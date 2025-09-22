@@ -1,0 +1,100 @@
+[project]
+name = "jernerics"
+version = "0.1.0"
+description = "Opinionated utilities for ml projects"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+	"typer>=0.19.1",
+	"pyyaml>=6.0.2",
+]
+
+[project.optional-dependencies]
+data = [
+	"numpy>=2.3.3",
+]
+
+visualization = [
+	"matplotlib>=3.10.6",
+	"seaborn>=0.13.2",
+	"plotly>=6.3.0",
+]
+
+dev = [
+	"mypy>=1.18.2",
+	"ruff>=0.13.1",
+	"pytest>=8.4.2",
+	"pytest-cov>=7.0.0",
+]
+
+[project.scripts]
+jernerics = "jernerics.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/jernerics"]
+include = ["scripts/*.job"]
+
+[tool.ruff]
+line-length = 88
+exclude=[
+    ".eggs",
+    ".git",
+    ".mypy_cache",
+    ".vscode",
+    "__pycache__",
+    "build",
+    "dist",
+    "sklearn/externals",
+    "doc/_build",
+    "doc/auto_examples",
+    "asv_benchmarks/env",
+    "asv_benchmarks/html",
+    "asv_benchmarks/results",
+    "asv_benchmarks/benchmarks/cache",
+]
+
+[tool.ruff.lint]
+# This enables us to use CPY001: copyright header check
+preview = true
+# This enables us to use the explicit preview rules that we want only
+explicit-preview-rules = true
+# all rules can be found here: https://docs.astral.sh/ruff/rules/
+extend-select = ["E501", "W", "I", "CPY001", "PGH", "RUF", "TID252"]
+ignore=[
+    # do not assign a lambda expression, use a def
+    "E731",
+    # do not use variables named 'l', 'O', or 'I'
+    "E741",
+    # E721 gives many false positives.
+    # Use `is` and `is not` for type comparisons, or `isinstance()` for
+    # isinstance checks
+    "E721",
+    # We don't care much about F841.
+    # Local variable ... is assigned to but never used
+    "F841",
+    # some RUF rules trigger too many changes
+    "RUF002",
+    "RUF003",
+    "RUF005",
+    "RUF012",
+    "RUF015",
+    "RUF021",
+    # https://docs.astral.sh/ruff/formatter/#conflicting-lint-rules
+    "W191",
+    "E111",
+    "E114",
+    "E117",
+    "D206",
+    "D300",
+    "Q000",
+    "Q001",
+    "Q002",
+    "Q003",
+    "COM812",
+    "COM819",
+]
+

@@ -1,0 +1,17 @@
+name: example
+description: example
+experiments:
+  - module: experiments.example_experiment
+    random_state: 42
+    parameters: 
+      model__kde_bandwidth: 0.5
+  - module: experiments.example_experiment
+    random_state: 42
+    parameters: 
+      model__kde_bandwidth: 0.5
+  - module: experiments.example_experiment
+    random_state: 42
+    parameters: 
+      model__kde_bandwidth: 0.5
+   # 'name', 'description', 'timestamp', 'task_id', 'parameters', and 'random_state'
+
