@@ -34,11 +34,12 @@ def train_run(
 
     job_script = resources.files("jernerics.scripts").joinpath("run_experiment.sh")
     train_script = resources.files("jernerics.experiment").joinpath("train.py")
+    start_time = int(time.time())
     command = [
         str(job_script),
         str(train_script),
         config_file,
-        str(int(time.time())),
+        str(start_time),
         results_dir,
     ]
     print("Submitting job with command:", " ".join(command))
