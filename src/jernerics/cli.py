@@ -1,35 +1,62 @@
+import os
 import subprocess
-from importlib import resources
 import time
+from importlib import resources
 
 import typer
-from typing_extensions import Annotated
 import yaml
+from typing_extensions import Annotated
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
 
-train_app = typer.Typer()
-app.add_typer(train_app, name="train", help="Train models.")
-
-submit_app = typer.Typer()
-app.add_typer(submit_app, name="submit", help="Submit jobs to a cluster.")
+run_app = typer.Typer()
+app.add_typer(run_app, name="run", help="Train models.")
 
 
-@train_app.command("run")
+@run_app.command("local")
 def train_run(
-    model_name: Annotated[str, typer.Option(help="Name of the model to train.")],
-    epochs: Annotated[int, typer.Option(help="Number of training epochs.")] = 10,
+    config_file: Annotated[str, typer.Argument(help="Path to the configuration file.")],
+    results_dir: Annotated[
+        str, typer.Argument(help="Directory to store results.")
+    ] = "results",
 ):
     """
     Run the training process directly.
     """
-    print(f"Starting training for model: {model_name} for {epochs} epochs...")
-    # Your call to the actual training logic would go here
-    # from .training.main import start
-    # start(model_name, epochs)
+    with open(config_file, "r") as f:
+        config_data = yaml.safe_load(f)
+
+    num_experiments = len(config_data.get("experiments", []))
+
+    if num_experiments == 0:
+        print("No experiments found in the configuration file.")
+        return
+
+    job_script = resources.files("jernerics.scripts").joinpath("run_experiment.sh")
+    train_script = resources.files("jernerics.experiment").joinpath("train.py")
+    command = [
+        str(job_script),
+        str(train_script),
+        config_file,
+        str(int(time.time())),
+        results_dir,
+    ]
+    print("Submitting job with command:", " ".join(command))
+    my_env = os.environ.copy()
+    for i in range(1, num_experiments + 1):
+        my_env["SLURM_ARRAY_TASK_ID"] = str(i)
+        print(f"Running experiment {i}/{num_experiments}")
+        result = subprocess.run(command, capture_output=True, text=True, env=my_env)
+        if result.returncode == 0:
+            print("Job completed successfully.")
+            print(result.stdout)
+        else:
+            print("Job failed.")
+            print(result.stdout)
+            print(result.stderr)
 
 
-@submit_app.command("slurm")
+@run_app.command("slurm")
 def submit_slurm(
     config_file: Annotated[str, typer.Argument(help="Path to the configuration file.")],
     results_dir: Annotated[
