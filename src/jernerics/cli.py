@@ -46,14 +46,23 @@ def train_run(
     for i in range(1, num_experiments + 1):
         my_env["SLURM_ARRAY_TASK_ID"] = str(i)
         print(f"Running experiment {i}/{num_experiments}")
-        result = subprocess.run(command, capture_output=True, text=True, env=my_env)
-        if result.returncode == 0:
-            print("Job completed successfully.")
-            print(result.stdout)
-        else:
-            print("Job failed.")
-            print(result.stdout)
-            print(result.stderr)
+        # result = subprocess.run(command, capture_output=True, text=True, env=my_env)
+        p = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=my_env
+        )
+        for line in iter(p.stdout.readline, b""):
+            print(line.decode(), end="")
+        for line in iter(p.stderr.readline, b""):
+            print(line.decode(), end="")
+
+        p.wait()
+        # if result.returncode == 0:
+        #     print("Job completed successfully.")
+        #     print(result.stdout)
+        # else:
+        #     print("Job failed.")
+        #     print(result.stdout)
+        #     print(result.stderr)
 
 
 @run_app.command("slurm")
@@ -79,7 +88,7 @@ def submit_slurm(
     train_script = resources.files("jernerics.experiment").joinpath("train.py")
     command = [
         "sbatch",
-        "--array=1-{}".format(num_experiments),
+        "--array=1-{}%10".format(num_experiments),
         str(job_script),
         str(train_script),
         config_file,
