@@ -5,14 +5,13 @@ description = "Opinionated utilities for ml projects"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+	"numpy>=2.3.3",
 	"typer>=0.19.1",
 	"pyyaml>=6.0.2",
 ]
 
 [project.optional-dependencies]
-data = [
-	"numpy>=2.3.3",
-]
+data = []
 
 visualization = [
 	"matplotlib>=3.10.6",

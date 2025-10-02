@@ -1,11 +1,11 @@
 import os
 import subprocess
 import time
-from importlib import resources
 
 import typer
-import yaml
 from typing_extensions import Annotated
+
+from ._cli_helpers import NoExperimentsFound, get_script_path, load_config
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
 
@@ -23,17 +23,14 @@ def train_run(
     """
     Run the training process directly.
     """
-    with open(config_file, "r") as f:
-        config_data = yaml.safe_load(f)
-
-    num_experiments = len(config_data.get("experiments", []))
-
-    if num_experiments == 0:
-        print("No experiments found in the configuration file.")
+    try:
+        _, num_experiments = load_config(config_file)
+    except NoExperimentsFound as e:
+        print(e)
         return
 
-    job_script = resources.files("jernerics.scripts").joinpath("run_experiment.sh")
-    train_script = resources.files("jernerics.experiment").joinpath("train.py")
+    job_script = get_script_path("run_experiment.sh")
+    train_script = get_script_path("train.py", "jernerics.experiment")
     start_time = int(time.time())
     command = [
         str(job_script),
@@ -42,28 +39,36 @@ def train_run(
         str(start_time),
         results_dir,
     ]
+
     print("Submitting job with command:", " ".join(command))
     my_env = os.environ.copy()
     for i in range(1, num_experiments + 1):
         my_env["SLURM_ARRAY_TASK_ID"] = str(i)
         print(f"Running experiment {i}/{num_experiments}")
-        # result = subprocess.run(command, capture_output=True, text=True, env=my_env)
         p = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=my_env
         )
+        if p.stdout is None or p.stderr is None:
+            print("Failed to capture output.")
+            return
+
         for line in iter(p.stdout.readline, b""):
             print(line.decode(), end="")
+
         for line in iter(p.stderr.readline, b""):
             print(line.decode(), end="")
 
         p.wait()
-        # if result.returncode == 0:
-        #     print("Job completed successfully.")
-        #     print(result.stdout)
-        # else:
-        #     print("Job failed.")
-        #     print(result.stdout)
-        #     print(result.stderr)
+
+    cleanup_script = get_script_path("cleanup_experiment.py")
+    cleanup_command = [
+        cleanup_script,
+        results_dir,
+        f"{results_dir}/final_results.json",
+    ]
+    cleanup_result = subprocess.run(cleanup_command, capture_output=True, text=True)
+    if cleanup_result.returncode == 0:
+        print(cleanup_result.stdout)
 
 
 @run_app.command("slurm")
@@ -76,19 +81,17 @@ def submit_slurm(
     """
     Submit a training job to a Slurm cluster.
     """
-    with open(config_file, "r") as f:
-        config_data = yaml.safe_load(f)
-
-    num_experiments = len(config_data.get("experiments", []))
-
-    if num_experiments == 0:
-        print("No experiments found in the configuration file.")
+    try:
+        _, num_experiments = load_config(config_file)
+    except NoExperimentsFound as e:
+        print(e)
         return
 
-    job_script = resources.files("jernerics.scripts").joinpath("run_experiment.sh")
-    train_script = resources.files("jernerics.experiment").joinpath("train.py")
+    job_script = get_script_path("run_experiment.sh")
+    train_script = get_script_path("train.py", "jernerics.experiment")
     command = [
         "sbatch",
+        "--parsable",
         "--array=1-{}%10".format(num_experiments),
         str(job_script),
         str(train_script),
@@ -98,12 +101,26 @@ def submit_slurm(
     ]
     print("Submitting job with command:", " ".join(command))
     result = subprocess.run(command, capture_output=True, text=True)
+
     if result.returncode == 0:
-        print("Job submitted successfully.")
-        print(result.stdout)
+        array_job_id = result.stdout.strip()
+
+        cleanup_script = get_script_path("cleanup_experiment.py")
+        cleanup_command = [
+            "sbatch",
+            f"--dependency=afterok:{array_job_id}",
+            cleanup_script,
+            results_dir,
+            f"{results_dir}/final_results.json",
+        ]
+        cleanup_result = subprocess.run(cleanup_command, capture_output=True, text=True)
+
+        if cleanup_result.returncode == 0:
+            print(cleanup_result.stdout)
+        else:
+            print(cleanup_result.stderr)
+
     else:
-        print("Failed to submit job.")
-        print(result.stdout)
         print(result.stderr)
 
 

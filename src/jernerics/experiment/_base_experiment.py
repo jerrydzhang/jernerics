@@ -6,8 +6,6 @@ import json
 
 import numpy as np
 
-# RESULTS_DIR = Path(__file__).resolve().parent.parent.parent / "results"
-
 ParameterType = np.ndarray | List | float | int | str | bool | None
 
 

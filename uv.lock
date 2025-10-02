@@ -227,14 +227,12 @@ name = "jernerics"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "numpy" },
     { name = "pyyaml" },
     { name = "typer" },
 ]
 
 [package.optional-dependencies]
-data = [
-    { name = "numpy" },
-]
 dev = [
     { name = "mypy" },
     { name = "pytest" },
@@ -251,7 +249,7 @@ visualization = [
 requires-dist = [
     { name = "matplotlib", marker = "extra == 'visualization'", specifier = ">=3.10.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.18.2" },
-    { name = "numpy", marker = "extra == 'data'", specifier = ">=2.3.3" },
+    { name = "numpy", specifier = ">=2.3.3" },
     { name = "plotly", marker = "extra == 'visualization'", specifier = ">=6.3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.4.2" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=7.0.0" },
