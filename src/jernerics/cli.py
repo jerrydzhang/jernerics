@@ -1,127 +1,144 @@
 import os
 import subprocess
-import time
 
 import typer
 from typing_extensions import Annotated
 
-from ._cli_helpers import NoExperimentsFound, get_script_path, load_config
+from ._cli_helpers import NoConfigsFound, get_script_path, load_config
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
 
 run_app = typer.Typer()
-app.add_typer(run_app, name="run", help="Train models.")
+app.add_typer(run_app, name="run", help="Run DAG experiments.")
+
+DEFAULT_SLURM = {
+    "output": ".cache/array_%A_%a.out",
+    "error": ".cache/array_%A_%a.err",
+    "max_parallel": 10,
+}
 
 
 @run_app.command("local")
-def train_run(
-    config_file: Annotated[str, typer.Argument(help="Path to the configuration file.")],
+def run_local(
+    dag_file: Annotated[str, typer.Argument(help="Path to the DAG file.")],
+    config_file: Annotated[str, typer.Argument(help="Path to the config file.")],
     results_dir: Annotated[
-        str, typer.Argument(help="Directory to store results.")
+        str, typer.Option("--results-dir", "-r", help="Directory to store results.")
     ] = "results",
 ):
-    """
-    Run the training process directly.
-    """
+    dag_path = os.path.abspath(dag_file)
+    config_path = os.path.abspath(config_file)
+
     try:
-        _, num_experiments = load_config(config_file)
-    except NoExperimentsFound as e:
+        _, configs = load_config(config_path)
+    except NoConfigsFound as e:
         print(e)
         return
 
-    job_script = get_script_path("run_experiment.sh")
-    train_script = get_script_path("train.py", "jernerics.experiment")
-    start_time = int(time.time())
-    command = [
-        str(job_script),
-        str(train_script),
-        config_file,
-        str(start_time),
-        results_dir,
-    ]
+    num_configs = len(configs)
 
-    print("Submitting job with command:", " ".join(command))
-    my_env = os.environ.copy()
-    for i in range(1, num_experiments + 1):
-        my_env["SLURM_ARRAY_TASK_ID"] = str(i)
-        print(f"Running experiment {i}/{num_experiments}")
-        p = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=my_env
+    for i in range(num_configs):
+        print(f"Running config {i + 1}/{num_configs}", flush=True)
+        env = os.environ.copy()
+        env["JERNERICS_CONFIG_INDEX"] = str(i)
+
+        result = subprocess.run(
+            ["python", "-c", _get_runner_code(dag_path, config_path, i)],
+            cwd=os.path.dirname(dag_path) or ".",
+            env=env,
         )
-        if p.stdout is None or p.stderr is None:
-            print("Failed to capture output.")
-            return
 
-        for line in iter(p.stdout.readline, b""):
-            print(line.decode(), end="")
-
-        for line in iter(p.stderr.readline, b""):
-            print(line.decode(), end="")
-
-        p.wait()
-
-    cleanup_script = get_script_path("cleanup_experiment.py")
-    cleanup_command = [
-        cleanup_script,
-        results_dir,
-        f"{results_dir}/final_results.json",
-    ]
-    cleanup_result = subprocess.run(cleanup_command, capture_output=True, text=True)
-    if cleanup_result.returncode == 0:
-        print(cleanup_result.stdout)
+        if result.returncode != 0:
+            print(f"Config {i + 1} failed with code {result.returncode}")
 
 
 @run_app.command("slurm")
-def submit_slurm(
-    config_file: Annotated[str, typer.Argument(help="Path to the configuration file.")],
+def run_slurm(
+    dag_file: Annotated[str, typer.Argument(help="Path to the DAG file.")],
+    config_file: Annotated[str, typer.Argument(help="Path to the config file.")],
     results_dir: Annotated[
-        str, typer.Argument(help="Directory to store results.")
+        str, typer.Option("--results-dir", "-r", help="Directory to store results.")
     ] = "results",
+    set_opt: Annotated[
+        list[str], typer.Option("--set", "-S", help="Set SLURM option (key=value)")
+    ] = [],
 ):
-    """
-    Submit a training job to a Slurm cluster.
-    """
+    dag_path = os.path.abspath(dag_file)
+    config_path = os.path.abspath(config_file)
+    results_path = os.path.abspath(results_dir)
+
     try:
-        _, num_experiments = load_config(config_file)
-    except NoExperimentsFound as e:
+        config_slurm, configs = load_config(config_path)
+    except NoConfigsFound as e:
         print(e)
         return
 
-    job_script = get_script_path("run_experiment.sh")
-    train_script = get_script_path("train.py", "jernerics.experiment")
-    command = [
-        "sbatch",
-        "--parsable",
-        "--array=1-{}%10".format(num_experiments),
-        str(job_script),
-        str(train_script),
-        config_file,
-        str(int(time.time())),
-        results_dir,
-    ]
-    print("Submitting job with command:", " ".join(command))
-    result = subprocess.run(command, capture_output=True, text=True)
+    num_configs = len(configs)
+
+    cli_overrides = {}
+    for opt in set_opt:
+        if "=" not in opt:
+            print(f"Invalid --set option: {opt}. Expected format: key=value")
+            return
+        key, value = opt.split("=", 1)
+        cli_overrides[key] = value
+
+    slurm_opts = {**DEFAULT_SLURM, **config_slurm, **cli_overrides}
+
+    max_parallel = slurm_opts.pop("max_parallel", 10)
+
+    if max_parallel > 0:
+        array_spec = f"1-{num_configs}%{max_parallel}"
+    else:
+        array_spec = f"1-{num_configs}"
+
+    sbatch_args = ["sbatch", "--parsable", f"--array={array_spec}"]
+
+    for key, value in slurm_opts.items():
+        sbatch_args.extend([f"--{key}", str(value)])
+
+    run_script = get_script_path("run_dag.sh")
+    sbatch_args.extend([run_script, dag_path, config_path, results_path])
+
+    print("Submitting job:", " ".join(sbatch_args))
+    result = subprocess.run(sbatch_args, capture_output=True, text=True)
 
     if result.returncode == 0:
-        array_job_id = result.stdout.strip()
-
-        cleanup_script = get_script_path("cleanup_experiment.py")
-        cleanup_command = [
-            "sbatch",
-            f"--dependency=afterok:{array_job_id}",
-            cleanup_script,
-            results_dir,
-            f"{results_dir}/final_results.json",
-        ]
-        cleanup_result = subprocess.run(cleanup_command, capture_output=True, text=True)
-
-        if cleanup_result.returncode == 0:
-            print(cleanup_result.stdout)
-        else:
-            print(cleanup_result.stderr)
-
+        print(f"Submitted job array: {result.stdout.strip()}")
     else:
-        print(result.stderr)
+        print(f"Failed to submit job: {result.stderr}")
+
+
+def _get_runner_code(dag_file: str, config_file: str, config_index: int) -> str:
+    return f'''
+import os
+import sys
+import pathlib
+
+dag_file = os.environ.get("JERNERICS_DAG_FILE", "{dag_file}")
+config_file = os.environ.get("JERNERICS_CONFIG_FILE", "{config_file}")
+config_index = int(os.environ.get("JERNERICS_CONFIG_INDEX", "{config_index}"))
+
+dag_dir = pathlib.Path(dag_file).parent
+if str(dag_dir) not in sys.path:
+    sys.path.insert(0, str(dag_dir))
+
+from jernerics.dag import DAG
+from jernerics._cli_helpers import load_config
+
+dag = DAG(dag_file)
+slurm_opts, configs = load_config(config_file)
+config = configs[config_index]
+
+results = dag.run(config, config_index=config_index)
+
+failed = [name for name, result in results.items() if isinstance(result, Exception)]
+if failed:
+    print("DAG failed. Tasks with errors:", ", ".join(failed))
+    sys.exit(1)
+else:
+    print("DAG completed")
+'''
 
 
 def main():

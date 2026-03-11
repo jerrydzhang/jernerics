@@ -1,48 +1,28 @@
+import runpy
 from importlib import resources
-from typing import Any, Dict, Tuple
+from pathlib import Path
+from typing import Any
 
-import yaml
 
-
-class NoExperimentsFound(Exception):
-    """Exception raised when no experiments are found in the config file."""
-
+class NoConfigsFound(Exception):
     pass
 
 
-def load_config(config_file: str) -> Tuple[Dict[str, Any], int]:
-    """
-    Loads experiment configuration from a YAML file.
+def load_config(config_file: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    config_path = Path(config_file)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_file}")
 
-    Args:
-        config_file: Path to the configuration file.
+    module_ns = runpy.run_path(str(config_path))
 
-    Returns:
-        A tuple containing the config data and the number of experiments.
+    configs = module_ns.get("configs", [])
+    if not configs:
+        raise NoConfigsFound("No 'configs' list found in configuration file.")
 
-    Raises:
-        NoExperimentsFound: If no experiments are found in the file.
-    """
-    with open(config_file, "r") as f:
-        config_data = yaml.safe_load(f)
+    slurm = module_ns.get("slurm", {})
 
-    num_experiments = len(config_data.get("experiments", []))
-
-    if num_experiments == 0:
-        raise NoExperimentsFound("No experiments found in the configuration file.")
-
-    return config_data, num_experiments
+    return slurm, configs
 
 
 def get_script_path(script_name: str, script_module: str = "jernerics.scripts") -> str:
-    """
-    Gets the path to a script within the package.
-
-    Args:
-        script_name: The name of the script file.
-        script_module: The module where the script is located.
-
-    Returns:
-        The absolute path to the script.
-    """
     return str(resources.files(script_module).joinpath(script_name))
