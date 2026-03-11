@@ -4,6 +4,11 @@ DAG_FILE=$1
 CONFIG_FILE=$2
 RESULTS_DIR=$3
 
+if [[ -z "$SLURM_ARRAY_TASK_ID" ]]; then
+    echo "Error: SLURM_ARRAY_TASK_ID must be set (this script is meant to run via sbatch --array)" >&2
+    exit 1
+fi
+
 CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))
 
 cd "$(dirname "$DAG_FILE")"
