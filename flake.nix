@@ -1,5 +1,5 @@
 {
-  description = "Python Development Enviornment";
+  description = "Develop Python on Nix with uv";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
@@ -15,31 +15,23 @@
       devShells = forAllSystems (
         system:
         let
-          pkgs = nixpkgs.legacyPackages.${system};
+          pkgs = import nixpkgs {
+            inherit system;
+          };
         in
+
         {
-          default =
-            (pkgs.buildFHSEnv {
-              name = "python-dev";
+          default = pkgs.mkShell {
+            packages = with pkgs; [
+              uv
+            ];
 
-              targetPkgs =
-                p: with p; [
-                  # stdenv.cc.cc
-                  # glibc
-                  # zlib
-
-                  python3
-                  uv
-                ];
-
-              profile = ''
-                unset PYTHONPATH
-                uv sync
-                . .venv/bin/activate
-              '';
-
-              runScript = "zsh";
-            }).env;
+            shellHook = ''
+              unset PYTHONPATH
+              uv sync
+              . .venv/bin/activate
+            '';
+          };
         }
       );
     };
