@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
+
 from jernerics.dag.task import Task, task
 
 

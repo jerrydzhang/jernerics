@@ -2,8 +2,91 @@ from __future__ import annotations
 
 import json
 
-from hypothesis import given, strategies as st
-from jernerics.dag.state import RunState, TaskState, TaskStatus
+import numpy as np
+from hypothesis import given
+from hypothesis import strategies as st
+
+from jernerics.dag.state import (
+    RunState,
+    TaskState,
+    TaskStatus,
+    _deserialize_output,
+    _serialize_output,
+)
+
+
+class TestSerialization:
+    def test_serialize_json_compatible(self):
+        output = {"result": 42, "name": "test"}
+        serialized, persisted = _serialize_output(output)
+        assert persisted is True
+        assert serialized == output
+
+    def test_serialize_numpy_array(self):
+        output = np.array([1, 2, 3])
+        serialized, persisted = _serialize_output(output)
+        assert persisted is True
+        assert isinstance(serialized, dict)
+        assert serialized.get("__jernerics_serialized__") == "cloudpickle"
+
+    def test_serialize_non_serializable(self):
+        import socket
+
+        output = socket.socket()
+        try:
+            serialized, persisted = _serialize_output(output)
+            assert persisted is False
+            assert "non-serializable" in serialized
+        finally:
+            output.close()
+
+    def test_serialize_none(self):
+        serialized, persisted = _serialize_output(None)
+        assert persisted is True
+        assert serialized is None
+
+    def test_roundtrip_numpy_array(self):
+        output = np.array([[1.0, 2.0], [3.0, 4.0]])
+        serialized, _ = _serialize_output(output)
+        deserialized = _deserialize_output(serialized)
+        assert isinstance(deserialized, np.ndarray)
+        assert np.array_equal(deserialized, output)
+
+    def test_roundtrip_json_output(self):
+        output = {"values": [1, 2, 3], "nested": {"a": "b"}}
+        serialized, _ = _serialize_output(output)
+        deserialized = _deserialize_output(serialized)
+        assert deserialized == output
+
+    def test_task_state_numpy_output_roundtrip(self):
+        state = TaskState(
+            task_id="test",
+            status=TaskStatus.COMPLETED,
+            output=np.array([1, 2, 3]),
+        )
+        d = state.to_dict()
+        assert d["persisted"] is True
+        restored = TaskState.from_dict(d)
+        assert isinstance(restored.output, np.ndarray)
+        assert np.array_equal(restored.output, np.array([1, 2, 3]))
+
+    def test_task_state_non_serializable_output(self):
+        import socket
+
+        sock = socket.socket()
+        try:
+            state = TaskState(
+                task_id="test",
+                status=TaskStatus.COMPLETED,
+                output=sock,
+            )
+            d = state.to_dict()
+            assert d["persisted"] is False
+            assert "non-serializable" in d["output"]
+            restored = TaskState.from_dict(d)
+            assert restored.persisted is False
+        finally:
+            sock.close()
 
 
 class TestTaskStatus:

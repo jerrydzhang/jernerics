@@ -8,3 +8,17 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Cache and temp files
+.jernerics/
+.cache/
+.ruff_cache/
+
+# Testing
+.hypothesis/
+.coverage
+results/
+
+# Nix/direnv
+.direnv/
+result

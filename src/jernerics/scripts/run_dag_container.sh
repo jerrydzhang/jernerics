@@ -1,24 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DAG_FILE=$1
-CONFIG_FILE=$2
-RESULTS_DIR=$3
+CONTAINER=$1
+DAG_FILE=$2
+CONFIG_FILE=$3
+RESULTS_DIR=$4
 
 if [[ -n "$SLURM_ARRAY_TASK_ID" ]]; then
     CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))
 else
-    CONFIG_INDEX=${4:-0}
+    CONFIG_INDEX=${5:-0}
 fi
 
-cd "$(dirname "$DAG_FILE")"
+PROJECT_DIR=$(dirname "$DAG_FILE")
+DAG_BASENAME=$(basename "$DAG_FILE")
+CONFIG_BASENAME=$(basename "$CONFIG_FILE")
 
-export JERNERICS_DAG_FILE="$DAG_FILE"
-export JERNERICS_CONFIG_FILE="$CONFIG_FILE"
-export JERNERICS_RESULTS_DIR="$RESULTS_DIR"
+export JERNERICS_DAG_FILE="/work/$DAG_BASENAME"
+export JERNERICS_CONFIG_FILE="/work/$CONFIG_BASENAME"
+export JERNERICS_RESULTS_DIR="/work/$RESULTS_DIR"
 export JERNERICS_CONFIG_INDEX="$CONFIG_INDEX"
 
-python -c '
+apptainer exec \
+    --nv \
+    --bind "$PROJECT_DIR:/work" \
+    "$CONTAINER" \
+    python -c '
 import os
 import sys
 import pathlib

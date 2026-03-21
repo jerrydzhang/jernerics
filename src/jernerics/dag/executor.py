@@ -4,12 +4,10 @@ import concurrent.futures
 from concurrent.futures import ALL_COMPLETED
 from datetime import datetime, timezone
 from graphlib import TopologicalSorter
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from .state import RunState, TaskStatus
 from .task import Task
-
-if TYPE_CHECKING:
-    from .state import RunState, TaskStatus
 
 
 def _get_timestamp() -> str:
@@ -20,6 +18,7 @@ def execute_dag(
     tasks: dict[str, Task],
     config: dict[str, Any],
     state: RunState | None = None,
+    max_workers: int | None = None,
 ) -> dict[str, Any]:
     graph: dict[str, set[str]] = {}
     for task_name, task in tasks.items():
@@ -31,15 +30,13 @@ def execute_dag(
 
     if state:
         for task_name, task_state in state.tasks.items():
-            from .state import TaskStatus
-
             if task_state.status == TaskStatus.FAILED:
                 state.update_task(task_name, TaskStatus.PENDING)
 
     sorter = TopologicalSorter(graph)
     sorter.prepare()
 
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         while sorter.is_active():
             ready_tasks = sorter.get_ready()
 
@@ -51,10 +48,11 @@ def execute_dag(
                 task = tasks[task_name]
 
                 if state and task_name in state.tasks:
-                    from .state import TaskStatus
-
                     task_state = state.tasks[task_name]
-                    if task_state.status == TaskStatus.COMPLETED:
+                    if (
+                        task_state.status == TaskStatus.COMPLETED
+                        and task_state.persisted
+                    ):
                         results[task_name] = task_state.output
                         sorter.done(task_name)
                         continue
@@ -71,8 +69,6 @@ def execute_dag(
                     sorter.done(task_name)
 
                     if state:
-                        from .state import TaskStatus
-
                         state.update_task(
                             task_name,
                             TaskStatus.FAILED,
@@ -88,8 +84,6 @@ def execute_dag(
                                 inputs[dep.name] = dep_result
 
                     if state:
-                        from .state import TaskStatus
-
                         state.update_task(
                             task_name, TaskStatus.RUNNING, started_at=_get_timestamp()
                         )
@@ -110,8 +104,6 @@ def execute_dag(
                         results[task_name] = result
 
                         if state:
-                            from .state import TaskStatus
-
                             state.update_task(
                                 task_name,
                                 TaskStatus.COMPLETED,
@@ -124,8 +116,6 @@ def execute_dag(
                         failed_tasks.add(task_name)
 
                         if state:
-                            from .state import TaskStatus
-
                             state.update_task(
                                 task_name,
                                 TaskStatus.FAILED,

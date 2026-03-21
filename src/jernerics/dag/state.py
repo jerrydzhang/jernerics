@@ -7,6 +7,34 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+_SERIALIZATION_KEY = "__jernerics_serialized__"
+
+
+def _serialize_output(output: Any) -> tuple[Any, bool]:
+    if output is None:
+        return None, True
+    try:
+        json.dumps(output)
+        return output, True
+    except (TypeError, ValueError):
+        try:
+            import cloudpickle
+
+            return {
+                _SERIALIZATION_KEY: "cloudpickle",
+                "data": cloudpickle.dumps(output).hex(),
+            }, True
+        except Exception:
+            return f"<non-serializable: {type(output).__name__}>", False
+
+
+def _deserialize_output(data: Any) -> Any:
+    if isinstance(data, dict) and data.get(_SERIALIZATION_KEY) == "cloudpickle":
+        import cloudpickle
+
+        return cloudpickle.loads(bytes.fromhex(data["data"]))
+    return data
+
 
 class TaskStatus(str, Enum):
     PENDING = "pending"
@@ -22,15 +50,18 @@ class TaskState:
     started_at: str | None = None
     completed_at: str | None = None
     output: Any = None
+    persisted: bool = True
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        serialized_output, persisted = _serialize_output(self.output)
         return {
             "task_id": self.task_id,
             "status": self.status.value,
             "started_at": self.started_at,
             "completed_at": self.completed_at,
-            "output": self.output,
+            "output": serialized_output,
+            "persisted": persisted,
             "error": self.error,
         }
 
@@ -41,7 +72,8 @@ class TaskState:
             status=TaskStatus(data["status"]),
             started_at=data.get("started_at"),
             completed_at=data.get("completed_at"),
-            output=data.get("output"),
+            output=_deserialize_output(data.get("output")),
+            persisted=data.get("persisted", True),
             error=data.get("error"),
         )
 

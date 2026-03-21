@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import runpy
-from graphlib import CycleError, TopologicalSorter
+from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Any
 
 from .executor import execute_dag
+from .provenance import Provenance
 from .state import RunState
 from .task import Task
 
@@ -65,6 +66,9 @@ class DAG:
         config: dict[str, Any],
         config_index: int = 0,
         state_dir: Path | str | None = None,
+        config_path: str | None = None,
+        container_path: str | None = None,
+        max_workers: int | None = None,
     ) -> dict[str, Any]:
         self.validate()
 
@@ -74,6 +78,8 @@ class DAG:
             self.state_dir = self.dag_file.parent / ".jernerics"
 
         state: RunState | None = None
+        provenance: Provenance | None = None
+
         if self.state_dir:
             dag_file_name = str(self.dag_file) if self.dag_file else "inline"
             state = RunState.create(
@@ -84,7 +90,20 @@ class DAG:
             for task_name in self.tasks:
                 state.init_task(task_name)
 
-        return execute_dag(self.tasks, config, state=state)
+            provenance = Provenance.create(
+                run_id=state.run_id,
+                config_path=config_path,
+                container_path=container_path,
+                repo_path=self.dag_file.parent if self.dag_file else None,
+            )
+            provenance.to_json(self.state_dir)
+
+        try:
+            return execute_dag(self.tasks, config, state=state, max_workers=max_workers)
+        finally:
+            if provenance and self.state_dir:
+                provenance.finalize()
+                provenance.to_json(self.state_dir)
 
     def resume(
         self,
@@ -92,6 +111,7 @@ class DAG:
         config_index: int = 0,
         run_id: str | None = None,
         state_dir: Path | str | None = None,
+        max_workers: int | None = None,
     ) -> dict[str, Any]:
         self.validate()
 
@@ -121,4 +141,4 @@ class DAG:
             if task_state.status == TaskStatus.RUNNING:
                 state.update_task(task_name, TaskStatus.PENDING)
 
-        return execute_dag(self.tasks, config, state=state)
+        return execute_dag(self.tasks, config, state=state, max_workers=max_workers)

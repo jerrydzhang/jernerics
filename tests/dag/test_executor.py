@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
 
-from hypothesis import given, strategies as st
+from hypothesis import given
+from hypothesis import strategies as st
+
 from jernerics.dag.executor import _run_task, execute_dag
 from jernerics.dag.state import RunState, TaskStatus
-from jernerics.dag.task import Task, task
+from jernerics.dag.task import task
 
 
 class TestRunTask:
@@ -129,6 +130,33 @@ class TestExecuteDAG:
 
         assert call_count == 0
         assert results["expensive"] == 42
+
+    def test_execute_reruns_non_persisted_tasks(self, tmp_path):
+        import socket
+
+        call_count = 0
+
+        @task
+        def non_serializable(config):
+            nonlocal call_count
+            call_count += 1
+            sock = socket.socket()
+            return sock
+
+        tasks = {"non_serializable": non_serializable}
+        state = RunState.create("test_dag.py", 0, tmp_path)
+        state.init_task("non_serializable")
+
+        sock = socket.socket()
+        try:
+            state.update_task("non_serializable", TaskStatus.COMPLETED, output=sock)
+            state.tasks["non_serializable"].persisted = False
+
+            results = execute_dag(tasks, {}, state=state)
+
+            assert call_count == 1
+        finally:
+            sock.close()
 
     def test_execute_records_failures(self, tmp_path):
         @task

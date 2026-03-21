@@ -1,6 +1,4 @@
 import subprocess
-import sys
-from pathlib import Path
 
 
 class TestIntegration:
@@ -72,7 +70,7 @@ configs = [{"seed": 1}]
             cwd=tmp_path,
         )
 
-        assert result.returncode == 0
+        assert result.returncode == 1
         assert "failed" in result.stdout.lower()
 
     def test_empty_configs_error(self, tmp_path):
@@ -192,6 +190,7 @@ configs = [{"seed": 1}, {"seed": 2}, {"seed": 3}]
                 "slurm",
                 str(dag_file),
                 str(config_file),
+                "--no-container",
                 "-S",
                 "time=4:00:00",
             ],

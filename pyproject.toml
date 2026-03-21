@@ -8,15 +8,18 @@ dependencies = [
 	"numpy>=2.3.3",
 	"typer>=0.19.1",
 	"pyyaml>=6.0.2",
+	"typing-extensions>=4.12.0",
+	"cloudpickle>=3.0.0",
 ]
 
-[project.optional-dependencies]
-data = []
-
-visualization = [
-	"matplotlib>=3.10.6",
-	"seaborn>=0.13.2",
-	"plotly>=6.3.0",
+[dependency-groups]
+dev = [
+	"hypothesis>=6.151.9",
+	"ruff>=0.13.1",
+	"pytest>=8.4.2",
+	"pytest-cov>=7.0.0",
+	"ty>=0.0.21",
+	"pre-commit>=4.5.1",
 ]
 
 [project.scripts]
@@ -28,7 +31,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jernerics"]
-include = ["scripts/*.job"]
+include = ["src/jernerics/scripts/*.sh", "src/jernerics/scripts/*.job"]
 
 [tool.ruff]
 line-length = 88
@@ -57,6 +60,8 @@ explicit-preview-rules = true
 # all rules can be found here: https://docs.astral.sh/ruff/rules/
 extend-select = ["E501", "W", "I", "CPY001", "PGH", "RUF", "TID252"]
 ignore=[
+	# copyright header check - not needed for personal library
+	"CPY001",
 	# do not assign a lambda expression, use a def
 	"E731",
 	# do not use variables named 'l', 'O', or 'I'
@@ -90,12 +95,5 @@ ignore=[
 	"COM819",
 ]
 
-[dependency-groups]
-dev = [
-	"hypothesis>=6.151.9",
-	"ruff>=0.13.1",
-	"pytest>=8.4.2",
-	"pytest-cov>=7.0.0",
-	"ty>=0.0.21",
-]
-
+[tool.ty.src]
+include = ["src"]

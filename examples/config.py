@@ -7,6 +7,8 @@ slurm = {
     "max_parallel": 5,
 }
 
+max_workers = 4
+
 configs = [
     {"seed": 1, "lr": 0.001},
     {"seed": 2, "lr": 0.001},
