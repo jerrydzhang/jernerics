@@ -44,6 +44,50 @@ class TestDAGCreation:
         except ValueError as e:
             assert "already registered" in str(e)
 
+    def test_dag_context_manager_auto_registers_tasks(self):
+        with DAG() as dag:
+
+            @task
+            def task_a(config):
+                return 1
+
+            @task
+            def task_b(config):
+                return 2
+
+        assert "task_a" in dag.tasks
+        assert "task_b" in dag.tasks
+
+    def test_dag_context_manager_nested(self):
+        with DAG() as dag1:
+
+            @task
+            def task_a(config):
+                return 1
+
+            with DAG() as dag2:
+
+                @task
+                def task_b(config):
+                    return 2
+
+            @task
+            def task_c(config):
+                return 3
+
+        assert "task_a" in dag1.tasks
+        assert "task_c" in dag1.tasks
+        assert "task_b" not in dag1.tasks
+        assert "task_b" in dag2.tasks
+
+    def test_dag_no_auto_register_outside_context(self):
+        @task
+        def standalone_task(config):
+            return 1
+
+        dag = DAG()
+        assert "standalone_task" not in dag.tasks
+
 
 class TestDAGDiscovery:
     def test_discover_tasks_from_file(self, tmp_path):

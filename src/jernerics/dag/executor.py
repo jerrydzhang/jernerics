@@ -28,7 +28,12 @@ def execute_dag(
     config: dict[str, Any],
     state: RunState | None = None,
     max_workers: int | None = None,
+    executor_type: str = "thread",
 ) -> dict[str, Any]:
+    if executor_type not in ("thread", "serial"):
+        raise ValueError(
+            f"executor_type must be 'thread' or 'serial', got {executor_type!r}"
+        )
     if max_workers is None:
         max_workers = _get_default_max_workers()
     if not isinstance(max_workers, int) or max_workers < 1:
@@ -60,14 +65,13 @@ def execute_dag(
     sorter.prepare()
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        if executor_type == "serial":
             while sorter.is_active():
                 ready_tasks = sorter.get_ready()
 
                 if not ready_tasks:
                     break
 
-                futures: dict[concurrent.futures.Future[Any], str] = {}
                 for task_name in ready_tasks:
                     task = tasks[task_name]
 
@@ -115,18 +119,8 @@ def execute_dag(
                             )
                             state.to_json()
 
-                        future = executor.submit(_run_task, task, inputs, config)
-                        futures[future] = task_name
-
-                if futures:
-                    completed, _ = concurrent.futures.wait(
-                        futures, return_when=ALL_COMPLETED
-                    )
-
-                    for future in completed:
-                        task_name = futures[future]
                         try:
-                            result = future.result()
+                            result = _run_task(task, inputs, config)
                             results[task_name] = result
 
                             if state:
@@ -155,6 +149,104 @@ def execute_dag(
 
                         finally:
                             sorter.done(task_name)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+                while sorter.is_active():
+                    ready_tasks = sorter.get_ready()
+
+                    if not ready_tasks:
+                        break
+
+                    futures: dict[concurrent.futures.Future[Any], str] = {}
+                    for task_name in ready_tasks:
+                        task = tasks[task_name]
+
+                        if state and task_name in state.tasks:
+                            task_state = state.tasks[task_name]
+                            if (
+                                task_state.status == TaskStatus.COMPLETED
+                                and task_state.persisted
+                            ):
+                                results[task_name] = task_state.output
+                                sorter.done(task_name)
+                                continue
+
+                        upstream_failed = any(
+                            dep.name in failed_tasks for dep in task.depends_on
+                        )
+
+                        if upstream_failed:
+                            results[task_name] = Exception(
+                                f"Upstream task(s) failed for '{task_name}'"
+                            )
+                            failed_tasks.add(task_name)
+                            sorter.done(task_name)
+
+                            if state:
+                                state.update_task(
+                                    task_name,
+                                    TaskStatus.FAILED,
+                                    error="Upstream task(s) failed",
+                                )
+                                state.to_json()
+                        else:
+                            inputs: dict[str, Any] = {}
+                            for dep in task.depends_on:
+                                if dep.name in results:
+                                    dep_result = results[dep.name]
+                                    if not isinstance(dep_result, Exception):
+                                        inputs[dep.name] = dep_result
+
+                            if state:
+                                state.update_task(
+                                    task_name,
+                                    TaskStatus.RUNNING,
+                                    started_at=_get_timestamp(),
+                                )
+                                state.to_json()
+
+                            future = pool.submit(_run_task, task, inputs, config)
+                            futures[future] = task_name
+
+                    if futures:
+                        completed, _ = concurrent.futures.wait(
+                            futures, return_when=ALL_COMPLETED
+                        )
+
+                        for future in completed:
+                            task_name = futures[future]
+                            try:
+                                result = future.result()
+                                results[task_name] = result
+
+                                if state:
+                                    state.update_task(
+                                        task_name,
+                                        TaskStatus.COMPLETED,
+                                        completed_at=_get_timestamp(),
+                                        output=result,
+                                    )
+                                    state.to_json()
+                            except Exception as e:
+                                tb_str = "".join(
+                                    traceback.format_exception(
+                                        type(e), e, e.__traceback__
+                                    )
+                                )
+                                results[task_name] = e
+                                failed_tasks.add(task_name)
+
+                                if state:
+                                    state.update_task(
+                                        task_name,
+                                        TaskStatus.FAILED,
+                                        completed_at=_get_timestamp(),
+                                        error=f"{type(e).__name__}: {e}\n{tb_str}",
+                                    )
+                                    state.to_json()
+
+                            finally:
+                                sorter.done(task_name)
     except Exception:
         with contextlib.suppress(Exception):
             for task_name in sorter.get_ready():

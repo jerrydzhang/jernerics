@@ -20,6 +20,20 @@ class DAG:
         )
         self.state_dir: Path | None = None
         self._discovered = False
+        self._token = None
+
+    def __enter__(self) -> DAG:
+        from .task import _active_dag
+
+        self._token = _active_dag.set(self)
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        from .task import _active_dag
+
+        if self._token is not None:
+            _active_dag.reset(self._token)
+            self._token = None
 
     def add_task(self, task: Task) -> None:
         if task.name in self.tasks:
@@ -75,6 +89,7 @@ class DAG:
         config_path: str | None = None,
         container_path: str | None = None,
         max_workers: int | None = None,
+        executor_type: str = "thread",
     ) -> dict[str, Any]:
         self.validate()
 
@@ -106,7 +121,13 @@ class DAG:
 
         exc_info: BaseException | None = None
         try:
-            return execute_dag(self.tasks, config, state=state, max_workers=max_workers)
+            return execute_dag(
+                self.tasks,
+                config,
+                state=state,
+                max_workers=max_workers,
+                executor_type=executor_type,
+            )
         except BaseException as e:
             exc_info = e
             raise
@@ -127,6 +148,7 @@ class DAG:
         run_id: str | None = None,
         state_dir: Path | str | None = None,
         max_workers: int | None = None,
+        executor_type: str = "thread",
     ) -> dict[str, Any]:
         self.validate()
 
@@ -166,4 +188,10 @@ class DAG:
             if task_state.status == TaskStatus.RUNNING:
                 state.update_task(task_name, TaskStatus.PENDING)
 
-        return execute_dag(self.tasks, config, state=state, max_workers=max_workers)
+        return execute_dag(
+            self.tasks,
+            config,
+            state=state,
+            max_workers=max_workers,
+            executor_type=executor_type,
+        )
