@@ -166,6 +166,14 @@ configs = [{"value": 42}]
         assert "DAG completed" in result.stdout
 
     def test_slurm_command_generation(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text("""
+[project]
+name = "test"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+""")
+
         dag_file = tmp_path / "dag.py"
         dag_file.write_text("""
 from jernerics.dag import task, DAG
@@ -190,7 +198,7 @@ configs = [{"seed": 1}, {"seed": 2}, {"seed": 3}]
                 "slurm",
                 str(dag_file),
                 str(config_file),
-                "--no-container",
+                "--dry-run",
                 "-S",
                 "time=4:00:00",
             ],
@@ -199,6 +207,7 @@ configs = [{"seed": 1}, {"seed": 2}, {"seed": 3}]
             cwd=tmp_path,
         )
 
+        assert result.returncode == 0
         assert "--array=1-3" in result.stdout
         assert "--time" in result.stdout
         assert "4:00:00" in result.stdout

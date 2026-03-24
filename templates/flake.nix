@@ -119,14 +119,14 @@
             };
 
             config = {
-              Env = [
-                "PATH=/bin"
-                "PYTHONPATH="
-                "LANG=C.UTF-8"
-                "LC_ALL=C.UTF-8"
-              ];
-              WorkingDir = "/work";
-            };
+               Env = [
+                 "PATH=/bin"
+                 "PYTHONPATH=/work/src"
+                 "LANG=C.UTF-8"
+                 "LC_ALL=C.UTF-8"
+               ];
+               WorkingDir = "/work";
+             };
           };
         }
       );

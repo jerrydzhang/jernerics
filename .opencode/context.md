@@ -9,29 +9,47 @@ Create a CLI-driven workflow for running experiments on HPC (SLURM + Apptainer) 
 - No external container registries - build on HPC only
 - All SSH operations scoped to configured remote_dir
 - No compute on login node - always use SLURM
-- Templates: `gpu` and `cpu` for Python projects
+- Template selection is via `jernerics init --template` (one-time decision)
+- User-provided `container.def` in project root is respected if it exists
 
-## Current State
+## Completed
 
-- GPU example working at `examples/container-gpu/`
-- Container builds via SLURM job, runs DAG with GPU access
-- Manual scripts (`test_sync_run.sh`, `run.sh`) - need to be replaced by CLI
+**Phase 1 - Container Commands:** `jernerics container build`
+**Phase 2 - Run Commands:** `jernerics run slurm`, `jobs`, `cancel`, `logs`, `results`
+**Phase 3 - Shell & Cleanup:** `jernerics shell`, `jernerics clean`
+**Phase 4 - Polish:** All tasks complete
 
-## Next Step
-
-Implement Phase 1 of the plan: `jernerics container build` command
+### Phase 4 Summary:
+- **Init refactor:** No longer creates dag.py/config.py (these are not singletons); supports merging into existing pyproject.toml; prompts before overwriting `[tool.jernerics]`
+- **Exit codes:** Added `ExitCode` enum (SUCCESS=0, GENERAL_ERROR=1, SSH_ERROR=2, CONFIG_ERROR=3, SLURM_ERROR=4, CONTAINER_ERROR=5)
+- **Error messages:** Improved with suggested actions (e.g., "Run 'jernerics init' to create one")
+- **JSON output:** Added `--json` flag to `jobs` command
+- **TTY detection:** Added `is_tty()` helper for future progress indicators
+- **Progress indicators:** Added step-by-step progress for `container build` and `run slurm`
 
 ## Relevant Files
 
 ```
-.opencode/hpc-cli-plan.md     # Full design document
-examples/container-gpu/       # Working reference implementation
-  ├── container.def           # Current Apptainer definition
-  ├── pyproject.toml          # Dependencies + jernerics git pin
-  ├── test_sync_run.sh        # Current sync + build script (to be replaced)
-  └── run.sh                  # Current run script (to be replaced)
+.opencode/hpc-cli-plan.md          # Full design document
 
 src/jernerics/
-├── cli.py                    # CLI entry point
-└── _cli_helpers.py           # Config loading
+├── cli.py                         # All CLI commands
+├── _cli_helpers.py                # Config loading, HpcConfig, ShellConfig, ExitCode, is_tty()
+├── container/
+│   ├── builder.py                 # Container build logic
+│   └── templates.py               # Template loading
+├── hpc/
+│   ├── ssh.py                     # SSH operations
+│   ├── slurm.py                   # SLURM job management
+│   └── sync.py                    # File sync
+└── templates/
+    └── python.def                 # Default container template
+
+tests/
+├── test_cli_init.py               # Init command tests
+├── test_cli_container.py          # Container build tests
+├── test_cli_run_slurm.py          # Run slurm tests
+├── test_cli_jobs.py               # Jobs/cancel/logs/results tests
+├── test_cli_shell_clean.py        # Shell and clean tests
+└── test_config_and_templates.py   # Config parsing and template tests
 ```
