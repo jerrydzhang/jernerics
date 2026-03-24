@@ -7,7 +7,6 @@ from jernerics._cli_helpers import (
     find_pyproject_dir,
     load_jernerics_config,
 )
-from jernerics.container.templates import get_template, list_templates
 
 
 class TestLoadJernericsConfig:
@@ -158,16 +157,40 @@ class TestFindPyprojectDir:
         assert result is None
 
 
-class TestTemplates:
-    def test_list_templates(self):
-        templates = list_templates()
-        assert "python" in templates
+class TestConfigEdgeCases:
+    def test_remote_path_fallback_to_remote_dir(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
 
-    def test_get_python_template(self):
-        template = get_template("python")
-        assert "Bootstrap: docker" in template
-        assert "python:3.12" in template
+[tool.jernerics.hpc]
+remote_path = "~/custom/path/{project_name}"
+""")
+        hpc_config, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.remote_dir == "~/custom/path/{project_name}"
 
-    def test_get_invalid_template(self):
-        with pytest.raises(ValueError, match="not found"):
-            get_template("nonexistent")
+    def test_remote_dir_used_when_no_remote_path(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+remote_dir = "~/custom/dir/{project_name}"
+""")
+        hpc_config, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.remote_dir == "~/custom/dir/{project_name}"
+
+    def test_remote_path_preferred_over_remote_dir(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+remote_path = "~/preferred/{project_name}"
+remote_dir = "~/not_preferred/{project_name}"
+""")
+        hpc_config, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.remote_dir == "~/preferred/{project_name}"

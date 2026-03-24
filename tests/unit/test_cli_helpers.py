@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from jernerics._cli_helpers import NoConfigsFound, load_config
 
 
