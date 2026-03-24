@@ -106,7 +106,8 @@ def load_jernerics_config(project_dir: str | Path) -> tuple[HpcConfig, ShellConf
 
     hpc = HpcConfig(
         host=os.environ.get("JERNERICS_HPC_HOST") or hpc_config.get("host"),
-        remote_dir=hpc_config.get("remote_dir", "~/experiments/{project_name}"),
+        remote_dir=hpc_config.get("remote_path")
+        or hpc_config.get("remote_dir", "~/experiments/{project_name}"),
         partition=container_config.get("partition", "priority"),
         time=container_config.get("time", "1:00:00"),
         mem=container_config.get("mem", "16G"),

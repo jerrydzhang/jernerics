@@ -166,7 +166,7 @@ def run_slurm(
         key, value = opt.split("=", 1)
         cli_overrides[key] = value
 
-    project_name = project_dir.name
+    project_name = project_dir.resolve().name
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 
@@ -342,7 +342,7 @@ def _get_hpc_client():
         )
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
-    project_name = project_dir.name
+    project_name = project_dir.resolve().name
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 
@@ -543,7 +543,7 @@ def shell(
     time_val = time if time is not None else shell_config.time
     partition_val = partition if partition is not None else shell_config.partition
 
-    project_name = project_dir.name
+    project_name = project_dir.resolve().name
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 
@@ -618,7 +618,7 @@ def clean(
         )
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
-    project_name = project_dir.name
+    project_name = project_dir.resolve().name
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 

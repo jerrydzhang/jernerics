@@ -34,8 +34,9 @@ class ContainerBuilder:
         self.slurm = SlurmJobManager(self.ssh)
 
     def _get_remote_dir(self) -> str:
-        project_name = self.project_dir.name
-        return self.config.remote_dir.replace("{project_name}", project_name)
+        project_name = self.project_dir.resolve().name
+        remote_dir = self.config.remote_dir.replace("{project_name}", project_name)
+        return remote_dir.rstrip("/")
 
     def _generate_build_script(self) -> str:
         return f"""#!/bin/bash
