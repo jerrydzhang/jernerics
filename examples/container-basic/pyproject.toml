@@ -10,7 +10,7 @@ dependencies = [
 
 [tool.uv.sources.jernerics]
 git = "https://github.com/jerrydzhang/jernerics.git"
-rev = "9631cf9"
+rev = "b532ef6"
 
 [tool.hatch.build.targets.wheel]
 packages = [
@@ -19,7 +19,7 @@ packages = [
 
 [tool.jernerics.hpc]
 host = "jez21005@hpc2.storrs.hpc.uconn.edu"
-remote_path = "~/projects/container-basic"
+remote_dir = "~/projects/container-basic"
 
 [tool.jernerics.container]
 partition = "priority"
