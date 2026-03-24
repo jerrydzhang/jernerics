@@ -10,7 +10,7 @@ dependencies = [
 
 [tool.uv.sources.jernerics]
 git = "https://github.com/jerrydzhang/jernerics.git"
-rev = "0693db2"
+rev = "cedc482ee4aa24348e621dce6284965ff7824f2d"
 
 [tool.hatch.build.targets.wheel]
 packages = [
