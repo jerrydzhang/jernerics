@@ -57,7 +57,8 @@ class ContainerBuilder:
         return remote_dir.rstrip("/")
 
     def _generate_build_script(self) -> str:
-        remote_dir = _quote_path(self._get_remote_dir())
+        remote_dir = self._get_remote_dir()
+        quoted_remote_dir = _quote_path(remote_dir)
         partition = _validate_slurm_value(self.config.partition, "partition")
         time = _validate_slurm_value(self.config.time, "time")
         mem = _validate_slurm_value(self.config.mem, "mem")
@@ -68,15 +69,15 @@ class ContainerBuilder:
 #SBATCH --time={time}
 #SBATCH --mem={mem}
 #SBATCH --cpus-per-task={cpus}
-#SBATCH --output=build_%j.out
-#SBATCH --error=build_%j.err
+#SBATCH --output={remote_dir}/build_%j.out
+#SBATCH --error={remote_dir}/build_%j.err
 
 set -e
 
 echo "=== Build started at $(date) ==="
 echo "Running on $(hostname)"
 
-cd {remote_dir}
+cd {quoted_remote_dir}
 
 echo
 echo "--- Building container with Apptainer + uv sync ---"
