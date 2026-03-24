@@ -20,9 +20,14 @@ class SlurmJobManager:
         result = self.ssh.run(f"sbatch --parsable {script_path}")
         return result.stdout.strip()
 
-    def submit_inline(self, script_content: str) -> str:
+    def submit_inline(self, script_content: str, workdir: str | None = None) -> str:
+        if workdir:
+            cmd = f"cd {workdir} && sbatch --parsable"
+        else:
+            cmd = "sbatch --parsable"
+
         proc = subprocess.run(
-            ["ssh", self.ssh.host, "sbatch --parsable"],
+            ["ssh", self.ssh.host, cmd],
             input=script_content,
             capture_output=True,
             text=True,
