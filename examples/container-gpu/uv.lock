@@ -52,7 +52,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jernerics", git = "https://github.com/jerrydzhang/jernerics.git?rev=b818ecb3f6f10e3fa1f540b0d796dabef7f5f4aa" },
+    { name = "jernerics", git = "https://github.com/jerrydzhang/jernerics.git?rev=34955f46f48aa710977aadbfd475dc786ced9297" },
     { name = "torch" },
 ]
 
@@ -146,7 +146,7 @@ wheels = [
 [[package]]
 name = "jernerics"
 version = "0.1.0"
-source = { git = "https://github.com/jerrydzhang/jernerics.git?rev=b818ecb3f6f10e3fa1f540b0d796dabef7f5f4aa#b818ecb3f6f10e3fa1f540b0d796dabef7f5f4aa" }
+source = { git = "https://github.com/jerrydzhang/jernerics.git?rev=34955f46f48aa710977aadbfd475dc786ced9297#34955f46f48aa710977aadbfd475dc786ced9297" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "numpy" },
