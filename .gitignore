@@ -22,3 +22,6 @@ results/
 # Nix/direnv
 .direnv/
 result
+
+# Ralph
+.ralph/
