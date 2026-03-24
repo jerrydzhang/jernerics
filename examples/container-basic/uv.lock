@@ -52,14 +52,14 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jernerics", git = "https://github.com/jerrydzhang/jernerics.git?rev=b532ef6" },
+    { name = "jernerics", git = "https://github.com/jerrydzhang/jernerics.git?rev=0693db2" },
     { name = "numpy", specifier = ">=2.3.3" },
 ]
 
 [[package]]
 name = "jernerics"
 version = "0.1.0"
-source = { git = "https://github.com/jerrydzhang/jernerics.git?rev=b532ef6#b532ef683e2a95e083ed1f6b73f1abd2a86dc5b0" }
+source = { git = "https://github.com/jerrydzhang/jernerics.git?rev=0693db2#0693db28a3ecf44a4e09fe34870e0aa412f5ceec" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "numpy" },
