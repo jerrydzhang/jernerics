@@ -1,6 +1,7 @@
 import os
-import shlex
 from dataclasses import dataclass
+
+from jernerics.hpc.ssh import _quote_path
 
 
 def expand_slurm_pattern(
@@ -68,7 +69,7 @@ class SlurmJobManager:
 
     def submit(self, script_path: str) -> str:
         result = self.ssh.run(
-            f"sbatch --parsable {shlex.quote(script_path)}", check=False
+            f"sbatch --parsable {_quote_path(script_path)}", check=False
         )
         if result.returncode != 0:
             raise RuntimeError(f"Failed to submit job: {result.stderr.strip()}")
@@ -76,7 +77,7 @@ class SlurmJobManager:
 
     def submit_inline(self, script_content: str, workdir: str | None = None) -> str:
         if workdir:
-            cmd = f"cd {shlex.quote(workdir)} && sbatch --parsable"
+            cmd = f"cd {_quote_path(workdir)} && sbatch --parsable"
         else:
             cmd = "sbatch --parsable"
 
@@ -140,7 +141,7 @@ class SlurmJobManager:
         return jobs
 
     def cancel(self, job_id: str) -> bool:
-        result = self.ssh.run(f"scancel {shlex.quote(job_id)}", check=False)
+        result = self.ssh.run(f"scancel {_quote_path(job_id)}", check=False)
         return result.returncode == 0
 
     def cancel_all(self) -> bool:
@@ -149,12 +150,12 @@ class SlurmJobManager:
 
     def get_status(self, job_id: str) -> str | None:
         result = self.ssh.run(
-            f"squeue -j {shlex.quote(job_id)} -o '%T' -h", check=False
+            f"squeue -j {_quote_path(job_id)} -o '%T' -h", check=False
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
         sacct_result = self.ssh.run(
-            f"sacct -j {shlex.quote(job_id)} --format=State --noheader --parsable2",
+            f"sacct -j {_quote_path(job_id)} --format=State --noheader --parsable2",
             check=False,
         )
         if sacct_result.returncode == 0 and sacct_result.stdout.strip():

@@ -8,6 +8,13 @@ def _validate_path(path: str) -> str:
     return path
 
 
+def _quote_path(path: str) -> str:
+    """Quote a path for shell, preserving ~ expansion."""
+    if path.startswith("~"):
+        return "~" + shlex.quote(path[1:])
+    return shlex.quote(path)
+
+
 class SSHClient:
     def __init__(self, host: str):
         self.host = host
@@ -47,16 +54,16 @@ class SSHClient:
 
     def mkdir(self, remote_path: str) -> subprocess.CompletedProcess:
         _validate_path(remote_path)
-        return self.run(f"mkdir -p {shlex.quote(remote_path)}")
+        return self.run(f"mkdir -p {_quote_path(remote_path)}")
 
     def file_exists(self, remote_path: str) -> bool:
         _validate_path(remote_path)
-        result = self.run(f"test -f {shlex.quote(remote_path)}", check=False)
+        result = self.run(f"test -f {_quote_path(remote_path)}", check=False)
         return result.returncode == 0
 
     def getmtime(self, remote_path: str) -> float | None:
         _validate_path(remote_path)
-        quoted = shlex.quote(remote_path)
+        quoted = _quote_path(remote_path)
         result = self.run(
             f"stat -c %Y {quoted} 2>/dev/null || stat -f %m {quoted}", check=False
         )
@@ -66,4 +73,4 @@ class SSHClient:
 
     def remove_file(self, remote_path: str) -> subprocess.CompletedProcess:
         _validate_path(remote_path)
-        return self.run(f"rm -f {shlex.quote(remote_path)}")
+        return self.run(f"rm -f {_quote_path(remote_path)}")

@@ -24,6 +24,7 @@ from .container.builder import ContainerBuilder
 from .container.templates import generate_container_def, list_templates
 from .hpc import FileSyncer, SlurmJobManager, SSHClient
 from .hpc.slurm import expand_slurm_pattern
+from .hpc.ssh import _quote_path
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
 
@@ -581,7 +582,7 @@ def logs(
         if follow:
             print("Error: --follow requires --array-index for array jobs")
             raise SystemExit(ExitCode.GENERAL_ERROR)
-        result = ssh.run(f"cat {shlex.quote(log_file)}", check=False)
+        result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
         if result.returncode != 0:
             print(f"Error: Log files not found: {log_file}")
             raise SystemExit(ExitCode.GENERAL_ERROR)
@@ -589,7 +590,7 @@ def logs(
     elif follow:
         subprocess.run(["ssh", ssh.host, "tail", "-f", log_file])
     else:
-        result = ssh.run(f"cat {shlex.quote(log_file)}", check=False)
+        result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
         if result.returncode != 0:
             print(f"Error: Log file not found: {log_file}")
             raise SystemExit(ExitCode.GENERAL_ERROR)
@@ -617,7 +618,7 @@ def results(
 
     Path(local_dir).mkdir(parents=True, exist_ok=True)
 
-    remote_path = f"{syncer.ssh.host}:{shlex.quote(remote_results + '/.')}"
+    remote_path = f"{syncer.ssh.host}:{_quote_path(remote_results + '/.')}"
     result = subprocess.run(
         ["scp", "-r", remote_path, local_dir],
         capture_output=True,
@@ -703,8 +704,8 @@ def shell(
     ssh = SSHClient(hpc_config.host)
     syncer = FileSyncer(ssh, remote_dir)
 
-    quoted_remote_dir = shlex.quote(remote_dir)
-    quoted_srun = " ".join(shlex.quote(arg) for arg in srun_args)
+    quoted_remote_dir = _quote_path(remote_dir)
+    quoted_srun = " ".join(_quote_path(arg) for arg in srun_args)
 
     if not no_container and syncer.container_exists():
         shell_cmd = (
@@ -795,7 +796,7 @@ def clean(
 
     for item in to_delete:
         path = f"{remote_dir}/{item}"
-        result = ssh.run(f"rm -rf {shlex.quote(path)}", check=False)
+        result = ssh.run(f"rm -rf {_quote_path(path)}", check=False)
         if result.returncode != 0:
             print(f"Failed to delete {item}: {result.stderr}")
         else:
