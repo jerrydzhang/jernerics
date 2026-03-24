@@ -2,6 +2,11 @@ from importlib import resources
 
 
 def get_template(template_name: str) -> str:
+    if not template_name.replace("-", "").replace("_", "").isalnum():
+        raise ValueError(
+            f"Invalid template name '{template_name}': "
+            "must contain only alphanumeric characters, hyphens, and underscores"
+        )
     templates_dir = resources.files("jernerics.templates")
     template_path = templates_dir / f"{template_name}.def"
 

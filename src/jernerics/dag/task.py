@@ -22,9 +22,9 @@ def task(
     dependencies = depends_on or []
 
     def decorator(fn: Callable[..., Any]) -> Task:
-        func_name = getattr(fn, "__name__", "task")
+        name = getattr(fn, "__name__", None) or getattr(type(fn), "__name__", repr(fn))
         task_instance = Task(
-            name=func_name,
+            name=name,
             func=fn,
             depends_on=list(dependencies),
         )

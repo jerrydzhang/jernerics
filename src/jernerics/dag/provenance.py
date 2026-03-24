@@ -13,6 +13,10 @@ from typing import Any
 
 
 def _get_git_sha(repo_path: Path | None = None) -> str | None:
+    if repo_path is None:
+        return None
+    if not repo_path.is_dir():
+        return None
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short=8", "HEAD"],
@@ -120,8 +124,14 @@ class Provenance:
         runs_dir.mkdir(parents=True, exist_ok=True)
 
         provenance_file = runs_dir / f"{self.run_id}_provenance.json"
-        with open(provenance_file, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        temp_file = runs_dir / f".tmp_{self.run_id}_provenance.json"
+        try:
+            with open(temp_file, "w") as f:
+                json.dump(self.to_dict(), f, indent=2)
+            os.replace(temp_file, provenance_file)
+        except Exception:
+            temp_file.unlink(missing_ok=True)
+            raise
 
         return provenance_file
 
@@ -129,4 +139,15 @@ class Provenance:
     def from_json(cls, path: Path) -> Provenance:
         with open(path) as f:
             data = json.load(f)
-        return cls(**data)
+        return cls(
+            run_id=data["run_id"],
+            jernerics_version=data["jernerics_version"],
+            git_sha=data.get("git_sha"),
+            config=data.get("config", {}),
+            python=data.get("python", "unknown"),
+            platform=data.get("platform", "unknown"),
+            container=data.get("container"),
+            slurm_job_id=data.get("slurm_job_id"),
+            started_at=data["started_at"],
+            ended_at=data.get("ended_at"),
+        )

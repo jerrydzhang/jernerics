@@ -5,9 +5,42 @@ import time
 from hypothesis import given
 from hypothesis import strategies as st
 
-from jernerics.dag.executor import _run_task, execute_dag
+from jernerics.dag.executor import _get_default_max_workers, _run_task, execute_dag
 from jernerics.dag.state import RunState, TaskStatus
 from jernerics.dag.task import task
+
+
+class TestDefaultMaxWorkers:
+    def test_default_max_workers_reasonable(self):
+        workers = _get_default_max_workers()
+        assert workers >= 1
+        assert workers <= 8
+
+    def test_default_max_workers_used_when_none(self):
+        call_count = 0
+        original_submit = None
+
+        @task
+        def simple_task(config):
+            return 1
+
+        import concurrent.futures
+        from unittest.mock import patch
+
+        with patch.object(
+            concurrent.futures.ThreadPoolExecutor, "__init__", autospec=True
+        ) as mock_init:
+            mock_init.return_value = None
+
+            try:
+                execute_dag({"simple": simple_task}, {})
+            except Exception:
+                pass
+
+            call_args = mock_init.call_args
+            assert call_args is not None
+            assert "max_workers" in call_args.kwargs
+            assert call_args.kwargs["max_workers"] == _get_default_max_workers()
 
 
 class TestRunTask:

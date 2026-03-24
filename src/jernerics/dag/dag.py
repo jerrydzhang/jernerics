@@ -1,20 +1,23 @@
 from __future__ import annotations
 
 import runpy
+import warnings
 from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Any
 
 from .executor import execute_dag
 from .provenance import Provenance
-from .state import RunState
+from .state import RunState, TaskStatus
 from .task import Task
 
 
 class DAG:
     def __init__(self, dag_file: str | Path | None = None):
         self.tasks: dict[str, Task] = {}
-        self.dag_file: Path | None = Path(dag_file) if dag_file else None
+        self.dag_file: Path | None = (
+            Path(dag_file) if dag_file and str(dag_file).strip() else None
+        )
         self.state_dir: Path | None = None
         self._discovered = False
 
@@ -31,7 +34,10 @@ class DAG:
         if not self.dag_file or not self.dag_file.exists():
             return
 
-        module_ns = runpy.run_path(str(self.dag_file))
+        try:
+            module_ns = runpy.run_path(str(self.dag_file))
+        except (SyntaxError, ImportError, PermissionError) as e:
+            raise RuntimeError(f"Failed to load DAG file '{self.dag_file}': {e}") from e
 
         for name, obj in module_ns.items():
             if isinstance(obj, Task):
@@ -98,12 +104,21 @@ class DAG:
             )
             provenance.to_json(self.state_dir)
 
+        exc_info: BaseException | None = None
         try:
             return execute_dag(self.tasks, config, state=state, max_workers=max_workers)
+        except BaseException as e:
+            exc_info = e
+            raise
         finally:
             if provenance and self.state_dir:
-                provenance.finalize()
-                provenance.to_json(self.state_dir)
+                try:
+                    provenance.finalize()
+                    provenance.to_json(self.state_dir)
+                except BaseException as e:
+                    if exc_info is not None:
+                        raise e from exc_info
+                    raise
 
     def resume(
         self,
@@ -122,8 +137,12 @@ class DAG:
         else:
             raise ValueError("No state directory available for resume")
 
-        if not self.state_dir or not self.state_dir.exists():
-            raise ValueError(f"No state directory found at {self.state_dir}")
+        if self.state_dir is None:
+            raise ValueError(
+                "No state directory configured. Specify state_dir or dag_file."
+            )
+        if not self.state_dir.exists():
+            raise ValueError(f"State directory not found: {self.state_dir}")
 
         if run_id is not None:
             state_file = self.state_dir / "runs" / f"{run_id}_{config_index}.json"
@@ -135,7 +154,13 @@ class DAG:
             if state is None:
                 raise ValueError(f"No previous runs found in {self.state_dir}")
 
-        from .state import TaskStatus
+        for task_name in state.tasks:
+            if task_name not in self.tasks:
+                warnings.warn(
+                    f"Task '{task_name}' from saved state is not in the current DAG",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
         for task_name, task_state in state.tasks.items():
             if task_state.status == TaskStatus.RUNNING:

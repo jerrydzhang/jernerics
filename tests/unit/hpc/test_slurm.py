@@ -1,8 +1,54 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from jernerics.hpc.slurm import SlurmJob, SlurmJobManager
+from jernerics.hpc.slurm import SlurmJob, SlurmJobManager, expand_slurm_pattern
+
+
+class TestExpandSlurmPattern:
+    def test_replaces_percent_j(self):
+        result = expand_slurm_pattern("slurm_%j.out", job_id="12345")
+        assert result == "slurm_12345.out"
+
+    def test_replaces_percent_A(self):
+        result = expand_slurm_pattern("slurm_%A.out", job_id="12345_1")
+        assert result == "slurm_12345.out"
+
+    def test_replaces_percent_a(self):
+        result = expand_slurm_pattern("slurm_%a.out", array_task_id=5)
+        assert result == "slurm_5.out"
+
+    def test_replaces_percent_x(self):
+        result = expand_slurm_pattern("slurm_%x.out", job_name="myjob")
+        assert result == "slurm_myjob.out"
+
+    def test_replaces_percent_u(self):
+        import os
+
+        result = expand_slurm_pattern("slurm_%u.out")
+        assert result == f"slurm_{os.environ.get('USER', 'unknown')}.out"
+
+    def test_wildcard_for_unknown_array(self):
+        result = expand_slurm_pattern(
+            "slurm_%a.out", replace_unknown_with_wildcard=True
+        )
+        assert result == "slurm_*.out"
+
+    def test_no_wildcard_without_flag(self):
+        result = expand_slurm_pattern("slurm_%a.out")
+        assert result == "slurm_%a.out"
+
+    def test_wildcard_for_percent_N(self):
+        result = expand_slurm_pattern(
+            "slurm_%N.out", replace_unknown_with_wildcard=True
+        )
+        assert result == "slurm_*.out"
+
+    def test_multiple_patterns(self):
+        result = expand_slurm_pattern(
+            "%x_%j_%a.out", job_id="12345", array_task_id=1, job_name="test"
+        )
+        assert result == "test_12345_1.out"
 
 
 class TestSlurmJob:
@@ -37,55 +83,46 @@ class TestSlurmJobManager:
 
     def test_submit_inline_with_workdir(self):
         mock_ssh = MagicMock()
-        mock_ssh.host = "user@hpc.example.edu"
+        mock_ssh.run.return_value = MagicMock(stdout="67890\n", returncode=0)
 
         manager = SlurmJobManager(mock_ssh)
+        job_id = manager.submit_inline("script content", workdir="~/project")
 
-        with patch("jernerics.hpc.slurm.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="67890\n", returncode=0)
-            job_id = manager.submit_inline("script content", workdir="~/project")
-
-            assert job_id == "67890"
-            mock_run.assert_called_once()
-            args, _kwargs = mock_run.call_args
-            assert args[0] == [
-                "ssh",
-                "user@hpc.example.edu",
-                "cd ~/project && sbatch --parsable",
-            ]
+        assert job_id == "67890"
+        mock_ssh.run.assert_called_once()
+        args, kwargs = mock_ssh.run.call_args
+        assert "cd '~/project' && sbatch --parsable" == args[0]
+        assert kwargs.get("input") == "script content"
+        assert kwargs.get("check") is False
 
     def test_submit_inline_without_workdir(self):
         mock_ssh = MagicMock()
-        mock_ssh.host = "user@hpc.example.edu"
+        mock_ssh.run.return_value = MagicMock(stdout="67890\n", returncode=0)
 
         manager = SlurmJobManager(mock_ssh)
+        job_id = manager.submit_inline("script content")
 
-        with patch("jernerics.hpc.slurm.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(stdout="67890\n", returncode=0)
-            job_id = manager.submit_inline("script content")
-
-            assert job_id == "67890"
-            args, _kwargs = mock_run.call_args
-            assert args[0] == ["ssh", "user@hpc.example.edu", "sbatch --parsable"]
+        assert job_id == "67890"
+        args, kwargs = mock_ssh.run.call_args
+        assert args[0] == "sbatch --parsable"
+        assert kwargs.get("input") == "script content"
+        assert kwargs.get("check") is False
 
     def test_submit_inline_raises_on_failure(self):
         mock_ssh = MagicMock()
-        mock_ssh.host = "user@hpc.example.edu"
+        mock_ssh.run.return_value = MagicMock(
+            stdout="", stderr="sbatch: error", returncode=1
+        )
 
         manager = SlurmJobManager(mock_ssh)
 
-        with patch("jernerics.hpc.slurm.subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                stdout="", stderr="sbatch: error", returncode=1
-            )
-
-            with pytest.raises(RuntimeError, match="Failed to submit job"):
-                manager.submit_inline("script content")
+        with pytest.raises(RuntimeError, match="Failed to submit job"):
+            manager.submit_inline("script content")
 
     def test_list_jobs_parses_output(self):
         mock_ssh = MagicMock()
         mock_ssh.run.return_value = MagicMock(
-            stdout="JOBID|NAME|STATE|PARTITION|TIME|NODE\n12345|test|RUNNING|gpu|1:00|node01\n",
+            stdout="JOBID\tNAME\tSTATE\tPARTITION\tTIME\tNODE\n12345\ttest\tRUNNING\tgpu\t1:00\tnode01\n",
             returncode=0,
         )
 
@@ -100,13 +137,26 @@ class TestSlurmJobManager:
     def test_list_jobs_empty(self):
         mock_ssh = MagicMock()
         mock_ssh.run.return_value = MagicMock(
-            stdout="JOBID|NAME|STATE|PARTITION|TIME|NODE\n", returncode=0
+            stdout="JOBID\tNAME\tSTATE\tPARTITION\tTIME\tNODE\n", returncode=0
         )
 
         manager = SlurmJobManager(mock_ssh)
         jobs = manager.list_jobs()
 
         assert len(jobs) == 0
+
+    def test_list_jobs_with_pipe_in_name(self):
+        mock_ssh = MagicMock()
+        mock_ssh.run.return_value = MagicMock(
+            stdout="JOBID\tNAME\tSTATE\tPARTITION\tTIME\tNODE\n12345\texperiment|v2\tRUNNING\tgpu\t1:00\tnode01\n",
+            returncode=0,
+        )
+
+        manager = SlurmJobManager(mock_ssh)
+        jobs = manager.list_jobs()
+
+        assert len(jobs) == 1
+        assert jobs[0].name == "experiment|v2"
 
     def test_cancel_job(self):
         mock_ssh = MagicMock()
@@ -159,3 +209,30 @@ class TestSlurmJobManager:
 
         result = manager.get_job_output_path("12345", "slurm_%A_%a.out")
         assert result == "slurm_12345_%a.out"
+
+    def test_get_job_output_path_with_job_name(self):
+        mock_ssh = MagicMock()
+        manager = SlurmJobManager(mock_ssh)
+
+        result = manager.get_job_output_path(
+            "12345", "slurm_%j_%x.out", job_name="myjob"
+        )
+        assert result == "slurm_12345_myjob.out"
+
+    def test_get_job_output_path_with_array_task_id(self):
+        mock_ssh = MagicMock()
+        manager = SlurmJobManager(mock_ssh)
+
+        result = manager.get_job_output_path(
+            "12345", "slurm_%A_%a.out", array_task_id=3
+        )
+        assert result == "slurm_12345_3.out"
+
+    def test_get_job_output_path_with_wildcard_replacement(self):
+        mock_ssh = MagicMock()
+        manager = SlurmJobManager(mock_ssh)
+
+        result = manager.get_job_output_path(
+            "12345", "slurm_%j_%a_%x.out", replace_unknown_with_wildcard=True
+        )
+        assert result == "slurm_12345_*_*.out"
