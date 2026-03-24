@@ -72,7 +72,7 @@ def run_local(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        _, configs, _ = load_config(config_path)
+        _, configs, _, _ = load_config(config_path)
     except FileNotFoundError as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR)
@@ -183,7 +183,7 @@ def run_slurm(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        config_slurm, configs, _ = load_config(str(config_path))
+        config_slurm, configs, _, _ = load_config(str(config_path))
     except NoConfigsFound as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR)
@@ -310,11 +310,13 @@ def run_slurm(
     script_lines.append("from jernerics._cli_helpers import load_config")
     script_lines.append("")
     script_lines.append("dag = DAG(dag_file)")
-    script_lines.append("slurm_opts, configs, max_workers = load_config(config_file)")
+    script_lines.append(
+        "slurm_opts, configs, max_workers, executor_type = load_config(config_file)"
+    )
     script_lines.append("config = configs[config_index]")
     script_lines.append("")
     script_lines.append(
-        "results = dag.run(config, config_index=config_index, config_path=config_file, max_workers=max_workers)"
+        "results = dag.run(config, config_index=config_index, config_path=config_file, max_workers=max_workers, executor_type=executor_type or 'thread')"
     )
     script_lines.append("")
     script_lines.append(
@@ -409,10 +411,10 @@ from jernerics.dag import DAG
 from jernerics._cli_helpers import load_config
 
 dag = DAG(dag_file)
-slurm_opts, configs, max_workers = load_config(config_file)
+slurm_opts, configs, max_workers, executor_type = load_config(config_file)
 config = configs[config_index]
 
-results = dag.run(config, config_index=config_index, config_path=config_file, container_path=container_path, max_workers=max_workers)
+results = dag.run(config, config_index=config_index, config_path=config_file, container_path=container_path, max_workers=max_workers, executor_type=executor_type or 'thread')
 
 failed = [name for name, result in results.items() if isinstance(result, Exception)]
 if failed:
