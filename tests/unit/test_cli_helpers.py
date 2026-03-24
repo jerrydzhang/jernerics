@@ -24,13 +24,14 @@ configs = [
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        slurm, configs, max_workers = load_config(str(config_file))
+        slurm, configs, max_workers, executor_type = load_config(str(config_file))
 
         assert slurm == {}
         assert len(configs) == 2
         assert configs[0]["seed"] == 1
         assert configs[1]["lr"] == 0.01
         assert max_workers is None
+        assert executor_type is None
 
     def test_load_config_with_slurm(self, tmp_path):
         config_content = """
@@ -45,7 +46,7 @@ configs = [{"seed": 1}]
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        slurm, configs, _max_workers = load_config(str(config_file))
+        slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
 
         assert slurm["time"] == "1:00:00"
         assert slurm["mem"] == "4G"
@@ -59,7 +60,7 @@ configs = [{"x": 1}]
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        slurm, configs, _max_workers = load_config(str(config_file))
+        slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
 
         assert slurm == {}
         assert configs == [{"x": 1}]
@@ -106,7 +107,7 @@ configs = [{"env": os.environ.get("TEST_VAR", "default")}]
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        _slurm, configs, _max_workers = load_config(str(config_file))
+        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
 
         assert "env" in configs[0]
 
@@ -120,7 +121,7 @@ configs = [{"seed": s, "lr": l} for s in seeds for l in lrs]
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        _slurm, configs, _max_workers = load_config(str(config_file))
+        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
 
         assert len(configs) == 6
         assert configs[0] == {"seed": 1, "lr": 0.001}
@@ -133,7 +134,7 @@ configs = [{"single": "config"}]
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        _slurm, configs, _max_workers = load_config(str(config_file))
+        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
 
         assert len(configs) == 1
         assert configs[0] == {"single": "config"}
@@ -150,7 +151,7 @@ configs = [
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        _slurm, configs, _max_workers = load_config(str(config_file))
+        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
 
         assert configs[0]["model"]["layers"] == 3
         assert configs[0]["training"]["epochs"] == 100
@@ -159,7 +160,7 @@ configs = [
         config_file = tmp_path / "config with spaces.py"
         config_file.write_text('configs = [{"x": 1}]')
 
-        _slurm, configs, _max_workers = load_config(str(config_file))
+        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
 
         assert configs == [{"x": 1}]
 
@@ -172,7 +173,21 @@ configs = [{"seed": 1}]
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        _slurm, configs, max_workers = load_config(str(config_file))
+        _slurm, configs, max_workers, _executor_type = load_config(str(config_file))
 
         assert max_workers == 4
+        assert len(configs) == 1
+
+    def test_load_config_with_executor_type(self, tmp_path):
+        config_content = """
+executor_type = "serial"
+
+configs = [{"seed": 1}]
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        _slurm, configs, _max_workers, executor_type = load_config(str(config_file))
+
+        assert executor_type == "serial"
         assert len(configs) == 1

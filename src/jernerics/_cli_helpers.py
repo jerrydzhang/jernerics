@@ -147,7 +147,7 @@ def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
 
 def load_config(
     config_file: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]], int | None]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], int | None, str | None]:
     config_path = Path(config_file)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_file}")
@@ -166,8 +166,9 @@ def load_config(
 
     slurm = module_ns.get("slurm", {})
     max_workers = module_ns.get("max_workers", None)
+    executor_type = module_ns.get("executor_type", None)
 
-    return slurm, configs, max_workers
+    return slurm, configs, max_workers, executor_type
 
 
 def get_script_path(script_name: str, script_module: str = "jernerics.scripts") -> str:
