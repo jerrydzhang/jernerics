@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, overload
+from typing import TYPE_CHECKING, Any, Callable, ParamSpec, TypeVar, overload
 
 if TYPE_CHECKING:
     from .dag import DAG
 
 _active_dag: ContextVar[DAG | None] = ContextVar("_active_dag", default=None)
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 @dataclass
@@ -21,15 +24,14 @@ class Task:
 
 
 @overload
-def task(func: Callable[..., Any]) -> Task: ...
+def task(__func: Callable[P, R], /) -> Task: ...
 
 
 @overload
 def task(
-    func: None = None,
     *,
     depends_on: list[Task] | None = None,
-) -> Callable[[Callable[..., Any]], Task]: ...
+) -> Callable[[Callable[P, R]], Task]: ...
 
 
 def task(
