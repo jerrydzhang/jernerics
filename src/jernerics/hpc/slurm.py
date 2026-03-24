@@ -21,17 +21,15 @@ class SlurmJobManager:
         return result.stdout.strip()
 
     def submit_inline(self, script_content: str) -> str:
-        result = self.ssh.run("sbatch --parsable", check=False)
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to submit job: {result.stderr}")
-
         proc = subprocess.run(
             ["ssh", self.ssh.host, "sbatch --parsable"],
             input=script_content,
             capture_output=True,
             text=True,
-            check=True,
         )
+        if proc.returncode != 0:
+            raise RuntimeError(f"Failed to submit job: {proc.stderr}")
+
         return proc.stdout.strip()
 
     def list_jobs(self, include_completed: bool = False) -> list[SlurmJob]:

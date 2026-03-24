@@ -198,13 +198,17 @@ def run_slurm(
     for key, value in slurm_opts.items():
         script_lines.append(f"#SBATCH --{key}={value}")
     script_lines.append("")
+    if "output" in slurm_opts:
+        output_dir = str(Path(str(slurm_opts["output"])).parent)
+        script_lines.append(f"mkdir -p {output_dir}")
     script_lines.append("CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))")
     script_lines.append(f"export JERNERICS_DAG_FILE=/work/{dag_basename}")
     script_lines.append(f"export JERNERICS_CONFIG_FILE=/work/{config_basename}")
     script_lines.append("export JERNERICS_CONFIG_INDEX=$CONFIG_INDEX")
     script_lines.append(f"cd {remote_dir}")
+    script_lines.append("REMOTE_DIR=$(cd . && pwd)")
     script_lines.append(
-        f'apptainer exec --contain --nv --pwd /work --bind "{remote_dir}:/work" container.sif \\'
+        'apptainer exec --contain --nv --pwd /work --bind "$REMOTE_DIR:/work" container.sif \\'
     )
     script_lines.append("    python -c \"$(cat <<'EOF'")
     script_lines.append("import os")
