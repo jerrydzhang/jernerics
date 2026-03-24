@@ -188,7 +188,6 @@ class TestRunSlurmDryRun:
 class TestRunSlurmInvalidOptions:
     def test_rejects_set_option_without_equals(self, tmp_path):
         project_dir = _create_hpc_project(tmp_path)
-
         result = subprocess.run(
             ["jernerics", "run", "slurm", "dag.py", "config.py", "--set", "invalid"],
             cwd=project_dir,
@@ -197,3 +196,158 @@ class TestRunSlurmInvalidOptions:
         )
         assert result.returncode == ExitCode.CONFIG_ERROR
         assert "Invalid --set option" in result.stdout
+
+
+class TestRunSlurmPathHandling:
+    def test_project_name_from_current_dir(self, tmp_path):
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
+
+        (project_dir / "pyproject.toml").write_text(
+            """
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}"
+"""
+        )
+        (project_dir / "dag.py").write_text(
+            "from jernerics.dag import DAG\ndag = DAG()"
+        )
+        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "~/experiments/test-project" in result.stdout
+
+    def test_uses_resolved_project_name_not_empty_string(self, tmp_path):
+        project_dir = tmp_path / "my-real-project"
+        project_dir.mkdir()
+
+        (project_dir / "pyproject.toml").write_text(
+            """
+[project]
+name = "my-real-project"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}"
+"""
+        )
+        (project_dir / "dag.py").write_text(
+            "from jernerics.dag import DAG\ndag = DAG()"
+        )
+        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "experiments/my-real-project" in result.stdout
+        assert "experiments/" not in result.stdout.replace(
+            "experiments/my-real-project", ""
+        )
+
+    def test_remote_dir_no_double_slashes(self, tmp_path):
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
+
+        (project_dir / "pyproject.toml").write_text(
+            """
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}/"
+"""
+        )
+        (project_dir / "dag.py").write_text(
+            "from jernerics.dag import DAG\ndag = DAG()"
+        )
+        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "//" not in result.stdout
+
+
+class TestRunSlurmScriptGeneration:
+    def test_script_uses_cd_for_shell_expansion(self, tmp_path):
+        project_dir = _create_hpc_project(tmp_path)
+
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "REMOTE_DIR=$(cd . && pwd)" in result.stdout
+        assert "$REMOTE_DIR:/work" in result.stdout
+
+    def test_script_includes_mkdir_for_log_dir(self, tmp_path):
+        project_dir = _create_hpc_project(tmp_path)
+
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "mkdir -p .jernerics/logs" in result.stdout
+
+    def test_output_paths_are_relative(self, tmp_path):
+        project_dir = _create_hpc_project(tmp_path)
+
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "--output=.jernerics/logs/%A_%a.out" in result.stdout
+
+    def test_no_tilde_in_sbatch_directives(self, tmp_path):
+        project_dir = _create_hpc_project(tmp_path)
+
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        lines = result.stdout.split("\n")
+        sbatch_lines = [l for l in lines if l.startswith("#SBATCH")]
+        for line in sbatch_lines:
+            assert "~" not in line
+
+    def test_script_changes_to_remote_dir_before_sbatch_content(self, tmp_path):
+        project_dir = _create_hpc_project(tmp_path)
+
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "cd ~/experiments/test-project" in result.stdout

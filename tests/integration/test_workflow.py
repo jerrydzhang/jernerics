@@ -1,7 +1,7 @@
 import subprocess
 
 
-class TestIntegration:
+class TestDAGWorkflow:
     def test_full_workflow_simple(self, tmp_path):
         dag_file = tmp_path / "dag.py"
         dag_file.write_text("""
@@ -165,6 +165,8 @@ configs = [{"value": 42}]
         assert result.returncode == 0
         assert "DAG completed" in result.stdout
 
+
+class TestSlurmCommandGeneration:
     def test_slurm_command_generation(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text("""
 [project]
