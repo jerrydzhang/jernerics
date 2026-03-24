@@ -56,10 +56,9 @@ class ContainerBuilder:
         remote_dir = self.config.remote_dir.replace("{project_name}", project_name)
         return remote_dir.rstrip("/")
 
-    def _generate_build_script(self) -> str:
+    def _generate_build_script(self, slurm_output_dir: str) -> str:
         remote_dir = self._get_remote_dir()
         quoted_remote_dir = _quote_path(remote_dir)
-        slurm_output_dir = remote_dir.replace("~", "$HOME")
         partition = _validate_slurm_value(self.config.partition, "partition")
         time = _validate_slurm_value(self.config.time, "time")
         mem = _validate_slurm_value(self.config.mem, "mem")
@@ -122,22 +121,23 @@ echo "=== Build completed at $(date) ==="
 
         self.ensure_container_def()
 
+        remote_dir = self._get_remote_dir()
+        slurm_output_dir = self.ssh.expand_tilde(remote_dir)
+
         if dry_run:
             print("=== DRY RUN ===")
             print(f"Project dir: {self.project_dir}")
-            print(f"Remote dir: {self._get_remote_dir()}")
+            print(f"Remote dir: {remote_dir}")
             print(f"HPC host: {self.config.host}")
             print()
             print("Would sync files and submit build job with:")
-            print(self._generate_build_script())
+            print(self._generate_build_script(slurm_output_dir))
             return None
-
-        remote_dir = self._get_remote_dir()
 
         print(f"[1/3] Syncing project to {self.config.host}:{remote_dir}")
         self.syncer.sync_project(self.project_dir)
 
-        build_script = self._generate_build_script()
+        build_script = self._generate_build_script(slurm_output_dir)
         remote_script_path = f"{remote_dir}/build_container.sh"
 
         print("[2/3] Uploading build script...")
@@ -158,7 +158,7 @@ echo "=== Build completed at $(date) ==="
         job_id = self.slurm.submit(remote_script_path)
         print(f"\nBuild job submitted: {job_id}")
         print("\nMonitor progress:")
-        quoted_log_path = _quote_path(f"{remote_dir}/build_{job_id}.out")
+        quoted_log_path = _quote_path(f"{slurm_output_dir}/build_{job_id}.out")
         print(f"  ssh {self.config.host} 'tail -f {quoted_log_path}'")
 
         return job_id

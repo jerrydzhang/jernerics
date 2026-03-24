@@ -74,3 +74,13 @@ class SSHClient:
     def remove_file(self, remote_path: str) -> subprocess.CompletedProcess:
         _validate_path(remote_path)
         return self.run(f"rm -f {_quote_path(remote_path)}")
+
+    def get_home_dir(self) -> str:
+        result = self.run("echo $HOME", check=True)
+        return result.stdout.strip()
+
+    def expand_tilde(self, path: str) -> str:
+        if path.startswith("~"):
+            home = self.get_home_dir()
+            return home + path[1:]
+        return path
