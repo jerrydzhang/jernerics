@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, overload
+
+if TYPE_CHECKING:
+    from .dag import DAG
+
+_active_dag: ContextVar[DAG | None] = ContextVar("_active_dag", default=None)
 
 
 @dataclass
@@ -12,6 +18,18 @@ class Task:
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.func(*args, **kwargs)
+
+
+@overload
+def task(func: Callable[..., Any]) -> Task: ...
+
+
+@overload
+def task(
+    func: None = None,
+    *,
+    depends_on: list[Task] | None = None,
+) -> Callable[[Callable[..., Any]], Task]: ...
 
 
 def task(
@@ -30,6 +48,11 @@ def task(
         )
         task_instance.__doc__ = fn.__doc__
         task_instance.__module__ = fn.__module__
+
+        dag = _active_dag.get()
+        if dag is not None:
+            dag.add_task(task_instance)
+
         return task_instance
 
     if func is not None:

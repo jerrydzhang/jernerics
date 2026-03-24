@@ -7,6 +7,56 @@ from jernerics._cli_helpers import (
     find_pyproject_dir,
     load_jernerics_config,
 )
+from jernerics.config import merge_configs
+
+
+class TestMergeConfigs:
+    def test_merge_single_override(self):
+        base = {"seed": 42, "lr": 0.001}
+        overrides = [{"lr": 0.01}]
+
+        result = merge_configs(base, overrides)
+
+        assert result == [{"seed": 42, "lr": 0.01}]
+
+    def test_merge_multiple_overrides(self):
+        base = {"seed": 42, "model": "gpt"}
+        overrides = [{"seed": 1}, {"seed": 2}, {"seed": 3}]
+
+        result = merge_configs(base, overrides)
+
+        assert result == [
+            {"seed": 1, "model": "gpt"},
+            {"seed": 2, "model": "gpt"},
+            {"seed": 3, "model": "gpt"},
+        ]
+
+    def test_merge_empty_overrides(self):
+        base = {"seed": 42}
+        overrides = []
+
+        result = merge_configs(base, overrides)
+
+        assert result == []
+
+    def test_merge_adds_new_keys(self):
+        base = {"seed": 42}
+        overrides = [{"lr": 0.001}, {"lr": 0.01, "batch_size": 32}]
+
+        result = merge_configs(base, overrides)
+
+        assert result == [
+            {"seed": 42, "lr": 0.001},
+            {"seed": 42, "lr": 0.01, "batch_size": 32},
+        ]
+
+    def test_merge_empty_base(self):
+        base = {}
+        overrides = [{"seed": 1}, {"seed": 2}]
+
+        result = merge_configs(base, overrides)
+
+        assert result == [{"seed": 1}, {"seed": 2}]
 
 
 class TestLoadJernericsConfig:
