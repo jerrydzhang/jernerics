@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+_logger = logging.getLogger(__name__)
+
 _SERIALIZATION_KEY = "__jernerics_serialized__"
+_UNSET = object()
 
 
 def _serialize_output(output: Any) -> tuple[Any, bool]:
@@ -28,11 +33,20 @@ def _serialize_output(output: Any) -> tuple[Any, bool]:
             return f"<non-serializable: {type(output).__name__}>", False
 
 
+class DeserializationError(Exception):
+    pass
+
+
 def _deserialize_output(data: Any) -> Any:
     if isinstance(data, dict) and data.get(_SERIALIZATION_KEY) == "cloudpickle":
-        import cloudpickle
+        try:
+            import cloudpickle
 
-        return cloudpickle.loads(bytes.fromhex(data["data"]))
+            return cloudpickle.loads(bytes.fromhex(data["data"]))
+        except (KeyError, ValueError, Exception) as e:
+            raise DeserializationError(
+                f"Failed to deserialize cloudpickle output: {e}"
+            ) from e
     return data
 
 
@@ -67,13 +81,25 @@ class TaskState:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TaskState:
+        output_data = data.get("output")
+        persisted = data.get("persisted", True)
+        try:
+            output = _deserialize_output(output_data)
+        except DeserializationError as e:
+            _logger.warning(
+                "Failed to deserialize output for task %s: %s",
+                data.get("task_id", "unknown"),
+                e,
+            )
+            output = None
+            persisted = False
         return cls(
             task_id=data["task_id"],
             status=TaskStatus(data["status"]),
             started_at=data.get("started_at"),
             completed_at=data.get("completed_at"),
-            output=_deserialize_output(data.get("output")),
-            persisted=data.get("persisted", True),
+            output=output,
+            persisted=persisted,
             error=data.get("error"),
         )
 
@@ -89,7 +115,7 @@ class RunState:
 
     @staticmethod
     def _generate_run_id() -> str:
-        return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
 
     @staticmethod
     def _get_timestamp() -> str:
@@ -112,6 +138,7 @@ class RunState:
             "created_at": self.created_at,
             "dag_file": self.dag_file,
             "config_index": self.config_index,
+            "state_dir": str(self.state_dir),
             "tasks": {name: state.to_dict() for name, state in self.tasks.items()},
         }
 
@@ -121,12 +148,18 @@ class RunState:
 
         filename = f"{self.run_id}_{self.config_index}.json"
         state_file = runs_dir / filename
-        with open(state_file, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        data = self.to_dict()
+
+        temp_state = runs_dir / f".tmp_{filename}"
+        with open(temp_state, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_state, state_file)
 
         latest_file = runs_dir / f"latest_{self.config_index}.json"
-        with open(latest_file, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        temp_latest = runs_dir / f".tmp_latest_{self.config_index}.json"
+        with open(temp_latest, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_latest, latest_file)
 
         return state_file
 
@@ -146,7 +179,9 @@ class RunState:
             dag_file=data["dag_file"],
             config_index=data["config_index"],
             tasks=tasks,
-            state_dir=path.parent.parent,
+            state_dir=Path(data["state_dir"])
+            if "state_dir" in data
+            else path.parent.parent,
         )
 
     @classmethod
@@ -175,7 +210,7 @@ class RunState:
         status: TaskStatus,
         started_at: str | None = None,
         completed_at: str | None = None,
-        output: Any = None,
+        output: Any = _UNSET,
         error: str | None = None,
     ) -> None:
         if task_id in self.tasks:
@@ -185,7 +220,7 @@ class RunState:
                 task_state.started_at = started_at
             if completed_at is not None:
                 task_state.completed_at = completed_at
-            if output is not None:
+            if output is not _UNSET:
                 task_state.output = output
             if error is not None:
                 task_state.error = error
@@ -195,7 +230,7 @@ class RunState:
                 status=status,
                 started_at=started_at,
                 completed_at=completed_at,
-                output=output,
+                output=None if output is _UNSET else output,
                 error=error,
             )
 

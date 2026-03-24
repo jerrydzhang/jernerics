@@ -1,0 +1,250 @@
+# AGENTS.md - Jernerics Codebase Guide
+
+This document provides guidelines for agentic coding agents working in this repository.
+
+## Project Overview
+
+Jernerics is a Python 3.12+ toolkit for building and evaluating ML models, providing utilities for DAG-based experiment execution, HPC cluster management via SLURM, and container-based reproducibility.
+
+## Build/Lint/Test Commands
+
+### Setup
+```bash
+uv sync                    # Install all dependencies
+. .venv/bin/activate       # Activate virtual environment
+```
+
+### Testing
+```bash
+pytest                                      # Run all tests
+pytest tests/unit/                          # Run unit tests only
+pytest tests/integration/                   # Run integration tests only
+pytest tests/unit/dag/test_task.py          # Run specific test file
+pytest tests/unit/dag/test_task.py::TestTaskDecorator::test_task_decorator_returns_task  # Run single test
+pytest -x                                   # Stop on first failure
+pytest -v                                   # Verbose output
+pytest --cov=src                            # With coverage
+```
+
+### Linting & Formatting
+```bash
+ruff check .                # Run linter
+ruff check . --fix          # Auto-fix lint issues
+ruff format .               # Format code
+ruff format . --check       # Check formatting without changes
+ty check                    # Type check with ty
+```
+
+### Pre-commit
+```bash
+pre-commit run --all-files  # Run all pre-commit hooks
+```
+
+## Code Style Guidelines
+
+### Imports
+
+```python
+from __future__ import annotations  # Always first for modern typing
+
+import standard_library_modules
+import third_party_modules
+from local_modules import ...
+```
+
+Order: future annotations → standard library → third-party → local imports. Group imports logically, use absolute imports for project modules.
+
+### Formatting
+
+- **Line length**: 88 characters (ruff default)
+- **Quotes**: Prefer double quotes for strings
+- **Indentation**: 4 spaces (no tabs)
+- **Trailing commas**: Use in multi-line collections
+
+### Type Hints
+
+```python
+from __future__ import annotations
+from typing import Any
+
+def function(
+    config: dict[str, Any],
+    path: str | Path | None = None,
+) -> dict[str, Any]:
+    ...
+```
+
+- Use `from __future__ import annotations` for modern type syntax
+- Use `|` for unions instead of `Union[]`
+- Use `list[X]`, `dict[K, V]` instead of `List`, `Dict`
+- Always annotate function parameters and return types
+- Use `Any` sparingly; prefer specific types
+
+### Naming Conventions
+
+```python
+class MyClass:                    # PascalCase for classes
+    def my_method(self): ...      # snake_case for methods/functions
+
+my_variable = 1                   # snake_case for variables
+MY_CONSTANT = 1                   # UPPER_SNAKE_CASE for constants
+
+def _private_function(): ...      # Underscore prefix for internal functions
+
+class HpcConfig: ...              # No abbreviations in class names
+class SSHClient: ...              # Acronyms kept uppercase
+```
+
+### Data Structures
+
+```python
+from dataclasses import dataclass, field
+
+@dataclass
+class Task:
+    name: str
+    func: Callable[..., Any]
+    depends_on: list[Task] = field(default_factory=list)
+```
+
+- Use `@dataclass` for data-holding classes
+- Use `field(default_factory=...)` for mutable defaults
+
+### Error Handling
+
+```python
+class ConfigNotFound(Exception):
+    pass
+
+class NoConfigsFound(Exception):
+    pass
+
+def load_config(config_file: str) -> tuple[dict[str, Any], list[dict[str, Any]], int | None]:
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found: {config_file}")
+    
+    if not configs:
+        raise NoConfigsFound("No 'configs' list found in configuration file.")
+```
+
+- Define custom exceptions at module level
+- Use descriptive error messages with context
+- Raise specific exception types (not generic `Exception`)
+
+### CLI Patterns
+
+```python
+import typer
+from typing_extensions import Annotated
+
+app = typer.Typer(help="Description.")
+
+@app.command()
+def command(
+    arg: Annotated[str, typer.Argument(help="Argument description.")],
+    option: Annotated[str | None, typer.Option("--option", "-o", help="Option desc.")] = None,
+):
+    ...
+```
+
+## Testing Guidelines
+
+### Test Organization
+```
+tests/
+├── conftest.py              # Shared fixtures
+├── unit/                    # Unit tests (fast, isolated)
+│   ├── dag/
+│   ├── hpc/
+│   └── container/
+└── integration/             # Integration tests (slower, may use external resources)
+```
+
+### Test Structure
+
+```python
+from __future__ import annotations
+
+from hypothesis import given
+from hypothesis import strategies as st
+
+from jernerics.dag import DAG, task
+
+
+class TestFeatureName:
+    def test_basic_case(self):
+        ...
+
+    def test_edge_case(self, tmp_path):  # Use pytest fixtures
+        ...
+
+    @given(st.integers(), st.integers())  # Property-based testing
+    def test_with_various_inputs(self, a, b):
+        ...
+```
+
+### Test Patterns
+
+```python
+class TestDAGValidation:
+    def test_validate_missing_dependency_raises(self):
+        @task
+        def a(config):
+            return 1
+
+        dag = DAG()
+        dag.add_task(a)
+
+        try:
+            dag.validate()
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "unregistered task" in str(e)
+```
+
+- Group related tests in classes
+- Use descriptive test names: `test_<what>_<condition>`
+- Use hypothesis for property-based testing
+- Use `tmp_path` fixture for filesystem tests
+
+## Project-Specific Patterns
+
+### DAG Tasks
+
+```python
+from jernerics.dag import DAG, task
+
+dag = DAG()
+
+@task
+def setup(config):
+    return {"done": True}
+
+@task(depends_on=[setup])
+def train(setup, config):
+    return setup["done"]
+```
+
+### Configuration Files
+
+```python
+configs = [
+    {"seed": 1, "lr": 0.001},
+    {"seed": 2, "lr": 0.01},
+]
+
+slurm = {
+    "partition": "priority",
+    "time": "1:00:00",
+    "mem": "16G",
+}
+
+max_workers = 4
+```
+
+## Important Notes
+
+- **No comments on self-documenting code** - Avoid redundant comments
+- **Pre-commit hooks run tests** - Ensure tests pass before committing
+- **Use uv** - This project uses uv, not pip directly
+- **Python 3.12+** - Use modern Python features

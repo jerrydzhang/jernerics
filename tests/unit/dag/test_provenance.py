@@ -21,6 +21,17 @@ class TestGitSha:
         result = _get_git_sha(Path("/nonexistent/path"))
         assert result is None
 
+    def test_get_git_sha_file_not_dir(self, tmp_path):
+        file_path = tmp_path / "notadir.txt"
+        file_path.write_text("content")
+
+        result = _get_git_sha(file_path)
+        assert result is None
+
+    def test_get_git_sha_none_path(self):
+        result = _get_git_sha(None)
+        assert result is None
+
 
 class TestFileHash:
     def test_get_file_hash_existing_file(self, tmp_path):

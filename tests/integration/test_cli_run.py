@@ -197,6 +197,17 @@ class TestRunSlurmInvalidOptions:
         assert result.returncode == ExitCode.CONFIG_ERROR
         assert "Invalid --set option" in result.stdout
 
+    def test_rejects_set_option_with_empty_key(self, tmp_path):
+        project_dir = _create_hpc_project(tmp_path)
+        result = subprocess.run(
+            ["jernerics", "run", "slurm", "dag.py", "config.py", "--set", "=value"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == ExitCode.CONFIG_ERROR
+        assert "Empty key" in result.stdout
+
 
 class TestRunSlurmPathHandling:
     def test_project_name_from_current_dir(self, tmp_path):
@@ -299,7 +310,7 @@ class TestRunSlurmScriptGeneration:
         )
         assert result.returncode == 0
         assert "REMOTE_DIR=$(cd . && pwd)" in result.stdout
-        assert "$REMOTE_DIR:/work" in result.stdout
+        assert '"${REMOTE_DIR}:/work"' in result.stdout
 
     def test_script_includes_mkdir_for_log_dir(self, tmp_path):
         project_dir = _create_hpc_project(tmp_path)

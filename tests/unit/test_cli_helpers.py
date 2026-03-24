@@ -1,4 +1,16 @@
-from jernerics._cli_helpers import NoConfigsFound, load_config
+import pytest
+
+from jernerics._cli_helpers import NoConfigsFound, get_script_path, load_config
+
+
+class TestGetScriptPath:
+    def test_get_script_path_existing_script(self):
+        path = get_script_path("run_with_container.sh")
+        assert path.endswith("run_with_container.sh")
+
+    def test_get_script_path_nonexistent_script(self):
+        with pytest.raises(FileNotFoundError, match="Script not found"):
+            get_script_path("nonexistent_script.sh")
 
 
 class TestLoadConfig:

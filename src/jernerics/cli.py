@@ -1,7 +1,9 @@
 import json
 import os
+import re
+import shlex
+import shutil
 import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
@@ -21,6 +23,7 @@ from ._cli_helpers import (
 from .container.builder import ContainerBuilder
 from .container.templates import generate_container_def, list_templates
 from .hpc import FileSyncer, SlurmJobManager, SSHClient
+from .hpc.slurm import expand_slurm_pattern
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
 
@@ -54,16 +57,27 @@ def run_local(
         bool,
         typer.Option("--gpu/--no-gpu", help="Enable GPU support via --nv flag"),
     ] = True,
+    timeout: Annotated[
+        int | None,
+        typer.Option("--timeout", "-t", help="Timeout in seconds for each config run"),
+    ] = None,
 ):
     dag_path = os.path.abspath(dag_file)
     config_path = os.path.abspath(config_file)
     results_path = os.path.abspath(results_dir)
 
+    if not Path(dag_path).exists():
+        print(f"Error: DAG file not found: {dag_path}")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
     try:
         _, configs, _ = load_config(config_path)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
     except NoConfigsFound as e:
         print(e)
-        return
+        raise SystemExit(ExitCode.CONFIG_ERROR)
 
     num_configs = len(configs)
     any_failed = False
@@ -72,21 +86,30 @@ def run_local(
         run_script = get_script_path("run_with_container.sh")
         container_path = os.path.abspath(container)
 
+        if not Path(container_path).exists():
+            print(f"Error: Container file not found: {container_path}")
+            raise SystemExit(ExitCode.CONFIG_ERROR)
+
         for i in range(num_configs):
             print(f"Running config {i + 1}/{num_configs}", flush=True)
-            result = subprocess.run(
-                [
-                    run_script,
-                    container_path,
-                    dag_path,
-                    config_path,
-                    results_path,
-                    str(gpu).lower(),
-                    str(i),
-                ],
-            )
-            if result.returncode != 0:
-                print(f"Config {i + 1} failed with code {result.returncode}")
+            try:
+                result = subprocess.run(
+                    [
+                        run_script,
+                        container_path,
+                        dag_path,
+                        config_path,
+                        results_path,
+                        str(gpu).lower(),
+                        str(i),
+                    ],
+                    timeout=timeout,
+                )
+                if result.returncode != 0:
+                    print(f"Config {i + 1} failed with code {result.returncode}")
+                    any_failed = True
+            except subprocess.TimeoutExpired:
+                print(f"Config {i + 1} timed out after {timeout} seconds")
                 any_failed = True
     else:
         for i in range(num_configs):
@@ -94,22 +117,26 @@ def run_local(
             env = os.environ.copy()
             env["JERNERICS_CONFIG_INDEX"] = str(i)
 
-            result = subprocess.run(
-                [
-                    "python",
-                    "-c",
-                    _get_runner_code(dag_path, config_path, i, None),
-                ],
-                cwd=os.path.dirname(dag_path) or ".",
-                env=env,
-            )
-
-            if result.returncode != 0:
-                print(f"Config {i + 1} failed with code {result.returncode}")
+            try:
+                result = subprocess.run(
+                    [
+                        "python",
+                        "-c",
+                        _get_runner_code(dag_path, config_path, i, None),
+                    ],
+                    cwd=os.path.dirname(dag_path) or ".",
+                    env=env,
+                    timeout=timeout,
+                )
+                if result.returncode != 0:
+                    print(f"Config {i + 1} failed with code {result.returncode}")
+                    any_failed = True
+            except subprocess.TimeoutExpired:
+                print(f"Config {i + 1} timed out after {timeout} seconds")
                 any_failed = True
 
     if any_failed:
-        sys.exit(ExitCode.GENERAL_ERROR)
+        raise SystemExit(ExitCode.GENERAL_ERROR)
 
 
 @run_app.command("slurm")
@@ -134,6 +161,10 @@ def run_slurm(
 
     dag_path = Path(dag_file).resolve()
     config_path = Path(config_file).resolve()
+
+    if not dag_path.exists():
+        print(f"Error: DAG file not found: {dag_path}")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
         hpc_config, _ = load_jernerics_config(project_dir)
@@ -164,6 +195,9 @@ def run_slurm(
             print(f"Error: Invalid --set option: {opt}. Expected format: key=value")
             raise SystemExit(ExitCode.CONFIG_ERROR)
         key, value = opt.split("=", 1)
+        if not key:
+            print(f"Error: Empty key in --set option: {opt}")
+            raise SystemExit(ExitCode.CONFIG_ERROR)
         cli_overrides[key] = value
 
     project_name = project_dir.resolve().name
@@ -180,7 +214,11 @@ def run_slurm(
     }
 
     max_parallel = slurm_opts.pop("max_parallel", hpc_config.max_concurrent_jobs)
-    max_parallel_val = int(max_parallel) if max_parallel else 0
+    try:
+        max_parallel_val = int(max_parallel) if max_parallel else 0
+    except (ValueError, TypeError) as e:
+        print(f"Error: max_parallel must be an integer, got: {max_parallel!r}")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from e
 
     if max_parallel_val > 0:
         array_spec = f"1-{num_configs}%{max_parallel_val}"
@@ -190,16 +228,43 @@ def run_slurm(
     dag_basename = dag_path.name
     config_basename = config_path.name
 
+    _SAFE_BASENAME = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+
+    def validate_basename(name: str, desc: str) -> str:
+        if not _SAFE_BASENAME.match(name):
+            raise SystemExit(
+                f"Error: {desc} filename '{name}' contains unsafe characters. "
+                "Only alphanumeric, underscore, hyphen, and period allowed."
+            )
+        return name
+
+    dag_basename = validate_basename(dag_basename, "DAG file")
+    config_basename = validate_basename(config_basename, "Config file")
+
     output_pattern = str(slurm_opts.get("output", "slurm_%j.out"))
     error_pattern = str(slurm_opts.get("error", "slurm_%j.err"))
 
-    if not output_pattern.startswith("/"):
-        slurm_opts["output"] = output_pattern
+    def expand_path(p: str) -> str:
+        if p.startswith("~"):
+            p = str(Path(p).expanduser())
+        return p
 
-    if "error" in slurm_opts:
-        err_val = str(slurm_opts["error"])
-        if not err_val.startswith("/"):
-            slurm_opts["error"] = err_val
+    def safe_shell_path(p: str) -> str:
+        if p.startswith("~"):
+            rest = p[1:]
+            if not rest or rest.startswith("/"):
+                escaped = rest.replace("\\", "\\\\").replace('"', '\\"')
+                escaped = escaped.replace("$", "\\$").replace("`", "\\`")
+                escaped = escaped.replace(";", "\\;").replace("|", "\\|")
+                escaped = escaped.replace("&", "\\&").replace("(", "\\(")
+                escaped = escaped.replace(")", "\\)").replace("\n", "")
+                return "~" + escaped
+        return shlex.quote(p)
+
+    output_pattern = expand_path(output_pattern)
+    error_pattern = expand_path(error_pattern)
+    slurm_opts["output"] = output_pattern
+    slurm_opts["error"] = error_pattern
 
     script_lines = [
         "#!/usr/bin/env bash",
@@ -209,16 +274,25 @@ def run_slurm(
     for key, value in slurm_opts.items():
         script_lines.append(f"#SBATCH --{key}={value}")
     script_lines.append("")
-    output_dir = str(Path(str(slurm_opts["output"])).parent)
-    script_lines.append(f"mkdir -p {output_dir}")
+    output_path = str(slurm_opts["output"])
+    if "%" in output_path:
+        before_pattern = output_path[: output_path.index("%")]
+        last_slash = before_pattern.rfind("/")
+        if last_slash >= 0:
+            output_dir = before_pattern[:last_slash]
+        else:
+            output_dir = "."
+    else:
+        output_dir = str(Path(output_path).parent)
+    script_lines.append(f"mkdir -p {safe_shell_path(output_dir)}")
     script_lines.append("CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))")
     script_lines.append(f"export JERNERICS_DAG_FILE=/work/{dag_basename}")
     script_lines.append(f"export JERNERICS_CONFIG_FILE=/work/{config_basename}")
-    script_lines.append("export JERNERICS_CONFIG_INDEX=$CONFIG_INDEX")
-    script_lines.append(f"cd {remote_dir}")
+    script_lines.append("export JERNERICS_CONFIG_INDEX=${CONFIG_INDEX}")
+    script_lines.append(f"cd {safe_shell_path(remote_dir)}")
     script_lines.append("REMOTE_DIR=$(cd . && pwd)")
     script_lines.append(
-        'apptainer exec --contain --nv --pwd /work --bind "$REMOTE_DIR:/work" container.sif \\'
+        'apptainer exec --contain --nv --pwd /work --bind "${REMOTE_DIR}:/work" container.sif \\'
     )
     script_lines.append("    python -c \"$(cat <<'EOF'")
     script_lines.append("import os")
@@ -275,7 +349,7 @@ def run_slurm(
     syncer.sync_project(project_dir)
 
     print("[2/3] Ensuring log directory exists...")
-    ssh.run(f"mkdir -p {remote_dir}/.jernerics/logs")
+    ssh.mkdir(f"{remote_dir}/.jernerics/logs")
 
     if not syncer.container_exists():
         print(
@@ -492,14 +566,13 @@ def logs(
     base_job_id = job_id.split("_")[0] if "_" in job_id else job_id
     array_idx = job_id.split("_")[1] if "_" in job_id else None
 
-    log_file = log_pattern.replace("%j", job_id).replace("%A", base_job_id)
-
-    if array_index is not None:
-        log_file = log_file.replace("%a", str(array_index))
-    elif array_idx is not None:
-        log_file = log_file.replace("%a", array_idx)
-    elif "%a" in log_file:
-        log_file = log_file.replace("%a", "*")
+    effective_array_index = array_index if array_index is not None else array_idx
+    log_file = expand_slurm_pattern(
+        log_pattern,
+        job_id=job_id,
+        array_task_id=effective_array_index,
+        replace_unknown_with_wildcard=True,
+    )
 
     if not log_file.startswith("/") and not log_file.startswith("~"):
         log_file = f"{meta_remote_dir}/{log_file}"
@@ -508,15 +581,15 @@ def logs(
         if follow:
             print("Error: --follow requires --array-index for array jobs")
             raise SystemExit(ExitCode.GENERAL_ERROR)
-        result = ssh.run(f"cat {log_file}", check=False)
+        result = ssh.run(f"cat {shlex.quote(log_file)}", check=False)
         if result.returncode != 0:
             print(f"Error: Log files not found: {log_file}")
             raise SystemExit(ExitCode.GENERAL_ERROR)
         print(result.stdout)
     elif follow:
-        subprocess.run(["ssh", ssh.host, f"tail -f {log_file}"])
+        subprocess.run(["ssh", ssh.host, "tail", "-f", log_file])
     else:
-        result = ssh.run(f"cat {log_file}", check=False)
+        result = ssh.run(f"cat {shlex.quote(log_file)}", check=False)
         if result.returncode != 0:
             print(f"Error: Log file not found: {log_file}")
             raise SystemExit(ExitCode.GENERAL_ERROR)
@@ -544,8 +617,9 @@ def results(
 
     Path(local_dir).mkdir(parents=True, exist_ok=True)
 
+    remote_path = f"{syncer.ssh.host}:{shlex.quote(remote_results + '/.')}"
     result = subprocess.run(
-        ["scp", "-r", f"{syncer.ssh.host}:{remote_results}/.", local_dir],
+        ["scp", "-r", remote_path, local_dir],
         capture_output=True,
         text=True,
     )
@@ -629,14 +703,17 @@ def shell(
     ssh = SSHClient(hpc_config.host)
     syncer = FileSyncer(ssh, remote_dir)
 
+    quoted_remote_dir = shlex.quote(remote_dir)
+    quoted_srun = " ".join(shlex.quote(arg) for arg in srun_args)
+
     if not no_container and syncer.container_exists():
         shell_cmd = (
-            f"cd {remote_dir} && "
-            f"{' '.join(srun_args)} "
-            f"apptainer exec --nv --bind {remote_dir}:/work --pwd /work container.sif bash"
+            f"cd {quoted_remote_dir} && "
+            f"{quoted_srun} "
+            f"apptainer exec --nv --bind {quoted_remote_dir}:/work --pwd /work container.sif bash"
         )
     else:
-        shell_cmd = f"cd {remote_dir} && {' '.join(srun_args)} bash"
+        shell_cmd = f"cd {quoted_remote_dir} && {quoted_srun} bash"
 
     print(f"Starting interactive shell on {hpc_config.host}...")
     subprocess.run(["ssh", "-t", hpc_config.host, shell_cmd])
@@ -718,7 +795,7 @@ def clean(
 
     for item in to_delete:
         path = f"{remote_dir}/{item}"
-        result = ssh.run(f"rm -rf {path}", check=False)
+        result = ssh.run(f"rm -rf {shlex.quote(path)}", check=False)
         if result.returncode != 0:
             print(f"Failed to delete {item}: {result.stderr}")
         else:
@@ -744,6 +821,10 @@ def init(
         ),
     ] = False,
 ):
+    if shutil.which("uv") is None:
+        print("Error: 'uv' command not found. Please install uv first.")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+
     project_path = Path(project_dir).resolve()
     project_name = project_path.name
 
@@ -759,8 +840,12 @@ def init(
     jernerics_config = _get_default_jernerics_config(project_name)
 
     if pyproject_path.exists():
-        with open(pyproject_path, "rb") as f:
-            existing = tomllib.load(f)
+        try:
+            with open(pyproject_path, "rb") as f:
+                existing = tomllib.load(f)
+        except tomllib.TOMLDecodeError as e:
+            print(f"Error: Malformed pyproject.toml: {e}")
+            raise SystemExit(ExitCode.CONFIG_ERROR)
 
         has_jernerics = "jernerics" in existing.get("tool", {})
 
@@ -857,7 +942,7 @@ def _create_minimal_pyproject(project_name: str, jernerics_config: dict) -> dict
         },
         "build-system": {
             "requires": ["hatchling"],
-            "build-backend": ["hatchling.build"],
+            "build-backend": "hatchling.build",
         },
     }
 

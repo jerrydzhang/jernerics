@@ -94,8 +94,11 @@ def load_jernerics_config(project_dir: str | Path) -> tuple[HpcConfig, ShellConf
     if not pyproject_path.exists():
         raise ConfigNotFound(f"No pyproject.toml found in {project_dir}")
 
-    with open(pyproject_path, "rb") as f:
-        data = tomllib.load(f)
+    try:
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigNotFound(f"Malformed pyproject.toml: {e}") from e
 
     tool_config = data.get("tool", {}).get("jernerics", {})
 
@@ -139,10 +142,6 @@ def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
             return current
         current = current.parent
 
-    pyproject = start_dir.resolve() / "pyproject.toml"
-    if pyproject.exists():
-        return start_dir.resolve()
-
     return None
 
 
@@ -153,7 +152,13 @@ def load_config(
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_file}")
 
-    module_ns = runpy.run_path(str(config_path))
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Config path is not a file: {config_file}")
+
+    try:
+        module_ns = runpy.run_path(str(config_path))
+    except (SyntaxError, ImportError, PermissionError) as e:
+        raise RuntimeError(f"Failed to load config file '{config_file}': {e}") from e
 
     configs = module_ns.get("configs", [])
     if not configs:
@@ -166,7 +171,10 @@ def load_config(
 
 
 def get_script_path(script_name: str, script_module: str = "jernerics.scripts") -> str:
-    return str(resources.files(script_module).joinpath(script_name))
+    path = resources.files(script_module).joinpath(script_name)
+    if not Path(str(path)).exists():
+        raise FileNotFoundError(f"Script not found: {script_name}")
+    return str(path)
 
 
 def find_container(

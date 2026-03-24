@@ -300,6 +300,21 @@ class TestRunState:
         assert restored.tasks["task_a"].status == TaskStatus.FAILED
         assert restored.tasks["task_a"].error == "boom"
 
+    def test_run_state_from_json_backward_compat(self, tmp_path):
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir(parents=True)
+        state_file = runs_dir / "20240101-120000-000000_0.json"
+        state_file.write_text(
+            '{"run_id": "20240101-120000-000000", '
+            '"created_at": "2024-01-01T12:00:00Z", '
+            '"dag_file": "test.py", "config_index": 0, "tasks": {}}'
+        )
+
+        restored = RunState.from_json(state_file)
+
+        assert restored.run_id == "20240101-120000-000000"
+        assert restored.state_dir == tmp_path
+
     def test_run_state_latest_file_created(self, tmp_path):
         state = RunState.create(
             dag_file="test_dag.py",

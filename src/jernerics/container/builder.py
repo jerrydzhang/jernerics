@@ -1,3 +1,5 @@
+import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -9,6 +11,17 @@ from jernerics.container.templates import generate_container_def
 from jernerics.hpc.slurm import SlurmJobManager
 from jernerics.hpc.ssh import SSHClient
 from jernerics.hpc.sync import FileSyncer
+
+_SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
+
+
+def _validate_slurm_value(value: str, name: str) -> str:
+    if not _SLURM_VALUE_PATTERN.match(value):
+        raise ValueError(
+            f"Invalid {name} value '{value}': contains disallowed characters. "
+            "Only alphanumeric, underscore, hyphen, period, colon, and slash allowed."
+        )
+    return value
 
 
 class ContainerBuilder:
@@ -35,16 +48,27 @@ class ContainerBuilder:
 
     def _get_remote_dir(self) -> str:
         project_name = self.project_dir.resolve().name
+        if not re.match(r"^[a-zA-Z0-9_.-]+$", project_name):
+            raise ValueError(
+                f"Invalid project name '{project_name}'. "
+                "Directory name must contain only alphanumeric characters, "
+                "underscores, hyphens, and periods."
+            )
         remote_dir = self.config.remote_dir.replace("{project_name}", project_name)
         return remote_dir.rstrip("/")
 
     def _generate_build_script(self) -> str:
+        remote_dir = shlex.quote(self._get_remote_dir())
+        partition = _validate_slurm_value(self.config.partition, "partition")
+        time = _validate_slurm_value(self.config.time, "time")
+        mem = _validate_slurm_value(self.config.mem, "mem")
+        cpus = _validate_slurm_value(str(self.config.cpus), "cpus")
         return f"""#!/bin/bash
 #SBATCH --job-name=container-build
-#SBATCH --partition={self.config.partition}
-#SBATCH --time={self.config.time}
-#SBATCH --mem={self.config.mem}
-#SBATCH --cpus-per-task={self.config.cpus}
+#SBATCH --partition={partition}
+#SBATCH --time={time}
+#SBATCH --mem={mem}
+#SBATCH --cpus-per-task={cpus}
 #SBATCH --output=build_%j.out
 #SBATCH --error=build_%j.err
 
@@ -53,7 +77,7 @@ set -e
 echo "=== Build started at $(date) ==="
 echo "Running on $(hostname)"
 
-cd {self._get_remote_dir()}
+cd {remote_dir}
 
 echo
 echo "--- Building container with Apptainer + uv sync ---"
@@ -116,18 +140,24 @@ echo "=== Build completed at $(date) ==="
         remote_script_path = f"{remote_dir}/build_container.sh"
 
         print("[2/3] Uploading build script...")
-        subprocess.run(
-            ["ssh", self.config.host, f"cat > {remote_script_path}"],
+        quoted_script_path = shlex.quote(remote_script_path)
+        result = subprocess.run(
+            ["ssh", self.config.host, f"cat > {quoted_script_path}"],
             input=build_script,
             text=True,
-            check=True,
+            check=False,
             capture_output=True,
         )  # type: ignore[call-overload]
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Failed to upload build script: {result.stderr or result.stdout}"
+            )
 
         print("[3/3] Submitting build job to SLURM...")
         job_id = self.slurm.submit(remote_script_path)
         print(f"\nBuild job submitted: {job_id}")
         print("\nMonitor progress:")
-        print(f"  ssh {self.config.host} 'tail -f {remote_dir}/build_{job_id}.out'")
+        quoted_log_path = shlex.quote(f"{remote_dir}/build_{job_id}.out")
+        print(f"  ssh {self.config.host} 'tail -f {quoted_log_path}'")
 
         return job_id
