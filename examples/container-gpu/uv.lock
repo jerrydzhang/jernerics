@@ -28,6 +28,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cloudpickle"
+version = "3.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/27/fb/576f067976d320f5f0114a8d9fa1215425441bb35627b1993e5afd8111e5/cloudpickle-3.1.2.tar.gz", hash = "sha256:7fda9eb655c9c230dab534f1983763de5835249750e85fbcef43aaa30a9a2414", size = 22330, upload-time = "2025-11-03T09:25:26.604Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/39/799be3f2f0f38cc727ee3b4f1445fe6d5e4133064ec2e4115069418a5bb6/cloudpickle-3.1.2-py3-none-any.whl", hash = "sha256:9acb47f6afd73f60dc1df93bb801b472f05ff42fa6c84167d25cb206be1fbf4a", size = 22228, upload-time = "2025-11-03T09:25:25.534Z" },
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 source = { registry = "https://pypi.org/simple" }
@@ -47,7 +56,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "jernerics", directory = "../../" },
+    { name = "jernerics", git = "https://github.com/jerrydzhang/jernerics.git?rev=9684d9750e75c14a575aa3a3e3a3a09281a15180" },
     { name = "torch", index = "https://download.pytorch.org/whl/cu121" },
 ]
 
@@ -72,33 +81,13 @@ wheels = [
 [[package]]
 name = "jernerics"
 version = "0.1.0"
-source = { directory = "../../" }
+source = { git = "https://github.com/jerrydzhang/jernerics.git?rev=9684d9750e75c14a575aa3a3e3a3a09281a15180#9684d9750e75c14a575aa3a3e3a3a09281a15180" }
 dependencies = [
+    { name = "cloudpickle" },
     { name = "numpy" },
     { name = "pyyaml" },
     { name = "typer" },
     { name = "typing-extensions" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "matplotlib", marker = "extra == 'visualization'", specifier = ">=3.10.6" },
-    { name = "numpy", specifier = ">=2.3.3" },
-    { name = "plotly", marker = "extra == 'visualization'", specifier = ">=6.3.0" },
-    { name = "pyyaml", specifier = ">=6.0.2" },
-    { name = "seaborn", marker = "extra == 'visualization'", specifier = ">=0.13.2" },
-    { name = "typer", specifier = ">=0.19.1" },
-    { name = "typing-extensions", specifier = ">=4.12.0" },
-]
-provides-extras = ["data", "visualization"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "hypothesis", specifier = ">=6.151.9" },
-    { name = "pytest", specifier = ">=8.4.2" },
-    { name = "pytest-cov", specifier = ">=7.0.0" },
-    { name = "ruff", specifier = ">=0.13.1" },
-    { name = "ty", specifier = ">=0.0.21" },
 ]
 
 [[package]]

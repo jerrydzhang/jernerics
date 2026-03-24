@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-jernerics = { path = "../.." }
+jernerics = { git = "https://github.com/jerrydzhang/jernerics.git", rev = "9684d9750e75c14a575aa3a3e3a3a09281a15180" }
 torch = { index = "pytorch-cu121" }
 
 [[tool.uv.index]]
