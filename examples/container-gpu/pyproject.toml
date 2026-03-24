@@ -10,7 +10,7 @@ dependencies = [
 
 [tool.uv.sources.jernerics]
 git = "https://github.com/jerrydzhang/jernerics.git"
-rev = "b818ecb3f6f10e3fa1f540b0d796dabef7f5f4aa"
+rev = "34955f46f48aa710977aadbfd475dc786ced9297"
 
 [tool.jernerics.hpc]
 host = "jez21005@hpc2.storrs.hpc.uconn.edu"
