@@ -83,7 +83,7 @@ class FileSyncer:
 
             quoted_dir = _quote_path(self.remote_dir)
             result = self.ssh.run(
-                f"cd {quoted_dir} && tar xzf sync.tar.gz --no-absolute-names",
+                f"cd {quoted_dir} && tar xzf sync.tar.gz",
                 check=False,
             )
             self.ssh.run(f"rm -f {quoted_dir}/sync.tar.gz")
