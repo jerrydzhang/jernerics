@@ -190,6 +190,17 @@ def run_slurm(
     dag_basename = dag_path.name
     config_basename = config_path.name
 
+    output_pattern = str(slurm_opts.get("output", "slurm_%j.out"))
+    error_pattern = str(slurm_opts.get("error", "slurm_%j.err"))
+
+    if not output_pattern.startswith("/"):
+        slurm_opts["output"] = output_pattern
+
+    if "error" in slurm_opts:
+        err_val = str(slurm_opts["error"])
+        if not err_val.startswith("/"):
+            slurm_opts["error"] = err_val
+
     script_lines = [
         "#!/usr/bin/env bash",
         "#SBATCH --parsable",
@@ -198,9 +209,8 @@ def run_slurm(
     for key, value in slurm_opts.items():
         script_lines.append(f"#SBATCH --{key}={value}")
     script_lines.append("")
-    if "output" in slurm_opts:
-        output_dir = str(Path(str(slurm_opts["output"])).parent)
-        script_lines.append(f"mkdir -p {output_dir}")
+    output_dir = str(Path(str(slurm_opts["output"])).parent)
+    script_lines.append(f"mkdir -p {output_dir}")
     script_lines.append("CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))")
     script_lines.append(f"export JERNERICS_DAG_FILE=/work/{dag_basename}")
     script_lines.append(f"export JERNERICS_CONFIG_FILE=/work/{config_basename}")
@@ -276,7 +286,20 @@ def run_slurm(
 
     print("[3/3] Submitting job...")
     try:
-        job_id = slurm.submit_inline(script_content)
+        job_id = slurm.submit_inline(script_content, workdir=remote_dir)
+
+        job_meta = {
+            "job_id": job_id,
+            "output_pattern": str(slurm_opts.get("output", "slurm_%j.out")),
+            "error_pattern": str(slurm_opts.get("error", "slurm_%j.err")),
+            "remote_dir": remote_dir,
+            "num_configs": num_configs,
+        }
+        meta_dir = project_dir / ".jernerics" / "jobs"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        meta_file = meta_dir / f"{job_id}.json"
+        meta_file.write_text(json.dumps(job_meta, indent=2))
+
         print(f"\nJob submitted: {job_id}")
         print("\nMonitor progress:")
         print(f"  jernerics logs {job_id} --follow")
@@ -440,17 +463,57 @@ def logs(
         int | None,
         typer.Option("--array-index", "-i", help="Array task index (for array jobs)"),
     ] = None,
+    stderr: Annotated[
+        bool,
+        typer.Option("--stderr", "-e", help="Show stderr instead of stdout"),
+    ] = False,
 ):
     ssh, _, _, remote_dir = _get_hpc_client()
+    project_dir = find_pyproject_dir() or Path.cwd()
 
-    output_dir = f"{remote_dir}/.jernerics/logs"
+    meta_file = project_dir / ".jernerics" / "jobs" / f"{job_id}.json"
+    if meta_file.exists():
+        meta = json.loads(meta_file.read_text())
+        output_pattern = meta.get("output_pattern", "slurm_%j.out")
+        error_pattern = meta.get("error_pattern", "slurm_%j.err")
+        meta_remote_dir = meta.get("remote_dir", remote_dir)
+        num_configs = meta.get("num_configs", 1)
+    else:
+        output_pattern = "slurm_%j.out"
+        error_pattern = "slurm_%j.err"
+        meta_remote_dir = remote_dir
+        num_configs = 1
+
+    if stderr:
+        log_pattern = error_pattern
+    else:
+        log_pattern = output_pattern
+
+    base_job_id = job_id.split("_")[0] if "_" in job_id else job_id
+    array_idx = job_id.split("_")[1] if "_" in job_id else None
+
+    log_file = log_pattern.replace("%j", job_id).replace("%A", base_job_id)
 
     if array_index is not None:
-        log_file = f"{output_dir}/{job_id}_{array_index}.out"
-    else:
-        log_file = f"{output_dir}/{job_id}.out"
+        log_file = log_file.replace("%a", str(array_index))
+    elif array_idx is not None:
+        log_file = log_file.replace("%a", array_idx)
+    elif "%a" in log_file:
+        log_file = log_file.replace("%a", "*")
 
-    if follow:
+    if not log_file.startswith("/") and not log_file.startswith("~"):
+        log_file = f"{meta_remote_dir}/{log_file}"
+
+    if "*" in log_file:
+        if follow:
+            print("Error: --follow requires --array-index for array jobs")
+            raise SystemExit(ExitCode.GENERAL_ERROR)
+        result = ssh.run(f"cat {log_file}", check=False)
+        if result.returncode != 0:
+            print(f"Error: Log files not found: {log_file}")
+            raise SystemExit(ExitCode.GENERAL_ERROR)
+        print(result.stdout)
+    elif follow:
         subprocess.run(["ssh", ssh.host, f"tail -f {log_file}"])
     else:
         result = ssh.run(f"cat {log_file}", check=False)
