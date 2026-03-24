@@ -1,25 +1,40 @@
 [project]
 name = "container-gpu"
 version = "0.1.0"
-description = "GPU container example with PyTorch (CUDA wheels, GPU via Apptainer --nv)"
+description = "GPU container example with PyTorch (CUDA 13.0 via PyPI default, GPU via Apptainer --nv)"
 requires-python = ">=3.12"
 dependencies = [
     "torch",
     "jernerics",
 ]
 
-[tool.uv.sources]
-jernerics = { git = "https://github.com/jerrydzhang/jernerics.git", rev = "f9509180d10be4dcde3adc011ec2f192ba869e25" }
-torch = { index = "pytorch-cu121" }
+[tool.uv.sources.jernerics]
+git = "https://github.com/jerrydzhang/jernerics.git"
+rev = "cedc482ee4aa24348e621dce6284965ff7824f2d"
 
-[[tool.uv.index]]
-name = "pytorch-cu121"
-url = "https://download.pytorch.org/whl/cu121"
-explicit = true
+[tool.jernerics.hpc]
+host = "jez21005@hpc2.storrs.hpc.uconn.edu"
+remote_dir = "~/projects/container-gpu"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+[tool.jernerics.container]
+partition = "priority-gpu"
+time = "1:00:00"
+mem = "16G"
+cpus = 4
+
+[tool.jernerics.shell]
+partition = "priority-gpu"
+cpus = 1
+mem = "4G"
+gpu = 1
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/container_gpu"]
+packages = [
+    "src/container_gpu",
+]
+
+[build-system]
+requires = [
+    "hatchling",
+]
+build-backend = "hatchling.build"
