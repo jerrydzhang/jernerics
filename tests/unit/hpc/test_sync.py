@@ -98,7 +98,7 @@ class TestFileSyncer:
             args, _kwargs = mock_run.call_args
             assert args[0][0] == "scp"
             assert str(local_file) in args[0][1]
-            assert "user@host.example.edu:'~/projects/test/test.txt'" in args[0][2]
+            assert "user@host.example.edu:~/projects/test/test.txt" in args[0][2]
 
     def test_sync_file_not_found(self):
         mock_ssh = MagicMock()
@@ -121,7 +121,7 @@ class TestFileSyncer:
 
             assert result is True
             args, _kwargs = mock_run.call_args
-            assert "user@host.example.edu:'~/custom/path.txt'" in args[0][2]
+            assert "user@host.example.edu:~/custom/path.txt" in args[0][2]
 
     def test_download_file_success(self, tmp_path):
         mock_ssh = MagicMock()
@@ -137,7 +137,7 @@ class TestFileSyncer:
             assert result is True
             args, _kwargs = mock_run.call_args
             assert args[0][0] == "scp"
-            assert "user@host.example.edu:'~/projects/test/results.json'" in args[0][1]
+            assert "user@host.example.edu:~/projects/test/results.json" in args[0][1]
 
     def test_sync_project_default_files_constant(self):
         assert FileSyncer.DEFAULT_FILES == [

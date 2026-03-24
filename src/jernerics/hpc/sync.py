@@ -1,8 +1,9 @@
-import shlex
 import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
+
+from jernerics.hpc.ssh import _quote_path
 
 DEFAULT_SCP_TIMEOUT = 300
 
@@ -76,11 +77,11 @@ class FileSyncer:
             scp_cmd = [
                 "scp",
                 tmp_path,
-                f"{self.ssh.host}:{shlex.quote(remote_tar_path)}",
+                f"{self.ssh.host}:{_quote_path(remote_tar_path)}",
             ]
             subprocess.run(scp_cmd, check=True, timeout=DEFAULT_SCP_TIMEOUT)
 
-            quoted_dir = shlex.quote(self.remote_dir)
+            quoted_dir = _quote_path(self.remote_dir)
             result = self.ssh.run(
                 f"cd {quoted_dir} && tar xzf sync.tar.gz --no-absolute-names",
                 check=False,
@@ -106,7 +107,7 @@ class FileSyncer:
         scp_cmd = [
             "scp",
             str(local_path),
-            f"{self.ssh.host}:{shlex.quote(remote_path)}",
+            f"{self.ssh.host}:{_quote_path(remote_path)}",
         ]
         result = subprocess.run(
             scp_cmd, capture_output=True, text=True, timeout=DEFAULT_SCP_TIMEOUT
@@ -123,7 +124,7 @@ class FileSyncer:
 
         scp_cmd = [
             "scp",
-            f"{self.ssh.host}:{shlex.quote(remote_path)}",
+            f"{self.ssh.host}:{_quote_path(remote_path)}",
             str(local_path),
         ]
         result = subprocess.run(

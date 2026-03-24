@@ -1,5 +1,4 @@
 import re
-import shlex
 import subprocess
 from pathlib import Path
 
@@ -9,7 +8,7 @@ from jernerics._cli_helpers import (
 )
 from jernerics.container.templates import generate_container_def
 from jernerics.hpc.slurm import SlurmJobManager
-from jernerics.hpc.ssh import SSHClient
+from jernerics.hpc.ssh import SSHClient, _quote_path
 from jernerics.hpc.sync import FileSyncer
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
@@ -58,7 +57,7 @@ class ContainerBuilder:
         return remote_dir.rstrip("/")
 
     def _generate_build_script(self) -> str:
-        remote_dir = shlex.quote(self._get_remote_dir())
+        remote_dir = _quote_path(self._get_remote_dir())
         partition = _validate_slurm_value(self.config.partition, "partition")
         time = _validate_slurm_value(self.config.time, "time")
         mem = _validate_slurm_value(self.config.mem, "mem")
@@ -140,7 +139,7 @@ echo "=== Build completed at $(date) ==="
         remote_script_path = f"{remote_dir}/build_container.sh"
 
         print("[2/3] Uploading build script...")
-        quoted_script_path = shlex.quote(remote_script_path)
+        quoted_script_path = _quote_path(remote_script_path)
         result = subprocess.run(
             ["ssh", self.config.host, f"cat > {quoted_script_path}"],
             input=build_script,
@@ -157,7 +156,7 @@ echo "=== Build completed at $(date) ==="
         job_id = self.slurm.submit(remote_script_path)
         print(f"\nBuild job submitted: {job_id}")
         print("\nMonitor progress:")
-        quoted_log_path = shlex.quote(f"{remote_dir}/build_{job_id}.out")
+        quoted_log_path = _quote_path(f"{remote_dir}/build_{job_id}.out")
         print(f"  ssh {self.config.host} 'tail -f {quoted_log_path}'")
 
         return job_id
