@@ -45,6 +45,7 @@ class HpcConfig:
     mem: str
     cpus: int
     max_concurrent_jobs: int
+    build_tmpdir: str | None
 
     def __init__(
         self,
@@ -55,6 +56,7 @@ class HpcConfig:
         mem: str = "16G",
         cpus: int = 4,
         max_concurrent_jobs: int = 10,
+        build_tmpdir: str | None = None,
     ):
         self.host = host
         self.remote_dir = remote_dir
@@ -63,6 +65,7 @@ class HpcConfig:
         self.mem = mem
         self.cpus = cpus
         self.max_concurrent_jobs = max_concurrent_jobs
+        self.build_tmpdir = build_tmpdir
 
 
 class ShellConfig:
@@ -116,6 +119,7 @@ def load_jernerics_config(project_dir: str | Path) -> tuple[HpcConfig, ShellConf
         mem=container_config.get("mem", "16G"),
         cpus=container_config.get("cpus", 4),
         max_concurrent_jobs=safety_config.get("max_concurrent_jobs", 10),
+        build_tmpdir=hpc_config.get("build_tmpdir"),
     )
 
     shell = ShellConfig(
