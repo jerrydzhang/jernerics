@@ -10,10 +10,9 @@ dependencies = [
 
 [tool.uv.sources.jernerics]
 git = "https://github.com/jerrydzhang/jernerics.git"
-rev = "051f1c1da59d9f1b706bbb559e6bb1fd4475a510"
 
 [tool.jernerics.hpc]
-host = "jez21005@hpc2.storrs.hpc.uconn.edu"
+host = "user@cluster.edu"
 remote_dir = "~/projects/container-gpu"
 
 [tool.jernerics.container]
