@@ -3,17 +3,64 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+import pathspec
+
 from jernerics.hpc.ssh import _quote_path
 
 DEFAULT_SCP_TIMEOUT = 300
 
+DEFAULT_EXCLUDES = [
+    ".git/",
+    ".jernerics/",
+    "__pycache__/",
+    "*.pyc",
+    "*.sif",
+    ".cache/",
+    "results/",
+    ".venv/",
+    "venv/",
+    "*.egg-info/",
+    ".eggs/",
+    "build/",
+    "dist/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+]
 
-def _safe_tar_filter(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
-    if tarinfo.islnk() or tarinfo.issym():
+
+def _load_gitignore(project_path: Path) -> pathspec.PathSpec | None:
+    gitignore_path = project_path / ".gitignore"
+    if not gitignore_path.exists():
         return None
-    if tarinfo.name.startswith("/") or ".." in tarinfo.name:
-        return None
-    return tarinfo
+    patterns = gitignore_path.read_text().splitlines()
+    return pathspec.PathSpec.from_lines("gitignore", patterns)
+
+
+def _should_include(
+    rel_path: str,
+    gitignore_spec: pathspec.PathSpec | None,
+    default_spec: pathspec.PathSpec,
+) -> bool:
+    if gitignore_spec and gitignore_spec.match_file(rel_path):
+        return False
+    if default_spec.match_file(rel_path):
+        return False
+    return True
+
+
+def _collect_files(
+    project_path: Path,
+    gitignore_spec: pathspec.PathSpec | None,
+    default_spec: pathspec.PathSpec,
+) -> list[Path]:
+    files = []
+    for item in project_path.rglob("*"):
+        if not item.is_file():
+            continue
+        rel_path = item.relative_to(project_path).as_posix()
+        if _should_include(rel_path, gitignore_spec, default_spec):
+            files.append(item)
+    return files
 
 
 class FileSyncer:
@@ -21,56 +68,34 @@ class FileSyncer:
         self.ssh = ssh_client
         self.remote_dir = remote_dir.rstrip("/")
 
-    DEFAULT_FILES = [
-        "pyproject.toml",
-        "uv.lock",
-        "container.def",
-        "dag.py",
-        "config.py",
-    ]
-    DEFAULT_DIRS = ["src"]
-
     def sync_project(
         self,
         project_dir: str | Path,
-        exclude_patterns: list[str] | None = None,
         dry_run: bool = False,
-        files: list[str] | None = None,
-        dirs: list[str] | None = None,
     ) -> bool:
         project_path = Path(project_dir)
 
-        if exclude_patterns is None:
-            exclude_patterns = [
-                "*.pyc",
-                "__pycache__",
-                "*.sif",
-                ".git",
-                ".cache",
-                "results",
-                ".jernerics",
-            ]
+        gitignore_spec = _load_gitignore(project_path)
+        default_spec = pathspec.PathSpec.from_lines("gitignore", DEFAULT_EXCLUDES)
+
+        files_to_sync = _collect_files(project_path, gitignore_spec, default_spec)
+
+        if not files_to_sync:
+            return True
 
         self.ssh.mkdir(self.remote_dir)
-
-        files_to_sync = files if files is not None else self.DEFAULT_FILES
-        dirs_to_sync = dirs if dirs is not None else self.DEFAULT_DIRS
-
-        existing_files = [f for f in files_to_sync if (project_path / f).exists()]
-        existing_dirs = [d for d in dirs_to_sync if (project_path / d).is_dir()]
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             tmp_path = tmp.name
 
         try:
             with tarfile.open(tmp_path, "w:gz") as tar:
-                for f in existing_files:
-                    tar.add(project_path / f, arcname=f, filter=_safe_tar_filter)
-                for d in existing_dirs:
-                    tar.add(project_path / d, arcname=d, filter=_safe_tar_filter)
+                for file_path in files_to_sync:
+                    arcname = file_path.relative_to(project_path)
+                    tar.add(file_path, arcname=str(arcname))
 
             if dry_run:
-                print(f"Would sync: {existing_files + existing_dirs}")
+                print(f"Would sync {len(files_to_sync)} files")
                 return True
 
             remote_tar_path = f"{self.remote_dir}/sync.tar.gz"
