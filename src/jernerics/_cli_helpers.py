@@ -45,7 +45,7 @@ class HpcConfig:
     mem: str
     cpus: int
     max_concurrent_jobs: int
-    build_tmpdir: str | None
+    cache_dir: str | None
 
     def __init__(
         self,
@@ -56,7 +56,7 @@ class HpcConfig:
         mem: str = "16G",
         cpus: int = 4,
         max_concurrent_jobs: int = 10,
-        build_tmpdir: str | None = None,
+        cache_dir: str | None = None,
     ):
         self.host = host
         self.remote_dir = remote_dir
@@ -65,7 +65,11 @@ class HpcConfig:
         self.mem = mem
         self.cpus = cpus
         self.max_concurrent_jobs = max_concurrent_jobs
-        self.build_tmpdir = build_tmpdir
+        self.cache_dir = cache_dir
+
+
+class BindsConfig(dict[str, str]):
+    pass
 
 
 class ShellConfig:
@@ -90,7 +94,9 @@ class ShellConfig:
         self.time = time
 
 
-def load_jernerics_config(project_dir: str | Path) -> tuple[HpcConfig, ShellConfig]:
+def load_jernerics_config(
+    project_dir: str | Path,
+) -> tuple[HpcConfig, ShellConfig, BindsConfig]:
     project_path = Path(project_dir)
     pyproject_path = project_path / "pyproject.toml"
 
@@ -109,6 +115,7 @@ def load_jernerics_config(project_dir: str | Path) -> tuple[HpcConfig, ShellConf
     container_config = tool_config.get("container", {})
     safety_config = tool_config.get("safety", {})
     shell_config = tool_config.get("shell", {})
+    binds_config = tool_config.get("binds", {})
 
     hpc = HpcConfig(
         host=os.environ.get("JERNERICS_HPC_HOST") or hpc_config.get("host"),
@@ -119,7 +126,7 @@ def load_jernerics_config(project_dir: str | Path) -> tuple[HpcConfig, ShellConf
         mem=container_config.get("mem", "16G"),
         cpus=container_config.get("cpus", 4),
         max_concurrent_jobs=safety_config.get("max_concurrent_jobs", 10),
-        build_tmpdir=hpc_config.get("build_tmpdir"),
+        cache_dir=hpc_config.get("cache_dir"),
     )
 
     shell = ShellConfig(
@@ -130,7 +137,9 @@ def load_jernerics_config(project_dir: str | Path) -> tuple[HpcConfig, ShellConf
         time=shell_config.get("time"),
     )
 
-    return hpc, shell
+    binds = BindsConfig(binds_config)
+
+    return hpc, shell, binds
 
 
 def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
@@ -147,6 +156,23 @@ def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
         current = current.parent
 
     return None
+
+
+def get_project_name(project_dir: str | Path) -> str:
+    project_path = Path(project_dir)
+    pyproject_path = project_path / "pyproject.toml"
+
+    if pyproject_path.exists():
+        try:
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+            project_name = data.get("project", {}).get("name")
+            if project_name:
+                return project_name
+        except (tomllib.TOMLDecodeError, KeyError):
+            pass
+
+    return project_path.resolve().name
 
 
 def load_config(

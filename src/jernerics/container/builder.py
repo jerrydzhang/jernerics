@@ -5,6 +5,7 @@ from pathlib import Path
 
 from jernerics._cli_helpers import (
     find_pyproject_dir,
+    get_project_name,
     load_jernerics_config,
 )
 from jernerics.container.templates import generate_container_def
@@ -34,7 +35,15 @@ class ContainerBuilder:
                 )
 
         self.project_dir = Path(project_dir)
-        self.config, _ = load_jernerics_config(self.project_dir)
+        self.config, _, _ = load_jernerics_config(self.project_dir)
+        self.project_name = get_project_name(self.project_dir)
+
+        if not re.match(r"^[a-zA-Z0-9_.-]+$", self.project_name):
+            raise ValueError(
+                f"Invalid project name '{self.project_name}'. "
+                "Name must contain only alphanumeric characters, "
+                "underscores, hyphens, and periods."
+            )
 
         if not self.config.host:
             raise ValueError(
@@ -47,15 +56,19 @@ class ContainerBuilder:
         self.slurm = SlurmJobManager(self.ssh)
 
     def _get_remote_dir(self) -> str:
-        project_name = self.project_dir.resolve().name
-        if not re.match(r"^[a-zA-Z0-9_.-]+$", project_name):
-            raise ValueError(
-                f"Invalid project name '{project_name}'. "
-                "Directory name must contain only alphanumeric characters, "
-                "underscores, hyphens, and periods."
-            )
-        remote_dir = self.config.remote_dir.replace("{project_name}", project_name)
+        remote_dir = self.config.remote_dir.replace("{project_name}", self.project_name)
         return remote_dir.rstrip("/")
+
+    def _get_cache_dir(self) -> str | None:
+        if not self.config.cache_dir:
+            return None
+        return self.config.cache_dir.rstrip("/")
+
+    def _get_build_tmpdir(self) -> str | None:
+        cache_dir = self._get_cache_dir()
+        if not cache_dir:
+            return None
+        return f"{cache_dir}/{self.project_name}/tmp"
 
     def _generate_build_script(self, slurm_output_dir: str) -> str:
         remote_dir = self._get_remote_dir()
@@ -66,8 +79,9 @@ class ContainerBuilder:
         cpus = _validate_slurm_value(str(self.config.cpus), "cpus")
 
         tmpdir_export = ""
-        if self.config.build_tmpdir:
-            tmpdir = _validate_slurm_value(self.config.build_tmpdir, "build_tmpdir")
+        build_tmpdir = self._get_build_tmpdir()
+        if build_tmpdir:
+            tmpdir = _validate_slurm_value(build_tmpdir, "build_tmpdir")
             tmpdir_export = f"export APPTAINER_TMPDIR={tmpdir}\n"
 
         return f"""#!/bin/bash
@@ -136,8 +150,9 @@ echo "=== Build completed at $(date) ==="
             print(f"Project dir: {self.project_dir}")
             print(f"Remote dir: {remote_dir}")
             print(f"HPC host: {self.config.host}")
-            if self.config.build_tmpdir:
-                print(f"Build tmpdir: {self.config.build_tmpdir}")
+            build_tmpdir = self._get_build_tmpdir()
+            if build_tmpdir:
+                print(f"Build tmpdir: {build_tmpdir}")
             print()
             print("Would sync files and submit build job with:")
             print(self._generate_build_script(slurm_output_dir))
@@ -149,11 +164,12 @@ echo "=== Build completed at $(date) ==="
         print("[2/4] Creating logs directory...")
         self.ssh.mkdir(f"{remote_dir}/logs")
 
-        if self.config.build_tmpdir:
-            print(f"[3/5] Creating build tmpdir ({self.config.build_tmpdir})...")
-            self.ssh.mkdir(self.config.build_tmpdir)
+        build_tmpdir = self._get_build_tmpdir()
+        if build_tmpdir:
+            print(f"[3/5] Creating build tmpdir ({build_tmpdir})...")
+            self.ssh.mkdir(build_tmpdir)
         else:
-            print("[3/5] (No build_tmpdir configured, using default /tmp)")
+            print("[3/5] (No cache_dir configured, using default /tmp)")
 
         build_script = self._generate_build_script(slurm_output_dir)
         remote_script_path = f"{remote_dir}/build_container.sh"

@@ -42,7 +42,7 @@ class TestGetScriptPath:
 
 class TestLoadJernericsConfig:
     def test_load_jernerics_config_basic(self, tmp_project):
-        hpc, _shell = load_jernerics_config(tmp_project)
+        hpc, _shell, _binds = load_jernerics_config(tmp_project)
 
         assert hpc.host == "user@hpc.example.edu"
         assert hpc.remote_dir == "~/experiments/{project_name}"
@@ -73,7 +73,7 @@ version = "0.1.0"
 """)
 
         monkeypatch.setenv("JERNERICS_HPC_HOST", "env@host.example.edu")
-        hpc, _shell = load_jernerics_config(project_dir)
+        hpc, _shell, _binds = load_jernerics_config(project_dir)
 
         assert hpc.host == "env@host.example.edu"
 
