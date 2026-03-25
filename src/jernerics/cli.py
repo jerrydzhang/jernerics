@@ -295,6 +295,7 @@ def run_slurm(
         output_dir = str(Path(output_path).parent)
     script_lines.append(f"mkdir -p {safe_shell_path(output_dir)}")
     script_lines.append("CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))")
+    script_lines.append("export JERNERICS_HPC=1")
     script_lines.append(f"export JERNERICS_DAG_FILE=/work/{dag_relpath}")
     script_lines.append(f"export JERNERICS_CONFIG_FILE=/work/{config_relpath}")
     script_lines.append("export JERNERICS_CONFIG_INDEX=${CONFIG_INDEX}")
