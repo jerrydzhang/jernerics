@@ -226,6 +226,35 @@ with DAG() as dag:
         assert "dependent_task" in dag.tasks
         assert dag.tasks["dependent_task"].depends_on[0].name == "context_task"
 
+    def test_discover_tasks_duplicate_name_last_wins(self, tmp_path):
+        dag_content = """
+from jernerics.dag import DAG, task
+
+with DAG() as dag1:
+    @task
+    def common_task(config):
+        return "first"
+
+with DAG() as dag2:
+    @task
+    def common_task(config):
+        return "second"
+
+@task
+def common_task(config):
+    return "third"
+"""
+        dag_file = tmp_path / "dag.py"
+        dag_file.write_text(dag_content)
+
+        dag = DAG(dag_file)
+        dag.validate()
+
+        assert "common_task" in dag.tasks
+        assert len(dag.tasks) == 1
+        result = dag.tasks["common_task"].func({})
+        assert result == "third"
+
 
 class TestDAGValidation:
     def test_validate_empty_dag(self):

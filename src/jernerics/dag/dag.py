@@ -57,7 +57,9 @@ class DAG:
             if isinstance(obj, Task):
                 if obj.name not in self.tasks:
                     self.add_task(obj)
-            elif isinstance(obj, DAG) and obj is not self:
+
+        for name, obj in module_ns.items():
+            if isinstance(obj, DAG) and obj is not self:
                 for task in obj.tasks.values():
                     if task.name not in self.tasks:
                         self.add_task(task)
