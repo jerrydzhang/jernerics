@@ -286,11 +286,11 @@ https://github.com/jerrydzhang/jernerics/tree/main/examples/
 
 ## Feedback
 
-If you encounter friction points, confusing behavior, or missing features while 
-using jernerics, submit feedback via GitHub issues:
+If you encounter friction points, confusing behavior, or missing documentation 
+while using jernerics OR this skill, submit feedback via GitHub issues:
 
 ```bash
-gh issue create --repo jerrydzhang/jernerics --label friction --title "<brief description>" --body "<details>"
+gh issue create --repo jerrydzhang/jernerics --title "<brief description>" --body "<details>"
 ```
 
 Include:
