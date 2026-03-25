@@ -362,3 +362,175 @@ class TestRunSlurmScriptGeneration:
         )
         assert result.returncode == 0
         assert "cd ~/experiments/test-project" in result.stdout
+
+
+class TestRunSlurmSubdirectoryPaths:
+    def test_config_in_subdirectory_preserves_relative_path(self, tmp_path):
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
+
+        (project_dir / "pyproject.toml").write_text(
+            """
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}"
+"""
+        )
+
+        configs_dir = project_dir / "configs"
+        configs_dir.mkdir()
+
+        (project_dir / "dag.py").write_text(
+            "from jernerics.dag import DAG\ndag = DAG()"
+        )
+        (configs_dir / "experiment.py").write_text(
+            "configs = [{'seed': 1}]\nslurm = {}"
+        )
+        (project_dir / "uv.lock").write_text("version = 1\n")
+
+        result = subprocess.run(
+            [
+                "jernerics",
+                "run",
+                "slurm",
+                "dag.py",
+                "configs/experiment.py",
+                "--dry-run",
+            ],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "JERNERICS_CONFIG_FILE=/work/configs/experiment.py" in result.stdout
+
+    def test_dag_in_subdirectory_preserves_relative_path(self, tmp_path):
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
+
+        (project_dir / "pyproject.toml").write_text(
+            """
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}"
+"""
+        )
+
+        experiments_dir = project_dir / "experiments"
+        experiments_dir.mkdir()
+
+        (experiments_dir / "pipeline.py").write_text(
+            "from jernerics.dag import DAG\ndag = DAG()"
+        )
+        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+        (project_dir / "uv.lock").write_text("version = 1\n")
+
+        result = subprocess.run(
+            [
+                "jernerics",
+                "run",
+                "slurm",
+                "experiments/pipeline.py",
+                "config.py",
+                "--dry-run",
+            ],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "JERNERICS_DAG_FILE=/work/experiments/pipeline.py" in result.stdout
+
+    def test_both_files_in_subdirectories(self, tmp_path):
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
+
+        (project_dir / "pyproject.toml").write_text(
+            """
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}"
+"""
+        )
+
+        experiments_dir = project_dir / "experiments"
+        experiments_dir.mkdir()
+        configs_dir = experiments_dir / "configs"
+        configs_dir.mkdir()
+
+        (experiments_dir / "pipeline.py").write_text(
+            "from jernerics.dag import DAG\ndag = DAG()"
+        )
+        (configs_dir / "experiment.py").write_text(
+            "configs = [{'seed': 1}]\nslurm = {}"
+        )
+        (project_dir / "uv.lock").write_text("version = 1\n")
+
+        result = subprocess.run(
+            [
+                "jernerics",
+                "run",
+                "slurm",
+                "experiments/pipeline.py",
+                "experiments/configs/experiment.py",
+                "--dry-run",
+            ],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "JERNERICS_DAG_FILE=/work/experiments/pipeline.py" in result.stdout
+        assert (
+            "JERNERICS_CONFIG_FILE=/work/experiments/configs/experiment.py"
+            in result.stdout
+        )
+
+    def test_rejects_path_traversal_in_dag_path(self, tmp_path):
+        project_dir = tmp_path / "test-project"
+        project_dir.mkdir()
+
+        (project_dir / "pyproject.toml").write_text(
+            """
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}"
+"""
+        )
+
+        (project_dir / "dag.py").write_text(
+            "from jernerics.dag import DAG\ndag = DAG()"
+        )
+        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+        (project_dir / "uv.lock").write_text("version = 1\n")
+
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "malicious.py").write_text("print('bad')")
+
+        result = subprocess.run(
+            [
+                "jernerics",
+                "run",
+                "slurm",
+                "../outside/malicious.py",
+                "config.py",
+                "--dry-run",
+            ],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
