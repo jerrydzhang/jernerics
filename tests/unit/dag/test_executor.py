@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 import warnings
@@ -34,10 +35,8 @@ class TestDefaultMaxWorkers:
         ) as mock_init:
             mock_init.return_value = None
 
-            try:
+            with contextlib.suppress(Exception):
                 execute_dag({"simple": simple_task}, {})
-            except Exception:
-                pass
 
             call_args = mock_init.call_args
             assert call_args is not None
@@ -311,7 +310,7 @@ class TestExecutorType:
 
         try:
             execute_dag({"simple": simple}, {}, executor_type="invalid")
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "executor_type must be 'thread' or 'serial'" in str(e)
 
@@ -324,7 +323,7 @@ class TestMaxWorkers:
 
         try:
             execute_dag({"simple": simple}, {}, max_workers=0)
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "max_workers must be a positive integer" in str(e)
 
@@ -335,7 +334,7 @@ class TestMaxWorkers:
 
         try:
             execute_dag({"simple": simple}, {}, max_workers=-1)
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "max_workers must be a positive integer" in str(e)
 
@@ -346,7 +345,7 @@ class TestMaxWorkers:
 
         try:
             execute_dag({"simple": simple}, {}, max_workers="invalid")
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "max_workers must be a positive integer" in str(e)
 

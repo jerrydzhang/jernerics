@@ -53,12 +53,11 @@ class DAG:
         except (SyntaxError, ImportError, PermissionError) as e:
             raise RuntimeError(f"Failed to load DAG file '{self.dag_file}': {e}") from e
 
-        for name, obj in module_ns.items():
-            if isinstance(obj, Task):
-                if obj.name not in self.tasks:
-                    self.add_task(obj)
+        for _name, obj in module_ns.items():
+            if isinstance(obj, Task) and obj.name not in self.tasks:
+                self.add_task(obj)
 
-        for name, obj in module_ns.items():
+        for _name, obj in module_ns.items():
             if isinstance(obj, DAG) and obj is not self:
                 for task in obj.tasks.values():
                     if task.name not in self.tasks:

@@ -4,8 +4,8 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +50,7 @@ def _deserialize_output(data: Any) -> Any:
     return data
 
 
-class TaskStatus(str, Enum):
+class TaskStatus(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -115,11 +115,11 @@ class RunState:
 
     @staticmethod
     def _generate_run_id() -> str:
-        return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        return datetime.now(UTC).strftime("%Y%m%d-%H%M%S-%f")
 
     @staticmethod
     def _get_timestamp() -> str:
-        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     @classmethod
     def create(cls, dag_file: str, config_index: int, state_dir: Path) -> RunState:

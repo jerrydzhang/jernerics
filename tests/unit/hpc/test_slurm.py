@@ -116,7 +116,7 @@ class TestSlurmJobManager:
         assert job_id == "67890"
         mock_ssh.run.assert_called_once()
         args, kwargs = mock_ssh.run.call_args
-        assert "cd ~/project && sbatch --parsable" == args[0]
+        assert args[0] == "cd ~/project && sbatch --parsable"
         assert kwargs.get("input") == "script content"
         assert kwargs.get("check") is False
 
