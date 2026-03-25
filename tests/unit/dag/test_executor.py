@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 
 from hypothesis import given
@@ -13,8 +14,8 @@ from jernerics.dag.task import task
 class TestDefaultMaxWorkers:
     def test_default_max_workers_reasonable(self):
         workers = _get_default_max_workers()
-        assert workers >= 1
-        assert workers <= 8
+        assert workers >= 4
+        assert workers == (os.cpu_count() or 4)
 
     def test_default_max_workers_used_when_none(self):
         call_count = 0
