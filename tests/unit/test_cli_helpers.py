@@ -193,7 +193,7 @@ slurm = {"time": "1:00:00"}
 
         try:
             load_config(str(config_file))
-            assert False, "Should have raised NoConfigsFound"
+            raise AssertionError("Should have raised NoConfigsFound")
         except NoConfigsFound as e:
             assert "configs" in str(e)
 
@@ -206,14 +206,14 @@ configs = []
 
         try:
             load_config(str(config_file))
-            assert False, "Should have raised NoConfigsFound"
+            raise AssertionError("Should have raised NoConfigsFound")
         except NoConfigsFound:
             pass
 
     def test_load_config_nonexistent_file(self):
         try:
             load_config("/nonexistent/config.py")
-            assert False, "Should have raised FileNotFoundError"
+            raise AssertionError("Should have raised FileNotFoundError")
         except FileNotFoundError:
             pass
 

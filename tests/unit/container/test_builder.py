@@ -126,9 +126,9 @@ host = "user@hpc.example.edu"
             patch("jernerics.container.builder.SSHClient"),
             patch("jernerics.container.builder.FileSyncer"),
             patch("jernerics.container.builder.SlurmJobManager"),
+            pytest.raises(ValueError, match="Invalid project name"),
         ):
-            with pytest.raises(ValueError, match="Invalid project name"):
-                ContainerBuilder(project_dir)
+            ContainerBuilder(project_dir)
 
 
 class TestGenerateBuildScript:
