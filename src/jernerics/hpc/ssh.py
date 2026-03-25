@@ -27,7 +27,7 @@ class SSHClient:
         timeout: int | None = None,
         input: str | None = None,
     ) -> subprocess.CompletedProcess:
-        ssh_args = ["ssh", self.host, command]
+        ssh_args = ["ssh", "-o", "LogLevel=ERROR", self.host, command]
         return subprocess.run(
             ssh_args,
             capture_output=capture_output,
@@ -44,7 +44,7 @@ class SSHClient:
         timeout: int | None = None,
     ) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["ssh", self.host, "bash -s"],
+            ["ssh", "-o", "LogLevel=ERROR", self.host, "bash -s"],
             input=script,
             capture_output=True,
             text=True,
