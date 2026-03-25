@@ -139,32 +139,36 @@ class TestFileSyncer:
             assert args[0][0] == "scp"
             assert "user@host.example.edu:~/projects/test/results.json" in args[0][1]
 
-    def test_sync_project_default_files_constant(self):
-        assert FileSyncer.DEFAULT_FILES == [
-            "pyproject.toml",
-            "uv.lock",
-            "container.def",
-            "dag.py",
-            "config.py",
-        ]
-        assert FileSyncer.DEFAULT_DIRS == ["src"]
-
-    def test_sync_project_accepts_custom_files_dirs(self, tmp_path):
+    def test_sync_project_respects_gitignore(self, tmp_path):
         mock_ssh = MagicMock()
         mock_ssh.host = "user@host.example.edu"
         syncer = FileSyncer(mock_ssh, "~/projects/test")
 
-        (tmp_path / "custom.py").write_text("content")
-        (tmp_path / "mydir").mkdir()
-        (tmp_path / "mydir" / "__init__.py").write_text("")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("content")
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "large.csv").write_text("data")
+        (tmp_path / ".gitignore").write_text("data/\n*.csv\n")
 
-        with (
-            patch("jernerics.hpc.sync.subprocess.run") as mock_run,
-        ):
+        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
+            result = syncer.sync_project(tmp_path, dry_run=True)
 
-            result = syncer.sync_project(
-                tmp_path, files=["custom.py"], dirs=["mydir"], dry_run=True
-            )
+            assert result is True
+
+    def test_sync_project_includes_all_by_default(self, tmp_path):
+        mock_ssh = MagicMock()
+        mock_ssh.host = "user@host.example.edu"
+        syncer = FileSyncer(mock_ssh, "~/projects/test")
+
+        (tmp_path / "experiments").mkdir()
+        (tmp_path / "experiments" / "dag.py").write_text("dag")
+        (tmp_path / "experiments" / "config.py").write_text("config")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("main")
+
+        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = syncer.sync_project(tmp_path, dry_run=True)
 
             assert result is True
