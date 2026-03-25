@@ -603,7 +603,8 @@ def logs(
         log_file = f"{meta_remote_dir}/{log_file}"
 
     if "*" in log_file:
-        if follow:
+        is_array_pattern = "%a" in log_pattern and effective_array_index is None
+        if follow and is_array_pattern:
             print("Error: --follow requires --array-index for array jobs")
             raise SystemExit(ExitCode.GENERAL_ERROR)
         result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
