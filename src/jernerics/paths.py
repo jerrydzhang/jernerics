@@ -70,16 +70,3 @@ def bind(name: str) -> Path:
 
     cache_path.mkdir(parents=True, exist_ok=True)
     return cache_path
-
-
-class _Paths:
-    @property
-    def work(self) -> Path:
-        return work()
-
-    @property
-    def is_hpc(self) -> bool:
-        return is_hpc()
-
-
-paths = _Paths()
