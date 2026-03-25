@@ -9,6 +9,8 @@ from pathlib import Path
 
 import tomli_w
 import typer
+from rich.console import Console
+from rich.table import Table
 from typing_extensions import Annotated
 
 from ._cli_helpers import (
@@ -495,12 +497,23 @@ def jobs(
         print("No jobs found.")
         return
 
-    print(f"{'JOB_ID':<12} {'NAME':<20} {'STATUS':<12} {'PARTITION':<12} {'TIME':<10}")
-    print("-" * 70)
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("JOB_ID")
+    table.add_column("NAME", max_width=20)
+    table.add_column("STATUS")
+    table.add_column("PARTITION")
+    table.add_column("TIME")
+
     for job in job_list:
-        print(
-            f"{job.job_id:<12} {job.name[:20]:<20} {job.status:<12} {job.partition:<12} {job.time:<10}"
+        table.add_row(
+            str(job.job_id),
+            job.name,
+            job.status,
+            job.partition or "",
+            job.time,
         )
+
+    Console().print(table)
 
 
 @app.command("cancel")
