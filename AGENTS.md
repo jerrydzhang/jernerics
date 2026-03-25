@@ -244,25 +244,48 @@ max_workers = 4
 
 ## HPC/Remote Path Handling
 
-**CRITICAL: Tilde (`~`) Expansion Issues**
+**CRITICAL: Tilde (`~`) Expansion Rules**
 
-When generating code that runs on HPC systems (SLURM scripts, SSH commands, etc.), **never use `~` directly** for home directory expansion. Tilde expansion only happens in interactive shells, not in:
-- SLURM `--output`/`--error` directives
-- SSH command arguments
-- Non-interactive shell scripts
+`~` expansion only happens by the shell in specific contexts. Understanding when it works is essential:
 
-**Wrong:**
+**`~` DOES expand (use it directly):**
+- SSH commands via `_quote_path()` helper - the remote shell expands it
+- Example: `ssh.mkdir("~/projects/foo")` works correctly
+
+**`~` DOES NOT expand (use `$HOME` instead):**
+- SLURM `--output`/`--error` directives (not processed by shell)
+- Double-quoted strings in bash scripts (e.g., `"${PATH}:~/bin"` - ~ is literal)
+- Non-interactive shell scripts when paths are embedded in heredocs or quoted
+
+**Wrong (SLURM directive with ~):**
 ```python
 f"#SBATCH --output={remote_dir}/build_%j.out"  # remote_dir = "~/projects/foo"
 ```
 
-**Correct:**
+**Correct (use $HOME for SLURM):**
 ```python
 slurm_dir = remote_dir.replace("~", "$HOME")
 f"#SBATCH --output={slurm_dir}/build_%j.out"  # "$HOME/projects/foo"
 ```
 
-The codebase has a `_quote_path()` helper in `src/jernerics/hpc/ssh.py` that preserves `~` for interactive SSH commands (where it works), but for SLURM directives and similar contexts, always use `$HOME` instead.
+**Wrong (bind path in double quotes inside SLURM script):**
+```python
+bind_args.append(f'"{cache_path}:{container_path}"')  # cache_path = "~/cache"
+# Inside script: "~/cache:/work/cache" - ~ is literal inside ""
+```
+
+**Correct (use $HOME for bind paths):**
+```python
+cache_path = cache_path.replace("~", "$HOME")
+bind_args.append(f'"{cache_path}:{container_path}"')  # "$HOME/cache:/work/cache"
+```
+
+**Correct (SSH commands via _quote_path):**
+```python
+ssh.mkdir("~/projects/foo")  # Works - _quote_path preserves ~ for remote shell
+```
+
+The `_quote_path()` helper in `src/jernerics/hpc/ssh.py` preserves `~` for SSH commands where the remote shell will expand it. For all other contexts (SLURM directives, quoted strings in scripts), replace `~` with `$HOME`.
 
 ## Important Notes
 
