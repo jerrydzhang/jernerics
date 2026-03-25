@@ -592,6 +592,8 @@ def logs(
     array_idx = job_id.split("_")[1] if "_" in job_id else None
 
     effective_array_index = array_index if array_index is not None else array_idx
+    if effective_array_index is None and num_configs == 1:
+        effective_array_index = 1
     log_file = expand_slurm_pattern(
         log_pattern,
         job_id=job_id,
@@ -603,7 +605,8 @@ def logs(
         log_file = f"{meta_remote_dir}/{log_file}"
 
     if "*" in log_file:
-        if follow:
+        is_array_pattern = "%a" in log_pattern and effective_array_index is None
+        if follow and is_array_pattern:
             print("Error: --follow requires --array-index for array jobs")
             raise SystemExit(ExitCode.GENERAL_ERROR)
         result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
