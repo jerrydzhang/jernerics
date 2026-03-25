@@ -19,6 +19,7 @@ from ._cli_helpers import (
     ExitCode,
     NoConfigsFound,
     find_pyproject_dir,
+    get_project_name,
     get_script_path,
     load_config,
     load_jernerics_config,
@@ -171,7 +172,7 @@ def run_slurm(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, _ = load_jernerics_config(project_dir)
+        hpc_config, _, binds = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
@@ -204,7 +205,7 @@ def run_slurm(
             raise SystemExit(ExitCode.CONFIG_ERROR)
         cli_overrides[key] = value
 
-    project_name = project_dir.resolve().name
+    project_name = get_project_name(project_dir)
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 
@@ -294,13 +295,24 @@ def run_slurm(
         output_dir = str(Path(output_path).parent)
     script_lines.append(f"mkdir -p {safe_shell_path(output_dir)}")
     script_lines.append("CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))")
+    script_lines.append("export JERNERICS_HPC=1")
     script_lines.append(f"export JERNERICS_DAG_FILE=/work/{dag_relpath}")
     script_lines.append(f"export JERNERICS_CONFIG_FILE=/work/{config_relpath}")
     script_lines.append("export JERNERICS_CONFIG_INDEX=${CONFIG_INDEX}")
     script_lines.append(f"cd {safe_shell_path(remote_dir)}")
     script_lines.append("REMOTE_DIR=$(cd . && pwd)")
+
+    bind_args = ['"${REMOTE_DIR}:/work"']
+    if hpc_config.cache_dir and binds:
+        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
+        cache_dir = cache_dir.replace("~", "$HOME")
+        for container_path, cache_subdir in binds.items():
+            cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
+            bind_args.append(f'"{cache_path}:{container_path}"')
+    bind_str = " \\\n    --bind ".join(bind_args)
+
     script_lines.append(
-        'apptainer exec --contain --nv --pwd /work --bind "${REMOTE_DIR}:/work" container.sif \\'
+        f"apptainer exec --contain --nv --pwd /work --bind {bind_str} container.sif \\"
     )
     script_lines.append("    python -c \"$(cat <<'EOF'")
     script_lines.append("import os")
@@ -360,11 +372,20 @@ def run_slurm(
     syncer = FileSyncer(ssh, remote_dir)
     slurm = SlurmJobManager(ssh)
 
-    print(f"[1/3] Syncing project to {hpc_config.host}:{remote_dir}...")
+    print(f"[1/4] Syncing project to {hpc_config.host}:{remote_dir}...")
     syncer.sync_project(project_dir)
 
-    print("[2/3] Ensuring log directory exists...")
+    print("[2/4] Ensuring log directory exists...")
     ssh.mkdir(f"{remote_dir}/.jernerics/logs")
+
+    if hpc_config.cache_dir and binds:
+        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
+        print(f"[3/4] Creating cache directories in {cache_dir}/{project_name}...")
+        for cache_subdir in binds.values():
+            cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
+            ssh.mkdir(cache_path)
+    else:
+        print("[3/4] (No cache binds configured)")
 
     if not syncer.container_exists():
         print(
@@ -373,7 +394,7 @@ def run_slurm(
         )
         raise SystemExit(ExitCode.CONTAINER_ERROR)
 
-    print("[3/3] Submitting job...")
+    print("[4/4] Submitting job...")
     try:
         job_id = slurm.submit_inline(script_content, workdir=remote_dir)
 
@@ -444,7 +465,7 @@ def _get_hpc_client():
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, _ = load_jernerics_config(project_dir)
+        hpc_config, _, binds = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
@@ -458,7 +479,7 @@ def _get_hpc_client():
         )
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
-    project_name = project_dir.resolve().name
+    project_name = get_project_name(project_dir)
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 
@@ -466,7 +487,7 @@ def _get_hpc_client():
     syncer = FileSyncer(ssh, remote_dir)
     slurm = SlurmJobManager(ssh)
 
-    return ssh, syncer, slurm, remote_dir
+    return ssh, syncer, slurm, remote_dir, hpc_config, binds, project_name
 
 
 @app.command("jobs")
@@ -480,7 +501,7 @@ def jobs(
         typer.Option("--json", help="Output as JSON"),
     ] = False,
 ):
-    _, _, slurm, _ = _get_hpc_client()
+    _, _, slurm, _, _, _, _ = _get_hpc_client()
 
     job_list = slurm.list_jobs(include_completed=all)
 
@@ -533,7 +554,7 @@ def cancel(
         typer.Option("--all", "-a", help="Cancel all your jobs"),
     ] = False,
 ):
-    _, _, slurm, _ = _get_hpc_client()
+    _, _, slurm, _, _, _, _ = _get_hpc_client()
 
     if all:
         if slurm.cancel_all():
@@ -568,7 +589,7 @@ def logs(
         typer.Option("--stderr", "-e", help="Show stderr instead of stdout"),
     ] = False,
 ):
-    ssh, _, _, remote_dir = _get_hpc_client()
+    ssh, _, _, remote_dir, _, _, _ = _get_hpc_client()
     project_dir = find_pyproject_dir() or Path.cwd()
 
     meta_file = project_dir / ".jernerics" / "jobs" / f"{job_id}.json"
@@ -656,7 +677,7 @@ def results(
         typer.Option("--local-dir", "-d", help="Local directory to download to"),
     ] = None,
 ):
-    _, syncer, _, remote_dir = _get_hpc_client()
+    _, syncer, _, remote_dir, _, _, _ = _get_hpc_client()
 
     if local_dir is None:
         local_dir = f"results/{job_id}"
@@ -716,7 +737,7 @@ def shell(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, shell_config = load_jernerics_config(project_dir)
+        hpc_config, shell_config, _ = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
@@ -736,7 +757,7 @@ def shell(
     time_val = time if time is not None else shell_config.time
     partition_val = partition if partition is not None else shell_config.partition
 
-    project_name = project_dir.resolve().name
+    project_name = get_project_name(project_dir)
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 
@@ -800,7 +821,7 @@ def clean(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, _ = load_jernerics_config(project_dir)
+        hpc_config, _, _ = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
@@ -814,7 +835,7 @@ def clean(
         )
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
-    project_name = project_dir.resolve().name
+    project_name = get_project_name(project_dir)
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 
@@ -959,6 +980,7 @@ def _get_default_jernerics_config(project_name: str) -> dict:
         "hpc": {
             "host": "your-username@hpc.example.edu",
             "remote_dir": f"~/experiments/{project_name}",
+            "cache_dir": "/scratch/$USER/jernerics",
         },
         "container": {
             "partition": "priority",
