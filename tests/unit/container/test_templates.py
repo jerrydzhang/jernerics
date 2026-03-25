@@ -13,6 +13,10 @@ class TestTemplates:
         assert "Bootstrap: docker" in template
         assert "python:3.12" in template
 
+    def test_python_template_includes_readme(self):
+        template = get_template("python")
+        assert "README.md" in template
+
     def test_get_invalid_template(self):
         with pytest.raises(ValueError, match="not found"):
             get_template("nonexistent")

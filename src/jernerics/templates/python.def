@@ -4,6 +4,7 @@ From: python:3.12-slim
 %files
     pyproject.toml /build/project/pyproject.toml
     uv.lock /build/project/uv.lock
+    README.md /build/project/README.md
     src/ /build/project/src/
 
 %post
