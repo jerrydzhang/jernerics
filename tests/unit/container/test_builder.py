@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from jernerics._cli_helpers import HpcConfig
 from jernerics.container.builder import ContainerBuilder, _validate_slurm_value
 
 
@@ -170,6 +171,46 @@ class TestGenerateBuildScript:
 
             assert "/custom/output/path/build_%j.out" in script
             assert "/custom/output/path/build_%j.err" in script
+
+    def test_script_includes_apptainer_tmpdir_when_configured(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'\n")
+        (tmp_path / "uv.lock").write_text("")
+
+        builder = ContainerBuilder.__new__(ContainerBuilder)
+        builder.project_dir = tmp_path
+        builder.config = HpcConfig(
+            host="user@hpc.example.edu",
+            remote_dir="~/projects/test",
+            partition="priority",
+            time="1:00:00",
+            mem="16G",
+            cpus=4,
+            build_tmpdir="/scratch/user/tmp",
+        )
+
+        script = builder._generate_build_script("/home/user/projects/test/logs")
+
+        assert "export APPTAINER_TMPDIR=/scratch/user/tmp" in script
+
+    def test_script_omits_apptainer_tmpdir_when_not_configured(self, tmp_path):
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'\n")
+        (tmp_path / "uv.lock").write_text("")
+
+        builder = ContainerBuilder.__new__(ContainerBuilder)
+        builder.project_dir = tmp_path
+        builder.config = HpcConfig(
+            host="user@hpc.example.edu",
+            remote_dir="~/projects/test",
+            partition="priority",
+            time="1:00:00",
+            mem="16G",
+            cpus=4,
+            build_tmpdir=None,
+        )
+
+        script = builder._generate_build_script("/home/user/projects/test/logs")
+
+        assert "APPTAINER_TMPDIR" not in script
 
 
 class TestNeedsRebuild:
