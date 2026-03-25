@@ -237,6 +237,28 @@ class TestLogsFollowNonArrayJob:
         assert result.returncode != 0
         assert "requires --array-index" in result.stdout
 
+    def test_follow_defaults_to_index_1_for_single_config(self, tmp_path):
+        project_dir = _create_hpc_project(tmp_path)
+        jobs_dir = project_dir / ".jernerics" / "jobs"
+        jobs_dir.mkdir(parents=True)
+
+        job_meta = {
+            "job_id": "12345",
+            "output_pattern": "logs/array_%A_%a.out",
+            "error_pattern": "logs/array_%A_%a.err",
+            "remote_dir": "~/experiments/test-project",
+            "num_configs": 1,
+        }
+        (jobs_dir / "12345.json").write_text(json.dumps(job_meta))
+
+        result = subprocess.run(
+            ["jernerics", "logs", "12345", "--follow"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert "requires --array-index" not in result.stdout
+
 
 class TestJobMetadataStorage:
     def test_metadata_includes_output_patterns(self, tmp_path):
