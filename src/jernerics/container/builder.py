@@ -81,8 +81,7 @@ class ContainerBuilder:
         tmpdir_export = ""
         build_tmpdir = self._get_build_tmpdir()
         if build_tmpdir:
-            tmpdir = _validate_slurm_value(build_tmpdir, "build_tmpdir")
-            tmpdir_export = f"export APPTAINER_TMPDIR={tmpdir}\n"
+            tmpdir_export = f"export APPTAINER_TMPDIR={build_tmpdir}\n"
 
         return f"""#!/bin/bash
 #SBATCH --job-name=container-build
