@@ -20,7 +20,7 @@ def _get_timestamp() -> str:
 
 
 def _get_default_max_workers() -> int:
-    return min(8, os.cpu_count() or 4)
+    return os.cpu_count() or 4
 
 
 def execute_dag(
