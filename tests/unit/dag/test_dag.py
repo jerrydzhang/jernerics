@@ -197,6 +197,86 @@ dag = DAG(__file__)
         except RuntimeError as e:
             assert "Failed to load DAG file" in str(e)
 
+    def test_discover_tasks_from_context_manager(self, tmp_path):
+        dag_content = """
+from jernerics.dag import DAG, task
+
+with DAG() as dag:
+    @task
+    def task_a(config):
+        return "a"
+
+    @task(depends_on=[task_a])
+    def task_b(task_a, config):
+        return f"b from {task_a}"
+"""
+        dag_file = tmp_path / "dag.py"
+        dag_file.write_text(dag_content)
+
+        dag = DAG(dag_file)
+        dag.validate()
+
+        assert "task_a" in dag.tasks
+        assert "task_b" in dag.tasks
+        assert dag.tasks["task_b"].depends_on[0].name == "task_a"
+
+    def test_discover_tasks_mixed_patterns(self, tmp_path):
+        dag_content = """
+from jernerics.dag import DAG, task
+
+@task
+def standalone_task(config):
+    return "standalone"
+
+with DAG() as dag:
+    @task
+    def context_task(config):
+        return "context"
+
+    @task(depends_on=[context_task])
+    def dependent_task(context_task, config):
+        return f"dependent from {context_task}"
+"""
+        dag_file = tmp_path / "dag.py"
+        dag_file.write_text(dag_content)
+
+        dag = DAG(dag_file)
+        dag.validate()
+
+        assert "standalone_task" in dag.tasks
+        assert "context_task" in dag.tasks
+        assert "dependent_task" in dag.tasks
+        assert dag.tasks["dependent_task"].depends_on[0].name == "context_task"
+
+    def test_discover_tasks_duplicate_name_last_wins(self, tmp_path):
+        dag_content = """
+from jernerics.dag import DAG, task
+
+with DAG() as dag1:
+    @task
+    def common_task(config):
+        return "first"
+
+with DAG() as dag2:
+    @task
+    def common_task(config):
+        return "second"
+
+@task
+def common_task(config):
+    return "third"
+"""
+        dag_file = tmp_path / "dag.py"
+        dag_file.write_text(dag_content)
+
+        dag = DAG(dag_file)
+        dag.validate()
+
+        assert "common_task" in dag.tasks
+        assert len(dag.tasks) == 1
+        result = dag.tasks["common_task"].func({})
+        assert result == "third"
+
 
 class TestDAGValidation:
     def test_validate_empty_dag(self):
