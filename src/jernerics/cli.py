@@ -4,6 +4,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 import tomllib
 from pathlib import Path
 
@@ -604,24 +605,47 @@ def logs(
     if not log_file.startswith("/") and not log_file.startswith("~"):
         log_file = f"{meta_remote_dir}/{log_file}"
 
+    max_retries = 5
+    retry_delay = 1.0
+
     if "*" in log_file:
         is_array_pattern = "%a" in log_pattern and effective_array_index is None
         if follow and is_array_pattern:
             print("Error: --follow requires --array-index for array jobs")
             raise SystemExit(ExitCode.GENERAL_ERROR)
-        result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
-        if result.returncode != 0:
-            print(f"Error: Log files not found: {log_file}")
-            raise SystemExit(ExitCode.GENERAL_ERROR)
-        print(result.stdout)
+        for attempt in range(max_retries):
+            result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
+            if result.returncode == 0:
+                print(result.stdout)
+                return
+            if attempt == 0:
+                print("Waiting for logs...")
+            time.sleep(retry_delay)
+        print(f"Error: Log files not found: {log_file}")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
     elif follow:
-        subprocess.run(["ssh", ssh.host, "tail", "-f", log_file])
-    else:
-        result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
-        if result.returncode != 0:
+        for attempt in range(max_retries):
+            result = ssh.run(f"test -f {log_file}", check=False)
+            if result.returncode == 0:
+                break
+            if attempt == 0:
+                print("Waiting for logs...")
+            time.sleep(retry_delay)
+        else:
             print(f"Error: Log file not found: {log_file}")
             raise SystemExit(ExitCode.GENERAL_ERROR)
-        print(result.stdout)
+        subprocess.run(["ssh", ssh.host, "tail", "-f", log_file])
+    else:
+        for attempt in range(max_retries):
+            result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
+            if result.returncode == 0:
+                print(result.stdout)
+                return
+            if attempt == 0:
+                print("Waiting for logs...")
+            time.sleep(retry_delay)
+        print(f"Error: Log file not found: {log_file}")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
 
 
 @app.command("results")
