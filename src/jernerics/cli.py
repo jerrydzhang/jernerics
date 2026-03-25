@@ -7,12 +7,12 @@ import subprocess
 import time
 import tomllib
 from pathlib import Path
+from typing import Annotated
 
 import tomli_w
 import typer
 from rich.console import Console
 from rich.table import Table
-from typing_extensions import Annotated
 
 from ._cli_helpers import (
     ConfigNotFound,
@@ -79,10 +79,10 @@ def run_local(
         _, configs, _, _ = load_config(config_path)
     except FileNotFoundError as e:
         print(f"Error: {e}")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
     except NoConfigsFound as e:
         print(e)
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     num_configs = len(configs)
     any_failed = False
@@ -152,13 +152,16 @@ def run_slurm(
         str, typer.Option("--results-dir", "-r", help="Directory to store results.")
     ] = "results",
     set_opt: Annotated[
-        list[str], typer.Option("--set", "-S", help="Set SLURM option (key=value)")
-    ] = [],
+        list[str] | None,
+        typer.Option("--set", "-S", help="Set SLURM option (key=value)"),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Preview without submitting"),
     ] = False,
 ):
+    if set_opt is None:
+        set_opt = []
     project_dir = find_pyproject_dir()
     if project_dir is None:
         print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
@@ -176,7 +179,7 @@ def run_slurm(
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     if not hpc_config.host:
         print(
@@ -190,7 +193,7 @@ def run_slurm(
         config_slurm, configs, _, _ = load_config(str(config_path))
     except NoConfigsFound as e:
         print(f"Error: {e}")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     num_configs = len(configs)
 
@@ -233,10 +236,10 @@ def run_slurm(
     dag_relpath = dag_path.relative_to(project_dir)
     config_relpath = config_path.relative_to(project_dir)
 
-    _SAFE_RELPATH = re.compile(r"^[a-zA-Z0-9_./\-]+$")
+    SAFE_RELPATH = re.compile(r"^[a-zA-Z0-9_./\-]+$")
 
     def validate_relpath(path: str, desc: str) -> str:
-        if not _SAFE_RELPATH.match(path):
+        if not SAFE_RELPATH.match(path):
             raise SystemExit(
                 f"Error: {desc} path '{path}' contains unsafe characters. "
                 "Only alphanumeric, underscore, hyphen, period, and slash allowed."
@@ -287,10 +290,7 @@ def run_slurm(
     if "%" in output_path:
         before_pattern = output_path[: output_path.index("%")]
         last_slash = before_pattern.rfind("/")
-        if last_slash >= 0:
-            output_dir = before_pattern[:last_slash]
-        else:
-            output_dir = "."
+        output_dir = before_pattern[:last_slash] if last_slash >= 0 else "."
     else:
         output_dir = str(Path(output_path).parent)
     script_lines.append(f"mkdir -p {safe_shell_path(output_dir)}")
@@ -415,7 +415,7 @@ def run_slurm(
         print(f"  jernerics logs {job_id} --follow")
     except RuntimeError as e:
         print(f"Error: Failed to submit job: {e}")
-        raise SystemExit(ExitCode.SLURM_ERROR)
+        raise SystemExit(ExitCode.SLURM_ERROR) from None
 
 
 def _get_runner_code(
@@ -469,7 +469,7 @@ def _get_hpc_client():
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     if not hpc_config.host:
         print(
@@ -605,10 +605,7 @@ def logs(
         meta_remote_dir = remote_dir
         num_configs = 1
 
-    if stderr:
-        log_pattern = error_pattern
-    else:
-        log_pattern = output_pattern
+    log_pattern = error_pattern if stderr else output_pattern
 
     base_job_id = job_id.split("_")[0] if "_" in job_id else job_id
     array_idx = job_id.split("_")[1] if "_" in job_id else None
@@ -741,7 +738,7 @@ def shell(
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     if not hpc_config.host:
         print(
@@ -825,7 +822,7 @@ def clean(
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     if not hpc_config.host:
         print(
@@ -918,17 +915,20 @@ def init(
                 existing = tomllib.load(f)
         except tomllib.TOMLDecodeError as e:
             print(f"Error: Malformed pyproject.toml: {e}")
-            raise SystemExit(ExitCode.CONFIG_ERROR)
+            raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
         has_jernerics = "jernerics" in existing.get("tool", {})
 
-        if has_jernerics and not force:
-            if not typer.confirm(
+        if (
+            has_jernerics
+            and not force
+            and not typer.confirm(
                 "[tool.jernerics] already exists in pyproject.toml. Overwrite?",
                 default=False,
-            ):
-                print("Skipped updating pyproject.toml")
-                return
+            )
+        ):
+            print("Skipped updating pyproject.toml")
+            return
 
         existing.setdefault("tool", {})["jernerics"] = jernerics_config
         merged = existing
@@ -1041,11 +1041,11 @@ def container_build(
     except FileNotFoundError as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to create pyproject.toml")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
     except ValueError as e:
         print(f"Error: {e}")
-        raise SystemExit(ExitCode.CONTAINER_ERROR)
+        raise SystemExit(ExitCode.CONTAINER_ERROR) from None

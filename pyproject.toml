@@ -65,18 +65,18 @@ exclude = [
 
 [tool.ruff.lint]
 preview = true
-explicit-preview-rules = true
 extend-select = [
-    "E501",
+    "E",
+    "F",
     "W",
     "I",
-    "CPY001",
-    "PGH",
+    "UP",
+    "B",
+    "SIM",
     "RUF",
     "TID252",
 ]
 ignore = [
-    "CPY001",
     "E731",
     "E741",
     "E721",
@@ -87,18 +87,6 @@ ignore = [
     "RUF012",
     "RUF015",
     "RUF021",
-    "W191",
-    "E111",
-    "E114",
-    "E117",
-    "D206",
-    "D300",
-    "Q000",
-    "Q001",
-    "Q002",
-    "Q003",
-    "COM812",
-    "COM819",
 ]
 
 [tool.ty.src]

@@ -2,6 +2,7 @@ import os
 import runpy
 import sys
 import tomllib
+from dataclasses import dataclass
 from enum import IntEnum
 from importlib import resources
 from pathlib import Path
@@ -37,61 +38,29 @@ class ConfigNotFound(Exception):
     pass
 
 
+@dataclass
 class HpcConfig:
-    host: str | None
-    remote_dir: str
-    partition: str
-    time: str
-    mem: str
-    cpus: int
-    max_concurrent_jobs: int
-    cache_dir: str | None
-
-    def __init__(
-        self,
-        host: str | None = None,
-        remote_dir: str = "~/experiments/{project_name}",
-        partition: str = "priority",
-        time: str = "1:00:00",
-        mem: str = "16G",
-        cpus: int = 4,
-        max_concurrent_jobs: int = 10,
-        cache_dir: str | None = None,
-    ):
-        self.host = host
-        self.remote_dir = remote_dir
-        self.partition = partition
-        self.time = time
-        self.mem = mem
-        self.cpus = cpus
-        self.max_concurrent_jobs = max_concurrent_jobs
-        self.cache_dir = cache_dir
+    host: str | None = None
+    remote_dir: str = "~/experiments/{project_name}"
+    partition: str = "priority"
+    time: str = "1:00:00"
+    mem: str = "16G"
+    cpus: int = 4
+    max_concurrent_jobs: int = 10
+    cache_dir: str | None = None
 
 
 class BindsConfig(dict[str, str]):
     pass
 
 
+@dataclass
 class ShellConfig:
-    partition: str | None
-    cpus: int | None
-    mem: str | None
-    gpu: int
-    time: str | None
-
-    def __init__(
-        self,
-        partition: str | None = None,
-        cpus: int | None = None,
-        mem: str | None = None,
-        gpu: int = 0,
-        time: str | None = None,
-    ):
-        self.partition = partition
-        self.cpus = cpus
-        self.mem = mem
-        self.gpu = gpu
-        self.time = time
+    partition: str | None = None
+    cpus: int | None = None
+    mem: str | None = None
+    gpu: int = 0
+    time: str | None = None
 
 
 def load_jernerics_config(
@@ -143,10 +112,7 @@ def load_jernerics_config(
 
 
 def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
-    if start_dir is None:
-        start_dir = Path.cwd()
-    else:
-        start_dir = Path(start_dir)
+    start_dir = Path.cwd() if start_dir is None else Path(start_dir)
 
     current = start_dir.resolve()
     while current != current.parent:
