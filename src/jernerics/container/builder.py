@@ -64,6 +64,12 @@ class ContainerBuilder:
         time = _validate_slurm_value(self.config.time, "time")
         mem = _validate_slurm_value(self.config.mem, "mem")
         cpus = _validate_slurm_value(str(self.config.cpus), "cpus")
+
+        tmpdir_export = ""
+        if self.config.build_tmpdir:
+            tmpdir = _validate_slurm_value(self.config.build_tmpdir, "build_tmpdir")
+            tmpdir_export = f"export APPTAINER_TMPDIR={tmpdir}\n"
+
         return f"""#!/bin/bash
 #SBATCH --job-name=container-build
 #SBATCH --partition={partition}
@@ -78,7 +84,7 @@ set -e
 echo "=== Build started at $(date) ==="
 echo "Running on $(hostname)"
 
-cd {quoted_remote_dir}
+{tmpdir_export}cd {quoted_remote_dir}
 
 echo
 echo "--- Building container with Apptainer + uv sync ---"
@@ -130,6 +136,8 @@ echo "=== Build completed at $(date) ==="
             print(f"Project dir: {self.project_dir}")
             print(f"Remote dir: {remote_dir}")
             print(f"HPC host: {self.config.host}")
+            if self.config.build_tmpdir:
+                print(f"Build tmpdir: {self.config.build_tmpdir}")
             print()
             print("Would sync files and submit build job with:")
             print(self._generate_build_script(slurm_output_dir))
@@ -141,10 +149,16 @@ echo "=== Build completed at $(date) ==="
         print("[2/4] Creating logs directory...")
         self.ssh.mkdir(f"{remote_dir}/logs")
 
+        if self.config.build_tmpdir:
+            print(f"[3/5] Creating build tmpdir ({self.config.build_tmpdir})...")
+            self.ssh.mkdir(self.config.build_tmpdir)
+        else:
+            print("[3/5] (No build_tmpdir configured, using default /tmp)")
+
         build_script = self._generate_build_script(slurm_output_dir)
         remote_script_path = f"{remote_dir}/build_container.sh"
 
-        print("[3/4] Uploading build script...")
+        print("[4/5] Uploading build script...")
         quoted_script_path = _quote_path(remote_script_path)
         result = subprocess.run(
             ["ssh", self.config.host, f"cat > {quoted_script_path}"],
@@ -158,7 +172,7 @@ echo "=== Build completed at $(date) ==="
                 f"Failed to upload build script: {result.stderr or result.stdout}"
             )
 
-        print("[4/4] Submitting build job to SLURM...")
+        print("[5/5] Submitting build job to SLURM...")
         job_id = self.slurm.submit(remote_script_path)
 
         job_meta = {
