@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import warnings
+
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -88,6 +90,14 @@ class TestDAGCreation:
         dag = DAG()
         assert "standalone_task" not in dag.tasks
 
+    def test_dag_with_empty_string_file(self):
+        dag = DAG("")
+        assert dag.dag_file is None
+
+    def test_dag_with_whitespace_file(self):
+        dag = DAG("   ")
+        assert dag.dag_file is None
+
 
 class TestDAGDiscovery:
     def test_discover_tasks_from_file(self, tmp_path):
@@ -174,6 +184,18 @@ dag = DAG(__file__)
         dag.validate()
 
         assert "my_task" in dag.tasks
+
+    def test_discover_syntax_error(self, tmp_path):
+        dag_file = tmp_path / "dag.py"
+        dag_file.write_text("this is not valid python [")
+
+        dag = DAG(dag_file)
+
+        try:
+            dag.validate()
+            assert False, "Should have raised RuntimeError"
+        except RuntimeError as e:
+            assert "Failed to load DAG file" in str(e)
 
     def test_discover_tasks_from_context_manager(self, tmp_path):
         dag_content = """
@@ -446,6 +468,17 @@ class TestDAGExecution:
         state_file = tmp_path / ".jernerics" / "runs" / "latest_5.json"
         assert state_file.exists()
 
+    def test_run_with_explicit_state_dir(self, tmp_path):
+        @task
+        def my_task(config):
+            return 1
+
+        dag = DAG()
+        dag.add_task(my_task)
+        dag.run({}, state_dir=tmp_path / "custom_state")
+
+        assert (tmp_path / "custom_state").exists()
+
     @given(st.integers(), st.integers())
     def test_run_with_config_values(self, x, y):
         @task
@@ -529,3 +562,120 @@ class TestDAGResume:
         results = dag2.resume({}, config_index=0)
 
         assert results["slow_task"] == 42
+
+    def test_resume_with_explicit_state_dir(self, tmp_path):
+        @task
+        def my_task(config):
+            return 1
+
+        state_dir = tmp_path / "custom_state"
+
+        dag = DAG()
+        dag.add_task(my_task)
+        dag.run({}, state_dir=state_dir)
+
+        dag2 = DAG()
+        dag2.add_task(my_task)
+        results = dag2.resume({}, state_dir=state_dir)
+
+        assert results["my_task"] == 1
+
+    def test_resume_no_state_dir_raises(self):
+        @task
+        def my_task(config):
+            return 1
+
+        dag = DAG()
+        dag.add_task(my_task)
+
+        try:
+            dag.resume({})
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "No state directory" in str(e)
+
+    def test_resume_nonexistent_state_dir_raises(self, tmp_path):
+        @task
+        def my_task(config):
+            return 1
+
+        dag = DAG()
+        dag.add_task(my_task)
+
+        try:
+            dag.resume({}, state_dir=tmp_path / "nonexistent")
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "State directory not found" in str(e)
+
+    def test_resume_nonexistent_run_id_raises(self, tmp_path):
+        @task
+        def my_task(config):
+            return 1
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+
+        dag = DAG()
+        dag.add_task(my_task)
+
+        try:
+            dag.resume({}, run_id="nonexistent", state_dir=state_dir)
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "not found" in str(e)
+
+    def test_resume_no_previous_runs_raises(self, tmp_path):
+        @task
+        def my_task(config):
+            return 1
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir(parents=True)
+        (state_dir / "runs").mkdir()
+
+        dag = DAG()
+        dag.add_task(my_task)
+
+        try:
+            dag.resume({}, state_dir=state_dir)
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "No previous runs found" in str(e)
+
+    def test_resume_warns_unknown_task(self, tmp_path):
+        @task
+        def my_task(config):
+            return 1
+
+        dag_file = tmp_path / "dag.py"
+        dag_file.write_text("pass")
+
+        dag = DAG(dag_file)
+        dag.add_task(my_task)
+        dag.run({}, config_index=0)
+
+        dag2 = DAG(dag_file)
+        dag2.add_task(my_task)
+
+        import json
+
+        state_file = tmp_path / ".jernerics" / "runs" / "latest_0.json"
+        state_data = json.loads(state_file.read_text())
+        state_data["tasks"]["unknown_task"] = {
+            "task_id": "unknown_task",
+            "status": "completed",
+            "output": None,
+            "persisted": True,
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+        }
+        state_file.write_text(json.dumps(state_data))
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            dag2.resume({}, config_index=0)
+
+            assert len(w) == 1
+            assert "not in the current DAG" in str(w[0].message)
