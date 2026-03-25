@@ -304,11 +304,8 @@ def run_slurm(
 
     bind_args = ['"${REMOTE_DIR}:/work"']
     if hpc_config.cache_dir and binds:
-        cache_dir = str(
-            Path(
-                hpc_config.cache_dir.replace("{project_name}", project_name)
-            ).expanduser()
-        )
+        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
+        cache_dir = cache_dir.replace("~", "$HOME")
         for container_path, cache_subdir in binds.items():
             cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
             bind_args.append(f'"{cache_path}:{container_path}"')
@@ -382,11 +379,7 @@ def run_slurm(
     ssh.mkdir(f"{remote_dir}/.jernerics/logs")
 
     if hpc_config.cache_dir and binds:
-        cache_dir = str(
-            Path(
-                hpc_config.cache_dir.replace("{project_name}", project_name)
-            ).expanduser()
-        )
+        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
         print(f"[3/4] Creating cache directories in {cache_dir}/{project_name}...")
         for cache_subdir in binds.values():
             cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
