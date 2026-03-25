@@ -9,6 +9,9 @@ on:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
+    env:
+      TERM: dumb
+      NO_COLOR: "1"
 
     steps:
       - uses: actions/checkout@v4
