@@ -42,12 +42,34 @@ Decide between local and HPC execution based on:
 
 Before executing on HPC, verify:
 
-1. **HPC config exists** in `pyproject.toml`:
+1. **Jernerics config exists** in `pyproject.toml`:
    ```toml
+   # Required: HPC connection settings
    [tool.jernerics.hpc]
-   host = "user@cluster.edu"
-   remote_dir = "~/projects/{project_name}"
+   host = "user@cluster.edu"                           # SSH host (or set JERNERICS_HPC_HOST env var)
+   remote_dir = "~/projects/{project_name}"            # Remote project directory
+
+   # Optional: Default SLURM settings for container builds
+   [tool.jernerics.container]
+   partition = "priority"                              # Default partition
+   time = "1:00:00"                                    # Default time limit
+   mem = "16G"                                         # Default memory
+   cpus = 4                                            # Default CPU count
+
+   # Optional: Safety limits
+   [tool.jernerics.safety]
+   max_concurrent_jobs = 10                            # Max parallel SLURM jobs
+
+   # Optional: Interactive shell defaults
+   [tool.jernerics.shell]
+   partition = "priority-gpu"                          # Default shell partition
+   cpus = 4                                            # Default shell CPUs
+   mem = "32G"                                         # Default shell memory
+   gpu = 1                                             # Default GPU count
+   time = "2:00:00"                                    # Default shell time
    ```
+
+   **Minimal required config**: Only `[tool.jernerics.hpc]` with `host` is required. All other settings have sensible defaults.
 
 2. **SSH access works**: Test with `ssh <host> 'echo ok'`
 
@@ -123,14 +145,18 @@ slurm = {
     "cpus": 4,
 }
 
-# Parallel task execution within each config (default: thread pool)
-max_workers = 4
+# Optional: Parallel task execution (default: CPU count, min 4 if undetectable)
+# max_workers = 4
+
+# Optional: Executor type - "thread" (default) or "serial"
+# executor_type = "thread"
 ```
 
 **Config format**:
-- `configs`: List of dicts, each dict runs the full DAG once
-- `slurm`: Optional SLURM settings for HPC
-- `max_workers`: Parallel task execution (ignored if `executor_type="serial"`)
+- `configs`: List of dicts, each dict runs the full DAG once (required)
+- `slurm`: SLURM settings for HPC (optional, empty dict if omitted)
+- `max_workers`: Parallel task execution (optional, defaults to `min(cpu_count, 8)`)
+- `executor_type`: `"thread"` for parallel or `"serial"` for sequential execution (optional, defaults to `"thread"`)
 
 ## Execution Workflow
 
