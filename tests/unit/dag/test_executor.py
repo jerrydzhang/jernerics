@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -300,3 +301,216 @@ class TestExecutorEdgeCases:
         results = execute_dag(tasks, {})
 
         assert results["t4"] == 4
+
+
+class TestExecutorType:
+    def test_invalid_executor_type_raises(self):
+        @task
+        def simple(config):
+            return 1
+
+        try:
+            execute_dag({"simple": simple}, {}, executor_type="invalid")
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "executor_type must be 'thread' or 'serial'" in str(e)
+
+
+class TestMaxWorkers:
+    def test_invalid_max_workers_zero(self):
+        @task
+        def simple(config):
+            return 1
+
+        try:
+            execute_dag({"simple": simple}, {}, max_workers=0)
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "max_workers must be a positive integer" in str(e)
+
+    def test_invalid_max_workers_negative(self):
+        @task
+        def simple(config):
+            return 1
+
+        try:
+            execute_dag({"simple": simple}, {}, max_workers=-1)
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "max_workers must be a positive integer" in str(e)
+
+    def test_invalid_max_workers_string(self):
+        @task
+        def simple(config):
+            return 1
+
+        try:
+            execute_dag({"simple": simple}, {}, max_workers="invalid")
+            assert False, "Should have raised ValueError"
+        except ValueError as e:
+            assert "max_workers must be a positive integer" in str(e)
+
+
+class TestUnregisteredDependency:
+    def test_unregistered_dependency_warning(self):
+        @task
+        def unregistered(config):
+            return 1
+
+        @task(depends_on=[unregistered])
+        def main_task(unregistered, config):
+            return unregistered + 1
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            results = execute_dag({"main_task": main_task}, {})
+
+            assert len(w) == 1
+            assert "unregistered task" in str(w[0].message)
+
+
+class TestSerialExecutor:
+    def test_serial_executor_runs_tasks(self):
+        order = []
+
+        @task
+        def a(config):
+            order.append("a")
+            return 1
+
+        @task
+        def b(config):
+            order.append("b")
+            return 2
+
+        tasks = {"a": a, "b": b}
+        results = execute_dag(tasks, {}, executor_type="serial")
+
+        assert results["a"] == 1
+        assert results["b"] == 2
+
+    def test_serial_executor_respects_dependencies(self):
+        order = []
+
+        @task
+        def first(config):
+            order.append("first")
+            return 1
+
+        @task(depends_on=[first])
+        def second(first, config):
+            order.append("second")
+            return first + 1
+
+        tasks = {"first": first, "second": second}
+        results = execute_dag(tasks, {}, executor_type="serial")
+
+        assert order == ["first", "second"]
+        assert results["second"] == 2
+
+    def test_serial_executor_with_state(self, tmp_path):
+        @task
+        def my_task(config):
+            return 42
+
+        tasks = {"my_task": my_task}
+        state = RunState.create("test_dag.py", 0, tmp_path)
+        state.init_task("my_task")
+
+        results = execute_dag(tasks, {}, state=state, executor_type="serial")
+
+        assert results["my_task"] == 42
+        assert state.tasks["my_task"].status == TaskStatus.COMPLETED
+
+    def test_serial_executor_skips_persisted(self):
+        call_count = 0
+
+        @task
+        def cached(config):
+            nonlocal call_count
+            call_count += 1
+            return 999
+
+        tasks = {"cached": cached}
+        state = RunState.create("test_dag.py", 0, ".jernerics")
+        state.init_task("cached")
+        state.update_task("cached", TaskStatus.COMPLETED, output=42)
+
+        results = execute_dag(tasks, {}, state=state, executor_type="serial")
+
+        assert call_count == 0
+        assert results["cached"] == 42
+
+    def test_serial_executor_handles_failure(self, tmp_path):
+        @task
+        def failing(config):
+            raise ValueError("test error")
+
+        tasks = {"failing": failing}
+        state = RunState.create("test_dag.py", 0, tmp_path)
+        state.init_task("failing")
+
+        results = execute_dag(tasks, {}, state=state, executor_type="serial")
+
+        assert isinstance(results["failing"], ValueError)
+        assert state.tasks["failing"].status == TaskStatus.FAILED
+
+    def test_serial_executor_upstream_failure(self, tmp_path):
+        @task
+        def failing(config):
+            raise RuntimeError("boom")
+
+        @task(depends_on=[failing])
+        def dependent(failing, config):
+            return "should not run"
+
+        tasks = {"failing": failing, "dependent": dependent}
+        state = RunState.create("test_dag.py", 0, tmp_path)
+        state.init_task("failing")
+        state.init_task("dependent")
+
+        results = execute_dag(tasks, {}, state=state, executor_type="serial")
+
+        assert isinstance(results["dependent"], Exception)
+        assert state.tasks["dependent"].status == TaskStatus.FAILED
+
+
+class TestStateReset:
+    def test_failed_tasks_reset_on_rerun(self, tmp_path):
+        call_count = 0
+
+        @task
+        def my_task(config):
+            nonlocal call_count
+            call_count += 1
+            return 42
+
+        tasks = {"my_task": my_task}
+        state = RunState.create("test_dag.py", 0, tmp_path)
+        state.init_task("my_task")
+        state.update_task("my_task", TaskStatus.FAILED, error="previous error")
+
+        results = execute_dag(tasks, {}, state=state)
+
+        assert call_count == 1
+        assert results["my_task"] == 42
+        assert state.tasks["my_task"].status == TaskStatus.COMPLETED
+
+
+class TestConfigParameterWarning:
+    def test_config_parameter_override_warning(self):
+        @task
+        def my_task(upstream_config, config):
+            return (config, upstream_config)
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            result = _run_task(
+                my_task,
+                {"upstream_config": "upstream", "config": "will be overwritten"},
+                {"key": "value"},
+            )
+
+            assert len(w) == 1
+            assert "overwritten by the DAG config dict" in str(w[0].message)
+            assert result == ({"key": "value"}, "upstream")
