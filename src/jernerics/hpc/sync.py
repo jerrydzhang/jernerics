@@ -43,9 +43,7 @@ def _should_include(
 ) -> bool:
     if gitignore_spec and gitignore_spec.match_file(rel_path):
         return False
-    if default_spec.match_file(rel_path):
-        return False
-    return True
+    return not default_spec.match_file(rel_path)
 
 
 def _collect_files(
@@ -142,10 +140,7 @@ class FileSyncer:
     def download_file(
         self, remote_path: str, local_path: str | Path | None = None
     ) -> bool:
-        if local_path is None:
-            local_path = Path(remote_path).name
-        else:
-            local_path = Path(local_path)
+        local_path = Path(remote_path).name if local_path is None else Path(local_path)
 
         scp_cmd = [
             "scp",

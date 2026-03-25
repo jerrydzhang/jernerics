@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, ParamSpec, TypeVar, overload
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, overload
 
 if TYPE_CHECKING:
     from .dag import DAG
@@ -24,7 +25,7 @@ class Task:
 
 
 @overload
-def task(__func: Callable[P, R], /) -> Task: ...
+def task[**P, R](__func: Callable[P, R], /) -> Task: ...
 
 
 @overload
