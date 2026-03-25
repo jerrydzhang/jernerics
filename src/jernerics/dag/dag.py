@@ -55,7 +55,14 @@ class DAG:
 
         for name, obj in module_ns.items():
             if isinstance(obj, Task):
-                self.add_task(obj)
+                if obj.name not in self.tasks:
+                    self.add_task(obj)
+
+        for name, obj in module_ns.items():
+            if isinstance(obj, DAG) and obj is not self:
+                for task in obj.tasks.values():
+                    if task.name not in self.tasks:
+                        self.add_task(task)
 
     def _ensure_discovered(self) -> None:
         self._discover_tasks()
