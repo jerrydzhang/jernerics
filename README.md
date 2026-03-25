@@ -1,25 +1,25 @@
 # Jernerics
 
-Opinionated utilities for ML projects. Provides DAG-based experiment execution, HPC cluster management via SLURM, and container-based reproducibility.
+A Python 3.12+ toolkit for building and evaluating ML models. Define experiments as DAGs of tasks, run them locally or on HPC clusters without code changes.
 
 ## Features
 
-- **DAG-based experiment orchestration** - Define tasks with dependencies, execute in parallel
-- **HPC integration** - Submit jobs to SLURM clusters, monitor progress, retrieve results
-- **Container support** - Build and run experiments in Apptainer/Singularity containers
-- **State management** - Resume interrupted runs, track experiment provenance
-- **CLI tools** - Simple commands for common workflows
+- **DAG-based experiments** - Define tasks with dependencies, automatic parallel execution
+- **HPC integration** - Submit to SLURM clusters, monitor jobs, retrieve results
+- **Container support** - Reproducible environments via Apptainer/Singularity
+- **Provenance tracking** - Automatic git SHA, config hash, and timestamp logging
+- **Resume capability** - Interrupted runs can be resumed from checkpoints
 
 ## Installation
 
 ```bash
-pip install git+https://github.com/jerrydzhang/jernerics.git
+uv add git+https://github.com/jerrydzhang/jernerics.git
 ```
 
-Or with uv:
+Or with pip:
 
 ```bash
-uv add git+https://github.com/jerrydzhang/jernerics.git
+pip install git+https://github.com/jerrydzhang/jernerics.git
 ```
 
 ## Quick Start
@@ -31,9 +31,9 @@ jernerics init my-project
 cd my-project
 ```
 
-This creates:
-- `pyproject.toml` with jernerics configuration
-- `container.def` for building containers
+Creates:
+- `pyproject.toml` with `[tool.jernerics]` configuration
+- `container.def` for Apptainer container
 - `src/` directory structure
 
 ### 2. Define your DAG
@@ -43,33 +43,43 @@ Create `dag.py`:
 ```python
 from jernerics.dag import DAG, task
 
-dag = DAG()
+with DAG() as dag:
 
-@task
-def load_data(config):
-    # Load and preprocess data
-    return {"data": [...]}
+    @task
+    def load_data(config):
+        data = ...  # load data
+        return {"data": data, "n_samples": len(data)}
 
-@task(depends_on=[load_data])
-def train(load_data, config):
-    # Train model
-    return {"model": ...}
+    @task(depends_on=[load_data])
+    def preprocess(load_data, config):
+        processed = ...  # preprocess load_data["data"]
+        return {"processed": processed}
 
-@task(depends_on=[train])
-def evaluate(train, config):
-    # Evaluate model
-    return {"metrics": {...}}
+    @task(depends_on=[preprocess])
+    def train(preprocess, config):
+        model = ...  # train on preprocess["processed"]
+        return {"model_path": "model.pt", "accuracy": 0.95}
 ```
+
+**Key points:**
+- Use `with DAG() as dag:` to auto-register decorated tasks
+- Dependencies are injected by function name: `depends_on=[load_data]` → `def preprocess(load_data, ...)`
+- `config` is always available, contains current hyperparameters
+- Return dicts to pass data between tasks
 
 ### 3. Create a configuration file
 
 Create `config.py`:
 
 ```python
-configs = [
+from jernerics import merge_configs
+
+_base = {"seed": 42, "epochs": 10}
+
+configs = merge_configs(_base, [
     {"lr": 0.001, "batch_size": 32},
     {"lr": 0.01, "batch_size": 64},
-]
+])
 
 slurm = {
     "partition": "priority",
@@ -77,79 +87,79 @@ slurm = {
     "mem": "16G",
 }
 
-max_workers = 4  # Parallel task execution
+max_workers = 4  # Parallel task execution (default: CPU count)
 ```
 
 ### 4. Run experiments
 
-**Locally:**
+**Local test (recommended first):**
 ```bash
 jernerics run local dag.py config.py
 ```
 
-**On HPC (SLURM):**
+**On HPC:**
 ```bash
-jernerics container build    # Build container on HPC
+jernerics container build    # Build container on HPC (once per project)
 jernerics run slurm dag.py config.py
+```
+
+### 5. Monitor and retrieve results
+
+```bash
+jernerics jobs                    # List running jobs
+jernerics logs <job_id> -f        # Follow logs
+jernerics results <job_id>        # Download results
 ```
 
 ## CLI Reference
 
-### Initialization
+| Command | Description |
+|---------|-------------|
+| `jernerics init [dir]` | Create project scaffolding |
+| `jernerics run local <dag> <config>` | Run locally |
+| `jernerics run slurm <dag> <config>` | Submit to HPC |
+| `jernerics container build` | Build container on HPC |
+| `jernerics jobs` | List jobs (`--all` for completed) |
+| `jernerics logs <job_id>` | View logs (`--follow`, `--array-index`) |
+| `jernerics results <job_id>` | Download results |
+| `jernerics shell` | Interactive shell on HPC |
+| `jernerics cancel <job_id>` | Cancel jobs (`--all`) |
+| `jernerics clean` | Delete remote artifacts |
 
-```bash
-jernerics init [project_dir] [--template python|cuda]
-```
+### Command Options
 
-### Running Experiments
+**`jernerics run local`**
+- `--results-dir, -r` - Results directory (default: `results`)
+- `--container, -c` - Path to container file
+- `--gpu/--no-gpu` - Enable GPU support (default: enabled)
+- `--timeout, -t` - Timeout per config in seconds
 
-```bash
-jernerics run local <dag_file> <config_file> [options]
-  --results-dir, -r    Directory for results (default: results)
-  --container, -c      Path to container file
-  --gpu/--no-gpu       Enable GPU support (default: enabled)
+**`jernerics run slurm`**
+- `--results-dir, -r` - Results directory
+- `--set, -S KEY=VALUE` - Override SLURM option
+- `--dry-run` - Preview without submitting
 
-jernerics run slurm <dag_file> <config_file> [options]
-  --results-dir, -r    Directory for results
-  --set, -S            Set SLURM option (key=value)
-  --dry-run            Preview without submitting
-```
+**`jernerics shell`**
+- `--gpu, -g N` - Number of GPUs
+- `--cpus, -c N` - Number of CPUs
+- `--mem, -m SIZE` - Memory (e.g., `16G`)
+- `--time, -t LIMIT` - Time limit (e.g., `2:00:00`)
+- `--partition, -p NAME` - Partition name
+- `--no-container` - Shell without container
 
-### Container Management
-
-```bash
-jernerics container build [project_dir] [--force] [--dry-run]
-```
-
-### Job Management
-
-```bash
-jernerics jobs [--all] [--json]              # List jobs
-jernerics logs <job_id> [--follow] [-i]      # View logs
-jernerics cancel <job_id> [--all]            # Cancel jobs
-jernerics results <job_id> [--local-dir]     # Download results
-```
-
-### Interactive Shell
-
-```bash
-jernerics shell [--gpu N] [--cpus N] [--mem 4G] [--time 1:00:00]
-```
-
-### Cleanup
-
-```bash
-jernerics clean [--results] [--logs] [--container] [--all] [--force]
-```
+**`jernerics container build`**
+- `--force, -f` - Force rebuild
+- `--dry-run` - Preview without executing
 
 ## Configuration
 
-Add to `pyproject.toml`:
+### pyproject.toml
 
 ```toml
 [tool.jernerics.hpc]
-host = "user@hpc.example.edu"
-remote_dir = "~/experiments/{project_name}"
+host = "user@cluster.edu"                    # SSH host (or set JERNERICS_HPC_HOST)
+remote_dir = "~/projects/{project_name}"     # Remote project directory
+cache_dir = "/scratch/$USER/jernerics"       # Optional: persistent cache
 
 [tool.jernerics.container]
 partition = "priority"
@@ -159,43 +169,89 @@ cpus = 4
 
 [tool.jernerics.shell]
 partition = "priority"
-cpus = 1
-mem = "4G"
-gpu = 0
+cpus = 4
+mem = "32G"
+gpu = 1
+
+[tool.jernerics.binds]
+"/work/.julia_env" = "julia_env"             # container_path = cache_subdir
 ```
 
-Override HPC host via environment variable:
+**Minimal config:** Only `[tool.jernerics.hpc]` with `host` is required.
+
+### Environment Variables
+
 ```bash
-export JERNERICS_HPC_HOST="user@cluster.edu"
+export JERNERICS_HPC_HOST="user@cluster.edu"  # Override HPC host
 ```
 
 ## DAG Tasks
 
-Tasks are functions decorated with `@task`. Dependencies are injected automatically:
+### Dependencies
+
+Tasks receive results from dependencies by parameter name:
 
 ```python
-from jernerics.dag import task
-
 @task
 def step_a(config):
     return {"result": 1}
 
 @task(depends_on=[step_a])
 def step_b(step_a, config):
-    # step_a is the return value from step_a
     return step_a["result"] + 1
 
 @task(depends_on=[step_a])
 def step_c(step_a, config):
-    # Independent of step_b, runs in parallel
-    return step_a["result"] * 2
+    return step_a["result"] * 2  # Runs in parallel with step_b
 ```
 
-The `config` parameter receives the current configuration from `configs` list.
+### Serial Execution
 
-## Resume Interrupted Runs
+For libraries incompatible with threading:
 
-Jernerics saves state to `.jernerics/runs/`. Resume a run:
+```python
+dag.run(config, executor_type="serial")
+```
+
+Or in config.py:
+
+```python
+executor_type = "serial"
+```
+
+## Output Artifacts
+
+Use `work()` to get the correct results directory:
+
+```python
+from jernerics.paths import work
+
+@task
+def save_results(train, config):
+    results_dir = work() / "results"
+    results_dir.mkdir(exist_ok=True)
+    
+    model_path = results_dir / "model.pt"
+    torch.save(train["model"], model_path)
+    
+    return {"model_path": str(model_path)}
+```
+
+## Provenance Tracking
+
+Every run automatically tracks:
+
+```python
+from jernerics.dag import Provenance
+
+provenance = Provenance.from_json(Path(".jernerics/runs/latest_provenance.json"))
+print(f"Git SHA: {provenance.git_sha}")
+print(f"Config: {provenance.config}")
+```
+
+Saved to `.jernerics/runs/{run_id}_provenance.json`.
+
+## Resume Failed Runs
 
 ```python
 from jernerics.dag import DAG
@@ -204,11 +260,79 @@ dag = DAG("dag.py")
 results = dag.resume(config, config_index=0)
 ```
 
+Skips completed tasks, re-runs failed ones.
+
+## Container Persistence
+
+For libraries that need persistent writable directories (Julia environments, checkpoints):
+
+```toml
+[tool.jernerics.hpc]
+cache_dir = "/scratch/$USER/jernerics"
+
+[tool.jernerics.binds]
+"/work/.julia_env" = "julia_env"
+"/work/checkpoints" = "checkpoints"
+```
+
+Use in code:
+
+```python
+from jernerics.paths import bind, work, is_hpc
+
+if is_hpc():
+    print("Running on HPC")
+
+julia_env = bind("julia_env")  # /work/.julia_env in container
+results_dir = work() / "results"
+```
+
+### When to Rebuild Containers
+
+| Change Type | Rebuild? |
+|-------------|----------|
+| Source code | No (bind-mounted) |
+| Config changes | No (passed at runtime) |
+| `pyproject.toml` dependencies | Yes |
+| `container.def` changes | Yes |
+| New binds | No (mounted at runtime) |
+
+## GPU Configuration
+
+Two options:
+
+1. **Use GPU partition:**
+   ```python
+   slurm = {"partition": "priority-gpu"}
+   ```
+
+2. **Request GPUs explicitly:**
+   ```python
+   slurm = {"gres": "gpu:1"}  # Request 1 GPU
+   ```
+
+## Common Issues
+
+| Issue | Fix |
+|-------|-----|
+| OOM | Increase `slurm["mem"]` |
+| Timeout | Increase `slurm["time"]` |
+| Array job log error | Add `--array-index N` |
+| DAG hangs | Use `executor_type="serial"` |
+| BindNotFound | Add to `[tool.jernerics.binds]` |
+
 ## Requirements
 
 - Python 3.12+
 - HPC cluster with SLURM (for remote execution)
 - Apptainer/Singularity (for containers)
+
+## Examples
+
+See complete examples in `examples/`:
+
+- `container-basic/` - CPU-only workflow
+- `container-gpu/` - GPU workflow with PyTorch
 
 ## License
 
