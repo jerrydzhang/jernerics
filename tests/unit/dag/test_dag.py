@@ -42,7 +42,7 @@ class TestDAGCreation:
 
         try:
             dag.add_task(my_task)
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "already registered" in str(e)
 
@@ -193,7 +193,7 @@ dag = DAG(__file__)
 
         try:
             dag.validate()
-            assert False, "Should have raised RuntimeError"
+            raise AssertionError("Should have raised RuntimeError")
         except RuntimeError as e:
             assert "Failed to load DAG file" in str(e)
 
@@ -354,7 +354,7 @@ class TestDAGValidation:
 
         try:
             dag.validate()
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "unregistered task" in str(e)
 
@@ -590,7 +590,7 @@ class TestDAGResume:
 
         try:
             dag.resume({})
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "No state directory" in str(e)
 
@@ -604,7 +604,7 @@ class TestDAGResume:
 
         try:
             dag.resume({}, state_dir=tmp_path / "nonexistent")
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "State directory not found" in str(e)
 
@@ -621,7 +621,7 @@ class TestDAGResume:
 
         try:
             dag.resume({}, run_id="nonexistent", state_dir=state_dir)
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "not found" in str(e)
 
@@ -639,7 +639,7 @@ class TestDAGResume:
 
         try:
             dag.resume({}, state_dir=state_dir)
-            assert False, "Should have raised ValueError"
+            raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "No previous runs found" in str(e)
 

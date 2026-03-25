@@ -358,10 +358,12 @@ time = "2:00:00"
 """
         )
 
-        with patch("jernerics.cli.subprocess.run") as mock_run:
-            with patch("jernerics.cli.FileSyncer") as mock_syncer:
-                mock_syncer.return_value.container_exists.return_value = False
-                result = runner.invoke(app, ["shell"])
+        with (
+            patch("jernerics.cli.subprocess.run") as mock_run,
+            patch("jernerics.cli.FileSyncer") as mock_syncer,
+        ):
+            mock_syncer.return_value.container_exists.return_value = False
+            result = runner.invoke(app, ["shell"])
 
         assert result.exit_code == 0
         mock_run.assert_called_once()
@@ -399,25 +401,27 @@ gpu = 0
 """
         )
 
-        with patch("jernerics.cli.subprocess.run") as mock_run:
-            with patch("jernerics.cli.FileSyncer") as mock_syncer:
-                mock_syncer.return_value.container_exists.return_value = False
-                result = runner.invoke(
-                    app,
-                    [
-                        "shell",
-                        "--gpu",
-                        "1",
-                        "--cpus",
-                        "8",
-                        "--mem",
-                        "16G",
-                        "--time",
-                        "4:00:00",
-                        "--partition",
-                        "priority",
-                    ],
-                )
+        with (
+            patch("jernerics.cli.subprocess.run") as mock_run,
+            patch("jernerics.cli.FileSyncer") as mock_syncer,
+        ):
+            mock_syncer.return_value.container_exists.return_value = False
+            result = runner.invoke(
+                app,
+                [
+                    "shell",
+                    "--gpu",
+                    "1",
+                    "--cpus",
+                    "8",
+                    "--mem",
+                    "16G",
+                    "--time",
+                    "4:00:00",
+                    "--partition",
+                    "priority",
+                ],
+            )
 
         assert result.exit_code == 0
         call_args = mock_run.call_args[0][0]
@@ -440,10 +444,12 @@ host = "user@hpc.example.edu"
 """
         )
 
-        with patch("jernerics.cli.subprocess.run") as mock_run:
-            with patch("jernerics.cli.FileSyncer") as mock_syncer:
-                mock_syncer.return_value.container_exists.return_value = True
-                result = runner.invoke(app, ["shell"])
+        with (
+            patch("jernerics.cli.subprocess.run") as mock_run,
+            patch("jernerics.cli.FileSyncer") as mock_syncer,
+        ):
+            mock_syncer.return_value.container_exists.return_value = True
+            result = runner.invoke(app, ["shell"])
 
         assert result.exit_code == 0
         call_args = mock_run.call_args[0][0]
@@ -463,10 +469,12 @@ host = "user@hpc.example.edu"
 """
         )
 
-        with patch("jernerics.cli.subprocess.run") as mock_run:
-            with patch("jernerics.cli.FileSyncer") as mock_syncer:
-                mock_syncer.return_value.container_exists.return_value = True
-                result = runner.invoke(app, ["shell", "--no-container"])
+        with (
+            patch("jernerics.cli.subprocess.run") as mock_run,
+            patch("jernerics.cli.FileSyncer") as mock_syncer,
+        ):
+            mock_syncer.return_value.container_exists.return_value = True
+            result = runner.invoke(app, ["shell", "--no-container"])
 
         assert result.exit_code == 0
         call_args = mock_run.call_args[0][0]
