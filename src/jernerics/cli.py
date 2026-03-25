@@ -353,7 +353,19 @@ def run_slurm(
     slurm = SlurmJobManager(ssh)
 
     print(f"[1/3] Syncing project to {hpc_config.host}:{remote_dir}...")
-    syncer.sync_project(project_dir)
+
+    sync_dirs = list(FileSyncer.DEFAULT_DIRS)
+    sync_files = list(FileSyncer.DEFAULT_FILES)
+
+    dag_parent = str(Path(dag_relpath).parent)
+    if dag_parent != "." and dag_parent not in sync_dirs:
+        sync_dirs.append(dag_parent)
+
+    config_parent = str(Path(config_relpath).parent)
+    if config_parent != "." and config_parent not in sync_dirs:
+        sync_dirs.append(config_parent)
+
+    syncer.sync_project(project_dir, files=sync_files, dirs=sync_dirs)
 
     print("[2/3] Ensuring log directory exists...")
     ssh.mkdir(f"{remote_dir}/.jernerics/logs")
