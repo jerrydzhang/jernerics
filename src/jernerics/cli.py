@@ -248,8 +248,8 @@ def run_slurm(
     dag_relpath = validate_relpath(str(dag_relpath), "DAG file")
     config_relpath = validate_relpath(str(config_relpath), "Config file")
 
-    output_pattern = str(slurm_opts.get("output", "slurm_%j.out"))
-    error_pattern = str(slurm_opts.get("error", "slurm_%j.err"))
+    output_pattern = str(slurm_opts.get("output", "logs/slurm_%j.out"))
+    error_pattern = str(slurm_opts.get("error", "logs/slurm_%j.err"))
 
     def expand_path(p: str) -> str:
         if p.startswith("~"):
@@ -305,6 +305,7 @@ def run_slurm(
     script_lines.append("import os")
     script_lines.append("import sys")
     script_lines.append("import pathlib")
+    script_lines.append("import traceback")
     script_lines.append("")
     script_lines.append('dag_file = os.environ["JERNERICS_DAG_FILE"]')
     script_lines.append('config_file = os.environ["JERNERICS_CONFIG_FILE"]')
@@ -326,12 +327,16 @@ def run_slurm(
     )
     script_lines.append("")
     script_lines.append(
-        "failed = [name for name, result in results.items() if isinstance(result, Exception)]"
+        "failed = [(name, result) for name, result in results.items() if isinstance(result, Exception)]"
     )
     script_lines.append("if failed:")
+    script_lines.append('    print("DAG failed with errors:\\n")')
+    script_lines.append("    for name, exc in failed:")
+    script_lines.append('        print(f"  [{name}] {type(exc).__name__}: {exc}")')
     script_lines.append(
-        '    print("DAG failed. Tasks with errors:", ", ".join(failed))'
+        "        traceback.print_exception(type(exc), exc, exc.__traceback__)"
     )
+    script_lines.append("        print()")
     script_lines.append("    sys.exit(1)")
     script_lines.append("else:")
     script_lines.append('    print("DAG completed")')
@@ -373,8 +378,8 @@ def run_slurm(
 
         job_meta = {
             "job_id": job_id,
-            "output_pattern": str(slurm_opts.get("output", "slurm_%j.out")),
-            "error_pattern": str(slurm_opts.get("error", "slurm_%j.err")),
+            "output_pattern": str(slurm_opts.get("output", "logs/slurm_%j.out")),
+            "error_pattern": str(slurm_opts.get("error", "logs/slurm_%j.err")),
             "remote_dir": remote_dir,
             "num_configs": num_configs,
         }
@@ -568,13 +573,13 @@ def logs(
     meta_file = project_dir / ".jernerics" / "jobs" / f"{job_id}.json"
     if meta_file.exists():
         meta = json.loads(meta_file.read_text())
-        output_pattern = meta.get("output_pattern", "slurm_%j.out")
-        error_pattern = meta.get("error_pattern", "slurm_%j.err")
+        output_pattern = meta.get("output_pattern", "logs/slurm_%j.out")
+        error_pattern = meta.get("error_pattern", "logs/slurm_%j.err")
         meta_remote_dir = meta.get("remote_dir", remote_dir)
         num_configs = meta.get("num_configs", 1)
     else:
-        output_pattern = "slurm_%j.out"
-        error_pattern = "slurm_%j.err"
+        output_pattern = "logs/slurm_%j.out"
+        error_pattern = "logs/slurm_%j.err"
         meta_remote_dir = remote_dir
         num_configs = 1
 
