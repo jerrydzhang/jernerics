@@ -46,7 +46,13 @@ class TestSSHClient:
 
             mock_run.assert_called_once()
             args, kwargs = mock_run.call_args
-            assert args[0] == ["ssh", "user@host.example.edu", "ls -la"]
+            assert args[0] == [
+                "ssh",
+                "-o",
+                "LogLevel=ERROR",
+                "user@host.example.edu",
+                "ls -la",
+            ]
             assert kwargs["capture_output"] is True
             assert kwargs["text"] is True
 
@@ -89,7 +95,13 @@ class TestSSHClient:
 
             mock_run.assert_called_once()
             args, kwargs = mock_run.call_args
-            assert args[0] == ["ssh", "user@host.example.edu", "bash -s"]
+            assert args[0] == [
+                "ssh",
+                "-o",
+                "LogLevel=ERROR",
+                "user@host.example.edu",
+                "bash -s",
+            ]
             assert kwargs["input"] == "echo hello"
             assert kwargs["capture_output"] is True
             assert kwargs["text"] is True
@@ -112,7 +124,7 @@ class TestSSHClient:
             client.mkdir("/path/to/dir")
 
             args, _kwargs = mock_run.call_args
-            assert "mkdir -p /path/to/dir" in args[0][2]
+            assert "mkdir -p /path/to/dir" in args[0][4]
 
     def test_mkdir_null_bytes_raises(self):
         client = SSHClient("user@host.example.edu")
@@ -129,7 +141,7 @@ class TestSSHClient:
 
             assert result is True
             args, _kwargs = mock_run.call_args
-            assert "test -f /path/to/file.txt" in args[0][2]
+            assert "test -f /path/to/file.txt" in args[0][4]
 
     def test_file_exists_false(self):
         client = SSHClient("user@host.example.edu")
@@ -178,7 +190,7 @@ class TestSSHClient:
             client.remove_file("/path/to/file.txt")
 
             args, _kwargs = mock_run.call_args
-            assert "rm -f /path/to/file.txt" in args[0][2]
+            assert "rm -f /path/to/file.txt" in args[0][4]
 
     def test_remove_file_null_bytes_raises(self):
         client = SSHClient("user@host.example.edu")
@@ -195,7 +207,7 @@ class TestSSHClient:
 
             assert result == "/home/username"
             args, kwargs = mock_run.call_args
-            assert "echo $HOME" in args[0][2]
+            assert "echo $HOME" in args[0][4]
             assert kwargs["check"] is True
 
     def test_expand_tilde_with_tilde(self):
