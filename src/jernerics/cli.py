@@ -226,21 +226,25 @@ def run_slurm(
     else:
         array_spec = f"1-{num_configs}"
 
-    dag_basename = dag_path.name
-    config_basename = config_path.name
+    dag_relpath = dag_path.relative_to(project_dir)
+    config_relpath = config_path.relative_to(project_dir)
 
-    _SAFE_BASENAME = re.compile(r"^[a-zA-Z0-9_.\-]+$")
+    _SAFE_RELPATH = re.compile(r"^[a-zA-Z0-9_./\-]+$")
 
-    def validate_basename(name: str, desc: str) -> str:
-        if not _SAFE_BASENAME.match(name):
+    def validate_relpath(path: str, desc: str) -> str:
+        if not _SAFE_RELPATH.match(path):
             raise SystemExit(
-                f"Error: {desc} filename '{name}' contains unsafe characters. "
-                "Only alphanumeric, underscore, hyphen, and period allowed."
+                f"Error: {desc} path '{path}' contains unsafe characters. "
+                "Only alphanumeric, underscore, hyphen, period, and slash allowed."
             )
-        return name
+        if ".." in path:
+            raise SystemExit(
+                f"Error: {desc} path '{path}' must not contain '..' (path traversal)."
+            )
+        return path
 
-    dag_basename = validate_basename(dag_basename, "DAG file")
-    config_basename = validate_basename(config_basename, "Config file")
+    dag_relpath = validate_relpath(str(dag_relpath), "DAG file")
+    config_relpath = validate_relpath(str(config_relpath), "Config file")
 
     output_pattern = str(slurm_opts.get("output", "slurm_%j.out"))
     error_pattern = str(slurm_opts.get("error", "slurm_%j.err"))
@@ -287,8 +291,8 @@ def run_slurm(
         output_dir = str(Path(output_path).parent)
     script_lines.append(f"mkdir -p {safe_shell_path(output_dir)}")
     script_lines.append("CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))")
-    script_lines.append(f"export JERNERICS_DAG_FILE=/work/{dag_basename}")
-    script_lines.append(f"export JERNERICS_CONFIG_FILE=/work/{config_basename}")
+    script_lines.append(f"export JERNERICS_DAG_FILE=/work/{dag_relpath}")
+    script_lines.append(f"export JERNERICS_CONFIG_FILE=/work/{config_relpath}")
     script_lines.append("export JERNERICS_CONFIG_INDEX=${CONFIG_INDEX}")
     script_lines.append(f"cd {safe_shell_path(remote_dir)}")
     script_lines.append("REMOTE_DIR=$(cd . && pwd)")
