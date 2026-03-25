@@ -7,7 +7,7 @@ import os
 import traceback
 import warnings
 from concurrent.futures import ALL_COMPLETED
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from graphlib import TopologicalSorter
 from typing import Any
 
@@ -16,7 +16,7 @@ from .task import Task
 
 
 def _get_timestamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _get_default_max_workers() -> int:

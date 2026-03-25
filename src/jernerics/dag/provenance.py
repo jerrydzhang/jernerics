@@ -7,7 +7,7 @@ import platform
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -110,11 +110,11 @@ class Provenance:
             platform=platform.platform(),
             container=_resolve_container_path(container_path),
             slurm_job_id=_get_slurm_job_id(),
-            started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            started_at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
 
     def finalize(self) -> None:
-        self.ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.ended_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
