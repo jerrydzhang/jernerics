@@ -88,6 +88,30 @@ remote_dir = "~/projects/{project_name}"
         assert hpc_config.host == "user@hpc.example.edu"
         assert hpc_config.remote_dir == "~/projects/{project_name}"
 
+    def test_load_config_with_build_tmpdir(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
+
+[tool.jernerics.hpc]
+host = "user@hpc.example.edu"
+build_tmpdir = "/scratch/pi_netid/user_netid/apptainer_tmp"
+""")
+
+        hpc_config, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.build_tmpdir == "/scratch/pi_netid/user_netid/apptainer_tmp"
+
+    def test_load_config_build_tmpdir_defaults_to_none(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
+""")
+
+        hpc_config, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.build_tmpdir is None
+
     def test_load_config_with_container_settings(self, tmp_path):
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text("""
