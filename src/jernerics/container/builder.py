@@ -1,3 +1,4 @@
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -122,7 +123,7 @@ echo "=== Build completed at $(date) ==="
         self.ensure_container_def()
 
         remote_dir = self._get_remote_dir()
-        slurm_output_dir = self.ssh.expand_tilde(remote_dir)
+        slurm_output_dir = f"{self.ssh.expand_tilde(remote_dir)}/logs"
 
         if dry_run:
             print("=== DRY RUN ===")
@@ -134,13 +135,16 @@ echo "=== Build completed at $(date) ==="
             print(self._generate_build_script(slurm_output_dir))
             return None
 
-        print(f"[1/3] Syncing project to {self.config.host}:{remote_dir}")
+        print(f"[1/4] Syncing project to {self.config.host}:{remote_dir}")
         self.syncer.sync_project(self.project_dir)
+
+        print("[2/4] Creating logs directory...")
+        self.ssh.mkdir(f"{remote_dir}/logs")
 
         build_script = self._generate_build_script(slurm_output_dir)
         remote_script_path = f"{remote_dir}/build_container.sh"
 
-        print("[2/3] Uploading build script...")
+        print("[3/4] Uploading build script...")
         quoted_script_path = _quote_path(remote_script_path)
         result = subprocess.run(
             ["ssh", self.config.host, f"cat > {quoted_script_path}"],
@@ -154,11 +158,23 @@ echo "=== Build completed at $(date) ==="
                 f"Failed to upload build script: {result.stderr or result.stdout}"
             )
 
-        print("[3/3] Submitting build job to SLURM...")
+        print("[4/4] Submitting build job to SLURM...")
         job_id = self.slurm.submit(remote_script_path)
+
+        job_meta = {
+            "job_id": job_id,
+            "job_type": "build",
+            "output_pattern": "logs/build_%j.out",
+            "error_pattern": "logs/build_%j.err",
+            "remote_dir": remote_dir,
+        }
+        meta_dir = self.project_dir / ".jernerics" / "jobs"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        meta_file = meta_dir / f"{job_id}.json"
+        meta_file.write_text(json.dumps(job_meta, indent=2))
+
         print(f"\nBuild job submitted: {job_id}")
         print("\nMonitor progress:")
-        quoted_log_path = _quote_path(f"{slurm_output_dir}/build_{job_id}.out")
-        print(f"  ssh {self.config.host} 'tail -f {quoted_log_path}'")
+        print(f"  jernerics logs {job_id} --follow")
 
         return job_id
