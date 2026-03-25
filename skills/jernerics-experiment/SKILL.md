@@ -26,35 +26,26 @@ The agent's job is to:
 
 ## Quick Start
 
-### Option 1: Initialize new project (recommended)
+**Before setting up, ask the user:**
+1. Is this a GPU or CPU project?
+2. What HPC cluster/host will they use?
+3. How much memory and time do they typically need?
+4. Do they need persistent cache directories (e.g., for Julia, model checkpoints)?
+
+Then configure accordingly.
+
+### Option 1: Initialize new project
 
 ```bash
 jernerics init my-project
 cd my-project
 ```
 
-This creates:
-- `pyproject.toml` with jernerics configuration
-- `container.def` for building Apptainer containers
-- `src/` directory structure
-
-Then create your DAG and config files.
+This creates scaffolding, but **you must customize `pyproject.toml`** based on the user's needs. See "Prerequisites Check" for all available options.
 
 ### Option 2: Add to existing project
 
-Add to your existing `pyproject.toml`:
-
-```toml
-[tool.jernerics.hpc]
-host = "user@cluster.edu"
-remote_dir = "~/projects/{project_name}"
-
-[tool.jernerics.container]
-partition = "priority"
-time = "1:00:00"
-mem = "16G"
-cpus = 4
-```
+Add a `[tool.jernerics]` section to `pyproject.toml`. **Do not copy a minimal template** - ask the user about their requirements and configure appropriately. See "Prerequisites Check" for all options.
 
 ## Scope Evaluation
 
@@ -197,9 +188,9 @@ slurm = {
 - `max_workers`: Parallel task execution (optional, defaults to `min(cpu_count, 8)`)
 - `executor_type`: `"thread"` for parallel or `"serial"` for sequential execution (optional, defaults to `"thread"`)
 
-**GPU configuration**: Two approaches work:
-1. Use `partition: "priority-gpu"` - routes to GPU queue (may have longer wait)
-2. Use `gres: "gpu:N"` - requests N GPUs on any partition
+**GPU configuration**:
+1. Use `partition: "priority-gpu"` - routes to GPU queue (without this we are put on the general queue which may have longer wait times for jobs)
+2. Use `gres: "gpu:N"` - requests N GPUs on any partition 
 
 ## Execution Workflow
 
@@ -270,15 +261,16 @@ Downloads results to `results/<job_id>/` locally. Do this automatically when job
 
 ## Output Artifacts
 
-Save results to the results directory, return summaries:
+Always use `work()` to get the correct results directory - this ensures paths work both locally and in containers:
 
 ```python
 import json
-from pathlib import Path
+from jernerics.paths import work
 
 @task(depends_on=[train])
 def save_results(train, config):
-    results_dir = Path(config.get("results_dir", "results"))
+    # Use work() to get project root (works in container and locally)
+    results_dir = work() / "results"
     results_dir.mkdir(exist_ok=True)
     
     # Save large artifacts
@@ -292,6 +284,8 @@ def save_results(train, config):
         "config": config,
     }
 ```
+
+**Important**: Do not use relative paths like `Path("results")` or `Path(config.get("results_dir"))` - these may resolve incorrectly inside containers. Always use `work()` as the base.
 
 ### Provenance Tracking
 
@@ -317,15 +311,23 @@ Some libraries need persistent writable directories across runs (Julia environme
 
 ### The Problem
 
-By default, containers are ephemeral - files written inside `/work` during one job aren't preserved for the next. This breaks libraries that install packages or cache data.
+`/work` is your project root and files written there ARE persisted. However, two issues arise:
+
+1. **Read-only container paths**: Directories like `.venv/` are built into the container and are read-only at runtime. Libraries that try to modify these paths will fail.
+
+2. **Home directory writes**: Libraries often write to `~/.julia`, `~/.cache`, etc. These locations are ephemeral in containers - data is lost between runs often leading to more overhead per run.
+
+The bind mount system provides writable directories outside the container image that persist across runs. As a side benefit, it keeps runtime artifacts (checkpoints, caches) out of your project directory.
+
+**Note**: Files in `cache_dir` are persisted between runs but should be treated as temporary - they may be deleted at any time. Use it for caches, checkpoints, and other reproducible artifacts, not for permanent storage.
 
 ### Solution: cache_dir + binds
 
-**1. Configure persistent cache location**:
+**1. Configure cache location**:
 
 ```toml
 [tool.jernerics.hpc]
-cache_dir = "/scratch/$USER/jernerics"  # Fast, persistent storage
+cache_dir = "/scratch/$USER/jernerics"  # Scratch storage for temporary caches
 ```
 
 **2. Define bind mappings**:
@@ -356,16 +358,6 @@ results_dir = work() / "results"
 # Get a bind-mounted directory
 julia_env = bind("julia_env")  # Returns Path("/work/.julia_env") on HPC
 os.environ["JULIA_PROJECT"] = str(julia_env)
-```
-
-**Alternative API via `paths` object**:
-
-```python
-from jernerics import paths
-
-if paths.is_hpc:
-    julia_env = bind("julia_env")  # bind() is still a function
-    work_dir = paths.work
 ```
 
 ### When to Rebuild Containers
