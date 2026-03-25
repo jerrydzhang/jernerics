@@ -112,11 +112,11 @@ remote_dir = "~/experiments/{project_name}/"
             assert remote_dir == "~/experiments/myproject"
 
     def test_invalid_project_name_raises(self, tmp_path):
-        project_dir = tmp_path / "invalid project!"
+        project_dir = tmp_path / "valid-project"
         project_dir.mkdir()
         (project_dir / "pyproject.toml").write_text("""
 [project]
-name = "invalid-project"
+name = "invalid project!"
 version = "0.1.0"
 
 [tool.jernerics.hpc]
@@ -178,6 +178,7 @@ class TestGenerateBuildScript:
 
         builder = ContainerBuilder.__new__(ContainerBuilder)
         builder.project_dir = tmp_path
+        builder.project_name = "test"
         builder.config = HpcConfig(
             host="user@hpc.example.edu",
             remote_dir="~/projects/test",
@@ -185,12 +186,12 @@ class TestGenerateBuildScript:
             time="1:00:00",
             mem="16G",
             cpus=4,
-            build_tmpdir="/scratch/user/tmp",
+            cache_dir="/scratch/user/jernerics",
         )
 
         script = builder._generate_build_script("/home/user/projects/test/logs")
 
-        assert "export APPTAINER_TMPDIR=/scratch/user/tmp" in script
+        assert "export APPTAINER_TMPDIR=/scratch/user/jernerics/test/tmp" in script
 
     def test_script_omits_apptainer_tmpdir_when_not_configured(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'\n")
@@ -198,6 +199,7 @@ class TestGenerateBuildScript:
 
         builder = ContainerBuilder.__new__(ContainerBuilder)
         builder.project_dir = tmp_path
+        builder.project_name = "test"
         builder.config = HpcConfig(
             host="user@hpc.example.edu",
             remote_dir="~/projects/test",
@@ -205,7 +207,7 @@ class TestGenerateBuildScript:
             time="1:00:00",
             mem="16G",
             cpus=4,
-            build_tmpdir=None,
+            cache_dir=None,
         )
 
         script = builder._generate_build_script("/home/user/projects/test/logs")
