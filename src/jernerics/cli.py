@@ -41,7 +41,6 @@ app.add_typer(container_app, name="container", help="Build and manage containers
 DEFAULT_SLURM = {
     "output": ".jernerics/logs/%A_%a.out",
     "error": ".jernerics/logs/%A_%a.err",
-    "max_parallel": 10,
 }
 
 

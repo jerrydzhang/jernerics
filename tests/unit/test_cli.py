@@ -128,7 +128,7 @@ class TestDefaultSlurm:
 
         assert "output" in DEFAULT_SLURM
         assert "error" in DEFAULT_SLURM
-        assert "max_parallel" in DEFAULT_SLURM
+        assert "max_parallel" not in DEFAULT_SLURM
         assert "%A_%a" in DEFAULT_SLURM["output"]
 
 
