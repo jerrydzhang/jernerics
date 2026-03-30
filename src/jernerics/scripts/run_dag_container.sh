@@ -22,6 +22,7 @@ export JERNERICS_RESULTS_DIR="/work/$RESULTS_DIR"
 export JERNERICS_CONFIG_INDEX="$CONFIG_INDEX"
 
 apptainer exec \
+    --fakeroot \
     --nv \
     --bind "$PROJECT_DIR:/work" \
     "$CONTAINER" \

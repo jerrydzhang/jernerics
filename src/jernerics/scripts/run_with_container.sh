@@ -45,6 +45,7 @@ export JERNERICS_RESULTS_DIR="/work/$RESULTS_DIR"
 export JERNERICS_CONFIG_INDEX="$CONFIG_INDEX"
 
 apptainer exec \
+    --fakeroot \
     $GPU_FLAG \
     --bind "$PROJECT_DIR:/work" \
     "$SIF_PATH" \
