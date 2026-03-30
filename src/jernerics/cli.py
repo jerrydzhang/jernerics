@@ -18,6 +18,7 @@ from ._cli_helpers import (
     ConfigNotFound,
     ExitCode,
     NoConfigsFound,
+    _normalize_time,
     find_pyproject_dir,
     get_project_name,
     get_script_path,
@@ -216,9 +217,16 @@ def run_slurm(
         "partition": hpc_config.partition,
         "time": hpc_config.time,
         "mem": hpc_config.mem,
-        **config_slurm,
-        **cli_overrides,
+        **{
+            k: _normalize_time(v) if k == "time" else v for k, v in config_slurm.items()
+        },
+        **{
+            k: _normalize_time(v) if k == "time" else v
+            for k, v in cli_overrides.items()
+        },
     }
+
+    slurm_opts = {k: v for k, v in slurm_opts.items() if v is not None}
 
     max_parallel = slurm_opts.pop("max_parallel", hpc_config.max_concurrent_jobs)
     try:

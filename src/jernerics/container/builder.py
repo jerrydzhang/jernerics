@@ -74,7 +74,7 @@ class ContainerBuilder:
         remote_dir = self._get_remote_dir()
         quoted_remote_dir = _quote_path(remote_dir)
         partition = _validate_slurm_value(self.config.partition, "partition")
-        time = _validate_slurm_value(self.config.time, "time")
+        time = _validate_slurm_value(self.config.time or "1:00:00", "time")
         mem = _validate_slurm_value(self.config.mem, "mem")
         cpus = _validate_slurm_value(str(self.config.cpus), "cpus")
 

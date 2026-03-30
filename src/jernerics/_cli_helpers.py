@@ -38,12 +38,18 @@ class ConfigNotFound(Exception):
     pass
 
 
+def _normalize_time(value: str | None) -> str | None:
+    if isinstance(value, str) and value.lower() == "none":
+        return None
+    return value
+
+
 @dataclass
 class HpcConfig:
     host: str | None = None
     remote_dir: str = "~/experiments/{project_name}"
     partition: str = "priority"
-    time: str = "1:00:00"
+    time: str | None = "1:00:00"
     mem: str = "16G"
     cpus: int = 4
     max_concurrent_jobs: int = 10
@@ -91,7 +97,7 @@ def load_jernerics_config(
         remote_dir=hpc_config.get("remote_path")
         or hpc_config.get("remote_dir", "~/experiments/{project_name}"),
         partition=container_config.get("partition", "priority"),
-        time=container_config.get("time", "1:00:00"),
+        time=_normalize_time(container_config.get("time", "1:00:00")),
         mem=container_config.get("mem", "16G"),
         cpus=container_config.get("cpus", 4),
         max_concurrent_jobs=safety_config.get("max_concurrent_jobs", 10),

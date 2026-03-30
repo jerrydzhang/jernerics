@@ -4,6 +4,7 @@ from jernerics._cli_helpers import (
     ConfigNotFound,
     HpcConfig,
     ShellConfig,
+    _normalize_time,
     find_pyproject_dir,
     load_jernerics_config,
 )
@@ -268,3 +269,68 @@ remote_dir = "~/not_preferred/{project_name}"
 """)
         hpc_config, _, _ = load_jernerics_config(tmp_path)
         assert hpc_config.remote_dir == "~/preferred/{project_name}"
+
+
+class TestNormalizeTime:
+    def test_none_string_returns_none(self):
+        assert _normalize_time("none") is None
+
+    def test_none_string_case_insensitive(self):
+        assert _normalize_time("None") is None
+        assert _normalize_time("NONE") is None
+
+    def test_none_value_returns_none(self):
+        assert _normalize_time(None) is None
+
+    def test_time_string_passes_through(self):
+        assert _normalize_time("1:00:00") == "1:00:00"
+
+    def test_other_string_passes_through(self):
+        assert _normalize_time("72:00:00") == "72:00:00"
+
+
+class TestTimeNoneInConfig:
+    def test_toml_time_none(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
+
+[tool.jernerics.container]
+time = "none"
+""")
+        hpc_config, _, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.time is None
+
+    def test_toml_time_none_case_insensitive(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
+
+[tool.jernerics.container]
+time = "None"
+""")
+        hpc_config, _, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.time is None
+
+    def test_toml_time_normal(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
+
+[tool.jernerics.container]
+time = "2:00:00"
+""")
+        hpc_config, _, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.time == "2:00:00"
+
+    def test_toml_time_default(self, tmp_path):
+        pyproject = tmp_path / "pyproject.toml"
+        pyproject.write_text("""
+[project]
+name = "test-project"
+""")
+        hpc_config, _, _ = load_jernerics_config(tmp_path)
+        assert hpc_config.time == "1:00:00"
