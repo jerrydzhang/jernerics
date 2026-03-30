@@ -312,7 +312,7 @@ def run_slurm(
     bind_str = " \\\n    --bind ".join(bind_args)
 
     script_lines.append(
-        f"apptainer exec --contain --nv --pwd /work --bind {bind_str} container.sif \\"
+        f"apptainer exec --fakeroot --contain --nv --pwd /work --bind {bind_str} container.sif \\"
     )
     script_lines.append("    python -c \"$(cat <<'EOF'")
     script_lines.append("import os")
