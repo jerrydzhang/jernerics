@@ -13,6 +13,10 @@ wheels/
 .jernerics/
 .cache/
 .ruff_cache/
+.coverage
+
+# Editor junk
+*#*#*
 
 # Testing
 .hypothesis/
@@ -24,4 +28,5 @@ results/
 result
 
 # AI Stuff
+.opencode/
 .ralph/
