@@ -1,112 +1,55 @@
 ---
 name: jernerics-experiment
 description: |
-  Use when running ML experiments, training, pipelines, or any DAG-based 
-  workflow. Trigger on "run this", "train", "experiment", "pipeline", 
-  "parallel configs", "workflow", or "execute". Handles both local and HPC 
-  execution based on workload scope - the agent evaluates and chooses 
-  appropriately. Also use when user explicitly mentions clusters, HPC, GPU, 
-  or remote execution needs.
+  Use when writing or running ML experiments, training pipelines, or DAG-based
+  workflows with jernerics. Covers DAG authoring, config files, local/HPC
+  execution, monitoring, and results retrieval. Trigger on "run experiment",
+  "train", "pipeline", "dag", "config", "hyperparameter sweep", or when working
+  with dag.py / config.py files in a jernerics project.
 ---
 
 # Jernerics Experiment Runner
 
-This skill enables autonomous execution of ML experiments using jernerics, a 
-DAG-based experiment framework. Write experiments once, run them locally or 
-on HPC without code changes.
+Write experiments as DAGs, run them locally or on HPC clusters without code changes.
 
-## Vision
+## Before You Start
 
-The agent's job is to:
-1. Evaluate the scope of the workload
-2. Write or verify the DAG and configuration
-3. Execute locally or on HPC based on scope
-4. Monitor progress and handle issues
-5. Retrieve results automatically
-
-## Quick Start
-
-**Before setting up, ask the user:**
+Ask the user:
 1. Is this a GPU or CPU project?
-2. What HPC cluster/host will they use?
-3. How much memory and time do they typically need?
-4. Do they need persistent cache directories (e.g., for Julia, model checkpoints)?
+2. Will they run on an HPC cluster? If so, is SSH access already configured?
+3. How many parallel configurations do they expect?
 
-Then configure accordingly.
+## Project Setup
 
-### Option 1: Initialize new project
+### New project
 
 ```bash
 jernerics init my-project
 cd my-project
 ```
 
-This creates scaffolding, but **you must customize `pyproject.toml`** based on the user's needs. See "Prerequisites Check" for all available options.
+Creates `pyproject.toml` (with `[tool.jernerics]` config), `container.def`, and `src/`.
+Edit `pyproject.toml` to add dependencies, then `uv sync`.
 
-### Option 2: Add to existing project
+### Existing project
 
-Add a `[tool.jernerics]` section to `pyproject.toml`. **Do not copy a minimal template** - ask the user about their requirements and configure appropriately. See "Prerequisites Check" for all options.
+Ensure `[tool.jernerics]` config exists in `pyproject.toml`. At minimum:
 
-## Scope Evaluation
+```toml
+[tool.jernerics.hpc]
+host = "user@cluster.edu"
+remote_dir = "~/projects/{project_name}"
+```
 
-Decide between local and HPC execution based on:
+See the `jernerics-hpc` skill for full configuration options.
 
-| Factor | Local | HPC |
-|--------|-------|-----|
-| Duration | < 10 min | > 10 min or unknown |
-| GPU needed | No | Yes |
-| Parallel configs | 1-2 | 3+ |
-| Memory | < 8GB | > 8GB or unknown |
-| Data size | Small, local | Large, on cluster |
+## DAG Authoring
 
-**Default**: When uncertain, start with a quick local test, then scale to HPC.
+A DAG is a set of tasks with dependency relationships. Tasks are Python functions decorated with `@task`.
 
-## Prerequisites Check
+### Basic pattern
 
-Before executing on HPC, verify:
-
-1. **Jernerics config exists** in `pyproject.toml`:
-   ```toml
-   # Required: HPC connection settings
-   [tool.jernerics.hpc]
-   host = "user@cluster.edu"                           # SSH host (or set JERNERICS_HPC_HOST env var)
-   remote_dir = "~/projects/{project_name}"            # Remote project directory
-   cache_dir = "/scratch/$USER/jernerics"              # Optional: persistent cache for binds
-
-   # Optional: Default SLURM settings for container builds
-   [tool.jernerics.container]
-   partition = "priority"                              # Default partition
-   time = "1:00:00"                                    # Default time limit
-   mem = "16G"                                         # Default memory
-   cpus = 4                                            # Default CPU count
-
-   # Optional: Safety limits
-   [tool.jernerics.safety]
-   max_concurrent_jobs = 10                            # Max parallel SLURM jobs
-
-   # Optional: Interactive shell defaults
-   [tool.jernerics.shell]
-   partition = "priority-gpu"                          # Default shell partition
-   cpus = 4                                            # Default shell CPUs
-   mem = "32G"                                         # Default shell memory
-   gpu = 1                                             # Default GPU count
-   time = "2:00:00"                                    # Default shell time
-
-   # Optional: Persistent directory binds (see "Advanced: Container Persistence")
-   [tool.jernerics.binds]
-   "/work/.julia_env" = "julia_env"                    # container_path = cache_subdir
-   "/work/.julia_depot" = "julia_depot"
-   ```
-
-   **Minimal required config**: Only `[tool.jernerics.hpc]` with `host` is required. All other settings have sensible defaults.
-
-2. **SSH access works**: Test with `ssh <host> 'echo ok'`
-
-3. **Container exists** (or build it): Check if `container.sif` exists on remote
-
-## DAG Structure
-
-Use the DAG context manager to auto-register tasks. Dependencies are injected by function name.
+Use `with DAG() as dag:` to auto-register tasks:
 
 ```python
 from jernerics.dag import DAG, task
@@ -115,348 +58,248 @@ with DAG() as dag:
 
     @task
     def load_data(config):
-        data = ...  # load data
-        return {"data": data, "n_samples": len(data)}
+        return {"data": [1, 2, 3]}
 
     @task(depends_on=[load_data])
-    def preprocess(load_data, config):
-        # load_data is the return value from the load_data task
-        data = load_data["data"]
-        return {"processed": processed_data}
+    def process(load_data, config):
+        return {"result": [x * 2 for x in load_data["data"]]}
 
-    @task(depends_on=[preprocess])
-    def train(preprocess, config):
-        return {"model_path": "model.pt", "accuracy": 0.95}
-
-    @task(depends_on=[train])
-    def evaluate(train, config):
-        return {"final_metrics": {...}}
+    @task(depends_on=[process])
+    def save(process, config):
+        return {"status": "done"}
 ```
 
-**Key points**:
-- Use `with DAG() as dag:` to auto-register decorated tasks
-- Dependencies are injected as kwargs by function name: `depends_on=[load_data]` -> `def preprocess(load_data, ...)`
-- `config` is always available, contains current hyperparameters
-- Return dicts to pass data between tasks
-- Tasks without dependencies run in parallel
+### Dependency injection
 
-**Serial execution**: For libraries incompatible with Python threading, use:
+Dependencies are injected by **function name matching**. If `depends_on=[load_data]`, then `load_data`'s return value is passed as the `load_data` parameter:
+
 ```python
-dag.run(config, executor_type="serial")  # Runs tasks in main thread
+@task(depends_on=[load_data])
+def process(load_data, config):  # load_data receives the return value
+    ...
 ```
+
+**Rules:**
+- `config` is always injected as the current hyperparameter dict
+- Return dicts from tasks — they're passed to downstream tasks
+- Tasks without dependencies run in parallel (thread pool)
+- If a task fails, all downstream tasks are skipped with an `Exception` result
+- Independent tasks still run even if another branch fails
+
+### Serial execution
+
+For libraries incompatible with Python threading:
+
+```python
+dag.run(config, executor_type="serial")
+```
+
+### Context manager vs manual registration
+
+`with DAG() as dag:` is preferred — tasks are auto-registered. The manual alternative:
+
+```python
+dag = DAG()
+dag.add_task(my_task)
+```
+
+Use the context manager unless you need fine-grained control.
+
+### Path handling
+
+Always use `jernerics.paths` for file paths — they work correctly both locally and inside containers:
+
+```python
+from jernerics.paths import work, bind, is_hpc
+
+@task
+def save_results(config):
+    # work() returns project root locally, /work on HPC
+    results_dir = work() / "results"
+    results_dir.mkdir(exist_ok=True)
+
+    # bind() returns a persistent cache directory
+    checkpoints = bind("checkpoints")  # must be configured in pyproject.toml
+
+    # is_hpc() checks if running on cluster
+    if is_hpc():
+        ...
+```
+
+**Do not** use relative paths like `Path("results")` — they break inside containers.
+
+### Config parameter naming conflict
+
+If a task has a parameter named `config` that clashes with the injected config dict, jernerics warns and the DAG config overwrites it. Rename the parameter.
 
 ## Configuration File
 
-Create `config.py` alongside `dag.py`:
+Create `config.py` (or any name) alongside `dag.py`:
 
 ```python
 from jernerics import merge_configs
 
-# Shared base configuration
-_base = {
-    "seed": 42,
-    "model": "gpt",
-    "epochs": 10,
-}
+# Shared base
+_base = {"seed": 42, "epochs": 10}
 
-# Override specific values per experiment
+# Each dict runs the full DAG once
 configs = merge_configs(_base, [
     {"lr": 0.001, "batch_size": 32},
     {"lr": 0.01, "batch_size": 64},
-    {"lr": 0.001, "batch_size": 32, "epochs": 20},  # Override epochs too
 ])
 
-# SLURM settings (for HPC execution)
+# SLURM settings (HPC only)
 slurm = {
-    "partition": "priority",       # Use "priority-gpu" for GPU queue
+    "partition": "priority",       # "priority-gpu" for GPU queue
     "time": "2:00:00",
     "mem": "16G",
-    "cpus": 4,
-    "gres": "gpu:1",               # Optional: Request N GPUs (alternative to priority-gpu)
+    "gres": "gpu:1",               # Request GPUs
 }
 
-# Optional: Parallel task execution (default: CPU count, min 4 if undetectable)
+# Optional: parallel task execution (default: cpu_count, min 4)
 # max_workers = 4
 
-# Optional: Executor type - "thread" (default) or "serial"
+# Optional: "thread" (default) or "serial"
 # executor_type = "thread"
 ```
 
-**Config format**:
-- `configs`: List of dicts, each dict runs the full DAG once (required)
-- `slurm`: SLURM settings for HPC (optional, empty dict if omitted)
-- `max_workers`: Parallel task execution (optional, defaults to `min(cpu_count, 8)`)
-- `executor_type`: `"thread"` for parallel or `"serial"` for sequential execution (optional, defaults to `"thread"`)
+**Required variables:**
+- `configs`: list of dicts — each triggers a full DAG run
 
-**GPU configuration**:
-1. Use `partition: "priority-gpu"` - routes to GPU queue (without this we are put on the general queue which may have longer wait times for jobs)
-2. Use `gres: "gpu:N"` - requests N GPUs on any partition 
+**Optional variables:**
+- `slurm`: dict of SLURM options for HPC (default: `{}`)
+- `max_workers`: int — thread pool size (default: `os.cpu_count() or 4`)
+- `executor_type`: `"thread"` or `"serial"` (default: `"thread"`)
 
-## Execution Workflow
+**GPU options:**
+- Set `partition: "priority-gpu"` to route to GPU queue
+- Set `gres: "gpu:N"` to request N GPUs
 
-### 1. Local Test (Recommended First)
+**Config overrides with `merge_configs`:**
+
+```python
+from jernerics import merge_configs
+
+base = {"seed": 42, "model": "gpt", "epochs": 10}
+configs = merge_configs(base, [
+    {"lr": 0.001},                          # inherits everything from base
+    {"lr": 0.01, "epochs": 20},             # overrides epochs too
+])
+# Result: [{"seed": 42, "model": "gpt", "epochs": 10, "lr": 0.001},
+#          {"seed": 42, "model": "gpt", "epochs": 20, "lr": 0.01}]
+```
+
+## Execution
+
+### 1. Local test
 
 ```bash
 jernerics run local dag.py config.py
 ```
 
-**Options**:
-- `--results-dir, -r`: Directory for results (default: results)
-- `--container, -c`: Path to container file (.sif or tarball) for testing containerized execution
-- `--gpu/--no-gpu`: Enable GPU support via --nv flag (default: enabled)
-- `--timeout, -t`: Timeout in seconds for each config run
+Options: `--results-dir`, `--container`, `--gpu/--no-gpu`, `--timeout`
 
-Verify basic functionality before HPC submission.
-
-### 2. Build Container (HPC Only)
+### 2. Submit to HPC
 
 ```bash
-jernerics container build --force
+jernerics run slurm dag.py config.py          # Submit
+jernerics run slurm dag.py config.py --dry-run  # Preview SLURM script
+jernerics run slurm dag.py config.py -S time=4:00:00  # Override SLURM option
 ```
 
-**Options**:
-- `--force, -f`: Force rebuild even if up to date
-- `--dry-run`: Preview actions without executing
+Options: `--results-dir`, `--set KEY=VALUE`, `--dry-run`
 
-Required once per project. Builds Apptainer container on HPC.
+**Prerequisites for HPC:** SSH access configured, container built (`jernerics container build`).
 
-### 3. Dry Run (HPC Only)
+### 3. Monitor
 
 ```bash
-jernerics run slurm dag.py config.py --dry-run
+jernerics jobs                     # Running jobs
+jernerics jobs --all               # Include completed
+jernerics logs <job_id> --follow   # Stream logs
+jernerics logs <job_id> --array-index 1  # Array job logs
+jernerics logs <job_id> --stderr   # Stderr instead of stdout
 ```
 
-Review the SLURM script before submission.
+Array jobs (multiple configs) require `--array-index` to view specific task logs.
 
-### 4. Submit to HPC
+### 4. Retrieve results
 
 ```bash
-jernerics run slurm dag.py config.py
+jernerics results <job_id>                    # Download to results/<job_id>/
+jernerics results <job_id> --local-dir path   # Custom directory
 ```
 
-**Options**:
-- `--results-dir, -r`: Directory for results
-- `--set, -S KEY=VALUE`: Override SLURM option (e.g., `--set time=4:00:00`)
-- `--dry-run`: Preview without submitting
-
-Outputs job ID. Record it for monitoring.
-
-### 5. Monitor Job
+### 5. Cancel
 
 ```bash
-jernerics jobs                    # List running jobs
-jernerics jobs --all              # List all jobs including completed
-jernerics logs <job_id> --array-index 1   # View logs for array job
+jernerics cancel <job_id>
+jernerics cancel --all
 ```
 
-**Note**: Array jobs (multiple configs) require `--array-index` for log viewing.
+## State and Resume
 
-### 6. Retrieve Results
-
-```bash
-jernerics results <job_id>
-```
-
-Downloads results to `results/<job_id>/` locally. Do this automatically when job completes.
-
-## Output Artifacts
-
-Always use `work()` to get the correct results directory - this ensures paths work both locally and in containers:
-
-```python
-import json
-from jernerics.paths import work
-
-@task(depends_on=[train])
-def save_results(train, config):
-    # Use work() to get project root (works in container and locally)
-    results_dir = work() / "results"
-    results_dir.mkdir(exist_ok=True)
-    
-    # Save large artifacts
-    model_path = results_dir / "model.pt"
-    torch.save(train["model"], model_path)
-    
-    # Return lightweight summary
-    return {
-        "model_path": str(model_path),
-        "accuracy": train["accuracy"],
-        "config": config,
-    }
-```
-
-**Important**: Do not use relative paths like `Path("results")` or `Path(config.get("results_dir"))` - these may resolve incorrectly inside containers. Always use `work()` as the base.
-
-### Provenance Tracking
-
-Jernerics automatically tracks experiment provenance. Access it programmatically:
-
-```python
-from jernerics.dag import DAG, Provenance
-
-# Provenance is saved to .jernerics/runs/<run_id>_provenance.json
-# Contains: git SHA, jernerics version, config hash, container info, timestamps
-
-# Read provenance from a previous run
-provenance = Provenance.from_json(Path(".jernerics/runs/latest_provenance.json"))
-print(f"Git SHA: {provenance.git_sha}")
-print(f"Config: {provenance.config}")
-```
-
-This enables reproducibility and debugging of experiment conditions.
-
-## Advanced: Container Persistence
-
-Some libraries need persistent writable directories across runs (Julia environments, model checkpoints, cached datasets). Jernerics provides a bind mount system for this.
-
-### The Problem
-
-`/work` is your project root and files written there ARE persisted. However, two issues arise:
-
-1. **Read-only container paths**: Directories like `.venv/` are built into the container and are read-only at runtime. Libraries that try to modify these paths will fail.
-
-2. **Home directory writes**: Libraries often write to `~/.julia`, `~/.cache`, etc. These locations are ephemeral in containers - data is lost between runs often leading to more overhead per run.
-
-The bind mount system provides writable directories outside the container image that persist across runs. As a side benefit, it keeps runtime artifacts (checkpoints, caches) out of your project directory.
-
-**Note**: Files in `cache_dir` are persisted between runs but should be treated as temporary - they may be deleted at any time. Use it for caches, checkpoints, and other reproducible artifacts, not for permanent storage.
-
-### Solution: cache_dir + binds
-
-**1. Configure cache location**:
-
-```toml
-[tool.jernerics.hpc]
-cache_dir = "/scratch/$USER/jernerics"  # Scratch storage for temporary caches
-```
-
-**2. Define bind mappings**:
-
-```toml
-[tool.jernerics.binds]
-"/work/.julia_env" = "julia_env"      # container_path = cache_subdir
-"/work/.julia_depot" = "julia_depot"
-"/work/checkpoints" = "checkpoints"
-```
-
-This creates:
-- On HPC: `/scratch/$USER/jernerics/<project>/julia_env` mounted to `/work/.julia_env`
-- Locally: `~/.cache/jernerics/<project>/julia_env` (for testing)
-
-**3. Use the paths API in your code**:
-
-```python
-from jernerics.paths import bind, work, is_hpc
-
-# Check if running on HPC
-if is_hpc():
-    print("Running on HPC cluster")
-
-# Get the work directory (/work on HPC, project dir locally)
-results_dir = work() / "results"
-
-# Get a bind-mounted directory
-julia_env = bind("julia_env")  # Returns Path("/work/.julia_env") on HPC
-os.environ["JULIA_PROJECT"] = str(julia_env)
-```
-
-### When to Rebuild Containers
-
-Understanding when containers need rebuilding saves time:
-
-| Change Type | Rebuild Needed? | Why |
-|-------------|-----------------|-----|
-| Source code changes | **No** | Source is bind-mounted at runtime |
-| Config changes | **No** | Config is passed at runtime |
-| `pyproject.toml` dependencies | **Yes** | Dependencies are baked into container |
-| `container.def` changes | **Yes** | Container definition changed |
-| New binds added | **No** | Binds are mounted at runtime |
-
-**Rule of thumb**: If it's in the container definition or lockfile, rebuild. If it's your code or config, no rebuild needed.
-
-## Common Issues
-
-| Issue | Cause | Fix |
-|-------|-------|-----|
-| OOM | Memory too small | Increase `slurm["mem"]` |
-| Timeout | Time too short | Increase `slurm["time"]` |
-| Job not found | Wrong job ID | Check `jernerics jobs --all` |
-| Log error | Array job without index | Add `--array-index N` |
-| Missing dependency | Typo in `depends_on` | Use exact function name |
-| Container missing | Not built | Run `jernerics container build` |
-| DAG hangs | Threading incompatibility | Use `executor_type="serial"` |
-| BindNotFound | Bind name not in config | Add to `[tool.jernerics.binds]` |
-
-## Resume Failed Runs
-
-Jernerics saves state to `.jernerics/runs/`. To resume:
+Jernerics auto-saves execution state to `.jernerics/runs/`. To resume a failed/interrupted run:
 
 ```python
 from jernerics.dag import DAG
 
-with DAG("dag.py") as dag:
-    results = dag.resume(config, config_index=0)
+dag = DAG("dag.py")
+dag.add_task(my_task)
+results = dag.resume(config, config_index=0)
 ```
 
-Useful for long runs that were interrupted.
+- Completed tasks are skipped (uses saved output)
+- Failed tasks are retried
+- Can specify `run_id=` to resume a specific run, or omit to resume the latest
 
-## Job Management
+## Provenance
+
+Every run automatically tracks: git SHA, jernerics version, Python version, platform, container path, SLURM job ID, timestamps. Saved to `.jernerics/runs/<run_id>_provenance.json`.
+
+```python
+from jernerics.dag import Provenance
+p = Provenance.from_json(Path(".jernerics/runs/<run_id>_provenance.json"))
+```
+
+## Interactive Shell
 
 ```bash
-jernerics cancel <job_id>         # Cancel specific job
-jernerics cancel --all            # Cancel all your jobs
-jernerics clean --all --force     # Clean remote artifacts
+jernerics shell                    # Defaults from pyproject.toml
+jernerics shell --gpu 1 --mem 16G  # Override options
+jernerics shell --no-container     # Raw shell, no container
 ```
 
-## Interactive Development
-
-```bash
-jernerics shell --gpu 1 --mem 16G --time 1:00:00
-```
-
-**Options**:
-- `--gpu, -g N`: Number of GPUs (0 = no GPU)
-- `--cpus, -c N`: Number of CPUs
-- `--mem, -m SIZE`: Memory allocation (e.g., 4G)
-- `--time, -t LIMIT`: Time limit (e.g., 1:00:00)
-- `--partition, -p NAME`: Partition name
-- `--no-container`: Enter shell without container
-
-Get an interactive shell on HPC for debugging.
+Options: `--gpu`, `--cpus`, `--mem`, `--time`, `--partition`, `--no-container`
 
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
-| `jernerics init [dir]` | Create project scaffolding (`--template`, `--force`) |
+| `jernerics init [dir]` | Create project (`--template`, `--force`) |
 | `jernerics run local <dag> <config>` | Run locally (`--results-dir`, `--container`, `--gpu/--no-gpu`, `--timeout`) |
 | `jernerics run slurm <dag> <config>` | Submit to HPC (`--results-dir`, `--set`, `--dry-run`) |
-| `jernerics container build` | Build on HPC (`--force`, `--dry-run`) |
+| `jernerics container build` | Build container on HPC (`--force`, `--dry-run`) |
 | `jernerics jobs` | List jobs (`--all`, `--json`) |
-| `jernerics logs <job_id>` | View logs (`--follow`, `--array-index`) |
+| `jernerics logs <job_id>` | View logs (`--follow`, `--array-index`, `--stderr`) |
 | `jernerics results <job_id>` | Download results (`--local-dir`) |
-| `jernerics shell` | Interactive shell (`--gpu`, `--cpus`, `--mem`, `--time`, `--partition`, `--no-container`) |
+| `jernerics shell` | Interactive HPC shell (`--gpu`, `--cpus`, `--mem`, `--time`, `--partition`, `--no-container`) |
 | `jernerics cancel <job_id>` | Cancel jobs (`--all`) |
 | `jernerics clean` | Delete remote artifacts (`--results`, `--logs`, `--container`, `--all`, `--force`) |
 
-## Full Examples
+## Common Issues
 
-See complete working examples at:
-https://github.com/jerrydzhang/jernerics/tree/main/examples/
+| Issue | Fix |
+|-------|-----|
+| OOM | Increase `slurm["mem"]` |
+| Timeout | Increase `slurm["time"]` |
+| DAG hangs | Use `executor_type="serial"` |
+| Missing dependency | Check `depends_on` uses exact function reference |
+| Array log error | Add `--array-index N` |
+| Container missing on HPC | Run `jernerics container build` |
 
-- `container-basic/` - CPU-only workflow
-- `container-gpu/` - GPU workflow with PyTorch
+## Examples
 
-## Feedback
-
-If you encounter friction points, confusing behavior, or missing documentation 
-while using jernerics OR this skill, submit feedback via GitHub issues:
-
-```bash
-gh issue create --repo jerrydzhang/jernerics --title "<brief description>" --body "<details>"
-```
-
-Include:
-- What you were trying to do
-- What was confusing or didn't work
-- Any workarounds you found
+See `examples/` in the repo:
+- `container-basic/` — CPU workflow
+- `container-gpu/` — GPU workflow with PyTorch

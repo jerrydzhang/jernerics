@@ -119,7 +119,7 @@ class ConfigNotFound(Exception):
 class NoConfigsFound(Exception):
     pass
 
-def load_config(config_file: str) -> tuple[dict[str, Any], list[dict[str, Any]], int | None]:
+def load_config(config_file: str) -> tuple[dict[str, Any], list[dict[str, Any]], int | None, str | None]:
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_file}")
     
@@ -214,24 +214,38 @@ class TestDAGValidation:
 ```python
 from jernerics.dag import DAG, task
 
+# Preferred: context manager auto-registers tasks
+with DAG() as dag:
+
+    @task
+    def setup(config):
+        return {"done": True}
+
+    @task(depends_on=[setup])
+    def train(setup, config):
+        return setup["done"]
+
+# Alternative: manual registration
 dag = DAG()
 
 @task
 def setup(config):
     return {"done": True}
 
-@task(depends_on=[setup])
-def train(setup, config):
-    return setup["done"]
+dag.add_task(setup)
 ```
 
 ### Configuration Files
 
 ```python
-configs = [
-    {"seed": 1, "lr": 0.001},
-    {"seed": 2, "lr": 0.01},
-]
+from jernerics import merge_configs
+
+_base = {"seed": 42, "model": "gpt"}
+
+configs = merge_configs(_base, [
+    {"lr": 0.001, "batch_size": 32},
+    {"lr": 0.01, "batch_size": 64},
+])
 
 slurm = {
     "partition": "priority",
@@ -240,7 +254,10 @@ slurm = {
 }
 
 max_workers = 4
+executor_type = "thread"  # or "serial"
 ```
+
+`load_config()` returns `(slurm, configs, max_workers, executor_type)`.
 
 ## HPC/Remote Path Handling
 
