@@ -431,8 +431,7 @@ def _generate_sweep_script(
 
     lines.append("")
 
-    remote_dir_for_db = remote_dir.replace("~", "$HOME").rstrip("/")
-    storage_url = f"sqlite:///{remote_dir_for_db}/.jernerics/optuna/{study_name}.db"
+    storage_url = f"sqlite:////work/.jernerics/optuna/{study_name}.db"
 
     bind_args = ['"${REMOTE_DIR}:/work"']
     if hpc_config.cache_dir and binds:
