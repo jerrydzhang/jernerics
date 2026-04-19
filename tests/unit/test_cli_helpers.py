@@ -1,10 +1,11 @@
+import optuna
 import pytest
 
 from jernerics._cli_helpers import (
     ConfigNotFound,
     ExitCode,
-    NoConfigsFound,
     NoContainerFound,
+    SweepConfig,
     find_container,
     find_pyproject_dir,
     get_script_path,
@@ -42,7 +43,7 @@ class TestGetScriptPath:
 
 class TestLoadJernericsConfig:
     def test_load_jernerics_config_basic(self, tmp_project):
-        hpc, _shell, _binds = load_jernerics_config(tmp_project)
+        hpc, _shell, _binds, _mlflow = load_jernerics_config(tmp_project)
 
         assert hpc.host == "user@hpc.example.edu"
         assert hpc.remote_dir == "~/experiments/{project_name}"
@@ -73,7 +74,7 @@ version = "0.1.0"
 """)
 
         monkeypatch.setenv("JERNERICS_HPC_HOST", "env@host.example.edu")
-        hpc, _shell, _binds = load_jernerics_config(project_dir)
+        hpc, _shell, _binds, _mlflow = load_jernerics_config(project_dir)
 
         assert hpc.host == "env@host.example.edu"
 
@@ -133,183 +134,135 @@ class TestFindContainer:
 
 
 class TestLoadConfig:
-    def test_load_config_basic(self, tmp_path):
+    def test_load_config_sweep(self, tmp_path):
         config_content = """
-configs = [
-    {"seed": 1, "lr": 0.001},
-    {"seed": 2, "lr": 0.01},
-]
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
+import optuna
 
-        slurm, configs, max_workers, executor_type = load_config(str(config_file))
+_base = {"seed": 42, "model": "gpt"}
 
-        assert slurm == {}
-        assert len(configs) == 2
-        assert configs[0]["seed"] == 1
-        assert configs[1]["lr"] == 0.01
-        assert max_workers is None
-        assert executor_type is None
-
-    def test_load_config_with_slurm(self, tmp_path):
-        config_content = """
-slurm = {
-    "time": "1:00:00",
-    "mem": "4G",
-    "partition": "gpu",
-}
-
-configs = [{"seed": 1}]
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
-
-        assert slurm["time"] == "1:00:00"
-        assert slurm["mem"] == "4G"
-        assert slurm["partition"] == "gpu"
-        assert len(configs) == 1
-
-    def test_load_config_empty_slurm(self, tmp_path):
-        config_content = """
-configs = [{"x": 1}]
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
-
-        assert slurm == {}
-        assert configs == [{"x": 1}]
-
-    def test_load_config_missing_configs_raises(self, tmp_path):
-        config_content = """
-slurm = {"time": "1:00:00"}
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        try:
-            load_config(str(config_file))
-            raise AssertionError("Should have raised NoConfigsFound")
-        except NoConfigsFound as e:
-            assert "configs" in str(e)
-
-    def test_load_config_empty_configs_raises(self, tmp_path):
-        config_content = """
-configs = []
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        try:
-            load_config(str(config_file))
-            raise AssertionError("Should have raised NoConfigsFound")
-        except NoConfigsFound:
-            pass
-
-    def test_load_config_nonexistent_file(self):
-        try:
-            load_config("/nonexistent/config.py")
-            raise AssertionError("Should have raised FileNotFoundError")
-        except FileNotFoundError:
-            pass
-
-    def test_load_config_with_imports(self, tmp_path):
-        config_content = """
-import os
-
-configs = [{"env": os.environ.get("TEST_VAR", "default")}]
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
-
-        assert "env" in configs[0]
-
-    def test_load_config_with_computed_values(self, tmp_path):
-        config_content = """
-seeds = [1, 2, 3]
-lrs = [0.001, 0.01]
-
-configs = [{"seed": s, "lr": l} for s in seeds for l in lrs]
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
-
-        assert len(configs) == 6
-        assert configs[0] == {"seed": 1, "lr": 0.001}
-        assert configs[-1] == {"seed": 3, "lr": 0.01}
-
-    def test_load_config_single_config(self, tmp_path):
-        config_content = """
-configs = [{"single": "config"}]
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
-
-        assert len(configs) == 1
-        assert configs[0] == {"single": "config"}
-
-    def test_load_config_with_nested_data(self, tmp_path):
-        config_content = """
-configs = [
-    {
-        "model": {"layers": 3, "hidden": 64},
-        "training": {"epochs": 100, "batch": 32},
+def search_space(trial):
+    return {
+        "lr": trial.suggest_float("lr", 1e-5, 1e-1, log=True),
+        "batch_size": trial.suggest_int("batch_size", 16, 128),
     }
-]
+
+n_trials = 50
+sampler = optuna.samplers.TPESampler(seed=42)
+objective_task = "train"
+objective_metric = "loss"
+direction = "minimize"
+
+slurm = {"partition": "gpu"}
+max_workers = 4
+executor_type = "thread"
 """
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
 
-        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
+        sweep = load_config(str(config_file))
 
-        assert configs[0]["model"]["layers"] == 3
-        assert configs[0]["training"]["epochs"] == 100
+        assert isinstance(sweep, SweepConfig)
+        assert sweep._base == {"seed": 42, "model": "gpt"}
+        assert sweep.search_space is not None
+        assert sweep.n_trials == 50
+        assert isinstance(sweep.sampler, optuna.samplers.TPESampler)
+        assert sweep.objective_task == "train"
+        assert sweep.objective_metric == "loss"
+        assert sweep.direction == "minimize"
+        assert sweep.slurm == {"partition": "gpu"}
+        assert sweep.max_workers == 4
+        assert sweep.executor_type == "thread"
+
+    def test_load_config_single_no_search_space(self, tmp_path):
+        config_content = """
+_base = {"seed": 1, "lr": 0.001}
+n_trials = 1
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep._base == {"seed": 1, "lr": 0.001}
+        assert sweep.search_space is None
+        assert sweep.n_trials == 1
+        assert sweep.sampler is None
+        assert sweep.objective_task is None
+        assert sweep.objective_metric is None
+        assert sweep.direction == "minimize"
+
+    def test_load_config_grid_sampler(self, tmp_path):
+        config_content = """
+import optuna
+
+_base = {}
+n_trials = 10
+sampler = optuna.samplers.GridSampler({"lr": [0.001, 0.01, 0.1]})
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert isinstance(sweep.sampler, optuna.samplers.GridSampler)
+
+    def test_load_config_slurm_max_workers_executor_type(self, tmp_path):
+        config_content = """
+slurm = {"time": "1:00:00", "mem": "4G"}
+max_workers = 8
+executor_type = "serial"
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep.slurm == {"time": "1:00:00", "mem": "4G"}
+        assert sweep.max_workers == 8
+        assert sweep.executor_type == "serial"
+
+    def test_load_config_missing_file_raises(self):
+        with pytest.raises(FileNotFoundError):
+            load_config("/nonexistent/config.py")
+
+    def test_load_config_no_base_defaults_empty(self, tmp_path):
+        config_content = """
+n_trials = 5
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep._base == {}
+
+    def test_load_config_defaults(self, tmp_path):
+        config_content = """
+pass
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep._base == {}
+        assert sweep.search_space is None
+        assert sweep.n_trials == 1
+        assert sweep.sampler is None
+        assert sweep.objective_task is None
+        assert sweep.objective_metric is None
+        assert sweep.direction == "minimize"
+        assert sweep.slurm == {}
+        assert sweep.max_workers is None
+        assert sweep.executor_type is None
 
     def test_load_config_with_special_characters_in_paths(self, tmp_path):
         config_file = tmp_path / "config with spaces.py"
-        config_file.write_text('configs = [{"x": 1}]')
+        config_file.write_text('_base = {"x": 1}')
 
-        _slurm, configs, _max_workers, _executor_type = load_config(str(config_file))
+        sweep = load_config(str(config_file))
 
-        assert configs == [{"x": 1}]
-
-    def test_load_config_with_max_workers(self, tmp_path):
-        config_content = """
-max_workers = 4
-
-configs = [{"seed": 1}]
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        _slurm, configs, max_workers, _executor_type = load_config(str(config_file))
-
-        assert max_workers == 4
-        assert len(configs) == 1
-
-    def test_load_config_with_executor_type(self, tmp_path):
-        config_content = """
-executor_type = "serial"
-
-configs = [{"seed": 1}]
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        _slurm, configs, _max_workers, executor_type = load_config(str(config_file))
-
-        assert executor_type == "serial"
-        assert len(configs) == 1
+        assert sweep._base == {"x": 1}
 
     def test_load_config_directory_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="Config path is not a file"):

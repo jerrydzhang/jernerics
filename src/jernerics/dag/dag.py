@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import runpy
 import warnings
+from contextlib import nullcontext
 from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Any
@@ -12,12 +13,46 @@ from .state import RunState, TaskStatus
 from .task import Task
 
 
+def _flatten_dict(
+    d: dict[str, Any],
+    parent_key: str = "",
+    sep: str = ".",
+) -> dict[str, str]:
+    items: list[tuple[str, str]] = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(_flatten_dict(v, new_key, sep).items())
+        else:
+            items.append((new_key, str(v)))
+    return dict(items)
+
+
+def _log_results_as_metrics(results: dict[str, Any]) -> None:
+    import mlflow
+
+    for task_name, result in results.items():
+        if isinstance(result, Exception):
+            continue
+        if isinstance(result, dict):
+            for key, value in result.items():
+                if isinstance(value, (int, float)):
+                    mlflow.log_metric(f"{task_name}.{key}", value)  # type: ignore[union-attr]
+        elif isinstance(result, (int, float)):
+            mlflow.log_metric(task_name, result)  # type: ignore[union-attr]
+
+
 class DAG:
-    def __init__(self, dag_file: str | Path | None = None):
+    def __init__(
+        self,
+        dag_file: str | Path | None = None,
+        project_name: str | None = None,
+    ):
         self.tasks: dict[str, Task] = {}
         self.dag_file: Path | None = (
             Path(dag_file) if dag_file and str(dag_file).strip() else None
         )
+        self.project_name = project_name
         self.state_dir: Path | None = None
         self._discovered = False
         self._token = None
@@ -126,26 +161,49 @@ class DAG:
             provenance.to_json(self.state_dir)
 
         exc_info: BaseException | None = None
-        try:
-            return execute_dag(
-                self.tasks,
-                config,
-                state=state,
-                max_workers=max_workers,
-                executor_type=executor_type,
-            )
-        except BaseException as e:
-            exc_info = e
-            raise
-        finally:
-            if provenance and self.state_dir:
-                try:
-                    provenance.finalize()
-                    provenance.to_json(self.state_dir)
-                except BaseException as e:
-                    if exc_info is not None:
-                        raise e from exc_info
-                    raise
+
+        use_mlflow = self.project_name is not None and self.dag_file is not None
+        if use_mlflow:
+            import mlflow
+
+            assert self.dag_file is not None  # guaranteed by use_mlflow check
+            mlflow.set_experiment(f"{self.project_name}/{self.dag_file.stem}")
+
+        mlflow_context = (
+            mlflow.start_run(run_name=f"trial_{config_index}")  # type: ignore[union-attr]
+            if use_mlflow
+            else nullcontext()
+        )
+
+        with mlflow_context:
+            if use_mlflow:
+                mlflow.log_params(_flatten_dict(config))  # type: ignore[union-attr]
+
+            try:
+                results = execute_dag(
+                    self.tasks,
+                    config,
+                    state=state,
+                    max_workers=max_workers,
+                    executor_type=executor_type,
+                )
+            except BaseException as e:
+                exc_info = e
+                raise
+            finally:
+                if provenance and self.state_dir:
+                    try:
+                        provenance.finalize()
+                        provenance.to_json(self.state_dir)
+                    except BaseException as e:
+                        if exc_info is not None:
+                            raise e from exc_info
+                        raise
+
+            if use_mlflow and exc_info is None:
+                _log_results_as_metrics(results)
+
+            return results
 
     def resume(
         self,

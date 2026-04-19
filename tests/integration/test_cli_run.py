@@ -295,7 +295,10 @@ remote_dir = "~/experiments/{project_name}/"
             text=True,
         )
         assert result.returncode == 0
-        assert "//" not in result.stdout
+        # sqlite:/// is a valid scheme prefix, not a double-slash in paths
+        for line in result.stdout.split("\n"):
+            stripped = line.replace("sqlite:///", "")
+            assert "//" not in stripped, f"Double slash found in: {line}"
 
 
 class TestRunSlurmScriptGeneration:
@@ -405,7 +408,7 @@ remote_dir = "~/experiments/{project_name}"
             text=True,
         )
         assert result.returncode == 0
-        assert "JERNERICS_CONFIG_FILE=/work/configs/experiment.py" in result.stdout
+        assert '"/work/configs/experiment.py"' in result.stdout
 
     def test_dag_in_subdirectory_preserves_relative_path(self, tmp_path):
         project_dir = tmp_path / "test-project"
@@ -445,7 +448,7 @@ remote_dir = "~/experiments/{project_name}"
             text=True,
         )
         assert result.returncode == 0
-        assert "JERNERICS_DAG_FILE=/work/experiments/pipeline.py" in result.stdout
+        assert '"/work/experiments/pipeline.py"' in result.stdout
 
     def test_both_files_in_subdirectories(self, tmp_path):
         project_dir = tmp_path / "test-project"
@@ -489,11 +492,8 @@ remote_dir = "~/experiments/{project_name}"
             text=True,
         )
         assert result.returncode == 0
-        assert "JERNERICS_DAG_FILE=/work/experiments/pipeline.py" in result.stdout
-        assert (
-            "JERNERICS_CONFIG_FILE=/work/experiments/configs/experiment.py"
-            in result.stdout
-        )
+        assert '"/work/experiments/pipeline.py"' in result.stdout
+        assert '"/work/experiments/configs/experiment.py"' in result.stdout
 
     def test_rejects_path_traversal_in_dag_path(self, tmp_path):
         project_dir = tmp_path / "test-project"

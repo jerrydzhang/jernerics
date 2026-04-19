@@ -2,6 +2,7 @@ import os
 import runpy
 import sys
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from importlib import resources
@@ -26,8 +27,18 @@ DEFAULT_CONTAINER_SIF = ".jernerics/container.sif"
 DEFAULT_CONTAINER_TAR = ".jernerics/container.tar.gz"
 
 
-class NoConfigsFound(Exception):
-    pass
+@dataclass
+class SweepConfig:
+    _base: dict[str, Any]
+    search_space: Callable[..., dict[str, Any]] | None
+    n_trials: int
+    sampler: Any  # optuna sampler, None = TPESampler default
+    objective_task: str | None
+    objective_metric: str | None
+    direction: str
+    slurm: dict[str, Any]
+    max_workers: int | None
+    executor_type: str | None
 
 
 class NoContainerFound(Exception):
@@ -61,6 +72,12 @@ class BindsConfig(dict[str, str]):
 
 
 @dataclass
+class MlflowConfig:
+    tracking_uri: str | None = None
+    username: str | None = None
+
+
+@dataclass
 class ShellConfig:
     partition: str | None = None
     cpus: int | None = None
@@ -71,7 +88,7 @@ class ShellConfig:
 
 def load_jernerics_config(
     project_dir: str | Path,
-) -> tuple[HpcConfig, ShellConfig, BindsConfig]:
+) -> tuple[HpcConfig, ShellConfig, BindsConfig, MlflowConfig]:
     project_path = Path(project_dir)
     pyproject_path = project_path / "pyproject.toml"
 
@@ -91,6 +108,8 @@ def load_jernerics_config(
     safety_config = tool_config.get("safety", {})
     shell_config = tool_config.get("shell", {})
     binds_config = tool_config.get("binds", {})
+
+    mlflow_config = tool_config.get("mlflow", {})
 
     hpc = HpcConfig(
         host=os.environ.get("JERNERICS_HPC_HOST") or hpc_config.get("host"),
@@ -114,7 +133,12 @@ def load_jernerics_config(
 
     binds = BindsConfig(binds_config)
 
-    return hpc, shell, binds
+    mlflow = MlflowConfig(
+        tracking_uri=mlflow_config.get("tracking_uri"),
+        username=mlflow_config.get("username"),
+    )
+
+    return hpc, shell, binds, mlflow
 
 
 def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
@@ -147,9 +171,7 @@ def get_project_name(project_dir: str | Path) -> str:
     return project_path.resolve().name
 
 
-def load_config(
-    config_file: str,
-) -> tuple[dict[str, Any], list[dict[str, Any]], int | None, str | None]:
+def load_config(config_file: str) -> SweepConfig:
     config_path = Path(config_file)
     if not config_path.exists():
         raise FileNotFoundError(f"Config file not found: {config_file}")
@@ -162,15 +184,18 @@ def load_config(
     except (SyntaxError, ImportError, PermissionError) as e:
         raise RuntimeError(f"Failed to load config file '{config_file}': {e}") from e
 
-    configs = module_ns.get("configs", [])
-    if not configs:
-        raise NoConfigsFound("No 'configs' list found in configuration file.")
-
-    slurm = module_ns.get("slurm", {})
-    max_workers = module_ns.get("max_workers", None)
-    executor_type = module_ns.get("executor_type", None)
-
-    return slurm, configs, max_workers, executor_type
+    return SweepConfig(
+        _base=module_ns.get("_base", {}),
+        search_space=module_ns.get("search_space", None),
+        n_trials=module_ns.get("n_trials", 1),
+        sampler=module_ns.get("sampler", None),
+        objective_task=module_ns.get("objective_task", None),
+        objective_metric=module_ns.get("objective_metric", None),
+        direction=module_ns.get("direction", "minimize"),
+        slurm=module_ns.get("slurm", {}),
+        max_workers=module_ns.get("max_workers", None),
+        executor_type=module_ns.get("executor_type", None),
+    )
 
 
 def get_script_path(script_name: str, script_module: str = "jernerics.scripts") -> str:
