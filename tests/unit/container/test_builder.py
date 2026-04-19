@@ -172,7 +172,7 @@ class TestGenerateBuildScript:
             assert "/custom/output/path/build_%j.out" in script
             assert "/custom/output/path/build_%j.err" in script
 
-    def test_script_includes_apptainer_tmpdir_when_configured(self, tmp_path):
+    def test_script_uses_dev_shm_for_apptainer_tmpdir(self, tmp_path):
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'\n")
         (tmp_path / "uv.lock").write_text("")
 
@@ -186,33 +186,15 @@ class TestGenerateBuildScript:
             time="1:00:00",
             mem="16G",
             cpus=4,
-            cache_dir="/scratch/user/jernerics",
         )
 
         script = builder._generate_build_script("/home/user/projects/test/logs")
 
-        assert "export APPTAINER_TMPDIR=/scratch/user/jernerics/test/tmp" in script
-
-    def test_script_omits_apptainer_tmpdir_when_not_configured(self, tmp_path):
-        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'\n")
-        (tmp_path / "uv.lock").write_text("")
-
-        builder = ContainerBuilder.__new__(ContainerBuilder)
-        builder.project_dir = tmp_path
-        builder.project_name = "test"
-        builder.config = HpcConfig(
-            host="user@hpc.example.edu",
-            remote_dir="~/projects/test",
-            partition="priority",
-            time="1:00:00",
-            mem="16G",
-            cpus=4,
-            cache_dir=None,
+        assert (
+            "export APPTAINER_TMPDIR=/dev/shm/apptainer-build-$SLURM_JOB_ID" in script
         )
-
-        script = builder._generate_build_script("/home/user/projects/test/logs")
-
-        assert "APPTAINER_TMPDIR" not in script
+        assert "mkdir -p $APPTAINER_TMPDIR" in script
+        assert "trap 'rm -rf $APPTAINER_TMPDIR' EXIT" in script
 
 
 class TestNeedsRebuild:
@@ -368,7 +350,9 @@ class TestBuild:
             assert result == "12345"
 
             mock_syncer_instance.sync_project.assert_called_once()
-            mock_ssh_instance.mkdir.assert_called_once()
+            mock_ssh_instance.mkdir.assert_called_once_with(
+                "~/experiments/test-project/logs"
+            )
             mock_slurm_instance.submit.assert_called_once()
 
             meta_file = tmp_project / ".jernerics" / "jobs" / "12345.json"

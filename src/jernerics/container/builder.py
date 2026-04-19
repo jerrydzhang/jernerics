@@ -59,17 +59,6 @@ class ContainerBuilder:
         remote_dir = self.config.remote_dir.replace("{project_name}", self.project_name)
         return remote_dir.rstrip("/")
 
-    def _get_cache_dir(self) -> str | None:
-        if not self.config.cache_dir:
-            return None
-        return self.config.cache_dir.rstrip("/")
-
-    def _get_build_tmpdir(self) -> str | None:
-        cache_dir = self._get_cache_dir()
-        if not cache_dir:
-            return None
-        return f"{cache_dir}/{self.project_name}/tmp"
-
     def _generate_build_script(self, slurm_output_dir: str) -> str:
         remote_dir = self._get_remote_dir()
         quoted_remote_dir = _quote_path(remote_dir)
@@ -77,11 +66,6 @@ class ContainerBuilder:
         time = _validate_slurm_value(self.config.time or "1:00:00", "time")
         mem = _validate_slurm_value(self.config.mem, "mem")
         cpus = _validate_slurm_value(str(self.config.cpus), "cpus")
-
-        tmpdir_export = ""
-        build_tmpdir = self._get_build_tmpdir()
-        if build_tmpdir:
-            tmpdir_export = f"export APPTAINER_TMPDIR={build_tmpdir}\n"
 
         return f"""#!/bin/bash
 #SBATCH --job-name=container-build
@@ -97,7 +81,11 @@ set -e
 echo "=== Build started at $(date) ==="
 echo "Running on $(hostname)"
 
-{tmpdir_export}cd {quoted_remote_dir}
+export APPTAINER_TMPDIR=/dev/shm/apptainer-build-$SLURM_JOB_ID
+mkdir -p $APPTAINER_TMPDIR
+trap 'rm -rf $APPTAINER_TMPDIR' EXIT
+
+cd {quoted_remote_dir}
 
 echo
 echo "--- Building container with Apptainer + uv sync ---"
@@ -149,31 +137,21 @@ echo "=== Build completed at $(date) ==="
             print(f"Project dir: {self.project_dir}")
             print(f"Remote dir: {remote_dir}")
             print(f"HPC host: {self.config.host}")
-            build_tmpdir = self._get_build_tmpdir()
-            if build_tmpdir:
-                print(f"Build tmpdir: {build_tmpdir}")
             print()
             print("Would sync files and submit build job with:")
             print(self._generate_build_script(slurm_output_dir))
             return None
 
-        print(f"[1/4] Syncing project to {self.config.host}:{remote_dir}")
+        print(f"[1/3] Syncing project to {self.config.host}:{remote_dir}")
         self.syncer.sync_project(self.project_dir)
 
-        print("[2/4] Creating logs directory...")
+        print("[2/3] Creating logs directory...")
         self.ssh.mkdir(f"{remote_dir}/logs")
-
-        build_tmpdir = self._get_build_tmpdir()
-        if build_tmpdir:
-            print(f"[3/5] Creating build tmpdir ({build_tmpdir})...")
-            self.ssh.mkdir(build_tmpdir)
-        else:
-            print("[3/5] (No cache_dir configured, using default /tmp)")
 
         build_script = self._generate_build_script(slurm_output_dir)
         remote_script_path = f"{remote_dir}/build_container.sh"
 
-        print("[4/5] Uploading build script...")
+        print("[3/3] Uploading build script...")
         quoted_script_path = _quote_path(remote_script_path)
         result = subprocess.run(
             ["ssh", self.config.host, f"cat > {quoted_script_path}"],
@@ -187,7 +165,7 @@ echo "=== Build completed at $(date) ==="
                 f"Failed to upload build script: {result.stderr or result.stdout}"
             )
 
-        print("[5/5] Submitting build job to SLURM...")
+        print("Submitting build job to SLURM...")
         job_id = self.slurm.submit(remote_script_path)
 
         job_meta = {
