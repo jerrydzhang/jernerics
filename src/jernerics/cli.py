@@ -680,6 +680,10 @@ def results(
         str | None,
         typer.Option("--local-dir", "-d", help="Local directory to download to"),
     ] = None,
+    clean_logs: Annotated[
+        bool,
+        typer.Option("--clean-logs", help="Delete remote SLURM logs after download"),
+    ] = False,
 ):
     _, syncer, _, remote_dir, _, _, _ = _get_hpc_client()
 
@@ -706,6 +710,41 @@ def results(
     else:
         print(f"Error: Failed to download results: {result.stderr.strip()}")
         raise SystemExit(ExitCode.SSH_ERROR)
+
+    if clean_logs:
+        project_dir = find_pyproject_dir() or Path.cwd()
+        meta_file = project_dir / ".jernerics" / "jobs" / f"{job_id}.json"
+
+        if not meta_file.exists():
+            print(f"Warning: No job metadata found for {job_id}, skipping log cleanup")
+            return
+
+        meta = json.loads(meta_file.read_text())
+        meta_remote_dir = meta.get("remote_dir", remote_dir)
+        num_configs = meta.get("num_configs", 1)
+        output_pattern = meta.get("output_pattern", DEFAULT_SLURM["output"])
+        error_pattern = meta.get("error_pattern", DEFAULT_SLURM["error"])
+
+        log_files: list[str] = []
+        for i in range(1, num_configs + 1):
+            for pattern in (output_pattern, error_pattern):
+                expanded = expand_slurm_pattern(pattern, job_id=job_id, array_task_id=i)
+                if not expanded.startswith(("/", "~")):
+                    expanded = f"{meta_remote_dir}/{expanded}"
+                log_files.append(expanded)
+
+        if not log_files:
+            return
+
+        quoted_files = " ".join(_quote_path(f) for f in log_files)
+        rm_result = syncer.ssh.run(f"rm -f {quoted_files}", check=False)
+
+        if rm_result.returncode == 0:
+            print(
+                f"Cleaned {len(log_files)} log files from {meta_remote_dir}/.jernerics/logs/"
+            )
+        else:
+            print(f"Warning: Failed to clean some log files: {rm_result.stderr}")
 
 
 @app.command("shell")
