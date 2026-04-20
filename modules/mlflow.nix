@@ -52,9 +52,25 @@ in
 
     package = mkOption {
       type = types.package;
-      default = pkgs.python3.withPackages (ps: [ ps.mlflow ps.flask-wtf ]);
+      default =
+        let
+          # nixpkgs builds mlflow from source, which omits the JS frontend.
+          # Install from the PyPI wheel instead, which includes pre-built UI assets.
+          mlflow-wheel = pkgs.python3.pkgs.buildPythonPackage rec {
+            pname = "mlflow";
+            version = pkgs.python3.pkgs.mlflow.version;
+            format = "wheel";
+            src = pkgs.fetchurl {
+              url = "https://files.pythonhosted.org/packages/d5/d5/a20b87c6cd99395fee04d6034686512305530c71ceaabe3a151eeaa25ed7/mlflow-3.8.1-py3-none-any.whl";
+              hash = "sha256-42f26b52438fdb615588e150407c6516d0f64d417436dfc75599c525a464f210";
+            };
+            # Inherit dependencies from the nixpkgs package
+            inherit (pkgs.python3.pkgs.mlflow) propagatedBuildInputs nativeBuildInputs;
+          };
+        in
+        pkgs.python3.withPackages (ps: [ mlflow-wheel ps.flask-wtf ]);
       defaultText = lib.literalExpression "pkgs.python3.withPackages (ps: [ ps.mlflow ps.flask-wtf ])";
-      description = "Python environment containing mlflow and auth dependencies.";
+      description = "Python environment containing mlflow (with UI) and auth dependencies.";
     };
 
     host = mkOption {
