@@ -877,7 +877,7 @@ wheels = [
 [[package]]
 name = "jernerics"
 version = "1.0.0"
-source = { git = "https://github.com/jerrydzhang/jernerics.git?branch=optuna-mlflow-integration#a0e7719e86c2d1defaa70cd98d074138df3363d2" }
+source = { git = "https://github.com/jerrydzhang/jernerics.git?branch=optuna-mlflow-integration#9a3d3fa91382fb13773df971e3ede7b5cdf33cac" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "mlflow" },

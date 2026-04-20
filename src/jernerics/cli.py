@@ -514,6 +514,18 @@ def _generate_sweep_script(
     lines.append("            study.tell(trial, value)")
     lines.append("        else:")
     lines.append("            study.tell(trial, 0.0)")
+    for line in [
+        "        for task_name, task_result in results.items():",
+        "            if isinstance(task_result, Exception):",
+        "                continue",
+        "            if isinstance(task_result, dict):",
+        "                for k, v in task_result.items():",
+        "                    if isinstance(v, (int, float)):",
+        '                        mlflow.log_metric(f"{task_name}.{k}", v)',
+        "            elif isinstance(task_result, (int, float)):",
+        "                mlflow.log_metric(task_name, task_result)",
+    ]:
+        lines.append(line)
     lines.append('        print("DAG completed")')
     lines.append("    except Exception:")
     lines.append("        study.tell(trial, state=optuna.trial.TrialState.FAIL)")
