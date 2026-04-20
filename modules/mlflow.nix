@@ -99,6 +99,13 @@ in
       description = "Path to a file containing the admin password. sops-nix compatible.";
       example = "/run/secrets/mlflow-admin-password";
     };
+
+    flaskWtfPackage = mkOption {
+      type = types.package;
+      default = pkgs.python3.pkgs.flask-wtf;
+      defaultText = lib.literalExpression "pkgs.python3.pkgs.flask-wtf";
+      description = "Flask-WTF package for basic auth CSRF validation. Must match mlflow's Python version.";
+    };
   };
 
   config = mkIf cfg.enable {
@@ -107,20 +114,6 @@ in
         assertion = cfg.adminPasswordFile != null;
         message = "services.jernerics.mlflow.adminPasswordFile must be set.";
       }
-    ];
-
-    # mlflow-server from nixpkgs doesn't include auth extras.
-    # Inject flask-wtf so --app-name basic-auth works.
-    nixpkgs.overlays = [
-      (_final: prev: {
-        pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
-          (py-final: py-prev: {
-            mlflow = py-prev.mlflow.overridePythonAttrs (old: {
-              propagatedBuildInputs = old.propagatedBuildInputs or [ ] ++ [ py-final.flask-wtf ];
-            });
-          })
-        ];
-      })
     ];
 
     users.users.mlflow = {
@@ -139,6 +132,7 @@ in
         User = "mlflow";
         Group = "mlflow";
         ExecStart = startScript;
+        Environment = "PYTHONPATH=${cfg.flaskWtfPackage}/${cfg.flaskWtfPackage.pythonModule.sitePackages}";
         StateDirectory = "mlflow";
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
