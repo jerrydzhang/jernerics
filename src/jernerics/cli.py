@@ -471,14 +471,12 @@ def _generate_sweep_script(
             mlflow_env_lines.append(
                 f"export MLFLOW_TRACKING_URI={mlflow_config.tracking_uri}"
             )
-    if mlflow_config.username:
         mlflow_env_lines.append(
-            f"export MLFLOW_TRACKING_USERNAME={mlflow_config.username}"
+            "export MLFLOW_TRACKING_USERNAME=${MLFLOW_TRACKING_USERNAME:-${JERNERICS_MLFLOW_USERNAME}}"
         )
-    mlflow_env_lines.append(
-        "export MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD}"
-    )
-    if mlflow_config.tracking_uri:
+        mlflow_env_lines.append(
+            "export MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD}"
+        )
         mlflow_env_lines.append(
             f"export JERNERICS_MLFLOW_REMOTE_URI={mlflow_config.tracking_uri}"
         )

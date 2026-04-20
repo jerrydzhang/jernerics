@@ -183,8 +183,13 @@ class TestSweepScriptGeneration:
         )
 
         assert "export MLFLOW_TRACKING_URI=http://localhost:5000" in script
-        assert "export MLFLOW_TRACKING_USERNAME=testuser" in script
+        username_line = (
+            "export MLFLOW_TRACKING_USERNAME="
+            "${MLFLOW_TRACKING_USERNAME:-${JERNERICS_MLFLOW_USERNAME}}"
+        )
+        assert username_line in script
         assert "export MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD}" in script
+        assert "export JERNERICS_MLFLOW_REMOTE_URI=http://localhost:5000" in script
 
     def test_mlflow_env_vars_absent_when_no_config(self, tmp_path):
         sweep = SweepConfig(
