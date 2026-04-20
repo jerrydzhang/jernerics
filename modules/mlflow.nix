@@ -35,6 +35,7 @@ let
     sed "s/^admin_password = .*/admin_password = $PASSWORD/" ${authConfig} > "$TMPDIR/basic_auth.ini"
 
     export MLFLOW_AUTH_CONFIG_PATH="$TMPDIR/basic_auth.ini"
+    export MLFLOW_FLASK_SERVER_SECRET_KEY="${builtins.hashString "sha256" cfg.stateDir}"
 
     exec ${cfg.package}/bin/mlflow server \
       --backend-store-uri "${cfg.backendStoreUri}" \
