@@ -49,7 +49,14 @@ in
   options.services.jernerics.mlflow = {
     enable = mkEnableOption "MLflow tracking server";
 
-    package = mkPackageOption pkgs "mlflow-server" { };
+    package = mkOption {
+      type = types.package;
+      default = pkgs.mlflow-server.overridePythonAttrs (prev: {
+        propagatedBuildInputs = prev.propagatedBuildInputs or [ ] ++ [ pkgs.python3.pkgs.flask-wtf ];
+      });
+      defaultText = lib.literalExpression "pkgs.mlflow-server (with flask-wtf)";
+      description = "MLflow server package. Defaults to mlflow-server with auth dependencies.";
+    };
 
     host = mkOption {
       type = types.str;
