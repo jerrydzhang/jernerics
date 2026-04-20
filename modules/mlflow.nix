@@ -49,14 +49,7 @@ in
   options.services.jernerics.mlflow = {
     enable = mkEnableOption "MLflow tracking server";
 
-    package = mkOption {
-      type = types.package;
-      default = pkgs.mlflow-server.overridePythonAttrs (prev: {
-        propagatedBuildInputs = prev.propagatedBuildInputs or [ ] ++ [ pkgs.python3.pkgs.flask-wtf ];
-      });
-      defaultText = lib.literalExpression "pkgs.mlflow-server (with flask-wtf)";
-      description = "MLflow server package. Defaults to mlflow-server with auth dependencies.";
-    };
+    package = mkPackageOption pkgs "mlflow-server" { };
 
     host = mkOption {
       type = types.str;
@@ -114,6 +107,20 @@ in
         assertion = cfg.adminPasswordFile != null;
         message = "services.jernerics.mlflow.adminPasswordFile must be set.";
       }
+    ];
+
+    # mlflow-server from nixpkgs doesn't include auth extras.
+    # Inject flask-wtf so --app-name basic-auth works.
+    nixpkgs.overlays = [
+      (_final: prev: {
+        pythonPackagesExtensions = prev.pythonPackagesExtensions ++ [
+          (py-final: py-prev: {
+            mlflow = py-prev.mlflow.overridePythonAttrs (old: {
+              propagatedBuildInputs = old.propagatedBuildInputs or [ ] ++ [ py-final.flask-wtf ];
+            });
+          })
+        ];
+      })
     ];
 
     users.users.mlflow = {
