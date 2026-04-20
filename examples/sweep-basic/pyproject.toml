@@ -14,6 +14,9 @@ dependencies = [
 git = "https://github.com/jerrydzhang/jernerics.git"
 branch = "optuna-mlflow-integration"
 
+[tool.uv.sources.mlflow-export-import]
+git = "https://github.com/mlflow/mlflow-export-import.git"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/sweep_basic"]
 
