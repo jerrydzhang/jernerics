@@ -445,7 +445,7 @@ def _generate_sweep_script(
     lines.append("mkdir -p .jernerics/optuna")
     lines.append(
         f"flock .jernerics/optuna/init.lock apptainer exec"
-        f" --writable-tmpfs --contain --nv --pwd /work --bind {bind_str}"
+        f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
         f' container.sif python -c "'
         f"import optuna;"
         f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
@@ -454,7 +454,7 @@ def _generate_sweep_script(
     lines.append("")
 
     lines.append(
-        f"apptainer exec --writable-tmpfs --contain --nv --pwd /work --bind {bind_str} container.sif \\"
+        f"apptainer exec --fakeroot --contain --nv --pwd /work --bind {bind_str} container.sif \\"
     )
     lines.append("    python -c \"$(cat <<'EOF'")
 
