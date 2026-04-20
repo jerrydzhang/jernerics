@@ -134,8 +134,10 @@ def load_jernerics_config(
     binds = BindsConfig(binds_config)
 
     mlflow = MlflowConfig(
-        tracking_uri=mlflow_config.get("tracking_uri"),
-        username=mlflow_config.get("username"),
+        tracking_uri=os.environ.get("JERNERICS_MLFLOW_TRACKING_URI")
+        or mlflow_config.get("tracking_uri"),
+        username=os.environ.get("JERNERICS_MLFLOW_USERNAME")
+        or mlflow_config.get("username"),
     )
 
     return hpc, shell, binds, mlflow
