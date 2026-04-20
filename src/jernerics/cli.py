@@ -657,12 +657,14 @@ _remote_uri = os.environ.get('JERNERICS_MLFLOW_REMOTE_URI')
 if _run_id and _remote_uri:
     try:
         from mlflow_export_import.copy.copy_run import copy
-        copy(
+        _dst_run = copy(
             src_run_id=_run_id,
             dst_experiment_name=experiment_name,
             src_mlflow_uri=os.environ.get('MLFLOW_TRACKING_URI'),
             dst_mlflow_uri=_remote_uri,
         )
+        from mlflow import MlflowClient as _MC
+        _MC(_remote_uri).set_tag(_dst_run.info.run_id, "jernerics.source_run_id", _run_id)
     except Exception as _e:
         print(f"Warning: mlflow sync failed: {{_e}}")
 """
@@ -777,10 +779,12 @@ def mlflow_sync() -> None:
     print("[2/3] Running sync via apptainer...")
     apptainer_cmd = (
         f"cd {_quote_path(remote_dir)} && "
+        "MLFLOW_TRACKING_USERNAME=${MLFLOW_TRACKING_USERNAME:-${JERNERICS_MLFLOW_USERNAME}} "
+        "MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD} "
         f"apptainer exec --fakeroot --contain --bind {bind_str} "
         f"container.sif python /scratch/jernerics_sync.py"
     )
-    result = ssh.run(apptainer_cmd)
+    result = ssh.run(apptainer_cmd, check=False)
 
     print("[3/3] Cleaning up sync script...")
     ssh.run(f"rm -f {_quote_path(script_path)}", check=False)
