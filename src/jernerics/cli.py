@@ -40,6 +40,9 @@ app.add_typer(run_app, name="run", help="Run DAG experiments.")
 container_app = typer.Typer()
 app.add_typer(container_app, name="container", help="Build and manage containers.")
 
+mlflow_app = typer.Typer()
+app.add_typer(mlflow_app, name="mlflow", help="Manage mlflow experiment tracking.")
+
 DEFAULT_SLURM = {
     "output": ".jernerics/logs/%A_%a.out",
     "error": ".jernerics/logs/%A_%a.err",
@@ -333,16 +336,20 @@ def run_slurm(
 
     print("[2/4] Ensuring log directory exists...")
     ssh.mkdir(f"{remote_dir}/.jernerics/logs")
-    ssh.mkdir(f"{remote_dir}/.jernerics/optuna")
 
-    if hpc_config.cache_dir and binds:
+    if hpc_config.cache_dir:
         cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
-        print(f"[3/4] Creating cache directories in {cache_dir}/{project_name}...")
-        for cache_subdir in binds.values():
-            cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
-            ssh.mkdir(cache_path)
+        print(f"[3/4] Creating scratch directories in {cache_dir}/{project_name}...")
+        ssh.mkdir(f"{cache_dir}/{project_name}/optuna")
+        if mlflow_config.tracking_uri:
+            ssh.mkdir(f"{cache_dir}/{project_name}/mlruns")
+        if binds:
+            for cache_subdir in binds.values():
+                cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
+                ssh.mkdir(cache_path)
     else:
-        print("[3/4] (No cache binds configured)")
+        ssh.mkdir(f"{remote_dir}/.jernerics/optuna")
+        print("[3/4] (No cache dir configured)")
 
     if not syncer.container_exists():
         print(
@@ -434,11 +441,36 @@ def _generate_sweep_script(
     lines.append(f"cd {safe_shell_path(remote_dir)}")
     lines.append("REMOTE_DIR=$(cd . && pwd)")
 
+    use_scratch = bool(hpc_config.cache_dir)
+
+    if use_scratch:
+        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
+        cache_dir = cache_dir.replace("~", "$HOME")
+        scratch_dir = f"{cache_dir}/{project_name}"
+
+    storage_url = (
+        f"sqlite:////scratch/optuna/{study_name}.db"
+        if use_scratch
+        else f"sqlite:////work/.jernerics/optuna/{study_name}.db"
+    )
+
+    bind_args = ['"${REMOTE_DIR}:/work"']
+    if use_scratch:
+        bind_args.append(f'"{scratch_dir}:/scratch"')
+        if binds:
+            for container_path, cache_subdir in binds.items():
+                cache_path = f"{scratch_dir}/{cache_subdir}"
+                bind_args.append(f'"{cache_path}:{container_path}"')
+    bind_str = " \\\n    --bind ".join(bind_args)
+
     mlflow_env_lines = []
     if mlflow_config.tracking_uri:
-        mlflow_env_lines.append(
-            f"export MLFLOW_TRACKING_URI={mlflow_config.tracking_uri}"
-        )
+        if use_scratch:
+            mlflow_env_lines.append("export MLFLOW_TRACKING_URI=file:///scratch/mlruns")
+        else:
+            mlflow_env_lines.append(
+                f"export MLFLOW_TRACKING_URI={mlflow_config.tracking_uri}"
+            )
     if mlflow_config.username:
         mlflow_env_lines.append(
             f"export MLFLOW_TRACKING_USERNAME={mlflow_config.username}"
@@ -446,32 +478,36 @@ def _generate_sweep_script(
     mlflow_env_lines.append(
         "export MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD}"
     )
+    if mlflow_config.tracking_uri:
+        mlflow_env_lines.append(
+            f"export JERNERICS_MLFLOW_REMOTE_URI={mlflow_config.tracking_uri}"
+        )
 
     for line in mlflow_env_lines:
         lines.append(line)
 
     lines.append("")
 
-    storage_url = f"sqlite:////work/.jernerics/optuna/{study_name}.db"
-
-    bind_args = ['"${REMOTE_DIR}:/work"']
-    if hpc_config.cache_dir and binds:
-        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
-        cache_dir = cache_dir.replace("~", "$HOME")
-        for container_path, cache_subdir in binds.items():
-            cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
-            bind_args.append(f'"{cache_path}:{container_path}"')
-    bind_str = " \\\n    --bind ".join(bind_args)
-
-    lines.append("mkdir -p .jernerics/optuna")
-    lines.append(
-        f"flock .jernerics/optuna/init.lock apptainer exec"
-        f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
-        f' container.sif python -c "'
-        f"import optuna;"
-        f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
-        f' direction={sweep.direction!r}, load_if_exists=True)"'
-    )
+    if use_scratch:
+        lines.append(f"mkdir -p {scratch_dir}/optuna")
+        lines.append(
+            f"flock {scratch_dir}/optuna/init.lock apptainer exec"
+            f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
+            f' container.sif python -c "'
+            f"import optuna;"
+            f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
+            f' direction={sweep.direction!r}, load_if_exists=True)"'
+        )
+    else:
+        lines.append("mkdir -p .jernerics/optuna")
+        lines.append(
+            f"flock .jernerics/optuna/init.lock apptainer exec"
+            f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
+            f' container.sif python -c "'
+            f"import optuna;"
+            f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
+            f' direction={sweep.direction!r}, load_if_exists=True)"'
+        )
     lines.append("")
 
     lines.append(
@@ -544,7 +580,7 @@ def _get_sweep_runner_code(
     project_name: str | None = None,
 ) -> str:
     dag_stem = Path(dag_file).stem
-    experiment_name = f"{project_name}/{dag_stem}" if project_name else dag_stem
+    experiment_name = f"{project_name}/{study_name}" if project_name else study_name
     project_name_arg = f", project_name={project_name!r}" if project_name else ""
     # ruff: noqa: E501
     return f"""
@@ -587,8 +623,10 @@ if _use_mlflow:
 
 _mlflow_run = mlflow.start_run(run_name=f'trial_{{trial.number}}') if _use_mlflow else nullcontext()
 
+_run_id = None
 with _mlflow_run:
     if _use_mlflow:
+        _run_id = _mlflow_run.info.run_id
         mlflow.log_params({{k: str(v) for k, v in params.items()}})
     try:
         results = dag.run(config, config_index=trial.number, config_path=config_file, max_workers=sweep.max_workers, executor_type=sweep.executor_type or 'thread')
@@ -611,22 +649,162 @@ with _mlflow_run:
             study.tell(trial, value)
         else:
             study.tell(trial, 0.0)
-        for task_name, task_result in results.items():
-            if isinstance(task_result, Exception):
-                continue
-            if isinstance(task_result, dict):
-                for k, v in task_result.items():
-                    if isinstance(v, (int, float)):
-                        if _use_mlflow:
-                            mlflow.log_metric(f"{{task_name}}.{{k}}", v)
-            elif isinstance(task_result, (int, float)):
-                if _use_mlflow:
-                    mlflow.log_metric(task_name, task_result)
+
         print("DAG completed")
     except Exception:
         study.tell(trial, state=optuna.trial.TrialState.FAIL)
         raise
+
+_remote_uri = os.environ.get('JERNERICS_MLFLOW_REMOTE_URI')
+if _run_id and _remote_uri:
+    try:
+        from mlflow_export_import.copy.copy_run import copy
+        copy(
+            src_run_id=_run_id,
+            dst_experiment_name=experiment_name,
+            src_mlflow_uri=os.environ.get('MLFLOW_TRACKING_URI'),
+            dst_mlflow_uri=_remote_uri,
+        )
+    except Exception as _e:
+        print(f"Warning: mlflow sync failed: {{_e}}")
 """
+
+
+def _get_mlflow_sync_script(remote_uri: str, username: str | None = None) -> str:
+    """Generate a self-contained Python sync script to run inside the container."""
+    return f"""
+import json
+import os
+import sys
+
+from mlflow import MlflowClient
+from mlflow_export_import.copy.copy_run import copy
+
+src_client = MlflowClient("file:///scratch/mlruns")
+dst_client = MlflowClient({remote_uri!r})
+
+synced = 0
+skipped = 0
+failed = []
+
+for exp in src_client.search_experiments():
+    if exp.name == "Default":
+        continue
+    runs = src_client.search_runs(experiment_ids=[exp.experiment_id])
+    for run in runs:
+        src_run_id = run.info.run_id
+        existing = dst_client.search_runs(
+            experiment_ids=[],
+            filter_string=f"tags.jernerics.source_run_id = '{{src_run_id}}'",
+        )
+        if len(existing) > 0:
+            skipped += 1
+            continue
+        try:
+            dst_run = copy(
+                src_run_id=src_run_id,
+                dst_experiment_name=exp.name,
+                src_mlflow_uri="file:///scratch/mlruns",
+                dst_mlflow_uri={remote_uri!r},
+            )
+            dst_client.set_tag(dst_run.info.run_id, "jernerics.source_run_id", src_run_id)
+            synced += 1
+        except Exception as e:
+            failed.append({{"run_id": src_run_id, "experiment": exp.name, "error": str(e)}})
+
+result = {{"synced": synced, "skipped": skipped, "failed": failed}}
+print(json.dumps(result))
+if failed:
+    sys.exit(1)
+"""
+
+
+@mlflow_app.command("sync")
+def mlflow_sync() -> None:
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        hpc_config, _, _binds, mlflow_config = load_jernerics_config(project_dir)
+    except ConfigNotFound as e:
+        print(f"Error: {e}")
+        print("Run 'jernerics init' to add [tool.jernerics] config.")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+
+    if not hpc_config.host:
+        print(
+            "Error: No HPC host configured.\n"
+            "  Set JERNERICS_HPC_HOST environment variable, or\n"
+            "  Add host to [tool.jernerics.hpc] in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    if not hpc_config.cache_dir:
+        print(
+            "Error: cache_dir must be configured in [tool.jernerics.hpc] for mlflow sync."
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    if not mlflow_config.tracking_uri:
+        print(
+            "Error: tracking_uri must be configured in [tool.jernerics.mlflow] for mlflow sync."
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    project_name = get_project_name(project_dir)
+    remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
+    remote_dir = remote_dir.replace("{project-name}", project_name)
+    cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
+    cache_dir = cache_dir.replace("~", "$HOME")
+    scratch_dir = f"{cache_dir}/{project_name}"
+
+    ssh = SSHClient(hpc_config.host)
+
+    script = _get_mlflow_sync_script(mlflow_config.tracking_uri, mlflow_config.username)
+    script_path = f"{scratch_dir}/jernerics_sync.py"
+
+    print(f"[1/3] Writing sync script to {hpc_config.host}:{script_path}...")
+    result = ssh.run(
+        f"cat > {_quote_path(script_path)} << 'JERNERICS_EOF'\n{script}\nJERNERICS_EOF"
+    )
+    if result.returncode != 0:
+        print(f"Error: Failed to write sync script: {result.stderr}")
+        raise SystemExit(ExitCode.SSH_ERROR)
+
+    bind_args = [f'"{scratch_dir}:/scratch"']
+    bind_str = " \\\n    --bind ".join(bind_args)
+
+    print("[2/3] Running sync via apptainer...")
+    apptainer_cmd = (
+        f"cd {_quote_path(remote_dir)} && "
+        f"apptainer exec --fakeroot --contain --bind {bind_str} "
+        f"container.sif python /scratch/jernerics_sync.py"
+    )
+    result = ssh.run(apptainer_cmd)
+
+    print("[3/3] Cleaning up sync script...")
+    ssh.run(f"rm -f {_quote_path(script_path)}", check=False)
+
+    if result.returncode != 0:
+        print(f"Sync completed with errors:\n{result.stdout}")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+
+    if result.stdout.strip():
+        try:
+            summary = json.loads(result.stdout.strip())
+            print(f"Synced: {summary.get('synced', 0)} runs")
+            print(f"Skipped: {summary.get('skipped', 0)} runs (already synced)")
+            if summary.get("failed"):
+                for entry in summary["failed"]:
+                    print(
+                        f"  Failed: {entry['run_id']} ({entry['experiment']}): {entry['error']}"
+                    )
+        except json.JSONDecodeError:
+            print(result.stdout)
+    else:
+        print("No runs found to sync.")
 
 
 def _get_hpc_client():

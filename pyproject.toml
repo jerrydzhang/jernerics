@@ -14,6 +14,7 @@ dependencies = [
     "pathspec>=0.12.1",
     "rich>=13.0.0",
     "mlflow>=3.11.1",
+    "mlflow-export-import>=1.0.0",
     "optuna>=4.8.0",
 ]
 
