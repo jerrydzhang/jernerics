@@ -877,7 +877,7 @@ wheels = [
 [[package]]
 name = "jernerics"
 version = "1.0.0"
-source = { git = "https://github.com/jerrydzhang/jernerics.git?branch=optuna-mlflow-integration#ba6cc2623b195fbb29e01a461c73ac6242ef84e3" }
+source = { directory = "../../" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "mlflow" },
@@ -889,6 +889,30 @@ dependencies = [
     { name = "tomli-w" },
     { name = "typer" },
     { name = "typing-extensions" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cloudpickle", specifier = ">=3.0.0" },
+    { name = "mlflow", specifier = ">=3.11.1" },
+    { name = "numpy", specifier = ">=2.3.3" },
+    { name = "optuna", specifier = ">=4.8.0" },
+    { name = "pathspec", specifier = ">=0.12.1" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "rich", specifier = ">=13.0.0" },
+    { name = "tomli-w", specifier = ">=1.0.0" },
+    { name = "typer", specifier = ">=0.24.1" },
+    { name = "typing-extensions", specifier = ">=4.12.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "hypothesis", specifier = ">=6.151.9" },
+    { name = "pre-commit", specifier = ">=4.5.1" },
+    { name = "pytest", specifier = ">=8.4.2" },
+    { name = "pytest-cov", specifier = ">=7.0.0" },
+    { name = "ruff", specifier = ">=0.13.1" },
+    { name = "ty", specifier = ">=0.0.21" },
 ]
 
 [[package]]
@@ -2226,12 +2250,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "jernerics" },
+    { name = "mlflow" },
     { name = "numpy" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "jernerics", git = "https://github.com/jerrydzhang/jernerics.git?branch=optuna-mlflow-integration" },
+    { name = "jernerics", directory = "../../" },
+    { name = "mlflow" },
     { name = "numpy" },
 ]
 

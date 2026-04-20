@@ -84,6 +84,16 @@ def run_local(
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
+    # Try to load mlflow config from pyproject.toml
+    mlflow_config = MlflowConfig()
+    project_dir = find_pyproject_dir()
+    if project_dir:
+        from contextlib import suppress
+
+        with suppress(ConfigNotFound):
+            _, _, _, mlflow_config = load_jernerics_config(project_dir)
+    project_name = get_project_name(project_dir) if project_dir else None
+
     if sweep.search_space is None and sweep.n_trials == 1:
         config = sweep._base
         env = os.environ.copy()
@@ -129,6 +139,12 @@ def run_local(
 
         env = os.environ.copy()
         env["JERNERICS_CONFIG_INDEX"] = str(i)
+        if mlflow_config.tracking_uri:
+            env["MLFLOW_TRACKING_URI"] = mlflow_config.tracking_uri
+        if mlflow_config.username:
+            env["MLFLOW_TRACKING_USERNAME"] = mlflow_config.username
+        if os.environ.get("JERNERICS_MLFLOW_PASSWORD"):
+            env["MLFLOW_TRACKING_PASSWORD"] = os.environ["JERNERICS_MLFLOW_PASSWORD"]
 
         try:
             result = subprocess.run(
@@ -136,7 +152,12 @@ def run_local(
                     "python",
                     "-c",
                     _get_sweep_runner_code(
-                        dag_path, config_path, i, study_name, storage_url, sweep
+                        dag_path,
+                        config_path,
+                        study_name,
+                        storage_url,
+                        sweep,
+                        project_name=project_name,
                     ),
                 ],
                 cwd=os.path.dirname(dag_path) or ".",
@@ -458,99 +479,16 @@ def _generate_sweep_script(
     )
     lines.append("    python -c \"$(cat <<'EOF'")
 
-    experiment_name = f"{project_name}/{Path(dag_relpath).stem}"
-
-    lines.append("import os")
-    lines.append("import sys")
-    lines.append("import pathlib")
-    lines.append("import traceback")
-    lines.append("")
-    lines.append("import optuna")
-    lines.append("from contextlib import nullcontext")
-    lines.append("from jernerics.dag import DAG")
-    lines.append("from jernerics._cli_helpers import load_config")
-    lines.append("")
-    lines.append(
-        'dag_file = os.environ.get("JERNERICS_DAG_FILE", "/work/' + dag_relpath + '")'
+    runner_code = _get_sweep_runner_code(
+        dag_file=f"/work/{dag_relpath}",
+        config_file=f"/work/{config_relpath}",
+        study_name=study_name,
+        storage_url=storage_url,
+        sweep=sweep,
+        project_name=project_name,
     )
-    lines.append(
-        'config_file = os.environ.get("JERNERICS_CONFIG_FILE", "/work/'
-        + config_relpath
-        + '")'
-    )
-    lines.append("sweep = load_config(config_file)")
-    lines.append("dag = DAG(dag_file, project_name=" + repr(project_name) + ")")
-    lines.append("")
-    lines.append("study = optuna.create_study(")
-    lines.append("    study_name=" + repr(study_name) + ",")
-    lines.append("    storage=" + repr(storage_url) + ",")
-    lines.append("    direction=sweep.direction,")
-    lines.append("    sampler=sweep.sampler,")
-    lines.append("    load_if_exists=True,")
-    lines.append(")")
-    lines.append("")
-    lines.append("trial = study.ask()")
-    lines.append("params = sweep.search_space(trial) if sweep.search_space else {}")
-    lines.append("config = {**sweep._base, **params}")
-    lines.append("")
-    lines.append("experiment_name = " + repr(experiment_name))
-    lines.append("_use_mlflow = bool(os.environ.get('MLFLOW_TRACKING_URI'))")
-    lines.append("if _use_mlflow:")
-    lines.append("    import mlflow")
-    lines.append("    mlflow.set_experiment(experiment_name)")
-    lines.append(
-        "_mlflow_run = mlflow.start_run(run_name=f'trial_{trial.number}') if _use_mlflow else nullcontext()"
-    )
-    lines.append("with _mlflow_run:")
-    lines.append("    if _use_mlflow:")
-    lines.append("        mlflow.log_params({k: str(v) for k, v in params.items()})")
-    lines.append("    try:")
-    lines.append("        results = dag.run(")
-    lines.append("            config,")
-    lines.append("            config_index=trial.number,")
-    lines.append("            config_path=config_file,")
-    lines.append("            max_workers=sweep.max_workers,")
-    lines.append("            executor_type=sweep.executor_type or 'thread',")
-    lines.append("        )")
-    lines.append("")
-    lines.append(
-        "        failed = [(n, r) for n, r in results.items() if isinstance(r, Exception)]"
-    )
-    lines.append("        if failed:")
-    lines.append("            for name, exc in failed:")
-    lines.append('                print(f"  [{name}] {type(exc).__name__}: {exc}")')
-    lines.append("            study.tell(trial, state=optuna.trial.TrialState.FAIL)")
-    lines.append("            sys.exit(1)")
-    lines.append("")
-    lines.append("        if sweep.objective_task and sweep.objective_metric:")
-    lines.append("            result = results[sweep.objective_task]")
-    lines.append("            if isinstance(result, dict):")
-    lines.append("                value = result[sweep.objective_metric]")
-    lines.append("            else:")
-    lines.append("                value = float(result)")
-    lines.append("            if _use_mlflow:")
-    lines.append("                mlflow.log_metric(sweep.objective_metric, value)")
-    lines.append("            study.tell(trial, value)")
-    lines.append("        else:")
-    lines.append("            study.tell(trial, 0.0)")
-    for line in [
-        "        for task_name, task_result in results.items():",
-        "            if isinstance(task_result, Exception):",
-        "                continue",
-        "            if isinstance(task_result, dict):",
-        "                for k, v in task_result.items():",
-        "                    if isinstance(v, (int, float)):",
-        "                        if _use_mlflow:",
-        '                            mlflow.log_metric(f"{task_name}.{k}", v)',
-        "            elif isinstance(task_result, (int, float)):",
-        "                if _use_mlflow:",
-        "                    mlflow.log_metric(task_name, task_result)",
-    ]:
+    for line in runner_code.strip().split("\n"):
         lines.append(line)
-    lines.append('        print("DAG completed")')
-    lines.append("    except Exception:")
-    lines.append("        study.tell(trial, state=optuna.trial.TrialState.FAIL)")
-    lines.append("        raise")
     lines.append("EOF")
     lines.append(')"')
 
@@ -600,20 +538,23 @@ else:
 def _get_sweep_runner_code(
     dag_file: str,
     config_file: str,
-    config_index: int,
     study_name: str,
     storage_url: str,
     sweep: SweepConfig,
+    project_name: str | None = None,
 ) -> str:
+    dag_stem = Path(dag_file).stem
+    experiment_name = f"{project_name}/{dag_stem}" if project_name else dag_stem
+    project_name_arg = f", project_name={project_name!r}" if project_name else ""
     # ruff: noqa: E501
-    return f'''
+    return f"""
 import os
 import sys
 import pathlib
+from contextlib import nullcontext
 
 dag_file = os.environ.get("JERNERICS_DAG_FILE", {dag_file!r})
 config_file = os.environ.get("JERNERICS_CONFIG_FILE", {config_file!r})
-config_index = int(os.environ.get("JERNERICS_CONFIG_INDEX", "{config_index}"))
 
 dag_dir = pathlib.Path(dag_file).parent
 if str(dag_dir) not in sys.path:
@@ -624,37 +565,68 @@ from jernerics.dag import DAG
 from jernerics._cli_helpers import load_config
 
 sweep = load_config(config_file)
-dag = DAG(dag_file)
+dag = DAG(dag_file{project_name_arg})
 
-study = optuna.load_study(study_name={study_name!r}, storage={storage_url!r})
+study = optuna.create_study(
+    study_name={study_name!r},
+    storage={storage_url!r},
+    direction=sweep.direction,
+    sampler=sweep.sampler,
+    load_if_exists=True,
+)
+
 trial = study.ask()
 params = sweep.search_space(trial) if sweep.search_space else {{}}
 config = {{**sweep._base, **params}}
 
-try:
-    results = dag.run(config, config_index=config_index, config_path=config_file, max_workers=sweep.max_workers, executor_type=sweep.executor_type or 'thread')
+experiment_name = {experiment_name!r}
+_use_mlflow = bool(os.environ.get('MLFLOW_TRACKING_URI'))
+if _use_mlflow:
+    import mlflow
+    mlflow.set_experiment(experiment_name)
 
-    failed = [(n, r) for n, r in results.items() if isinstance(r, Exception)]
-    if failed:
-        for name, exc in failed:
-            print(f"  [{{name}}] {{type(exc).__name__}}: {{exc}}")
-        study.tell(trial, state=optuna.trial.TrialState.FAIL)
-        sys.exit(1)
+_mlflow_run = mlflow.start_run(run_name=f'trial_{{trial.number}}') if _use_mlflow else nullcontext()
 
-    if sweep.objective_task and sweep.objective_metric:
-        result = results[sweep.objective_task]
-        if isinstance(result, dict):
-            value = result[sweep.objective_metric]
+with _mlflow_run:
+    if _use_mlflow:
+        mlflow.log_params({{k: str(v) for k, v in params.items()}})
+    try:
+        results = dag.run(config, config_index=trial.number, config_path=config_file, max_workers=sweep.max_workers, executor_type=sweep.executor_type or 'thread')
+
+        failed = [(n, r) for n, r in results.items() if isinstance(r, Exception)]
+        if failed:
+            for name, exc in failed:
+                print(f"  [{{name}}] {{type(exc).__name__}}: {{exc}}")
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            sys.exit(1)
+
+        if sweep.objective_task and sweep.objective_metric:
+            result = results[sweep.objective_task]
+            if isinstance(result, dict):
+                value = result[sweep.objective_metric]
+            else:
+                value = float(result)
+            if _use_mlflow:
+                mlflow.log_metric(sweep.objective_metric, value)
+            study.tell(trial, value)
         else:
-            value = float(result)
-        study.tell(trial, value)
-    else:
-        study.tell(trial, 0.0)
-    print("DAG completed")
-except Exception:
-    study.tell(trial, state=optuna.trial.TrialState.FAIL)
-    raise
-'''
+            study.tell(trial, 0.0)
+        for task_name, task_result in results.items():
+            if isinstance(task_result, Exception):
+                continue
+            if isinstance(task_result, dict):
+                for k, v in task_result.items():
+                    if isinstance(v, (int, float)):
+                        if _use_mlflow:
+                            mlflow.log_metric(f"{{task_name}}.{{k}}", v)
+            elif isinstance(task_result, (int, float)):
+                if _use_mlflow:
+                    mlflow.log_metric(task_name, task_result)
+        print("DAG completed")
+    except Exception:
+        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+        raise
+"""
 
 
 def _get_hpc_client():

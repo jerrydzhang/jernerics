@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "jernerics",
+    "mlflow",
 ]
 
 [tool.uv.sources.jernerics]
@@ -25,6 +26,9 @@ partition = "priority"
 mem = "4G"
 time = "0:30:00"
 cpus = 4
+
+[tool.jernerics.mlflow]
+tracking_uri = "http://127.0.0.1:5000"
 
 [build-system]
 requires = ["hatchling"]
