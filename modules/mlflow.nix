@@ -109,12 +109,21 @@ in
       }
     ];
 
+    users.users.mlflow = {
+      isSystemUser = true;
+      group = "mlflow";
+      home = cfg.stateDir;
+    };
+    users.groups.mlflow = { };
+
     systemd.services.mlflow = {
       description = "MLflow tracking server";
       after = [ "network.target" ];
       wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
+        User = "mlflow";
+        Group = "mlflow";
         ExecStart = startScript;
         StateDirectory = "mlflow";
         WorkingDirectory = cfg.stateDir;
@@ -122,7 +131,6 @@ in
         RestartSec = 5;
 
         # Hardening
-        DynamicUser = true;
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = true;
