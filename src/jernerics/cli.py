@@ -443,7 +443,7 @@ def _generate_sweep_script(
     bind_str = " \\\n    --bind ".join(bind_args)
 
     lines.append(
-        f"apptainer exec --fakeroot --contain --nv --pwd /work --bind {bind_str} container.sif \\"
+        f"apptainer exec --writable-tmpfs --contain --nv --pwd /work --bind {bind_str} container.sif \\"
     )
     lines.append("    python -c \"$(cat <<'EOF'")
 
