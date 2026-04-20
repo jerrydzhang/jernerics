@@ -10,7 +10,6 @@ let
 
   inherit (lib)
     mkEnableOption
-    mkPackageOption
     mkOption
     mkIf
     types
@@ -37,7 +36,7 @@ let
 
     export MLFLOW_AUTH_CONFIG_PATH="$TMPDIR/basic_auth.ini"
 
-    exec ${lib.getExe cfg.package} server \
+    exec ${cfg.package}/bin/mlflow server \
       --backend-store-uri "${cfg.backendStoreUri}" \
       --host "${cfg.host}" \
       --port ${toString cfg.port} \
@@ -49,7 +48,12 @@ in
   options.services.jernerics.mlflow = {
     enable = mkEnableOption "MLflow tracking server";
 
-    package = mkPackageOption pkgs "mlflow-server" { };
+    package = mkOption {
+      type = types.package;
+      default = pkgs.python3.withPackages (ps: [ ps.mlflow ps.flask-wtf ]);
+      defaultText = lib.literalExpression "pkgs.python3.withPackages (ps: [ ps.mlflow ps.flask-wtf ])";
+      description = "Python environment containing mlflow and auth dependencies.";
+    };
 
     host = mkOption {
       type = types.str;
@@ -100,12 +104,7 @@ in
       example = "/run/secrets/mlflow-admin-password";
     };
 
-    flaskWtfPackage = mkOption {
-      type = types.package;
-      default = pkgs.python3.pkgs.flask-wtf;
-      defaultText = lib.literalExpression "pkgs.python3.pkgs.flask-wtf";
-      description = "Flask-WTF package for basic auth CSRF validation. Must match mlflow's Python version.";
-    };
+
   };
 
   config = mkIf cfg.enable {
@@ -132,7 +131,6 @@ in
         User = "mlflow";
         Group = "mlflow";
         ExecStart = startScript;
-        Environment = "PYTHONPATH=${cfg.flaskWtfPackage}/${cfg.flaskWtfPackage.pythonModule.sitePackages}";
         StateDirectory = "mlflow";
         WorkingDirectory = cfg.stateDir;
         Restart = "on-failure";
