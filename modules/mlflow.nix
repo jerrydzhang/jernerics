@@ -42,7 +42,8 @@ let
       --host "${cfg.host}" \
       --port ${toString cfg.port} \
       ${lib.optionalString cfg.serveArtifacts "--serve-artifacts"} \
-      --app-name basic-auth
+      --app-name basic-auth \
+      --allowed-hosts "*"
   '';
 in
 {
