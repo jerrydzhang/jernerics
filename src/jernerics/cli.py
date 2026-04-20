@@ -455,7 +455,7 @@ def _generate_sweep_script(
     lines.append("import traceback")
     lines.append("")
     lines.append("import optuna")
-    lines.append("import mlflow")
+    lines.append("from contextlib import nullcontext")
     lines.append("from jernerics.dag import DAG")
     lines.append("from jernerics._cli_helpers import load_config")
     lines.append("")
@@ -483,9 +483,16 @@ def _generate_sweep_script(
     lines.append("config = {**sweep._base, **params}")
     lines.append("")
     lines.append("experiment_name = " + repr(experiment_name))
-    lines.append("mlflow.set_experiment(experiment_name)")
-    lines.append("with mlflow.start_run(run_name=f'trial_{trial.number}'):")
-    lines.append("    mlflow.log_params({k: str(v) for k, v in params.items()})")
+    lines.append("_use_mlflow = bool(os.environ.get('MLFLOW_TRACKING_URI'))")
+    lines.append("if _use_mlflow:")
+    lines.append("    import mlflow")
+    lines.append("    mlflow.set_experiment(experiment_name)")
+    lines.append(
+        "_mlflow_run = mlflow.start_run(run_name=f'trial_{trial.number}') if _use_mlflow else nullcontext()"
+    )
+    lines.append("with _mlflow_run:")
+    lines.append("    if _use_mlflow:")
+    lines.append("        mlflow.log_params({k: str(v) for k, v in params.items()})")
     lines.append("    try:")
     lines.append("        results = dag.run(")
     lines.append("            config,")
@@ -510,7 +517,8 @@ def _generate_sweep_script(
     lines.append("                value = result[sweep.objective_metric]")
     lines.append("            else:")
     lines.append("                value = float(result)")
-    lines.append("            mlflow.log_metric(sweep.objective_metric, value)")
+    lines.append("            if _use_mlflow:")
+    lines.append("                mlflow.log_metric(sweep.objective_metric, value)")
     lines.append("            study.tell(trial, value)")
     lines.append("        else:")
     lines.append("            study.tell(trial, 0.0)")
@@ -521,9 +529,11 @@ def _generate_sweep_script(
         "            if isinstance(task_result, dict):",
         "                for k, v in task_result.items():",
         "                    if isinstance(v, (int, float)):",
-        '                        mlflow.log_metric(f"{task_name}.{k}", v)',
+        "                        if _use_mlflow:",
+        '                            mlflow.log_metric(f"{task_name}.{k}", v)',
         "            elif isinstance(task_result, (int, float)):",
-        "                mlflow.log_metric(task_name, task_result)",
+        "                if _use_mlflow:",
+        "                    mlflow.log_metric(task_name, task_result)",
     ]:
         lines.append(line)
     lines.append('        print("DAG completed")')

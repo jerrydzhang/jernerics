@@ -214,8 +214,8 @@ class TestSweepScriptGeneration:
             sweep=sweep,
         )
 
-        assert "MLFLOW_TRACKING_URI" not in script
-        assert "MLFLOW_TRACKING_USERNAME" not in script
+        assert "export MLFLOW_TRACKING_URI" not in script
+        assert "export MLFLOW_TRACKING_USERNAME" not in script
 
     def test_objective_extraction(self, tmp_path):
         sweep = SweepConfig(
