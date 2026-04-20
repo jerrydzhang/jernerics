@@ -65,7 +65,10 @@ in
               hash = "sha256-QvJrUkOP22FViOFQQHxlFtD2TUF0Nt/HVZnFJaRk8hA=";
             };
             # Inherit dependencies from the nixpkgs package
-            inherit (pkgs.python3.pkgs.mlflow) propagatedBuildInputs nativeBuildInputs;
+            propagatedBuildInputs = pkgs.python3.pkgs.mlflow.propagatedBuildInputs;
+            nativeBuildInputs = pkgs.python3.pkgs.mlflow.nativeBuildInputs;
+            # Wheel is pre-built — skip build phase
+            dontBuild = true;
           };
         in
         pkgs.python3.withPackages (ps: [ mlflow-wheel ps.flask-wtf ]);
