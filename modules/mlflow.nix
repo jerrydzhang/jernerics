@@ -69,6 +69,8 @@ in
             nativeBuildInputs = pkgs.python3.pkgs.mlflow.nativeBuildInputs;
             # Wheel is pre-built — skip build phase
             dontBuild = true;
+            # Wheel metadata has strict version checks that don't match nixpkgs
+            dontUsePythonRuntimeDepsCheck = true;
           };
         in
         pkgs.python3.withPackages (ps: [ mlflow-wheel ps.flask-wtf ]);
