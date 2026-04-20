@@ -62,7 +62,7 @@ in
             format = "wheel";
             src = pkgs.fetchurl {
               url = "https://files.pythonhosted.org/packages/d5/d5/a20b87c6cd99395fee04d6034686512305530c71ceaabe3a151eeaa25ed7/mlflow-3.8.1-py3-none-any.whl";
-              hash = "sha256-42f26b52438fdb615588e150407c6516d0f64d417436dfc75599c525a464f210";
+              hash = "sha256-QvJrUkOP22FViOFQQHxlFtD2TUF0Nt/HVZnFJaRk8hA=";
             };
             # Inherit dependencies from the nixpkgs package
             inherit (pkgs.python3.pkgs.mlflow) propagatedBuildInputs nativeBuildInputs;
