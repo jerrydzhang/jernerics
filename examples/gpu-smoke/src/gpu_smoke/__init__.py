@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 import json
 from pathlib import Path
+from typing import Any
 
 
-def check_gpu() -> dict:
+def check_gpu() -> dict[str, Any]:
     import torch
 
     return {
@@ -15,6 +18,7 @@ def check_gpu() -> dict:
     }
 
 
-def save_json(path: str, data: dict) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(json.dumps(data, indent=2))
+def save_json(path: str | Path, data: dict[str, Any]) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(data, indent=2))

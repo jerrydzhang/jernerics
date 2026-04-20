@@ -331,8 +331,11 @@ Two options:
 
 See complete examples in `examples/`:
 
-- `container-basic/` - CPU-only workflow
-- `container-gpu/` - GPU workflow with PyTorch
+- `sweep-basic/` - Optuna + MLflow sweep with synthetic loss surface
+- `sweep-parallel/` - Parallel sweep with max_parallel constraint
+- `no-objective-sweep/` - Sweep without optimization objective
+- `gpu-smoke/` - GPU smoke test in container
+- `resume-partial-failure/` - DAG resume after partial failure
 
 ## License
 
