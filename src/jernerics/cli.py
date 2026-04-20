@@ -442,6 +442,17 @@ def _generate_sweep_script(
             bind_args.append(f'"{cache_path}:{container_path}"')
     bind_str = " \\\n    --bind ".join(bind_args)
 
+    lines.append("mkdir -p .jernerics/optuna")
+    lines.append(
+        f"flock .jernerics/optuna/init.lock apptainer exec"
+        f" --writable-tmpfs --contain --nv --pwd /work --bind {bind_str}"
+        f' container.sif python -c "'
+        f"import optuna;"
+        f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
+        f' direction={sweep.direction!r}, load_if_exists=True)"'
+    )
+    lines.append("")
+
     lines.append(
         f"apptainer exec --writable-tmpfs --contain --nv --pwd /work --bind {bind_str} container.sif \\"
     )
