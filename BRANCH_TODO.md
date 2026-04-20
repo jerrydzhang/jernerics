@@ -8,11 +8,19 @@ Pre-merge checklist. Delete this file before merging to main.
 
 - [ ] **Add `mlflow` dependency to examples that need it** — `examples/sweep-basic/pyproject.toml` has `mlflow` added. Decide if other sweep examples (`sweep-parallel`, `no-objective-sweep`) should also list it, or if it's only needed when `[tool.jernerics.mlflow]` is configured.
 
-- [ ] **Add `mlflow.log_artifact` support** — The current integration only logs params and metrics. Users need a way to log artifacts (model checkpoints, plots, etc.) from within DAG tasks. This is the last piece before the `jernerics results` download command can be superseded by mlflow for experiment outputs.
+- [ ] **Remove auto-mlflow metric scanning from runner code** — `_get_sweep_runner_code()` currently auto-logs every numeric field from every task result dict. Remove this loop. Users should call `mlflow.log_metric()` / `mlflow.log_artifact()` explicitly in their task code. Params from `search_space()` remain auto-logged (defined once in config, not per-task).
 
-- [ ] **NixOS module for mlflow tracking server** — Add a NixOS module to `flake.nix` that exposes an `mlflow server` as a systemd service. Needed for the HPC → home server use case. See the context prompt generated during the mlflow local testing session for full details.
+- [ ] **Local-first mlflow logging via FileStore** — During sweeps, the generated runner code should set `mlflow.set_tracking_uri("file:///mlruns")` (bind-mounted from `{cache_dir}/{project_name}/mlruns` on scratch). All logging goes to local filesystem on HPC scratch. No network dependency during the sweep. The `tracking_uri` in `[tool.jernerics.mlflow]` becomes the sync destination, not the live logging target.
 
-- [ ] **Decide on auth strategy for `JERNERICS_MLFLOW_PASSWORD`** — Currently the SLURM script does `export MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD}` but nothing sets that env var. Need a plan: either inject via SLURM `--export`, user's shell profile on the cluster, or the NixOS module handles it. Document the chosen approach.
+- [ ] **Automatic sync after each trial** — After each trial's DAG execution completes, attempt to sync that run to the remote tracking server. This runs on the compute node (outbound HTTPS to home server via Tailscale Funnel or Cloudflare Tunnel). Best-effort — if it fails, data stays on scratch and can be synced later. Implemented as a function in the generated runner code, not a CLI command.
+
+- [ ] **`jernerics mlflow sync` command** — User-facing CLI command that SSHes to HPC login node, reads the scratch FileStore, and pushes unsynced runs to the remote server. Idempotent (skips runs already on remote). Used for on-demand mid-sweep visibility or recovery from failed automatic syncs.
+
+- [ ] **Move optuna DB to scratch** — The optuna SQLite DB is currently at `/work/.jernerics/optuna/` (home directory via bind mount). Move it to `{cache_dir}/{project_name}/optuna/` on scratch. Optuna study data is sweep-local — after the sweep, it's redundant with mlflow. No reason to consume home directory quota.
+
+- [ ] **NixOS module for mlflow tracking server** — Add a NixOS module exposed via `nixosModules` in `flake.nix`. Options: `services.jernerics.mlflow.enable`, `.port` (5000), `.host` ("127.0.0.1"), `.backendStoreUri`, `.openFirewall` (false), `.basicAuth.enable`, `.basicAuth.adminUsername`, `.basicAuth.adminPasswordFile` (sops-nix compatible). Binds localhost by default — external access via Tailscale Funnel or Cloudflare Tunnel (separate from this module). Uses `mlflow-server` from nixpkgs with `--app-name basic-auth`.
+
+- [ ] **`JERNERICS_MLFLOW_PASSWORD` on HPC** — The SLURM script does `export MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD}`. This needs to be set in the user's shell profile on the HPC login node (e.g., sourced from a file in `~/.config/jernerics/`). The NixOS module creates the admin user via `basic_auth.ini` with the password from sops-nix. Not a module concern — document the pattern.
 
 ## Nice to Have
 

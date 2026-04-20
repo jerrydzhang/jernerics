@@ -54,28 +54,27 @@ in
       type = types.package;
       default =
         let
-          # nixpkgs builds mlflow from source, which omits the JS frontend.
-          # Install from the PyPI wheel instead, which includes pre-built UI assets.
-          mlflow-wheel = pkgs.python3.pkgs.buildPythonPackage rec {
-            pname = "mlflow";
-            version = pkgs.python3.pkgs.mlflow.version;
-            format = "wheel";
-            src = pkgs.fetchurl {
-              url = "https://files.pythonhosted.org/packages/d5/d5/a20b87c6cd99395fee04d6034686512305530c71ceaabe3a151eeaa25ed7/mlflow-3.8.1-py3-none-any.whl";
-              hash = "sha256-QvJrUkOP22FViOFQQHxlFtD2TUF0Nt/HVZnFJaRk8hA=";
-            };
-            # Inherit dependencies from the nixpkgs package
-            propagatedBuildInputs = pkgs.python3.pkgs.mlflow.propagatedBuildInputs;
-            nativeBuildInputs = pkgs.python3.pkgs.mlflow.nativeBuildInputs;
-            # Wheel is pre-built — skip build phase
-            dontBuild = true;
-            # Wheel metadata has strict version checks that don't match nixpkgs
-            dontUsePythonRuntimeDepsCheck = true;
+          mlflowVersion = pkgs.python3.pkgs.mlflow.version;
+          # nixpkgs builds mlflow from source (GitHub tarball), which omits the
+          # JS frontend. Fetch the PyPI wheel to extract pre-built UI assets.
+          # NOTE: hash must be updated when nixpkgs mlflow version changes.
+          mlflowWheel = pkgs.fetchurl {
+            url = "https://files.pythonhosted.org/packages/py3/m/mlflow/mlflow-${mlflowVersion}-py3-none-any.whl";
+            hash = "sha256-QvJrUkOP22FViOFQQHxlFtD2TUF0Nt/HVZnFJaRk8hA=";
           };
+          mlflowWithUI = pkgs.python3.pkgs.mlflow.overridePythonAttrs (old: {
+            nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.unzip ];
+            postInstall = (old.postInstall or "") + ''
+              ${pkgs.unzip}/bin/unzip ${mlflowWheel} "mlflow/server/js/*" -d "$out/${pkgs.python3.sitePackages}"
+            '';
+          });
         in
-        pkgs.python3.withPackages (ps: [ mlflow-wheel ps.flask-wtf ]);
+        pkgs.python3.withPackages (ps: [ mlflowWithUI ps.flask-wtf ]);
       defaultText = lib.literalExpression "pkgs.python3.withPackages (ps: [ ps.mlflow ps.flask-wtf ])";
-      description = "Python environment containing mlflow (with UI) and auth dependencies.";
+      description = ''
+        Python environment containing mlflow and auth dependencies.
+        The default patches in the pre-built JS frontend from the PyPI wheel.
+      '';
     };
 
     host = mkOption {
