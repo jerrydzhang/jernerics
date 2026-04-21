@@ -97,28 +97,6 @@ def run_local(
             _, _, _, mlflow_config = load_jernerics_config(project_dir)
     project_name = get_project_name(project_dir) if project_dir else None
 
-    if sweep.search_space is None and sweep.n_trials == 1:
-        config = sweep._base
-        env = os.environ.copy()
-        env["JERNERICS_CONFIG_INDEX"] = "0"
-        try:
-            result = subprocess.run(
-                [
-                    "python",
-                    "-c",
-                    _get_runner_code(dag_path, config_path, 0, None),
-                ],
-                cwd=os.path.dirname(dag_path) or ".",
-                env=env,
-                timeout=timeout,
-            )
-            if result.returncode != 0:
-                raise SystemExit(ExitCode.GENERAL_ERROR)
-        except subprocess.TimeoutExpired:
-            print("Timed out")
-            raise SystemExit(ExitCode.GENERAL_ERROR) from None
-        return
-
     import optuna
 
     dag_dir = Path(os.path.dirname(dag_path) or ".")
@@ -527,46 +505,6 @@ def _generate_sweep_script(
     return "\n".join(lines)
 
 
-def _get_runner_code(
-    dag_file: str,
-    config_file: str,
-    config_index: int,
-    container_path: str | None = None,
-) -> str:
-    container_arg = repr(container_path) if container_path else "None"
-    # ruff: noqa: E501
-    return f'''
-import os
-import sys
-import pathlib
-
-dag_file = os.environ.get("JERNERICS_DAG_FILE", {dag_file!r})
-config_file = os.environ.get("JERNERICS_CONFIG_FILE", {config_file!r})
-config_index = int(os.environ.get("JERNERICS_CONFIG_INDEX", "{config_index}"))
-container_path = {container_arg}
-
-dag_dir = pathlib.Path(dag_file).parent
-if str(dag_dir) not in sys.path:
-    sys.path.insert(0, str(dag_dir))
-
-from jernerics.dag import DAG
-from jernerics._cli_helpers import load_config
-
-dag = DAG(dag_file)
-sweep = load_config(config_file)
-config = sweep._base
-
-results = dag.run(config, config_index=config_index, config_path=config_file, container_path=container_path, max_workers=sweep.max_workers, executor_type=sweep.executor_type or 'thread')
-
-failed = [name for name, result in results.items() if isinstance(result, Exception)]
-if failed:
-    print("DAG failed. Tasks with errors:", ", ".join(failed))
-    sys.exit(1)
-else:
-    print("DAG completed")
-'''
-
-
 def _get_sweep_runner_code(
     dag_file: str,
     config_file: str,
@@ -608,6 +546,11 @@ study = optuna.create_study(
 
 trial = study.ask()
 params = sweep.search_space(trial) if sweep.search_space else {{}}
+
+if params and set(sweep._base) & set(params):
+    _overlap = sorted(set(sweep._base) & set(params))
+    raise ValueError(f"Config keys defined in both _base and search_space: {{_overlap}}. Remove them from _base.")
+
 config = {{**sweep._base, **params}}
 
 experiment_name = {experiment_name!r}
@@ -622,7 +565,19 @@ _run_id = None
 with _mlflow_run:
     if _use_mlflow:
         _run_id = _mlflow_run.info.run_id
-        mlflow.log_params({{k: str(v) for k, v in params.items()}})
+        _flat = {{}}
+        def _flatten(_d, _p=""):
+            for _k, _v in _d.items():
+                _key = f"{{_p}}.{{_k}}" if _p else _k
+                if isinstance(_v, dict):
+                    _flatten(_v, _key)
+                else:
+                    _flat[_key] = _v if isinstance(_v, str) else str(_v)
+        if sweep._base:
+            _flatten(sweep._base, "base")
+        if params:
+            _flatten(params, "swept")
+        mlflow.log_params(_flat)
         import jernerics as _jern
         _jern.active_run_id = _run_id
     try:

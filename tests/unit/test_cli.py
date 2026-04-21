@@ -7,47 +7,7 @@ import pytest
 from jernerics.cli import (
     _create_minimal_pyproject,
     _get_default_jernerics_config,
-    _get_runner_code,
 )
-
-
-class TestGetRunnerCode:
-    def test_basic_runner_code(self):
-        code = _get_runner_code("/path/to/dag.py", "/path/to/config.py", 0)
-
-        assert "/path/to/dag.py" in code
-        assert "/path/to/config.py" in code
-        assert "config_index" in code
-        assert "DAG(dag_file)" in code
-        assert "load_config" in code
-
-    def test_runner_code_with_config_index(self):
-        code = _get_runner_code("/dag.py", "/config.py", 5)
-
-        assert '"5"' in code or "config_index" in code
-
-    def test_runner_code_with_container(self):
-        code = _get_runner_code(
-            "/dag.py", "/config.py", 0, container_path="/container.sif"
-        )
-
-        assert "/container.sif" in code
-
-    def test_runner_code_without_container(self):
-        code = _get_runner_code("/dag.py", "/config.py", 0, container_path=None)
-
-        assert "container_path = None" in code
-
-    def test_runner_code_imports_dag(self):
-        code = _get_runner_code("/dag.py", "/config.py", 0)
-
-        assert "from jernerics.dag import DAG" in code
-
-    def test_runner_code_handles_failure(self):
-        code = _get_runner_code("/dag.py", "/config.py", 0)
-
-        assert "isinstance(result, Exception)" in code
-        assert "sys.exit(1)" in code
 
 
 class TestGetDefaultJernericsConfig:
