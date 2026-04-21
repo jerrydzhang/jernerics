@@ -239,6 +239,50 @@ Or in config.py:
 executor_type = "serial"
 ```
 
+## MLflow Integration
+
+Configure in `pyproject.toml`:
+
+```toml
+[tool.jernerics.mlflow]
+tracking_uri = "https://mlflow.example.com"
+username = "admin"
+```
+
+### Auto-logged per trial
+
+Every trial (including single runs) automatically logs:
+
+- **Params:** Full config with namespacing — `base.*` for `_base` values, `swept.*` for search space values. Nested dicts flattened with dots.
+- **Metric:** The `objective_metric` from the `objective_task` return value
+
+Defining the same key in both `_base` and `search_space` raises a `ValueError`.
+
+### Logging additional metrics in tasks
+
+Use `mlflow.log_metric` with `jernerics.active_run_id`:
+
+```python
+import mlflow
+from jernerics import active_run_id
+
+@task
+def evaluate(train, config):
+    accuracy = 1.0 - train["loss"]
+    mlflow.log_metric("accuracy", accuracy, run_id=active_run_id)
+    return {"loss": train["loss"]}
+```
+
+Always pass `run_id=active_run_id` — the run is started by the sweep runner, not inside the task.
+
+### Syncing from HPC
+
+On HPC with `cache_dir` configured, runs auto-sync after each trial. For manual sync:
+
+```bash
+jernerics mlflow sync
+```
+
 ## Output Artifacts
 
 Use `work()` to get the correct results directory:
