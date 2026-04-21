@@ -40,9 +40,7 @@ def setup(config):
 
     (project_dir / "config.py").write_text(
         """
-configs = [
-    {"seed": 1},
-]
+_base = {"seed": 1}
 
 slurm = {
     "partition": "priority",
@@ -227,7 +225,7 @@ remote_dir = "~/experiments/{project_name}"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
 
         result = subprocess.run(
             ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
@@ -255,7 +253,7 @@ remote_dir = "~/experiments/{project_name}"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
 
         result = subprocess.run(
             ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
@@ -286,7 +284,7 @@ remote_dir = "~/experiments/{project_name}/"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
 
         result = subprocess.run(
             ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
@@ -295,9 +293,12 @@ remote_dir = "~/experiments/{project_name}/"
             text=True,
         )
         assert result.returncode == 0
-        # sqlite:/// is a valid scheme prefix, not a double-slash in paths
+        # URL schemes (sqlite:///, https://, http://, file://) are valid prefixes,
+        # not double-slashes in paths
         for line in result.stdout.split("\n"):
-            stripped = line.replace("sqlite:///", "")
+            stripped = line
+            for scheme in ("sqlite:///", "https://", "http://", "file:///"):
+                stripped = stripped.replace(scheme, "")
             assert "//" not in stripped, f"Double slash found in: {line}"
 
 
@@ -389,9 +390,7 @@ remote_dir = "~/experiments/{project_name}"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (configs_dir / "experiment.py").write_text(
-            "configs = [{'seed': 1}]\nslurm = {}"
-        )
+        (configs_dir / "experiment.py").write_text("_base = {'seed': 1}\nslurm = {}")
         (project_dir / "uv.lock").write_text("version = 1\n")
 
         result = subprocess.run(
@@ -408,7 +407,7 @@ remote_dir = "~/experiments/{project_name}"
             text=True,
         )
         assert result.returncode == 0
-        assert '"/work/configs/experiment.py"' in result.stdout
+        assert "'/work/configs/experiment.py'" in result.stdout
 
     def test_dag_in_subdirectory_preserves_relative_path(self, tmp_path):
         project_dir = tmp_path / "test-project"
@@ -431,7 +430,7 @@ remote_dir = "~/experiments/{project_name}"
         (experiments_dir / "pipeline.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
         (project_dir / "uv.lock").write_text("version = 1\n")
 
         result = subprocess.run(
@@ -448,7 +447,7 @@ remote_dir = "~/experiments/{project_name}"
             text=True,
         )
         assert result.returncode == 0
-        assert '"/work/experiments/pipeline.py"' in result.stdout
+        assert "'/work/experiments/pipeline.py'" in result.stdout
 
     def test_both_files_in_subdirectories(self, tmp_path):
         project_dir = tmp_path / "test-project"
@@ -473,9 +472,7 @@ remote_dir = "~/experiments/{project_name}"
         (experiments_dir / "pipeline.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (configs_dir / "experiment.py").write_text(
-            "configs = [{'seed': 1}]\nslurm = {}"
-        )
+        (configs_dir / "experiment.py").write_text("_base = {'seed': 1}\nslurm = {}")
         (project_dir / "uv.lock").write_text("version = 1\n")
 
         result = subprocess.run(
@@ -492,8 +489,8 @@ remote_dir = "~/experiments/{project_name}"
             text=True,
         )
         assert result.returncode == 0
-        assert '"/work/experiments/pipeline.py"' in result.stdout
-        assert '"/work/experiments/configs/experiment.py"' in result.stdout
+        assert "'/work/experiments/pipeline.py'" in result.stdout
+        assert "'/work/experiments/configs/experiment.py'" in result.stdout
 
     def test_rejects_path_traversal_in_dag_path(self, tmp_path):
         project_dir = tmp_path / "test-project"
@@ -513,7 +510,7 @@ remote_dir = "~/experiments/{project_name}"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("configs = [{'seed': 1}]\nslurm = {}")
+        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
         (project_dir / "uv.lock").write_text("version = 1\n")
 
         outside_dir = tmp_path / "outside"

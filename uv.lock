@@ -1459,7 +1459,6 @@ source = { editable = "." }
 dependencies = [
     { name = "cloudpickle" },
     { name = "mlflow" },
-    { name = "mlflow-export-import" },
     { name = "numpy" },
     { name = "optuna" },
     { name = "pathspec" },
@@ -1468,6 +1467,11 @@ dependencies = [
     { name = "tomli-w" },
     { name = "typer" },
     { name = "typing-extensions" },
+]
+
+[package.optional-dependencies]
+mlflow = [
+    { name = "mlflow-export-import" },
 ]
 
 [package.dev-dependencies]
@@ -1484,7 +1488,7 @@ dev = [
 requires-dist = [
     { name = "cloudpickle", specifier = ">=3.0.0" },
     { name = "mlflow", specifier = ">=3.11.1" },
-    { name = "mlflow-export-import", git = "https://github.com/mlflow/mlflow-export-import.git" },
+    { name = "mlflow-export-import", marker = "extra == 'mlflow'", git = "https://github.com/mlflow/mlflow-export-import.git" },
     { name = "numpy", specifier = ">=2.3.3" },
     { name = "optuna", specifier = ">=4.8.0" },
     { name = "pathspec", specifier = ">=0.12.1" },
@@ -1494,6 +1498,7 @@ requires-dist = [
     { name = "typer", specifier = ">=0.24.1" },
     { name = "typing-extensions", specifier = ">=4.12.0" },
 ]
+provides-extras = ["mlflow"]
 
 [package.metadata.requires-dev]
 dev = [

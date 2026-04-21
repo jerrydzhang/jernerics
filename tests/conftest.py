@@ -40,7 +40,7 @@ def setup(config):
 """)
 
     (tmp_project / "config.py").write_text("""
-configs = [{"seed": 1}]
+_base = {"seed": 1}
 slurm = {}
 """)
 

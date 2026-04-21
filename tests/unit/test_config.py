@@ -163,7 +163,9 @@ time = "2:00:00"
 
 
 class TestMlflowConfig:
-    def test_mlflow_config_absent(self, tmp_path):
+    def test_mlflow_config_absent(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JERNERICS_MLFLOW_TRACKING_URI", raising=False)
+        monkeypatch.delenv("JERNERICS_MLFLOW_USERNAME", raising=False)
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text("""
 [project]
@@ -174,7 +176,9 @@ name = "test-project"
         assert mlflow.tracking_uri is None
         assert mlflow.username is None
 
-    def test_mlflow_config_present(self, tmp_path):
+    def test_mlflow_config_present(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JERNERICS_MLFLOW_TRACKING_URI", raising=False)
+        monkeypatch.delenv("JERNERICS_MLFLOW_USERNAME", raising=False)
         pyproject = tmp_path / "pyproject.toml"
         pyproject.write_text("""
 [project]

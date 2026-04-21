@@ -2,6 +2,7 @@ import os
 import runpy
 import sys
 import tomllib
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
@@ -185,6 +186,15 @@ def load_config(config_file: str) -> SweepConfig:
         module_ns = runpy.run_path(str(config_path))
     except (SyntaxError, ImportError, PermissionError) as e:
         raise RuntimeError(f"Failed to load config file '{config_file}': {e}") from e
+
+    if "configs" in module_ns and "_base" not in module_ns:
+        warnings.warn(
+            "'configs' is no longer supported. "
+            "Use '_base' for base config, 'search_space' for Optuna parameters, "
+            "and 'n_trials' for the number of trials.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     return SweepConfig(
         _base=module_ns.get("_base", {}),

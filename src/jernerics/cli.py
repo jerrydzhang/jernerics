@@ -128,13 +128,6 @@ def run_local(
     study_name = f"local_{Path(config_path).stem}_{timestamp}"
     storage_url = f"sqlite:///{db_dir / (study_name + '.db')}"
 
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage_url,
-        direction=sweep.direction,
-        sampler=sweep.sampler,
-        load_if_exists=True,
-    )
     any_failed = False
 
     for i in range(sweep.n_trials):
@@ -174,11 +167,16 @@ def run_local(
             print(f"Trial {i + 1} timed out after {timeout} seconds")
             any_failed = True
 
-    study = optuna.load_study(study_name=study_name, storage=storage_url)
-    completed = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
-    if completed:
-        print(f"Best value: {study.best_value:.4f}")
-        print(f"Best params: {study.best_params}")
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage_url)
+        completed = [
+            t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
+        ]
+        if completed:
+            print(f"Best value: {study.best_value:.4f}")
+            print(f"Best params: {study.best_params}")
+    except KeyError:
+        pass
 
     if any_failed:
         raise SystemExit(ExitCode.GENERAL_ERROR)
@@ -402,7 +400,7 @@ def _generate_sweep_script(
 
     def expand_path(p: str) -> str:
         if p.startswith("~"):
-            p = str(Path(p).expanduser())
+            p = "$HOME" + p[1:]
         return p
 
     def safe_shell_path(p: str) -> str:
@@ -626,6 +624,8 @@ with _mlflow_run:
     if _use_mlflow:
         _run_id = _mlflow_run.info.run_id
         mlflow.log_params({{k: str(v) for k, v in params.items()}})
+        import jernerics as _jern
+        _jern.active_run_id = _run_id
     try:
         results = dag.run(config, config_index=trial.number, config_path=config_file, max_workers=sweep.max_workers, executor_type=sweep.executor_type or 'thread')
 
@@ -670,7 +670,7 @@ if _run_id and _remote_uri:
 """
 
 
-def _get_mlflow_sync_script(remote_uri: str, username: str | None = None) -> str:
+def _get_mlflow_sync_script(remote_uri: str) -> str:
     """Generate a self-contained Python sync script to run inside the container."""
     return f"""
 import json
@@ -693,10 +693,17 @@ for exp in src_client.search_experiments():
     runs = src_client.search_runs(experiment_ids=[exp.experiment_id])
     for run in runs:
         src_run_id = run.info.run_id
-        existing = dst_client.search_runs(
-            experiment_ids=[],
-            filter_string=f"tags.jernerics.source_run_id = '{{src_run_id}}'",
-        )
+        dst_exp = dst_client.get_experiment_by_name(exp.name)
+        if dst_exp and dst_exp.lifecycle_stage == "active":
+            existing = dst_client.search_runs(
+                experiment_ids=[dst_exp.experiment_id],
+                filter_string=f"tags.jernerics.source_run_id = '{{src_run_id}}'",
+            )
+        else:
+            existing = []
+        if dst_exp and dst_exp.lifecycle_stage != "active":
+            skipped += 1
+            continue
         if len(existing) > 0:
             skipped += 1
             continue
@@ -721,6 +728,15 @@ if failed:
 
 @mlflow_app.command("sync")
 def mlflow_sync() -> None:
+    import importlib.util
+
+    if not importlib.util.find_spec("mlflow_export_import"):
+        print(
+            "Error: mlflow-export-import is required for mlflow sync.\n"
+            '  Install with: pip install "jernerics[mlflow]"'
+        )
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
     project_dir = find_pyproject_dir()
     if project_dir is None:
         print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
@@ -762,7 +778,7 @@ def mlflow_sync() -> None:
 
     ssh = SSHClient(hpc_config.host)
 
-    script = _get_mlflow_sync_script(mlflow_config.tracking_uri, mlflow_config.username)
+    script = _get_mlflow_sync_script(mlflow_config.tracking_uri)
     script_path = f"{scratch_dir}/jernerics_sync.py"
 
     print(f"[1/3] Writing sync script to {hpc_config.host}:{script_path}...")

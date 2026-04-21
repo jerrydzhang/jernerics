@@ -5,8 +5,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+import mlflow
 from sweep_basic import fake_loss
 
+from jernerics import active_run_id
 from jernerics.dag import DAG, task
 
 with DAG() as dag:
@@ -22,4 +24,6 @@ with DAG() as dag:
 
     @task(depends_on=[train])
     def evaluate(train, config):
-        return {"loss": train["loss"], "accuracy": 1.0 - min(train["loss"], 1.0)}
+        acc = 1.0 - min(train["loss"], 1.0)
+        mlflow.log_metric("accuracy", acc, run_id=active_run_id)
+        return {"loss": train["loss"], "accuracy": acc}

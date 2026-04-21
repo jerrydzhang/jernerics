@@ -14,8 +14,12 @@ dependencies = [
     "pathspec>=0.12.1",
     "rich>=13.0.0",
     "mlflow>=3.11.1",
-    "mlflow-export-import",
     "optuna>=4.8.0",
+]
+
+[project.optional-dependencies]
+mlflow = [
+    "mlflow-export-import",
 ]
 
 [project.scripts]
@@ -100,18 +104,3 @@ include = [
     "src",
 ]
 
-[tool.jernerics.hpc]
-host = "your-username@hpc.example.edu"
-remote_dir = "~/experiments/jernerics"
-
-[tool.jernerics.container]
-partition = "priority"
-time = "1:00:00"
-mem = "16G"
-cpus = 4
-
-[tool.jernerics.shell]
-partition = "priority"
-cpus = 1
-mem = "4G"
-gpu = 0
