@@ -616,7 +616,7 @@ if _use_mlflow:
     import mlflow
     mlflow.set_experiment(experiment_name)
 
-_mlflow_run = mlflow.start_run(run_name=f'trial_{{trial.number}}') if _use_mlflow else nullcontext()
+_mlflow_run = mlflow.start_run(run_name=f'trial_{{trial.number + 1}}') if _use_mlflow else nullcontext()
 
 _run_id = None
 with _mlflow_run:

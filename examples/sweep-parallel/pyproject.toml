@@ -10,7 +10,7 @@ dependencies = [
 
 [tool.uv.sources.jernerics]
 git = "https://github.com/jerrydzhang/jernerics.git"
-branch = "optuna-mlflow-integration"
+branch = "main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sweep_parallel"]

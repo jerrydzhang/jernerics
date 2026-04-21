@@ -15,7 +15,7 @@ torch = [
 
 [tool.uv.sources.jernerics]
 git = "https://github.com/jerrydzhang/jernerics.git"
-branch = "optuna-mlflow-integration"
+branch = "main"
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
