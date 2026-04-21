@@ -53,6 +53,6 @@
           mlflow = pkgs.python3.withPackages (ps: [ mlflowWithUI ps.flask-wtf ]);
         });
 
-      nixosModules.mlflow = import ./modules/mlflow.nix;
+      nixosModules.mlflow = import ./nix/modules/mlflow.nix;
     };
 }

@@ -28,7 +28,3 @@ results/
 # Nix/direnv
 .direnv/
 result
-
-# AI Stuff
-.opencode/
-.ralph/
