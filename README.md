@@ -72,14 +72,20 @@ with DAG() as dag:
 Create `config.py`:
 
 ```python
-from jernerics import merge_configs
+import optuna
 
 _base = {"seed": 42, "epochs": 10}
 
-configs = merge_configs(_base, [
-    {"lr": 0.001, "batch_size": 32},
-    {"lr": 0.01, "batch_size": 64},
-])
+def search_space(trial):
+    return {
+        "lr": trial.suggest_float("lr", 1e-5, 1e-1, log=True),
+        "batch_size": trial.suggest_int("batch_size", 16, 128),
+    }
+
+n_trials = 50
+objective_task = "train"
+objective_metric = "loss"
+direction = "minimize"
 
 slurm = {
     "partition": "priority",
@@ -89,6 +95,8 @@ slurm = {
 
 max_workers = 4  # Parallel task execution (default: CPU count)
 ```
+
+For a single run without hyperparameter search, omit `search_space` and set `n_trials = 1` (default).
 
 ### 4. Run experiments
 
@@ -124,6 +132,7 @@ jernerics results <job_id>        # Download results
 | `jernerics results <job_id>` | Download results |
 | `jernerics shell` | Interactive shell on HPC |
 | `jernerics cancel <job_id>` | Cancel jobs (`--all`) |
+| `jernerics mlflow sync` | Sync mlflow runs from HPC to remote server |
 | `jernerics clean` | Delete remote artifacts |
 
 ### Command Options
@@ -151,6 +160,10 @@ jernerics results <job_id>        # Download results
 - `--force, -f` - Force rebuild
 - `--dry-run` - Preview without executing
 
+**`jernerics mlflow sync`**
+Syncs mlflow runs from HPC scratch to the remote tracking server.
+Requires `[tool.jernerics.mlflow]` and `cache_dir` to be configured.
+
 ## Configuration
 
 ### pyproject.toml
@@ -175,6 +188,10 @@ gpu = 1
 
 [tool.jernerics.binds]
 "/work/.julia_env" = "julia_env"             # container_path = cache_subdir
+
+[tool.jernerics.mlflow]
+tracking_uri = "https://mlflow.example.com"    # Remote tracking server
+username = "admin"
 ```
 
 **Minimal config:** Only `[tool.jernerics.hpc]` with `host` is required.
@@ -182,7 +199,10 @@ gpu = 1
 ### Environment Variables
 
 ```bash
-export JERNERICS_HPC_HOST="user@cluster.edu"  # Override HPC host
+export JERNERICS_HPC_HOST="user@cluster.edu"       # Override HPC host
+export JERNERICS_MLFLOW_TRACKING_URI="https://..." # Override mlflow tracking URI
+export JERNERICS_MLFLOW_USERNAME="admin"            # mlflow username
+export JERNERICS_MLFLOW_PASSWORD="..."              # mlflow password
 ```
 
 ## DAG Tasks
@@ -217,6 +237,50 @@ Or in config.py:
 
 ```python
 executor_type = "serial"
+```
+
+## MLflow Integration
+
+Configure in `pyproject.toml`:
+
+```toml
+[tool.jernerics.mlflow]
+tracking_uri = "https://mlflow.example.com"
+username = "admin"
+```
+
+### Auto-logged per trial
+
+Every trial (including single runs) automatically logs:
+
+- **Params:** Full config with namespacing — `base.*` for `_base` values, `swept.*` for search space values. Nested dicts flattened with dots.
+- **Metric:** The `objective_metric` from the `objective_task` return value
+
+Defining the same key in both `_base` and `search_space` raises a `ValueError`.
+
+### Logging additional metrics in tasks
+
+Use `mlflow.log_metric` with `jernerics.active_run_id`:
+
+```python
+import mlflow
+from jernerics import active_run_id
+
+@task
+def evaluate(train, config):
+    accuracy = 1.0 - train["loss"]
+    mlflow.log_metric("accuracy", accuracy, run_id=active_run_id)
+    return {"loss": train["loss"]}
+```
+
+Always pass `run_id=active_run_id` — the run is started by the sweep runner, not inside the task.
+
+### Syncing from HPC
+
+On HPC with `cache_dir` configured, runs auto-sync after each trial. For manual sync:
+
+```bash
+jernerics mlflow sync
 ```
 
 ## Output Artifacts
@@ -331,8 +395,11 @@ Two options:
 
 See complete examples in `examples/`:
 
-- `container-basic/` - CPU-only workflow
-- `container-gpu/` - GPU workflow with PyTorch
+- `sweep-basic/` - Optuna + MLflow sweep with synthetic loss surface
+- `sweep-parallel/` - Parallel sweep with max_parallel constraint
+- `no-objective-sweep/` - Sweep without optimization objective
+- `gpu-smoke/` - GPU smoke test in container
+- `resume-partial-failure/` - DAG resume after partial failure
 
 ## License
 

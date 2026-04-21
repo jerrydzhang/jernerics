@@ -23,7 +23,7 @@ All HPC config lives under `[tool.jernerics]` in `pyproject.toml`:
 [tool.jernerics.hpc]
 host = "user@cluster.edu"                          # SSH host (or set JERNERICS_HPC_HOST env var)
 remote_dir = "~/projects/{project_name}"           # Remote project directory
-cache_dir = "/scratch/$USER/jernerics"             # Optional: scratch storage for binds
+cache_dir = "/scratch/$USER/jernerics"             # Optional: scratch storage for binds, Optuna DB, MLflow
 
 # Optional: Default SLURM settings for container builds
 [tool.jernerics.container]
@@ -49,6 +49,11 @@ time = "2:00:00"
 "/work/.julia_env" = "julia_env"
 "/work/.julia_depot" = "julia_depot"
 "/work/checkpoints" = "checkpoints"
+
+# Optional: MLflow experiment tracking
+[tool.jernerics.mlflow]
+tracking_uri = "https://mlflow.example.com"
+username = "admin"
 ```
 
 **Minimal config:** Only `[tool.jernerics.hpc]` with `host` is required. Everything else has defaults.
@@ -59,11 +64,12 @@ time = "2:00:00"
 
 ### Config loading
 
-`load_jernerics_config(project_dir)` returns `(HpcConfig, ShellConfig, BindsConfig)`:
+`load_jernerics_config(project_dir)` returns `(HpcConfig, ShellConfig, BindsConfig, MlflowConfig)`:
 
 - `HpcConfig`: host, remote_dir, partition, time, mem, cpus, max_concurrent_jobs, cache_dir
 - `ShellConfig`: partition, cpus, mem, gpu, time (all optional, used by `jernerics shell`)
 - `BindsConfig`: dict mapping container_path → cache_subdir name
+- `MlflowConfig`: tracking_uri, username
 
 The `container` section feeds into both `HpcConfig` (partition/time/mem/cpus for builds) and `safety` section for `max_concurrent_jobs`.
 
@@ -126,7 +132,7 @@ Key points:
 - `PYTHONPATH=/work/src` so source code is importable from bind mount
 - Source is NOT baked in — it's bind-mounted at `/work` at runtime
 
-Available templates: check `list_templates()` or `ls src/jernerics/templates/`.
+Available templates: check `list_templates()` in the jernerics source.
 
 ## Path Handling: Tilde Expansion
 
@@ -173,7 +179,7 @@ f'"{cache_path}:{container_path}"'  # "$HOME/cache:/work/cache"
 
 ### `_quote_path` internals
 
-`_quote_path(path)` in `src/jernerics/hpc/ssh.py`:
+`_quote_path(path)` in `jernerics.hpc.ssh`:
 - If path starts with `~`, returns `~` + `shlex.quote(rest)` — preserving `~` for shell expansion
 - Otherwise, returns `shlex.quote(path)`
 
@@ -309,18 +315,45 @@ When `jernerics run slurm dag.py config.py` is called:
 8. Save job metadata to `.jernerics/jobs/<job_id>.json`
 
 The inline runner in the SLURM script:
-- Sets `JERNERICS_HPC=1`, `JERNERICS_DAG_FILE=/work/<dag>`, `JERNERICS_CONFIG_FILE=/work/<config>`
+- Sets `JERNERICS_DAG_FILE=/work/<dag>`, `JERNERICS_CONFIG_FILE=/work/<config>`
 - Runs `apptainer exec --fakeroot --contain --nv --pwd /work --bind ...` with the container
-- Inside the container: loads the DAG, runs config by index, reports success/failure
+- Inside the container: creates/loads Optuna study, asks for trial, runs DAG, reports objective value
+- If MLflow is configured: starts mlflow run, logs full config with `base.*`/`swept.*` namespacing, logs objective metric, auto-syncs to remote after trial
+
+### Optuna storage on HPC
+
+The Optuna study uses a shared SQLite database:
+- With `cache_dir`: `sqlite:////scratch/optuna/<study_name>.db` (shared across array tasks)
+- Without `cache_dir`: `sqlite:////work/.jernerics/optuna/<study_name>.db`
+
+Array tasks coordinate via `flock` on an init lock file to safely create the study.
+
+### MLflow on HPC
+
+When both `cache_dir` and `[tool.jernerics.mlflow]` are configured:
+- Each trial logs to a local MLflow file store at `/scratch/<project>/mlruns/`
+- After the DAG completes, the run is copied to the remote tracking server via `mlflow-export-import`
+- The remote run is tagged with `jernerics.source_run_id` pointing to the local run ID
+- `jernerics mlflow sync` can batch-sync any runs that failed auto-sync
 
 ### Runtime environment variables
 
 Inside the container on HPC:
-- `JERNERICS_HPC=1`
 - `JERNERICS_DAG_FILE=/work/<relative_dag_path>`
 - `JERNERICS_CONFIG_FILE=/work/<relative_config_path>`
-- `JERNERICS_CONFIG_INDEX=<0-based index>`
+- `JERNERICS_CONFIG_INDEX=<0-based trial index>`
 - `PYTHONPATH=/work/src`
+- `MLFLOW_TRACKING_URI=file:///scratch/mlruns` (if mlflow configured)
+- `MLFLOW_TRACKING_USERNAME`, `MLFLOW_TRACKING_PASSWORD` (from env vars)
+- `JERNERICS_MLFLOW_REMOTE_URI=<remote tracking URI>` (for auto-sync)
+
+## MLflow Sync
+
+```bash
+jernerics mlflow sync    # Sync unsynced runs from HPC scratch to remote tracking server
+```
+
+Requires `[tool.jernerics.mlflow]` with `tracking_uri` and `[tool.jernerics.hpc]` with `cache_dir`. Runs a sync script inside the container that copies any local runs not yet present on the remote server.
 
 ## Clean
 

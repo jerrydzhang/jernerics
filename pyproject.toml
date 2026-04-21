@@ -1,11 +1,11 @@
 [project]
 name = "jernerics"
-version = "1.0.0"
+version = "1.1.0"
 description = "Opinionated utilities for ml projects"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "typer>=0.19.1",
+    "typer>=0.24.1",
     "pyyaml>=6.0.2",
     "typing-extensions>=4.12.0",
     "cloudpickle>=3.0.0",
@@ -13,6 +13,13 @@ dependencies = [
     "tomli-w>=1.0.0",
     "pathspec>=0.12.1",
     "rich>=13.0.0",
+    "mlflow>=3.11.1",
+    "optuna>=4.8.0",
+]
+
+[project.optional-dependencies]
+mlflow = [
+    "mlflow-export-import",
 ]
 
 [project.scripts]
@@ -33,6 +40,9 @@ requires = [
     "hatchling",
 ]
 build-backend = "hatchling.build"
+
+[tool.uv.sources]
+mlflow-export-import = { git = "https://github.com/mlflow/mlflow-export-import.git" }
 
 [tool.hatch.build.targets.wheel]
 packages = [
@@ -93,19 +103,3 @@ ignore = [
 include = [
     "src",
 ]
-
-[tool.jernerics.hpc]
-host = "your-username@hpc.example.edu"
-remote_dir = "~/experiments/jernerics"
-
-[tool.jernerics.container]
-partition = "priority"
-time = "1:00:00"
-mem = "16G"
-cpus = 4
-
-[tool.jernerics.shell]
-partition = "priority"
-cpus = 1
-mem = "4G"
-gpu = 0

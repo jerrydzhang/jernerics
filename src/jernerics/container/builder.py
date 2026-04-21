@@ -35,7 +35,7 @@ class ContainerBuilder:
                 )
 
         self.project_dir = Path(project_dir)
-        self.config, _, _ = load_jernerics_config(self.project_dir)
+        self.config, _, _, _ = load_jernerics_config(self.project_dir)
         self.project_name = get_project_name(self.project_dir)
 
         if not re.match(r"^[a-zA-Z0-9_.-]+$", self.project_name):
@@ -156,10 +156,10 @@ echo "=== Build completed at $(date) ==="
         result = subprocess.run(
             ["ssh", self.config.host, f"cat > {quoted_script_path}"],
             input=build_script,
-            text=True,
+            encoding="utf-8",
             check=False,
             capture_output=True,
-        )  # type: ignore[call-overload]
+        )  # type: ignore[no-matching-overload]
         if result.returncode != 0:
             raise RuntimeError(
                 f"Failed to upload build script: {result.stderr or result.stdout}"

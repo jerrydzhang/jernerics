@@ -100,7 +100,7 @@ class TestProvenance:
 
     def test_create_with_config_path(self, tmp_path):
         config_file = tmp_path / "config.py"
-        config_file.write_text("configs = [{'lr': 0.001}]")
+        config_file.write_text("_base = {'lr': 0.001}")
 
         prov = Provenance.create(
             run_id="test-123",

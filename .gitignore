@@ -11,6 +11,8 @@ wheels/
 
 # Cache and temp files
 .jernerics/
+mlflow.db
+mlruns/
 .cache/
 .ruff_cache/
 .coverage
@@ -26,7 +28,3 @@ results/
 # Nix/direnv
 .direnv/
 result
-
-# AI Stuff
-.opencode/
-.ralph/

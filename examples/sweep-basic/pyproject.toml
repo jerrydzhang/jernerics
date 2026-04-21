@@ -1,0 +1,39 @@
+[project]
+name = "sweep-basic"
+version = "0.1.0"
+description = "Optuna + MLflow sweep example with synthetic loss surface"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "jernerics",
+    "mlflow",
+    "mlflow-export-import",
+]
+
+[tool.uv.sources.jernerics]
+git = "https://github.com/jerrydzhang/jernerics.git"
+branch = "main"
+
+[tool.uv.sources.mlflow-export-import]
+git = "https://github.com/mlflow/mlflow-export-import.git"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sweep_basic"]
+
+[tool.jernerics.hpc]
+host = "jez21005@hpc2.storrs.hpc.uconn.edu"
+remote_dir = "~/projects/jernerics-examples/sweep-basic"
+cache_dir = "/scratch/qiy18011/jez21005/jernerics"
+
+[tool.jernerics.container]
+partition = "priority"
+mem = "4G"
+time = "0:30:00"
+cpus = 4
+
+[tool.jernerics.mlflow]
+tracking_uri = "http://127.0.0.1:5000"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

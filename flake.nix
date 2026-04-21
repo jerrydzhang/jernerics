@@ -10,36 +10,49 @@
     let
       inherit (nixpkgs) lib;
       forAllSystems = lib.genAttrs lib.systems.flakeExposed;
-    in
-    {
-      devShells = forAllSystems (
-        system:
+
+      mkMlflowWithUI = pkgs:
         let
-          pkgs = import nixpkgs {
-            inherit system;
+          mlflowVersion = pkgs.python3.pkgs.mlflow.version;
+          mlflowWheel = pkgs.fetchurl {
+            url = "https://files.pythonhosted.org/packages/py3/m/mlflow/mlflow-${mlflowVersion}-py3-none-any.whl";
+            hash = "sha256-QvJrUkOP22FViOFQQHxlFtD2TUF0Nt/HVZnFJaRk8hA=";
           };
         in
+        pkgs.python3.pkgs.mlflow.overridePythonAttrs (old: {
+          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.unzip ];
+          postInstall = (old.postInstall or "") + ''
+            ${pkgs.unzip}/bin/unzip ${mlflowWheel} "mlflow/server/js/*" -d "$out/${pkgs.python3.sitePackages}"
+          '';
+        });
+    in
+    {
+      devShells = forAllSystems (system: {
+        default = (import nixpkgs { inherit system; }).callPackage ./shell.nix { };
+      });
 
+      apps = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          mlflowWithUI = mkMlflowWithUI pkgs;
+        in
         {
-          default = pkgs.mkShell {
-            packages = with pkgs; [
-              uv
-              python3
-            ];
-
-            env = lib.optionalAttrs pkgs.stdenv.isLinux {
-              # Python libraries often load native shared objects using dlopen(3).
-              # Setting LD_LIBRARY_PATH makes the dynamic library loader aware of libraries without using RPATH for lookup.
-              LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ];
-            };
-
-            shellHook = ''
-              unset PYTHONPATH
-              uv sync
-              . .venv/bin/activate
-            '';
+          mlflow = {
+            type = "app";
+            program = "${pkgs.python3.withPackages (ps: [ mlflowWithUI ps.flask-wtf ])}/bin/mlflow";
           };
-        }
-      );
+        });
+
+
+      packages = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+          mlflowWithUI = mkMlflowWithUI pkgs;
+        in
+        {
+          mlflow = pkgs.python3.withPackages (ps: [ mlflowWithUI ps.flask-wtf ]);
+        });
+
+      nixosModules.mlflow = import ./nix/modules/mlflow.nix;
     };
 }

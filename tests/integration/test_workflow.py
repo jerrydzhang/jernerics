@@ -20,9 +20,8 @@ dag = DAG(__file__)
 
         config_file = tmp_path / "config.py"
         config_file.write_text("""
-slurm = {"time": "1:00:00", "mem": "4G"}
-
-configs = [{"seed": 1}, {"seed": 2}]
+_base = {"seed": 42}
+n_trials = 2
 """)
 
         result = subprocess.run(
@@ -33,8 +32,8 @@ configs = [{"seed": 1}, {"seed": 2}]
         )
 
         assert result.returncode == 0
-        assert "Running config 1/2" in result.stdout
-        assert "Running config 2/2" in result.stdout
+        assert "Running trial 1/2" in result.stdout
+        assert "Running trial 2/2" in result.stdout
         assert result.stdout.count("DAG completed") == 2
 
         state_dir = tmp_path / ".jernerics" / "runs"
@@ -60,7 +59,7 @@ dag = DAG(__file__)
 
         config_file = tmp_path / "config.py"
         config_file.write_text("""
-configs = [{"seed": 1}]
+_base = {"seed": 1}
 """)
 
         result = subprocess.run(
@@ -73,7 +72,7 @@ configs = [{"seed": 1}]
         assert result.returncode == 1
         assert "failed" in result.stdout.lower()
 
-    def test_empty_configs_error(self, tmp_path):
+    def test_empty_base_defaults_to_empty_dict(self, tmp_path):
         dag_file = tmp_path / "dag.py"
         dag_file.write_text("""
 from jernerics.dag import task, DAG
@@ -86,9 +85,7 @@ dag = DAG(__file__)
 """)
 
         config_file = tmp_path / "config.py"
-        config_file.write_text("""
-configs = []
-""")
+        config_file.write_text("")
 
         result = subprocess.run(
             ["jernerics", "run", "local", str(dag_file), str(config_file)],
@@ -97,7 +94,8 @@ configs = []
             cwd=tmp_path,
         )
 
-        assert "configs" in result.stdout.lower()
+        assert result.returncode == 0
+        assert "DAG completed" in result.stdout
 
     def test_diamond_dependency(self, tmp_path):
         dag_file = tmp_path / "dag.py"
@@ -125,7 +123,7 @@ dag = DAG(__file__)
 
         config_file = tmp_path / "config.py"
         config_file.write_text("""
-configs = [{"seed": 1}]
+_base = {"seed": 1}
 """)
 
         result = subprocess.run(
@@ -152,7 +150,7 @@ dag = DAG(__file__)
 
         config_file = tmp_path / "my config.py"
         config_file.write_text("""
-configs = [{"value": 42}]
+_base = {"value": 42}
 """)
 
         result = subprocess.run(
@@ -190,7 +188,7 @@ dag = DAG(__file__)
         config_file = tmp_path / "config.py"
         config_file.write_text("""
 slurm = {"time": "2:00:00", "mem": "8G", "partition": "gpu"}
-configs = [{"seed": 1}, {"seed": 2}, {"seed": 3}]
+n_trials = 3
 """)
 
         result = subprocess.run(

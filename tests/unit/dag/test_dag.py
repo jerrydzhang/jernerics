@@ -98,6 +98,20 @@ class TestDAGCreation:
         dag = DAG("   ")
         assert dag.dag_file is None
 
+    def test_dag_with_project_name(self, tmp_path):
+        dag_file = tmp_path / "dag.py"
+        dag_file.write_text("pass")
+
+        dag = DAG(dag_file, project_name="my-project")
+        assert dag.project_name == "my-project"
+
+    def test_dag_without_project_name(self, tmp_path):
+        dag_file = tmp_path / "dag.py"
+        dag_file.write_text("pass")
+
+        dag = DAG(dag_file)
+        assert dag.project_name is None
+
 
 class TestDAGDiscovery:
     def test_discover_tasks_from_file(self, tmp_path):

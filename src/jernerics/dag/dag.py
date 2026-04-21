@@ -13,11 +13,16 @@ from .task import Task
 
 
 class DAG:
-    def __init__(self, dag_file: str | Path | None = None):
+    def __init__(
+        self,
+        dag_file: str | Path | None = None,
+        project_name: str | None = None,
+    ):
         self.tasks: dict[str, Task] = {}
         self.dag_file: Path | None = (
             Path(dag_file) if dag_file and str(dag_file).strip() else None
         )
+        self.project_name = project_name
         self.state_dir: Path | None = None
         self._discovered = False
         self._token = None
@@ -126,8 +131,9 @@ class DAG:
             provenance.to_json(self.state_dir)
 
         exc_info: BaseException | None = None
+
         try:
-            return execute_dag(
+            results = execute_dag(
                 self.tasks,
                 config,
                 state=state,
@@ -146,6 +152,8 @@ class DAG:
                     if exc_info is not None:
                         raise e from exc_info
                     raise
+
+        return results
 
     def resume(
         self,

@@ -6,8 +6,9 @@ import shutil
 import subprocess
 import time
 import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import tomli_w
 import typer
@@ -17,11 +18,11 @@ from rich.table import Table
 from ._cli_helpers import (
     ConfigNotFound,
     ExitCode,
-    NoConfigsFound,
+    MlflowConfig,
+    SweepConfig,
     _normalize_time,
     find_pyproject_dir,
     get_project_name,
-    get_script_path,
     load_config,
     load_jernerics_config,
 )
@@ -38,6 +39,9 @@ app.add_typer(run_app, name="run", help="Run DAG experiments.")
 
 container_app = typer.Typer()
 app.add_typer(container_app, name="container", help="Build and manage containers.")
+
+mlflow_app = typer.Typer()
+app.add_typer(mlflow_app, name="mlflow", help="Manage mlflow experiment tracking.")
 
 DEFAULT_SLURM = {
     "output": ".jernerics/logs/%A_%a.out",
@@ -69,76 +73,88 @@ def run_local(
 ):
     dag_path = os.path.abspath(dag_file)
     config_path = os.path.abspath(config_file)
-    results_path = os.path.abspath(results_dir)
 
     if not Path(dag_path).exists():
         print(f"Error: DAG file not found: {dag_path}")
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        _, configs, _, _ = load_config(config_path)
+        sweep = load_config(config_path)
     except FileNotFoundError as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
-    except NoConfigsFound as e:
-        print(e)
+    except RuntimeError as e:
+        print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
-    num_configs = len(configs)
+    # Try to load mlflow config from pyproject.toml
+    mlflow_config = MlflowConfig()
+    project_dir = find_pyproject_dir()
+    if project_dir:
+        from contextlib import suppress
+
+        with suppress(ConfigNotFound):
+            _, _, _, mlflow_config = load_jernerics_config(project_dir)
+    project_name = get_project_name(project_dir) if project_dir else None
+
+    import optuna
+
+    dag_dir = Path(os.path.dirname(dag_path) or ".")
+    db_dir = dag_dir / ".jernerics" / "optuna"
+    db_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    study_name = f"local_{Path(config_path).stem}_{timestamp}"
+    storage_url = f"sqlite:///{db_dir / (study_name + '.db')}"
+
     any_failed = False
 
-    if container:
-        run_script = get_script_path("run_with_container.sh")
-        container_path = os.path.abspath(container)
+    for i in range(sweep.n_trials):
+        print(f"Running trial {i + 1}/{sweep.n_trials}", flush=True)
 
-        if not Path(container_path).exists():
-            print(f"Error: Container file not found: {container_path}")
-            raise SystemExit(ExitCode.CONFIG_ERROR)
+        env = os.environ.copy()
+        env["JERNERICS_CONFIG_INDEX"] = str(i)
+        if mlflow_config.tracking_uri:
+            env["MLFLOW_TRACKING_URI"] = mlflow_config.tracking_uri
+        if mlflow_config.username:
+            env["MLFLOW_TRACKING_USERNAME"] = mlflow_config.username
+        if os.environ.get("JERNERICS_MLFLOW_PASSWORD"):
+            env["MLFLOW_TRACKING_PASSWORD"] = os.environ["JERNERICS_MLFLOW_PASSWORD"]
 
-        for i in range(num_configs):
-            print(f"Running config {i + 1}/{num_configs}", flush=True)
-            try:
-                result = subprocess.run(
-                    [
-                        run_script,
-                        container_path,
+        try:
+            result = subprocess.run(
+                [
+                    "python",
+                    "-c",
+                    _get_sweep_runner_code(
                         dag_path,
                         config_path,
-                        results_path,
-                        str(gpu).lower(),
-                        str(i),
-                    ],
-                    timeout=timeout,
-                )
-                if result.returncode != 0:
-                    print(f"Config {i + 1} failed with code {result.returncode}")
-                    any_failed = True
-            except subprocess.TimeoutExpired:
-                print(f"Config {i + 1} timed out after {timeout} seconds")
+                        study_name,
+                        storage_url,
+                        sweep,
+                        project_name=project_name,
+                    ),
+                ],
+                cwd=os.path.dirname(dag_path) or ".",
+                env=env,
+                timeout=timeout,
+            )
+            if result.returncode != 0:
+                print(f"Trial {i + 1} failed with code {result.returncode}")
                 any_failed = True
-    else:
-        for i in range(num_configs):
-            print(f"Running config {i + 1}/{num_configs}", flush=True)
-            env = os.environ.copy()
-            env["JERNERICS_CONFIG_INDEX"] = str(i)
+        except subprocess.TimeoutExpired:
+            print(f"Trial {i + 1} timed out after {timeout} seconds")
+            any_failed = True
 
-            try:
-                result = subprocess.run(
-                    [
-                        "python",
-                        "-c",
-                        _get_runner_code(dag_path, config_path, i, None),
-                    ],
-                    cwd=os.path.dirname(dag_path) or ".",
-                    env=env,
-                    timeout=timeout,
-                )
-                if result.returncode != 0:
-                    print(f"Config {i + 1} failed with code {result.returncode}")
-                    any_failed = True
-            except subprocess.TimeoutExpired:
-                print(f"Config {i + 1} timed out after {timeout} seconds")
-                any_failed = True
+    try:
+        study = optuna.load_study(study_name=study_name, storage=storage_url)
+        completed = [
+            t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
+        ]
+        if completed:
+            print(f"Best value: {study.best_value:.4f}")
+            print(f"Best params: {study.best_params}")
+    except KeyError:
+        pass
 
     if any_failed:
         raise SystemExit(ExitCode.GENERAL_ERROR)
@@ -175,7 +191,7 @@ def run_slurm(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, _, binds = load_jernerics_config(project_dir)
+        hpc_config, _, binds, mlflow_config = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
@@ -190,12 +206,13 @@ def run_slurm(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        config_slurm, configs, _, _ = load_config(str(config_path))
-    except NoConfigsFound as e:
+        sweep = load_config(str(config_path))
+    except FileNotFoundError as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
-
-    num_configs = len(configs)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     cli_overrides = {}
     for opt in set_opt:
@@ -217,9 +234,7 @@ def run_slurm(
         "partition": hpc_config.partition,
         "time": hpc_config.time,
         "mem": hpc_config.mem,
-        **{
-            k: _normalize_time(v) if k == "time" else v for k, v in config_slurm.items()
-        },
+        **{k: _normalize_time(v) if k == "time" else v for k, v in sweep.slurm.items()},
         **{
             k: _normalize_time(v) if k == "time" else v
             for k, v in cli_overrides.items()
@@ -235,10 +250,11 @@ def run_slurm(
         print(f"Error: max_parallel must be an integer, got: {max_parallel!r}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from e
 
+    n_trials = sweep.n_trials
     if max_parallel_val > 0:
-        array_spec = f"1-{num_configs}%{max_parallel_val}"
+        array_spec = f"1-{n_trials}%{max_parallel_val}"
     else:
-        array_spec = f"1-{num_configs}"
+        array_spec = f"1-{n_trials}"
 
     dag_relpath = dag_path.relative_to(project_dir)
     config_relpath = config_path.relative_to(project_dir)
@@ -260,110 +276,22 @@ def run_slurm(
     dag_relpath = validate_relpath(str(dag_relpath), "DAG file")
     config_relpath = validate_relpath(str(config_relpath), "Config file")
 
-    output_pattern = str(slurm_opts.get("output", "logs/slurm_%j.out"))
-    error_pattern = str(slurm_opts.get("error", "logs/slurm_%j.err"))
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    study_name = f"{project_name}_{config_path.stem}_{timestamp}"
 
-    def expand_path(p: str) -> str:
-        if p.startswith("~"):
-            p = str(Path(p).expanduser())
-        return p
-
-    def safe_shell_path(p: str) -> str:
-        if p.startswith("~"):
-            rest = p[1:]
-            if not rest or rest.startswith("/"):
-                escaped = rest.replace("\\", "\\\\").replace('"', '\\"')
-                escaped = escaped.replace("$", "\\$").replace("`", "\\`")
-                escaped = escaped.replace(";", "\\;").replace("|", "\\|")
-                escaped = escaped.replace("&", "\\&").replace("(", "\\(")
-                escaped = escaped.replace(")", "\\)").replace("\n", "")
-                return "~" + escaped
-        return shlex.quote(p)
-
-    output_pattern = expand_path(output_pattern)
-    error_pattern = expand_path(error_pattern)
-    slurm_opts["output"] = output_pattern
-    slurm_opts["error"] = error_pattern
-
-    script_lines = [
-        "#!/usr/bin/env bash",
-        "#SBATCH --parsable",
-        f"#SBATCH --array={array_spec}",
-    ]
-    for key, value in slurm_opts.items():
-        script_lines.append(f"#SBATCH --{key}={value}")
-    script_lines.append("")
-    output_path = str(slurm_opts["output"])
-    if "%" in output_path:
-        before_pattern = output_path[: output_path.index("%")]
-        last_slash = before_pattern.rfind("/")
-        output_dir = before_pattern[:last_slash] if last_slash >= 0 else "."
-    else:
-        output_dir = str(Path(output_path).parent)
-    script_lines.append(f"mkdir -p {safe_shell_path(output_dir)}")
-    script_lines.append("CONFIG_INDEX=$((SLURM_ARRAY_TASK_ID - 1))")
-    script_lines.append("export JERNERICS_HPC=1")
-    script_lines.append(f"export JERNERICS_DAG_FILE=/work/{dag_relpath}")
-    script_lines.append(f"export JERNERICS_CONFIG_FILE=/work/{config_relpath}")
-    script_lines.append("export JERNERICS_CONFIG_INDEX=${CONFIG_INDEX}")
-    script_lines.append(f"cd {safe_shell_path(remote_dir)}")
-    script_lines.append("REMOTE_DIR=$(cd . && pwd)")
-
-    bind_args = ['"${REMOTE_DIR}:/work"']
-    if hpc_config.cache_dir and binds:
-        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
-        cache_dir = cache_dir.replace("~", "$HOME")
-        for container_path, cache_subdir in binds.items():
-            cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
-            bind_args.append(f'"{cache_path}:{container_path}"')
-    bind_str = " \\\n    --bind ".join(bind_args)
-
-    script_lines.append(
-        f"apptainer exec --fakeroot --contain --nv --pwd /work --bind {bind_str} container.sif \\"
+    script_content = _generate_sweep_script(
+        array_spec=array_spec,
+        slurm_opts=slurm_opts,
+        dag_relpath=dag_relpath,
+        config_relpath=config_relpath,
+        remote_dir=remote_dir,
+        hpc_config=hpc_config,
+        binds=binds,
+        project_name=project_name,
+        mlflow_config=mlflow_config,
+        study_name=study_name,
+        sweep=sweep,
     )
-    script_lines.append("    python -c \"$(cat <<'EOF'")
-    script_lines.append("import os")
-    script_lines.append("import sys")
-    script_lines.append("import pathlib")
-    script_lines.append("import traceback")
-    script_lines.append("")
-    script_lines.append('dag_file = os.environ["JERNERICS_DAG_FILE"]')
-    script_lines.append('config_file = os.environ["JERNERICS_CONFIG_FILE"]')
-    script_lines.append('config_index = int(os.environ["JERNERICS_CONFIG_INDEX"])')
-    script_lines.append("")
-    script_lines.append("sys.path.insert(0, str(pathlib.Path(dag_file).parent))")
-    script_lines.append("")
-    script_lines.append("from jernerics.dag import DAG")
-    script_lines.append("from jernerics._cli_helpers import load_config")
-    script_lines.append("")
-    script_lines.append("dag = DAG(dag_file)")
-    script_lines.append(
-        "slurm_opts, configs, max_workers, executor_type = load_config(config_file)"
-    )
-    script_lines.append("config = configs[config_index]")
-    script_lines.append("")
-    script_lines.append(
-        "results = dag.run(config, config_index=config_index, config_path=config_file, max_workers=max_workers, executor_type=executor_type or 'thread')"
-    )
-    script_lines.append("")
-    script_lines.append(
-        "failed = [(name, result) for name, result in results.items() if isinstance(result, Exception)]"
-    )
-    script_lines.append("if failed:")
-    script_lines.append('    print("DAG failed with errors:\\n")')
-    script_lines.append("    for name, exc in failed:")
-    script_lines.append('        print(f"  [{name}] {type(exc).__name__}: {exc}")')
-    script_lines.append(
-        "        traceback.print_exception(type(exc), exc, exc.__traceback__)"
-    )
-    script_lines.append("        print()")
-    script_lines.append("    sys.exit(1)")
-    script_lines.append("else:")
-    script_lines.append('    print("DAG completed")')
-    script_lines.append("EOF")
-    script_lines.append(')"')
-
-    script_content = "\n".join(script_lines)
 
     if dry_run:
         print("=== DRY RUN ===")
@@ -385,14 +313,19 @@ def run_slurm(
     print("[2/4] Ensuring log directory exists...")
     ssh.mkdir(f"{remote_dir}/.jernerics/logs")
 
-    if hpc_config.cache_dir and binds:
+    if hpc_config.cache_dir:
         cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
-        print(f"[3/4] Creating cache directories in {cache_dir}/{project_name}...")
-        for cache_subdir in binds.values():
-            cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
-            ssh.mkdir(cache_path)
+        print(f"[3/4] Creating scratch directories in {cache_dir}/{project_name}...")
+        ssh.mkdir(f"{cache_dir}/{project_name}/optuna")
+        if mlflow_config.tracking_uri:
+            ssh.mkdir(f"{cache_dir}/{project_name}/mlruns")
+        if binds:
+            for cache_subdir in binds.values():
+                cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
+                ssh.mkdir(cache_path)
     else:
-        print("[3/4] (No cache binds configured)")
+        ssh.mkdir(f"{remote_dir}/.jernerics/optuna")
+        print("[3/4] (No cache dir configured)")
 
     if not syncer.container_exists():
         print(
@@ -410,7 +343,7 @@ def run_slurm(
             "output_pattern": str(slurm_opts.get("output", "logs/slurm_%j.out")),
             "error_pattern": str(slurm_opts.get("error", "logs/slurm_%j.err")),
             "remote_dir": remote_dir,
-            "num_configs": num_configs,
+            "n_trials": n_trials,
         }
         meta_dir = project_dir / ".jernerics" / "jobs"
         meta_dir.mkdir(parents=True, exist_ok=True)
@@ -425,44 +358,425 @@ def run_slurm(
         raise SystemExit(ExitCode.SLURM_ERROR) from None
 
 
-def _get_runner_code(
+def _generate_sweep_script(
+    array_spec: str,
+    slurm_opts: dict[str, str],
+    dag_relpath: str,
+    config_relpath: str,
+    remote_dir: str,
+    hpc_config: Any,
+    binds: dict[str, str],
+    project_name: str,
+    mlflow_config: MlflowConfig,
+    study_name: str,
+    sweep: SweepConfig,
+) -> str:
+    slurm_opts = dict(slurm_opts)
+
+    output_pattern = str(slurm_opts.get("output", "logs/slurm_%j.out"))
+    error_pattern = str(slurm_opts.get("error", "logs/slurm_%j.err"))
+
+    def expand_path(p: str) -> str:
+        if p.startswith("~"):
+            p = "$HOME" + p[1:]
+        return p
+
+    def safe_shell_path(p: str) -> str:
+        if p.startswith("~"):
+            rest = p[1:]
+            if not rest or rest.startswith("/"):
+                escaped = rest.replace("\\", "\\\\").replace('"', '\\"')
+                escaped = escaped.replace("$", "\\$").replace("`", "\\`")
+                escaped = escaped.replace(";", "\\;").replace("|", "\\|")
+                escaped = escaped.replace("&", "\\&").replace("(", "\\(")
+                escaped = escaped.replace(")", "\\)").replace("\n", "")
+                return "~" + escaped
+        return shlex.quote(p)
+
+    slurm_opts["output"] = expand_path(output_pattern)
+    slurm_opts["error"] = expand_path(error_pattern)
+
+    lines = [
+        "#!/usr/bin/env bash",
+        "#SBATCH --parsable",
+        f"#SBATCH --array={array_spec}",
+    ]
+    for key, value in slurm_opts.items():
+        lines.append(f"#SBATCH --{key}={value}")
+    lines.append("")
+
+    output_path = str(slurm_opts["output"])
+    if "%" in output_path:
+        before_pattern = output_path[: output_path.index("%")]
+        last_slash = before_pattern.rfind("/")
+        output_dir = before_pattern[:last_slash] if last_slash >= 0 else "."
+    else:
+        output_dir = str(Path(output_path).parent)
+    lines.append(f"mkdir -p {safe_shell_path(output_dir)}")
+
+    lines.append(f"cd {safe_shell_path(remote_dir)}")
+    lines.append("REMOTE_DIR=$(cd . && pwd)")
+
+    use_scratch = bool(hpc_config.cache_dir)
+
+    if use_scratch:
+        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
+        cache_dir = cache_dir.replace("~", "$HOME")
+        scratch_dir = f"{cache_dir}/{project_name}"
+
+    storage_url = (
+        f"sqlite:////scratch/optuna/{study_name}.db"
+        if use_scratch
+        else f"sqlite:////work/.jernerics/optuna/{study_name}.db"
+    )
+
+    bind_args = ['"${REMOTE_DIR}:/work"']
+    if use_scratch:
+        bind_args.append(f'"{scratch_dir}:/scratch"')
+        if binds:
+            for container_path, cache_subdir in binds.items():
+                cache_path = f"{scratch_dir}/{cache_subdir}"
+                bind_args.append(f'"{cache_path}:{container_path}"')
+    bind_str = " \\\n    --bind ".join(bind_args)
+
+    mlflow_env_lines = []
+    if mlflow_config.tracking_uri:
+        if use_scratch:
+            mlflow_env_lines.append("export MLFLOW_TRACKING_URI=file:///scratch/mlruns")
+        else:
+            mlflow_env_lines.append(
+                f"export MLFLOW_TRACKING_URI={mlflow_config.tracking_uri}"
+            )
+        mlflow_env_lines.append(
+            "export MLFLOW_TRACKING_USERNAME=${MLFLOW_TRACKING_USERNAME:-${JERNERICS_MLFLOW_USERNAME}}"
+        )
+        mlflow_env_lines.append(
+            "export MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD}"
+        )
+        mlflow_env_lines.append(
+            f"export JERNERICS_MLFLOW_REMOTE_URI={mlflow_config.tracking_uri}"
+        )
+
+    for line in mlflow_env_lines:
+        lines.append(line)
+
+    lines.append("")
+
+    if use_scratch:
+        lines.append(f"mkdir -p {scratch_dir}/optuna")
+        lines.append(
+            f"flock {scratch_dir}/optuna/init.lock apptainer exec"
+            f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
+            f' container.sif python -c "'
+            f"import optuna;"
+            f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
+            f' direction={sweep.direction!r}, load_if_exists=True)"'
+        )
+    else:
+        lines.append("mkdir -p .jernerics/optuna")
+        lines.append(
+            f"flock .jernerics/optuna/init.lock apptainer exec"
+            f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
+            f' container.sif python -c "'
+            f"import optuna;"
+            f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
+            f' direction={sweep.direction!r}, load_if_exists=True)"'
+        )
+    lines.append("")
+
+    lines.append(
+        f"apptainer exec --fakeroot --contain --nv --pwd /work --bind {bind_str} container.sif \\"
+    )
+    lines.append("    python -c \"$(cat <<'EOF'")
+
+    runner_code = _get_sweep_runner_code(
+        dag_file=f"/work/{dag_relpath}",
+        config_file=f"/work/{config_relpath}",
+        study_name=study_name,
+        storage_url=storage_url,
+        sweep=sweep,
+        project_name=project_name,
+    )
+    for line in runner_code.strip().split("\n"):
+        lines.append(line)
+    lines.append("EOF")
+    lines.append(')"')
+
+    return "\n".join(lines)
+
+
+def _get_sweep_runner_code(
     dag_file: str,
     config_file: str,
-    config_index: int,
-    container_path: str | None = None,
+    study_name: str,
+    storage_url: str,
+    sweep: SweepConfig,
+    project_name: str | None = None,
 ) -> str:
-    container_arg = repr(container_path) if container_path else "None"
+    experiment_name = f"{project_name}/{study_name}" if project_name else study_name
+    project_name_arg = f", project_name={project_name!r}" if project_name else ""
     # ruff: noqa: E501
-    return f'''
+    return f"""
 import os
 import sys
 import pathlib
+from contextlib import nullcontext
 
 dag_file = os.environ.get("JERNERICS_DAG_FILE", {dag_file!r})
 config_file = os.environ.get("JERNERICS_CONFIG_FILE", {config_file!r})
-config_index = int(os.environ.get("JERNERICS_CONFIG_INDEX", "{config_index}"))
-container_path = {container_arg}
 
 dag_dir = pathlib.Path(dag_file).parent
 if str(dag_dir) not in sys.path:
     sys.path.insert(0, str(dag_dir))
 
+import optuna
 from jernerics.dag import DAG
 from jernerics._cli_helpers import load_config
 
-dag = DAG(dag_file)
-slurm_opts, configs, max_workers, executor_type = load_config(config_file)
-config = configs[config_index]
+sweep = load_config(config_file)
+dag = DAG(dag_file{project_name_arg})
 
-results = dag.run(config, config_index=config_index, config_path=config_file, container_path=container_path, max_workers=max_workers, executor_type=executor_type or 'thread')
+study = optuna.create_study(
+    study_name={study_name!r},
+    storage={storage_url!r},
+    direction=sweep.direction,
+    sampler=sweep.sampler,
+    load_if_exists=True,
+)
 
-failed = [name for name, result in results.items() if isinstance(result, Exception)]
+trial = study.ask()
+params = sweep.search_space(trial) if sweep.search_space else {{}}
+
+if params and set(sweep._base) & set(params):
+    _overlap = sorted(set(sweep._base) & set(params))
+    raise ValueError(f"Config keys defined in both _base and search_space: {{_overlap}}. Remove them from _base.")
+
+config = {{**sweep._base, **params}}
+
+experiment_name = {experiment_name!r}
+_use_mlflow = bool(os.environ.get('MLFLOW_TRACKING_URI'))
+if _use_mlflow:
+    import mlflow
+    mlflow.set_experiment(experiment_name)
+
+_mlflow_run = mlflow.start_run(run_name=f'trial_{{trial.number + 1}}') if _use_mlflow else nullcontext()
+
+_run_id = None
+with _mlflow_run:
+    if _use_mlflow:
+        _run_id = _mlflow_run.info.run_id
+        _flat = {{}}
+        def _flatten(_d, _p=""):
+            for _k, _v in _d.items():
+                _key = f"{{_p}}.{{_k}}" if _p else _k
+                if isinstance(_v, dict):
+                    _flatten(_v, _key)
+                else:
+                    _flat[_key] = _v if isinstance(_v, str) else str(_v)
+        if sweep._base:
+            _flatten(sweep._base, "base")
+        if params:
+            _flatten(params, "swept")
+        mlflow.log_params(_flat)
+        import jernerics as _jern
+        _jern.active_run_id = _run_id
+    try:
+        results = dag.run(config, config_index=trial.number, config_path=config_file, max_workers=sweep.max_workers, executor_type=sweep.executor_type or 'thread')
+
+        failed = [(n, r) for n, r in results.items() if isinstance(r, Exception)]
+        if failed:
+            for name, exc in failed:
+                print(f"  [{{name}}] {{type(exc).__name__}}: {{exc}}")
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            sys.exit(1)
+
+        if sweep.objective_task and sweep.objective_metric:
+            result = results[sweep.objective_task]
+            if isinstance(result, dict):
+                value = result[sweep.objective_metric]
+            else:
+                value = float(result)
+            if _use_mlflow:
+                mlflow.log_metric(sweep.objective_metric, value)
+            study.tell(trial, value)
+        else:
+            study.tell(trial, 0.0)
+
+        print("DAG completed")
+    except Exception:
+        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+        raise
+
+_remote_uri = os.environ.get('JERNERICS_MLFLOW_REMOTE_URI')
+if _run_id and _remote_uri:
+    try:
+        from mlflow_export_import.copy.copy_run import copy
+        _dst_run = copy(
+            src_run_id=_run_id,
+            dst_experiment_name=experiment_name,
+            src_mlflow_uri=os.environ.get('MLFLOW_TRACKING_URI'),
+            dst_mlflow_uri=_remote_uri,
+        )
+        from mlflow import MlflowClient as _MC
+        _MC(_remote_uri).set_tag(_dst_run.info.run_id, "jernerics.source_run_id", _run_id)
+    except Exception as _e:
+        print(f"Warning: mlflow sync failed: {{_e}}")
+"""
+
+
+def _get_mlflow_sync_script(remote_uri: str) -> str:
+    """Generate a self-contained Python sync script to run inside the container."""
+    return f"""
+import json
+import os
+import sys
+
+from mlflow import MlflowClient
+from mlflow_export_import.copy.copy_run import copy
+
+src_client = MlflowClient("file:///scratch/mlruns")
+dst_client = MlflowClient({remote_uri!r})
+
+synced = 0
+skipped = 0
+failed = []
+
+for exp in src_client.search_experiments():
+    if exp.name == "Default":
+        continue
+    runs = src_client.search_runs(experiment_ids=[exp.experiment_id])
+    for run in runs:
+        src_run_id = run.info.run_id
+        dst_exp = dst_client.get_experiment_by_name(exp.name)
+        if dst_exp and dst_exp.lifecycle_stage == "active":
+            existing = dst_client.search_runs(
+                experiment_ids=[dst_exp.experiment_id],
+                filter_string=f"tags.jernerics.source_run_id = '{{src_run_id}}'",
+            )
+        else:
+            existing = []
+        if dst_exp and dst_exp.lifecycle_stage != "active":
+            skipped += 1
+            continue
+        if len(existing) > 0:
+            skipped += 1
+            continue
+        try:
+            dst_run = copy(
+                src_run_id=src_run_id,
+                dst_experiment_name=exp.name,
+                src_mlflow_uri="file:///scratch/mlruns",
+                dst_mlflow_uri={remote_uri!r},
+            )
+            dst_client.set_tag(dst_run.info.run_id, "jernerics.source_run_id", src_run_id)
+            synced += 1
+        except Exception as e:
+            failed.append({{"run_id": src_run_id, "experiment": exp.name, "error": str(e)}})
+
+result = {{"synced": synced, "skipped": skipped, "failed": failed}}
+print(json.dumps(result))
 if failed:
-    print("DAG failed. Tasks with errors:", ", ".join(failed))
     sys.exit(1)
-else:
-    print("DAG completed")
-'''
+"""
+
+
+@mlflow_app.command("sync")
+def mlflow_sync() -> None:
+    import importlib.util
+
+    if not importlib.util.find_spec("mlflow_export_import"):
+        print(
+            "Error: mlflow-export-import is required for mlflow sync.\n"
+            '  Install with: pip install "jernerics[mlflow]"'
+        )
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        hpc_config, _, _binds, mlflow_config = load_jernerics_config(project_dir)
+    except ConfigNotFound as e:
+        print(f"Error: {e}")
+        print("Run 'jernerics init' to add [tool.jernerics] config.")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+
+    if not hpc_config.host:
+        print(
+            "Error: No HPC host configured.\n"
+            "  Set JERNERICS_HPC_HOST environment variable, or\n"
+            "  Add host to [tool.jernerics.hpc] in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    if not hpc_config.cache_dir:
+        print(
+            "Error: cache_dir must be configured in [tool.jernerics.hpc] for mlflow sync."
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    if not mlflow_config.tracking_uri:
+        print(
+            "Error: tracking_uri must be configured in [tool.jernerics.mlflow] for mlflow sync."
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    project_name = get_project_name(project_dir)
+    remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
+    remote_dir = remote_dir.replace("{project-name}", project_name)
+    cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
+    cache_dir = cache_dir.replace("~", "$HOME")
+    scratch_dir = f"{cache_dir}/{project_name}"
+
+    ssh = SSHClient(hpc_config.host)
+
+    script = _get_mlflow_sync_script(mlflow_config.tracking_uri)
+    script_path = f"{scratch_dir}/jernerics_sync.py"
+
+    print(f"[1/3] Writing sync script to {hpc_config.host}:{script_path}...")
+    result = ssh.run(
+        f"cat > {_quote_path(script_path)} << 'JERNERICS_EOF'\n{script}\nJERNERICS_EOF"
+    )
+    if result.returncode != 0:
+        print(f"Error: Failed to write sync script: {result.stderr}")
+        raise SystemExit(ExitCode.SSH_ERROR)
+
+    bind_args = [f'"{scratch_dir}:/scratch"']
+    bind_str = " \\\n    --bind ".join(bind_args)
+
+    print("[2/3] Running sync via apptainer...")
+    apptainer_cmd = (
+        f"cd {_quote_path(remote_dir)} && "
+        "MLFLOW_TRACKING_USERNAME=${MLFLOW_TRACKING_USERNAME:-${JERNERICS_MLFLOW_USERNAME}} "
+        "MLFLOW_TRACKING_PASSWORD=${JERNERICS_MLFLOW_PASSWORD} "
+        f"apptainer exec --fakeroot --contain --bind {bind_str} "
+        f"container.sif python /scratch/jernerics_sync.py"
+    )
+    result = ssh.run(apptainer_cmd, check=False)
+
+    print("[3/3] Cleaning up sync script...")
+    ssh.run(f"rm -f {_quote_path(script_path)}", check=False)
+
+    if result.returncode != 0:
+        print(f"Sync completed with errors:\n{result.stdout}")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+
+    if result.stdout.strip():
+        try:
+            summary = json.loads(result.stdout.strip())
+            print(f"Synced: {summary.get('synced', 0)} runs")
+            print(f"Skipped: {summary.get('skipped', 0)} runs (already synced)")
+            if summary.get("failed"):
+                for entry in summary["failed"]:
+                    print(
+                        f"  Failed: {entry['run_id']} ({entry['experiment']}): {entry['error']}"
+                    )
+        except json.JSONDecodeError:
+            print(result.stdout)
+    else:
+        print("No runs found to sync.")
 
 
 def _get_hpc_client():
@@ -472,7 +786,7 @@ def _get_hpc_client():
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, _, binds = load_jernerics_config(project_dir)
+        hpc_config, _, binds, _mlflow = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
@@ -605,12 +919,12 @@ def logs(
         output_pattern = meta.get("output_pattern", "logs/slurm_%j.out")
         error_pattern = meta.get("error_pattern", "logs/slurm_%j.err")
         meta_remote_dir = meta.get("remote_dir", remote_dir)
-        num_configs = meta.get("num_configs", 1)
+        n_trials = meta.get("n_trials", 1)
     else:
         output_pattern = "logs/slurm_%j.out"
         error_pattern = "logs/slurm_%j.err"
         meta_remote_dir = remote_dir
-        num_configs = 1
+        n_trials = 1
 
     log_pattern = error_pattern if stderr else output_pattern
 
@@ -618,7 +932,7 @@ def logs(
     array_idx = job_id.split("_")[1] if "_" in job_id else None
 
     effective_array_index = array_index if array_index is not None else array_idx
-    if effective_array_index is None and num_configs == 1:
+    if effective_array_index is None and n_trials == 1:
         effective_array_index = 1
     log_file = expand_slurm_pattern(
         log_pattern,
@@ -721,12 +1035,12 @@ def results(
 
         meta = json.loads(meta_file.read_text())
         meta_remote_dir = meta.get("remote_dir", remote_dir)
-        num_configs = meta.get("num_configs", 1)
+        n_trials = meta.get("n_trials", 1)
         output_pattern = meta.get("output_pattern", DEFAULT_SLURM["output"])
         error_pattern = meta.get("error_pattern", DEFAULT_SLURM["error"])
 
         log_files: list[str] = []
-        for i in range(1, num_configs + 1):
+        for i in range(1, n_trials + 1):
             for pattern in (output_pattern, error_pattern):
                 expanded = expand_slurm_pattern(pattern, job_id=job_id, array_task_id=i)
                 if not expanded.startswith(("/", "~")):
@@ -780,7 +1094,7 @@ def shell(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, shell_config, _ = load_jernerics_config(project_dir)
+        hpc_config, shell_config, _, _mlflow = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
@@ -864,7 +1178,7 @@ def clean(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, _, _ = load_jernerics_config(project_dir)
+        hpc_config, _, _, _mlflow = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         print("Run 'jernerics init' to add [tool.jernerics] config.")
