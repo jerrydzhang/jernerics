@@ -365,7 +365,7 @@ def run_slurm(
             "output_pattern": str(slurm_opts.get("output", "logs/slurm_%j.out")),
             "error_pattern": str(slurm_opts.get("error", "logs/slurm_%j.err")),
             "remote_dir": remote_dir,
-            "num_configs": n_trials,
+            "n_trials": n_trials,
         }
         meta_dir = project_dir / ".jernerics" / "jobs"
         meta_dir.mkdir(parents=True, exist_ok=True)
@@ -575,7 +575,6 @@ def _get_sweep_runner_code(
     sweep: SweepConfig,
     project_name: str | None = None,
 ) -> str:
-    dag_stem = Path(dag_file).stem
     experiment_name = f"{project_name}/{study_name}" if project_name else study_name
     project_name_arg = f", project_name={project_name!r}" if project_name else ""
     # ruff: noqa: E501
@@ -965,12 +964,12 @@ def logs(
         output_pattern = meta.get("output_pattern", "logs/slurm_%j.out")
         error_pattern = meta.get("error_pattern", "logs/slurm_%j.err")
         meta_remote_dir = meta.get("remote_dir", remote_dir)
-        num_configs = meta.get("num_configs", 1)
+        n_trials = meta.get("n_trials", 1)
     else:
         output_pattern = "logs/slurm_%j.out"
         error_pattern = "logs/slurm_%j.err"
         meta_remote_dir = remote_dir
-        num_configs = 1
+        n_trials = 1
 
     log_pattern = error_pattern if stderr else output_pattern
 
@@ -978,7 +977,7 @@ def logs(
     array_idx = job_id.split("_")[1] if "_" in job_id else None
 
     effective_array_index = array_index if array_index is not None else array_idx
-    if effective_array_index is None and num_configs == 1:
+    if effective_array_index is None and n_trials == 1:
         effective_array_index = 1
     log_file = expand_slurm_pattern(
         log_pattern,
@@ -1081,12 +1080,12 @@ def results(
 
         meta = json.loads(meta_file.read_text())
         meta_remote_dir = meta.get("remote_dir", remote_dir)
-        num_configs = meta.get("num_configs", 1)
+        n_trials = meta.get("n_trials", 1)
         output_pattern = meta.get("output_pattern", DEFAULT_SLURM["output"])
         error_pattern = meta.get("error_pattern", DEFAULT_SLURM["error"])
 
         log_files: list[str] = []
-        for i in range(1, num_configs + 1):
+        for i in range(1, n_trials + 1):
             for pattern in (output_pattern, error_pattern):
                 expanded = expand_slurm_pattern(pattern, job_id=job_id, array_task_id=i)
                 if not expanded.startswith(("/", "~")):

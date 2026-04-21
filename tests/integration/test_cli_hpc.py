@@ -156,7 +156,7 @@ class TestLogsArrayJobHandling:
             "output_pattern": ".jernerics/logs/%A_%a.out",
             "error_pattern": ".jernerics/logs/%A_%a.err",
             "remote_dir": "~/experiments/test-project",
-            "num_configs": 5,
+            "n_trials": 5,
         }
         (jobs_dir / "12345.json").write_text(json.dumps(job_meta))
 
@@ -178,7 +178,7 @@ class TestLogsArrayJobHandling:
             "output_pattern": ".jernerics/logs/%A_%a.out",
             "error_pattern": ".jernerics/logs/%A_%a.err",
             "remote_dir": "~/experiments/test-project",
-            "num_configs": 5,
+            "n_trials": 5,
         }
         (jobs_dir / "12345.json").write_text(json.dumps(job_meta))
 
@@ -202,7 +202,7 @@ class TestLogsFollowNonArrayJob:
             "output_pattern": "logs/slurm_%j.out",
             "error_pattern": "logs/slurm_%j.err",
             "remote_dir": "~/experiments/test-project",
-            "num_configs": 1,
+            "n_trials": 1,
         }
         (jobs_dir / "12345.json").write_text(json.dumps(job_meta))
 
@@ -224,7 +224,7 @@ class TestLogsFollowNonArrayJob:
             "output_pattern": "logs/array_%A_%a.out",
             "error_pattern": "logs/array_%A_%a.err",
             "remote_dir": "~/experiments/test-project",
-            "num_configs": 5,
+            "n_trials": 5,
         }
         (jobs_dir / "12345.json").write_text(json.dumps(job_meta))
 
@@ -247,7 +247,7 @@ class TestLogsFollowNonArrayJob:
             "output_pattern": "logs/array_%A_%a.out",
             "error_pattern": "logs/array_%A_%a.err",
             "remote_dir": "~/experiments/test-project",
-            "num_configs": 1,
+            "n_trials": 1,
         }
         (jobs_dir / "12345.json").write_text(json.dumps(job_meta))
 
@@ -271,7 +271,7 @@ class TestJobMetadataStorage:
             "output_pattern": "custom_logs/job_%j.out",
             "error_pattern": "custom_logs/job_%j.err",
             "remote_dir": "~/experiments/test-project",
-            "num_configs": 1,
+            "n_trials": 1,
         }
         (jobs_dir / "67890.json").write_text(json.dumps(job_meta))
 
@@ -293,7 +293,7 @@ class TestJobMetadataStorage:
             "output_pattern": ".jernerics/logs/%j.out",
             "error_pattern": ".jernerics/logs/%j.err",
             "remote_dir": "~/custom/location/project",
-            "num_configs": 1,
+            "n_trials": 1,
         }
         (jobs_dir / "11111.json").write_text(json.dumps(job_meta))
 
