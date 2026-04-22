@@ -416,6 +416,7 @@ def _generate_sweep_script(
 
     lines.append(f"cd {safe_shell_path(remote_dir)}")
     lines.append("REMOTE_DIR=$(cd . && pwd)")
+    lines.append("export JERNERICS_HPC=1")
 
     use_scratch = bool(hpc_config.cache_dir)
 
