@@ -111,7 +111,7 @@ class TestSweepScriptGeneration:
         )
 
         assert "#SBATCH --array=1-1" in script
-        assert "study.tell(trial, 0.0)" in script
+        assert "_tell(study, trial, 0.0)" in script
 
     def test_array_spec_calculation(self):
         from jernerics.cli import DEFAULT_SLURM
@@ -252,7 +252,7 @@ class TestSweepScriptGeneration:
 
         assert "results[sweep.objective_task]" in script
         assert "sweep.objective_metric" in script
-        assert "study.tell(trial, value)" in script
+        assert "_tell(study, trial, value)" in script
 
     def test_optuna_fail_state(self, tmp_path):
         sweep = SweepConfig(
