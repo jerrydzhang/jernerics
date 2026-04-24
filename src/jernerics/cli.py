@@ -514,6 +514,11 @@ def _get_sweep_runner_code(
     sweep: SweepConfig,
     project_name: str | None = None,
 ) -> str:
+    # NOTE: the generated code uses a _tell() helper instead of bare study.tell()
+    # because GridSampler.after_trial() calls study.stop() when all grid points
+    # are exhausted, which raises RuntimeError in ask/tell mode (it is designed
+    # for study.optimize()). The trial is already recorded at that point, so we
+    # safely swallow the error. See: https://github.com/optuna/optuna/issues/5106
     experiment_name = f"{project_name}/{study_name}" if project_name else study_name
     project_name_arg = f", project_name={project_name!r}" if project_name else ""
     # ruff: noqa: E501
@@ -544,6 +549,15 @@ study = optuna.create_study(
     sampler=sweep.sampler,
     load_if_exists=True,
 )
+
+def _tell(study, trial, value=None, *, state=None):
+    try:
+        if state is not None:
+            study.tell(trial, state=state)
+        else:
+            study.tell(trial, value)
+    except RuntimeError:
+        pass
 
 trial = study.ask()
 params = sweep.search_space(trial) if sweep.search_space else {{}}
@@ -588,7 +602,7 @@ with _mlflow_run:
         if failed:
             for name, exc in failed:
                 print(f"  [{{name}}] {{type(exc).__name__}}: {{exc}}")
-            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            _tell(study, trial, state=optuna.trial.TrialState.FAIL)
             sys.exit(1)
 
         if sweep.objective_task and sweep.objective_metric:
@@ -599,13 +613,13 @@ with _mlflow_run:
                 value = float(result)
             if _use_mlflow:
                 mlflow.log_metric(sweep.objective_metric, value)
-            study.tell(trial, value)
+            _tell(study, trial, value)
         else:
-            study.tell(trial, 0.0)
+            _tell(study, trial, 0.0)
 
         print("DAG completed")
     except Exception:
-        study.tell(trial, state=optuna.trial.TrialState.FAIL)
+        _tell(study, trial, state=optuna.trial.TrialState.FAIL)
         raise
 
 _remote_uri = os.environ.get('JERNERICS_MLFLOW_REMOTE_URI')
