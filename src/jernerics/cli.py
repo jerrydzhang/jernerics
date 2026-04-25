@@ -596,7 +596,7 @@ with _mlflow_run:
         import jernerics as _jern
         _jern.active_run_id = _run_id
     try:
-        results = dag.run(config, config_index=trial.number, config_path=config_file, max_workers=sweep.max_workers, executor_type=sweep.executor_type or 'thread')
+        results = dag.run(config, config_index=trial.number, config_path=config_file, runner=sweep.runner)
 
         failed = [(n, r) for n, r in results.items() if isinstance(r, Exception)]
         if failed:

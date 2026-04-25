@@ -267,6 +267,7 @@ dag.add_task(setup)
 
 ```python
 import optuna
+from jernerics.dag.executor import ThreadPoolRunner, SyncRunner
 
 _base = {"seed": 42, "model": "gpt"}
 
@@ -288,13 +289,29 @@ slurm = {
     "mem": "16G",
 }
 
-max_workers = 4
-executor_type = "thread"  # or "serial"
+runner = ThreadPoolRunner(max_workers=4)  # or SyncRunner() for debugging
 ```
 
 For single runs, omit `search_space` and set `n_trials = 1` (default). `load_config()` returns a `SweepConfig` dataclass.
 
-## HPC/Remote Path Handling
+## Executor API
+
+The executor uses the Runner protocol. Two implementations:
+
+- `ThreadPoolRunner(max_workers=None)` — production, uses `FIRST_COMPLETED` for responsive scheduling
+- `SyncRunner()` — debugging (pdb), runs tasks inline with no threads
+
+`execute_dag()` returns `dict[str, TaskResult]` where `TaskResult` has `.value`, `.error`, `.error_traceback`, and `.is_error` property. `DAG.run()` and `DAG.resume()` return the same type.
+
+Users pass a runner instance in their config file:
+```python
+from jernerics.dag.executor import ThreadPoolRunner
+runner = ThreadPoolRunner(max_workers=4)
+```
+
+Serial execution is for debugging only. Not a first-class strategy.
+
+## HPC Environment Constraints
 
 **CRITICAL: Tilde (`~`) Expansion Rules**
 

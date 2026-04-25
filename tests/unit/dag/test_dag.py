@@ -384,7 +384,7 @@ class TestDAGExecution:
 
         results = dag.run({"value": 21})
 
-        assert results["my_task"] == 42
+        assert results["my_task"].value == 42
 
     def test_run_linear_chain(self):
         @task
@@ -406,9 +406,9 @@ class TestDAGExecution:
 
         results = dag.run({})
 
-        assert results["a"] == 1
-        assert results["b"] == 2
-        assert results["c"] == 3
+        assert results["a"].value == 1
+        assert results["b"].value == 2
+        assert results["c"].value == 3
 
     def test_run_diamond_dependency(self):
         @task
@@ -435,10 +435,10 @@ class TestDAGExecution:
 
         results = dag.run({})
 
-        assert results["a"] == 1
-        assert results["b"] == 11
-        assert results["c"] == 101
-        assert results["d"] == 112
+        assert results["a"].value == 1
+        assert results["b"].value == 11
+        assert results["c"].value == 101
+        assert results["d"].value == 112
 
     def test_run_injects_config(self):
         @task
@@ -450,7 +450,7 @@ class TestDAGExecution:
 
         results = dag.run({"key": "value"})
 
-        assert results["my_task"] == "value"
+        assert results["my_task"].value == "value"
 
     def test_run_creates_state_directory(self, tmp_path):
         @task
@@ -504,7 +504,7 @@ class TestDAGExecution:
 
         results = dag.run({"x": x, "y": y})
 
-        assert results["add"] == x + y
+        assert results["add"].value == x + y
 
 
 class TestDAGErrorHandling:
@@ -518,7 +518,8 @@ class TestDAGErrorHandling:
 
         results = dag.run({})
 
-        assert isinstance(results["failing_task"], ValueError)
+        assert results["failing_task"].is_error
+        assert isinstance(results["failing_task"].error, ValueError)
 
     def test_downstream_task_skipped_on_failure(self):
         @task
@@ -535,9 +536,10 @@ class TestDAGErrorHandling:
 
         results = dag.run({})
 
-        assert isinstance(results["failing"], ValueError)
-        assert isinstance(results["downstream"], Exception)
-        assert "Upstream" in str(results["downstream"])
+        assert results["failing"].is_error
+        assert isinstance(results["failing"].error, ValueError)
+        assert results["downstream"].is_error
+        assert "dependencies failed" in str(results["downstream"].error)
 
     def test_independent_tasks_run_on_partial_failure(self):
         @task
@@ -554,8 +556,9 @@ class TestDAGErrorHandling:
 
         results = dag.run({})
 
-        assert isinstance(results["failing"], ValueError)
-        assert results["independent"] == "success"
+        assert results["failing"].is_error
+        assert isinstance(results["failing"].error, ValueError)
+        assert results["independent"].value == "success"
 
 
 class TestDAGResume:
@@ -575,7 +578,7 @@ class TestDAGResume:
         dag2.add_task(slow_task)
         results = dag2.resume({}, config_index=0)
 
-        assert results["slow_task"] == 42
+        assert results["slow_task"].value == 42
 
     def test_resume_with_explicit_state_dir(self, tmp_path):
         @task
@@ -592,7 +595,7 @@ class TestDAGResume:
         dag2.add_task(my_task)
         results = dag2.resume({}, state_dir=state_dir)
 
-        assert results["my_task"] == 1
+        assert results["my_task"].value == 1
 
     def test_resume_no_state_dir_raises(self):
         @task

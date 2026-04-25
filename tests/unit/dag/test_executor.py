@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import os
 import time
 import warnings
@@ -8,7 +7,13 @@ import warnings
 from hypothesis import given
 from hypothesis import strategies as st
 
-from jernerics.dag.executor import _get_default_max_workers, _run_task, execute_dag
+from jernerics.dag.executor import (
+    SyncRunner,
+    ThreadPoolRunner,
+    _get_default_max_workers,
+    _run_task,
+    execute_dag,
+)
 from jernerics.dag.state import RunState, TaskStatus
 from jernerics.dag.task import task
 
@@ -19,30 +24,6 @@ class TestDefaultMaxWorkers:
         assert workers >= 4
         assert workers == (os.cpu_count() or 4)
 
-    def test_default_max_workers_used_when_none(self):
-        call_count = 0
-        original_submit = None
-
-        @task
-        def simple_task(config):
-            return 1
-
-        import concurrent.futures
-        from unittest.mock import patch
-
-        with patch.object(
-            concurrent.futures.ThreadPoolExecutor, "__init__", autospec=True
-        ) as mock_init:
-            mock_init.return_value = None
-
-            with contextlib.suppress(Exception):
-                execute_dag({"simple": simple_task}, {})
-
-            call_args = mock_init.call_args
-            assert call_args is not None
-            assert "max_workers" in call_args.kwargs
-            assert call_args.kwargs["max_workers"] == _get_default_max_workers()
-
 
 class TestRunTask:
     def test_run_task_basic(self):
@@ -51,7 +32,8 @@ class TestRunTask:
             return config["value"]
 
         result = _run_task(my_task, {}, {"value": 42})
-        assert result == 42
+        assert result.value == 42
+        assert not result.is_error
 
     def test_run_task_with_inputs(self):
         @task
@@ -59,7 +41,7 @@ class TestRunTask:
             return upstream * 2
 
         result = _run_task(my_task, {"upstream": 10}, {})
-        assert result == 20
+        assert result.value == 20
 
     def test_run_task_merges_inputs_and_config(self):
         @task
@@ -67,7 +49,7 @@ class TestRunTask:
             return data + config["add"]
 
         result = _run_task(my_task, {"data": 5}, {"add": 7})
-        assert result == 12
+        assert result.value == 12
 
     @given(st.integers(), st.integers())
     def test_run_task_various_inputs(self, a, b):
@@ -76,7 +58,18 @@ class TestRunTask:
             return x + y
 
         result = _run_task(compute, {"x": a, "y": b}, {})
-        assert result == a + b
+        assert result.value == a + b
+
+    def test_run_task_captures_exception(self):
+        @task
+        def failing(config):
+            raise ValueError("boom")
+
+        result = _run_task(failing, {}, {})
+        assert result.is_error
+        assert isinstance(result.error, ValueError)
+        assert "boom" in str(result.error)
+        assert result.error_traceback is not None
 
 
 class TestExecuteDAG:
@@ -88,7 +81,7 @@ class TestExecuteDAG:
         tasks = {"single": single}
         results = execute_dag(tasks, {})
 
-        assert results["single"] == 1
+        assert results["single"].value == 1
 
     def test_execute_parallel_tasks(self):
         @task
@@ -107,8 +100,8 @@ class TestExecuteDAG:
         results = execute_dag(tasks, {})
         elapsed = time.time() - start
 
-        assert results["task_a"] == "a"
-        assert results["task_b"] == "b"
+        assert results["task_a"].value == "a"
+        assert results["task_b"].value == "b"
         assert elapsed < 0.05
 
     def test_execute_respects_dependencies(self):
@@ -128,8 +121,8 @@ class TestExecuteDAG:
         results = execute_dag(tasks, {})
 
         assert execution_order == ["first", "second"]
-        assert results["first"] == 1
-        assert results["second"] == 2
+        assert results["first"].value == 1
+        assert results["second"].value == 2
 
     def test_execute_with_state(self, tmp_path):
         @task
@@ -142,7 +135,7 @@ class TestExecuteDAG:
 
         results = execute_dag(tasks, {}, state=state)
 
-        assert results["my_task"] == 42
+        assert results["my_task"].value == 42
         assert state.tasks["my_task"].status == TaskStatus.COMPLETED
         assert state.tasks["my_task"].output == 42
 
@@ -163,7 +156,7 @@ class TestExecuteDAG:
         results = execute_dag(tasks, {}, state=state)
 
         assert call_count == 0
-        assert results["expensive"] == 42
+        assert results["expensive"].value == 42
 
     def test_execute_reruns_non_persisted_tasks(self, tmp_path):
         import socket
@@ -203,7 +196,8 @@ class TestExecuteDAG:
 
         results = execute_dag(tasks, {}, state=state)
 
-        assert isinstance(results["failing"], ValueError)
+        assert results["failing"].is_error
+        assert isinstance(results["failing"].error, ValueError)
         assert state.tasks["failing"].status == TaskStatus.FAILED
         assert "boom" in state.tasks["failing"].error
 
@@ -227,10 +221,10 @@ class TestExecuteDAG:
         tasks = {"a": a, "b": b, "c": c, "d": d}
         results = execute_dag(tasks, {})
 
-        assert results["a"] == 1
-        assert results["b"] == 11
-        assert results["c"] == 101
-        assert results["d"] == 112
+        assert results["a"].value == 1
+        assert results["b"].value == 11
+        assert results["c"].value == 101
+        assert results["d"].value == 112
 
     def test_execute_failure_propagates(self):
         @task
@@ -244,9 +238,10 @@ class TestExecuteDAG:
         tasks = {"failing": failing, "dependent": dependent}
         results = execute_dag(tasks, {})
 
-        assert isinstance(results["failing"], RuntimeError)
-        assert isinstance(results["dependent"], Exception)
-        assert "Upstream" in str(results["dependent"])
+        assert results["failing"].is_error
+        assert isinstance(results["failing"].error, RuntimeError)
+        assert results["dependent"].is_error
+        assert "dependencies failed" in str(results["dependent"].error)
 
 
 class TestExecutorEdgeCases:
@@ -273,7 +268,7 @@ class TestExecutorEdgeCases:
         results = execute_dag(tasks, {})
 
         for i in range(num_tasks):
-            assert results[f"task_{i}"] == i
+            assert results[f"task_{i}"].value == i
 
     def test_long_chain(self):
         @task
@@ -299,59 +294,34 @@ class TestExecutorEdgeCases:
         tasks = {"t0": t0, "t1": t1, "t2": t2, "t3": t3, "t4": t4}
         results = execute_dag(tasks, {})
 
-        assert results["t4"] == 4
+        assert results["t4"].value == 4
 
 
-class TestExecutorType:
-    def test_invalid_executor_type_raises(self):
-        @task
-        def simple(config):
-            return 1
-
-        try:
-            execute_dag({"simple": simple}, {}, executor_type="invalid")
-            raise AssertionError("Should have raised ValueError")
-        except ValueError as e:
-            assert "executor_type must be 'thread' or 'serial'" in str(e)
-
-
-class TestMaxWorkers:
+class TestMaxWorkersValidation:
     def test_invalid_max_workers_zero(self):
-        @task
-        def simple(config):
-            return 1
-
         try:
-            execute_dag({"simple": simple}, {}, max_workers=0)
+            ThreadPoolRunner(max_workers=0)
             raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "max_workers must be a positive integer" in str(e)
 
     def test_invalid_max_workers_negative(self):
-        @task
-        def simple(config):
-            return 1
-
         try:
-            execute_dag({"simple": simple}, {}, max_workers=-1)
+            ThreadPoolRunner(max_workers=-1)
             raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "max_workers must be a positive integer" in str(e)
 
     def test_invalid_max_workers_string(self):
-        @task
-        def simple(config):
-            return 1
-
         try:
-            execute_dag({"simple": simple}, {}, max_workers="invalid")
+            ThreadPoolRunner(max_workers="invalid")  # type: ignore[arg-type]
             raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "max_workers must be a positive integer" in str(e)
 
 
 class TestUnregisteredDependency:
-    def test_unregistered_dependency_warning(self):
+    def test_unregistered_dependency_raises(self):
         @task
         def unregistered(config):
             return 1
@@ -360,15 +330,14 @@ class TestUnregisteredDependency:
         def main_task(unregistered, config):
             return unregistered + 1
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            results = execute_dag({"main_task": main_task}, {})
+        try:
+            execute_dag({"main_task": main_task}, {})
+            raise AssertionError("Should have raised ValueError")
+        except ValueError as e:
+            assert "unknown task" in str(e)
 
-            assert len(w) == 1
-            assert "unregistered task" in str(w[0].message)
 
-
-class TestSerialExecutor:
+class TestSyncRunner:
     def test_serial_executor_runs_tasks(self):
         order = []
 
@@ -383,10 +352,10 @@ class TestSerialExecutor:
             return 2
 
         tasks = {"a": a, "b": b}
-        results = execute_dag(tasks, {}, executor_type="serial")
+        results = execute_dag(tasks, {}, runner=SyncRunner())
 
-        assert results["a"] == 1
-        assert results["b"] == 2
+        assert results["a"].value == 1
+        assert results["b"].value == 2
 
     def test_serial_executor_respects_dependencies(self):
         order = []
@@ -402,10 +371,10 @@ class TestSerialExecutor:
             return first + 1
 
         tasks = {"first": first, "second": second}
-        results = execute_dag(tasks, {}, executor_type="serial")
+        results = execute_dag(tasks, {}, runner=SyncRunner())
 
         assert order == ["first", "second"]
-        assert results["second"] == 2
+        assert results["second"].value == 2
 
     def test_serial_executor_with_state(self, tmp_path):
         @task
@@ -416,9 +385,9 @@ class TestSerialExecutor:
         state = RunState.create("test_dag.py", 0, tmp_path)
         state.init_task("my_task")
 
-        results = execute_dag(tasks, {}, state=state, executor_type="serial")
+        results = execute_dag(tasks, {}, state=state, runner=SyncRunner())
 
-        assert results["my_task"] == 42
+        assert results["my_task"].value == 42
         assert state.tasks["my_task"].status == TaskStatus.COMPLETED
 
     def test_serial_executor_skips_persisted(self):
@@ -435,10 +404,10 @@ class TestSerialExecutor:
         state.init_task("cached")
         state.update_task("cached", TaskStatus.COMPLETED, output=42)
 
-        results = execute_dag(tasks, {}, state=state, executor_type="serial")
+        results = execute_dag(tasks, {}, state=state, runner=SyncRunner())
 
         assert call_count == 0
-        assert results["cached"] == 42
+        assert results["cached"].value == 42
 
     def test_serial_executor_handles_failure(self, tmp_path):
         @task
@@ -449,9 +418,10 @@ class TestSerialExecutor:
         state = RunState.create("test_dag.py", 0, tmp_path)
         state.init_task("failing")
 
-        results = execute_dag(tasks, {}, state=state, executor_type="serial")
+        results = execute_dag(tasks, {}, state=state, runner=SyncRunner())
 
-        assert isinstance(results["failing"], ValueError)
+        assert results["failing"].is_error
+        assert isinstance(results["failing"].error, ValueError)
         assert state.tasks["failing"].status == TaskStatus.FAILED
 
     def test_serial_executor_upstream_failure(self, tmp_path):
@@ -468,9 +438,9 @@ class TestSerialExecutor:
         state.init_task("failing")
         state.init_task("dependent")
 
-        results = execute_dag(tasks, {}, state=state, executor_type="serial")
+        results = execute_dag(tasks, {}, state=state, runner=SyncRunner())
 
-        assert isinstance(results["dependent"], Exception)
+        assert results["dependent"].is_error
         assert state.tasks["dependent"].status == TaskStatus.FAILED
 
 
@@ -492,7 +462,7 @@ class TestStateReset:
         results = execute_dag(tasks, {}, state=state)
 
         assert call_count == 1
-        assert results["my_task"] == 42
+        assert results["my_task"].value == 42
         assert state.tasks["my_task"].status == TaskStatus.COMPLETED
 
 
@@ -512,4 +482,4 @@ class TestConfigParameterWarning:
 
             assert len(w) == 1
             assert "overwritten by the DAG config dict" in str(w[0].message)
-            assert result == ({"key": "value"}, "upstream")
+            assert result.value == ({"key": "value"}, "upstream")

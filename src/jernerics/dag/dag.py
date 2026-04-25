@@ -6,7 +6,7 @@ from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Any
 
-from .executor import execute_dag
+from .executor import Runner, TaskResult, ThreadPoolRunner, execute_dag
 from .provenance import Provenance
 from .state import RunState, TaskStatus
 from .task import Task
@@ -99,9 +99,8 @@ class DAG:
         state_dir: Path | str | None = None,
         config_path: str | None = None,
         container_path: str | None = None,
-        max_workers: int | None = None,
-        executor_type: str = "thread",
-    ) -> dict[str, Any]:
+        runner: Runner | None = None,
+    ) -> dict[str, TaskResult]:
         self.validate()
 
         if state_dir is not None:
@@ -137,8 +136,7 @@ class DAG:
                 self.tasks,
                 config,
                 state=state,
-                max_workers=max_workers,
-                executor_type=executor_type,
+                runner=runner or ThreadPoolRunner(max_workers=None),
             )
         except BaseException as e:
             exc_info = e
@@ -161,9 +159,8 @@ class DAG:
         config_index: int = 0,
         run_id: str | None = None,
         state_dir: Path | str | None = None,
-        max_workers: int | None = None,
-        executor_type: str = "thread",
-    ) -> dict[str, Any]:
+        runner: Runner | None = None,
+    ) -> dict[str, TaskResult]:
         self.validate()
 
         if state_dir is not None:
@@ -206,6 +203,5 @@ class DAG:
             self.tasks,
             config,
             state=state,
-            max_workers=max_workers,
-            executor_type=executor_type,
+            runner=runner or ThreadPoolRunner(max_workers=None),
         )

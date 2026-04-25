@@ -38,8 +38,7 @@ class SweepConfig:
     objective_metric: str | None
     direction: str
     slurm: dict[str, Any]
-    max_workers: int | None
-    executor_type: str | None
+    runner: Any  # Runner | None
 
 
 class NoContainerFound(Exception):
@@ -205,8 +204,7 @@ def load_config(config_file: str) -> SweepConfig:
         objective_metric=module_ns.get("objective_metric", None),
         direction=module_ns.get("direction", "minimize"),
         slurm=module_ns.get("slurm", {}),
-        max_workers=module_ns.get("max_workers", None),
-        executor_type=module_ns.get("executor_type", None),
+        runner=module_ns.get("runner", None),
     )
 
 

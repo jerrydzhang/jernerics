@@ -18,8 +18,7 @@ class TestRunLocalSingleConfig:
             objective_metric=None,
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
         mock_run.return_value = MagicMock(returncode=0)
 
@@ -54,8 +53,7 @@ class TestRunLocalSweep:
             objective_metric="loss",
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
         mock_run.return_value = MagicMock(returncode=0)
 

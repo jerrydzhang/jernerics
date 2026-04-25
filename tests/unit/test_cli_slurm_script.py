@@ -59,8 +59,7 @@ class TestSweepScriptGeneration:
             objective_metric="loss",
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
 
         script = _generate_sweep_script(
@@ -92,8 +91,7 @@ class TestSweepScriptGeneration:
             objective_metric=None,
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
 
         script = _generate_sweep_script(
@@ -128,8 +126,7 @@ class TestSweepScriptGeneration:
             objective_metric=None,
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
 
         study_name = "myproject_config_20260419-143000"
@@ -161,8 +158,7 @@ class TestSweepScriptGeneration:
             objective_metric=None,
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
 
         script = _generate_sweep_script(
@@ -201,8 +197,7 @@ class TestSweepScriptGeneration:
             objective_metric=None,
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
 
         script = _generate_sweep_script(
@@ -232,8 +227,7 @@ class TestSweepScriptGeneration:
             objective_metric="loss",
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
 
         script = _generate_sweep_script(
@@ -264,8 +258,7 @@ class TestSweepScriptGeneration:
             objective_metric=None,
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
 
         script = _generate_sweep_script(
@@ -294,8 +287,7 @@ class TestSweepScriptGeneration:
             objective_metric=None,
             direction="minimize",
             slurm={},
-            max_workers=None,
-            executor_type=None,
+            runner=None,
         )
 
         script = _generate_sweep_script(

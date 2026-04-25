@@ -73,6 +73,7 @@ Create `config.py`:
 
 ```python
 import optuna
+from jernerics.dag.executor import ThreadPoolRunner
 
 _base = {"seed": 42, "epochs": 10}
 
@@ -93,7 +94,7 @@ slurm = {
     "mem": "16G",
 }
 
-max_workers = 4  # Parallel task execution (default: CPU count)
+runner = ThreadPoolRunner(max_workers=4)  # Optional, defaults to CPU count
 ```
 
 For a single run without hyperparameter search, omit `search_space` and set `n_trials = 1` (default).
@@ -225,18 +226,20 @@ def step_c(step_a, config):
     return step_a["result"] * 2  # Runs in parallel with step_b
 ```
 
-### Serial Execution
+### Serial Execution (Debugging)
 
-For libraries incompatible with threading:
+For debugging with pdb or libraries incompatible with threading:
 
 ```python
-dag.run(config, executor_type="serial")
+from jernerics.dag.executor import SyncRunner
+dag.run(config, runner=SyncRunner())
 ```
 
 Or in config.py:
 
 ```python
-executor_type = "serial"
+from jernerics.dag.executor import SyncRunner
+runner = SyncRunner()
 ```
 
 ## MLflow Integration
@@ -382,7 +385,7 @@ Two options:
 | OOM | Increase `slurm["mem"]` |
 | Timeout | Increase `slurm["time"]` |
 | Array job log error | Add `--array-index N` |
-| DAG hangs | Use `executor_type="serial"` |
+| DAG hangs | Use `SyncRunner()` for debugging |
 | BindNotFound | Add to `[tool.jernerics.binds]` |
 
 ## Requirements

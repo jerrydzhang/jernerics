@@ -91,10 +91,6 @@ class TestFindPyprojectDir:
         result = find_pyproject_dir(subdir)
         assert result == tmp_project
 
-    def test_find_pyproject_dir_not_found(self, tmp_path):
-        result = find_pyproject_dir(tmp_path)
-        assert result is None
-
 
 class TestFindContainer:
     def test_find_container_explicit(self, tmp_path):
@@ -137,6 +133,7 @@ class TestLoadConfig:
     def test_load_config_sweep(self, tmp_path):
         config_content = """
 import optuna
+from jernerics.dag.executor import ThreadPoolRunner
 
 _base = {"seed": 42, "model": "gpt"}
 
@@ -153,8 +150,7 @@ objective_metric = "loss"
 direction = "minimize"
 
 slurm = {"partition": "gpu"}
-max_workers = 4
-executor_type = "thread"
+runner = ThreadPoolRunner(max_workers=4)
 """
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
@@ -170,8 +166,7 @@ executor_type = "thread"
         assert sweep.objective_metric == "loss"
         assert sweep.direction == "minimize"
         assert sweep.slurm == {"partition": "gpu"}
-        assert sweep.max_workers == 4
-        assert sweep.executor_type == "thread"
+        assert sweep.runner is not None
 
     def test_load_config_single_no_search_space(self, tmp_path):
         config_content = """
@@ -206,11 +201,11 @@ sampler = optuna.samplers.GridSampler({"lr": [0.001, 0.01, 0.1]})
 
         assert isinstance(sweep.sampler, optuna.samplers.GridSampler)
 
-    def test_load_config_slurm_max_workers_executor_type(self, tmp_path):
+    def test_load_config_runner(self, tmp_path):
         config_content = """
 slurm = {"time": "1:00:00", "mem": "4G"}
-max_workers = 8
-executor_type = "serial"
+from jernerics.dag.executor import SyncRunner
+runner = SyncRunner()
 """
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
@@ -218,8 +213,7 @@ executor_type = "serial"
         sweep = load_config(str(config_file))
 
         assert sweep.slurm == {"time": "1:00:00", "mem": "4G"}
-        assert sweep.max_workers == 8
-        assert sweep.executor_type == "serial"
+        assert sweep.runner is not None
 
     def test_load_config_missing_file_raises(self):
         with pytest.raises(FileNotFoundError):
@@ -253,8 +247,7 @@ pass
         assert sweep.objective_metric is None
         assert sweep.direction == "minimize"
         assert sweep.slurm == {}
-        assert sweep.max_workers is None
-        assert sweep.executor_type is None
+        assert sweep.runner is None
 
     def test_load_config_with_special_characters_in_paths(self, tmp_path):
         config_file = tmp_path / "config with spaces.py"

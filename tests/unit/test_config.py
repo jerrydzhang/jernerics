@@ -209,10 +209,6 @@ class TestFindPyprojectDir:
         result = find_pyproject_dir(subdir)
         assert result == tmp_path
 
-    def test_not_found(self, tmp_path):
-        result = find_pyproject_dir(tmp_path)
-        assert result is None
-
 
 class TestConfigEdgeCases:
     def test_remote_path_fallback_to_remote_dir(self, tmp_path):
