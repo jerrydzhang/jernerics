@@ -39,7 +39,7 @@ def bind(name: str) -> Path:
         )
 
     try:
-        hpc_config, _, binds, _ = load_jernerics_config(project_dir)
+        hpc_config, _, binds = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         raise BindNotFound(f"Cannot resolve bind '{name}': {e}") from e
 

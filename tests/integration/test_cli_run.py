@@ -40,7 +40,7 @@ def setup(config):
 
     (project_dir / "config.py").write_text(
         """
-_base = {"seed": 1}
+base = {"seed": 1}
 
 slurm = {
     "partition": "priority",
@@ -225,7 +225,7 @@ remote_dir = "~/experiments/{project_name}"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
+        (project_dir / "config.py").write_text("base = {'seed': 1}\nslurm = {}")
 
         result = subprocess.run(
             ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
@@ -253,7 +253,7 @@ remote_dir = "~/experiments/{project_name}"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
+        (project_dir / "config.py").write_text("base = {'seed': 1}\nslurm = {}")
 
         result = subprocess.run(
             ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
@@ -284,7 +284,7 @@ remote_dir = "~/experiments/{project_name}/"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
+        (project_dir / "config.py").write_text("base = {'seed': 1}\nslurm = {}")
 
         result = subprocess.run(
             ["jernerics", "run", "slurm", "dag.py", "config.py", "--dry-run"],
@@ -390,7 +390,7 @@ remote_dir = "~/experiments/{project_name}"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (configs_dir / "experiment.py").write_text("_base = {'seed': 1}\nslurm = {}")
+        (configs_dir / "experiment.py").write_text("base = {'seed': 1}\nslurm = {}")
         (project_dir / "uv.lock").write_text("version = 1\n")
 
         result = subprocess.run(
@@ -430,7 +430,7 @@ remote_dir = "~/experiments/{project_name}"
         (experiments_dir / "pipeline.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
+        (project_dir / "config.py").write_text("base = {'seed': 1}\nslurm = {}")
         (project_dir / "uv.lock").write_text("version = 1\n")
 
         result = subprocess.run(
@@ -472,7 +472,7 @@ remote_dir = "~/experiments/{project_name}"
         (experiments_dir / "pipeline.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (configs_dir / "experiment.py").write_text("_base = {'seed': 1}\nslurm = {}")
+        (configs_dir / "experiment.py").write_text("base = {'seed': 1}\nslurm = {}")
         (project_dir / "uv.lock").write_text("version = 1\n")
 
         result = subprocess.run(
@@ -510,7 +510,7 @@ remote_dir = "~/experiments/{project_name}"
         (project_dir / "dag.py").write_text(
             "from jernerics.dag import DAG\ndag = DAG()"
         )
-        (project_dir / "config.py").write_text("_base = {'seed': 1}\nslurm = {}")
+        (project_dir / "config.py").write_text("base = {'seed': 1}\nslurm = {}")
         (project_dir / "uv.lock").write_text("version = 1\n")
 
         outside_dir = tmp_path / "outside"

@@ -35,7 +35,7 @@ class ContainerBuilder:
                 )
 
         self.project_dir = Path(project_dir)
-        self.config, _, _, _ = load_jernerics_config(self.project_dir)
+        self.config, _, _ = load_jernerics_config(self.project_dir)
         self.project_name = get_project_name(self.project_dir)
 
         if not re.match(r"^[a-zA-Z0-9_.-]+$", self.project_name):

@@ -43,7 +43,7 @@ class TestGetScriptPath:
 
 class TestLoadJernericsConfig:
     def test_load_jernerics_config_basic(self, tmp_project):
-        hpc, _shell, _binds, _mlflow = load_jernerics_config(tmp_project)
+        hpc, _shell, _binds = load_jernerics_config(tmp_project)
 
         assert hpc.host == "user@hpc.example.edu"
         assert hpc.remote_dir == "~/experiments/{project_name}"
@@ -74,7 +74,7 @@ version = "0.1.0"
 """)
 
         monkeypatch.setenv("JERNERICS_HPC_HOST", "env@host.example.edu")
-        hpc, _shell, _binds, _mlflow = load_jernerics_config(project_dir)
+        hpc, _shell, _binds = load_jernerics_config(project_dir)
 
         assert hpc.host == "env@host.example.edu"
 
@@ -135,7 +135,7 @@ class TestLoadConfig:
 import optuna
 from jernerics.dag.executor import ThreadPoolRunner
 
-_base = {"seed": 42, "model": "gpt"}
+base = {"seed": 42, "model": "gpt"}
 
 def search_space(trial):
     return {
@@ -145,8 +145,7 @@ def search_space(trial):
 
 n_trials = 50
 sampler = optuna.samplers.TPESampler(seed=42)
-objective_task = "train"
-objective_metric = "loss"
+objective = lambda results: results["train"].value["loss"]
 direction = "minimize"
 
 slurm = {"partition": "gpu"}
@@ -158,19 +157,18 @@ runner = ThreadPoolRunner(max_workers=4)
         sweep = load_config(str(config_file))
 
         assert isinstance(sweep, SweepConfig)
-        assert sweep._base == {"seed": 42, "model": "gpt"}
+        assert sweep.base == {"seed": 42, "model": "gpt"}
         assert sweep.search_space is not None
         assert sweep.n_trials == 50
         assert isinstance(sweep.sampler, optuna.samplers.TPESampler)
-        assert sweep.objective_task == "train"
-        assert sweep.objective_metric == "loss"
+        assert sweep.objective is not None
         assert sweep.direction == "minimize"
         assert sweep.slurm == {"partition": "gpu"}
         assert sweep.runner is not None
 
     def test_load_config_single_no_search_space(self, tmp_path):
         config_content = """
-_base = {"seed": 1, "lr": 0.001}
+base = {"seed": 1, "lr": 0.001}
 n_trials = 1
 """
         config_file = tmp_path / "config.py"
@@ -178,19 +176,18 @@ n_trials = 1
 
         sweep = load_config(str(config_file))
 
-        assert sweep._base == {"seed": 1, "lr": 0.001}
+        assert sweep.base == {"seed": 1, "lr": 0.001}
         assert sweep.search_space is None
         assert sweep.n_trials == 1
         assert sweep.sampler is None
-        assert sweep.objective_task is None
-        assert sweep.objective_metric is None
+        assert sweep.objective is None
         assert sweep.direction == "minimize"
 
     def test_load_config_grid_sampler(self, tmp_path):
         config_content = """
 import optuna
 
-_base = {}
+base = {}
 n_trials = 10
 sampler = optuna.samplers.GridSampler({"lr": [0.001, 0.01, 0.1]})
 """
@@ -228,7 +225,7 @@ n_trials = 5
 
         sweep = load_config(str(config_file))
 
-        assert sweep._base == {}
+        assert sweep.base == {}
 
     def test_load_config_defaults(self, tmp_path):
         config_content = """
@@ -239,23 +236,22 @@ pass
 
         sweep = load_config(str(config_file))
 
-        assert sweep._base == {}
+        assert sweep.base == {}
         assert sweep.search_space is None
         assert sweep.n_trials == 1
         assert sweep.sampler is None
-        assert sweep.objective_task is None
-        assert sweep.objective_metric is None
+        assert sweep.objective is None
         assert sweep.direction == "minimize"
         assert sweep.slurm == {}
         assert sweep.runner is None
 
     def test_load_config_with_special_characters_in_paths(self, tmp_path):
         config_file = tmp_path / "config with spaces.py"
-        config_file.write_text('_base = {"x": 1}')
+        config_file.write_text('base = {"x": 1}')
 
         sweep = load_config(str(config_file))
 
-        assert sweep._base == {"x": 1}
+        assert sweep.base == {"x": 1}
 
     def test_load_config_directory_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError, match="Config path is not a file"):

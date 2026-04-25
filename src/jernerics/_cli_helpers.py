@@ -10,6 +10,10 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from optuna.samplers import BaseSampler
+
+from .dag import Runner
+
 
 class ExitCode(IntEnum):
     SUCCESS = 0
@@ -30,15 +34,14 @@ DEFAULT_CONTAINER_TAR = ".jernerics/container.tar.gz"
 
 @dataclass
 class SweepConfig:
-    _base: dict[str, Any]
+    base: dict[str, Any]
     search_space: Callable[..., dict[str, Any]] | None
     n_trials: int
-    sampler: Any  # optuna sampler, None = TPESampler default
-    objective_task: str | None
-    objective_metric: str | None
+    sampler: BaseSampler | None
+    objective: Callable[..., float] | None
     direction: str
     slurm: dict[str, Any]
-    runner: Any  # Runner | None
+    runner: Runner | None
 
 
 class NoContainerFound(Exception):
@@ -72,12 +75,6 @@ class BindsConfig(dict[str, str]):
 
 
 @dataclass
-class MlflowConfig:
-    tracking_uri: str | None = None
-    username: str | None = None
-
-
-@dataclass
 class ShellConfig:
     partition: str | None = None
     cpus: int | None = None
@@ -88,7 +85,7 @@ class ShellConfig:
 
 def load_jernerics_config(
     project_dir: str | Path,
-) -> tuple[HpcConfig, ShellConfig, BindsConfig, MlflowConfig]:
+) -> tuple[HpcConfig, ShellConfig, BindsConfig]:
     project_path = Path(project_dir)
     pyproject_path = project_path / "pyproject.toml"
 
@@ -108,8 +105,6 @@ def load_jernerics_config(
     safety_config = tool_config.get("safety", {})
     shell_config = tool_config.get("shell", {})
     binds_config = tool_config.get("binds", {})
-
-    mlflow_config = tool_config.get("mlflow", {})
 
     hpc = HpcConfig(
         host=os.environ.get("JERNERICS_HPC_HOST") or hpc_config.get("host"),
@@ -133,14 +128,7 @@ def load_jernerics_config(
 
     binds = BindsConfig(binds_config)
 
-    mlflow = MlflowConfig(
-        tracking_uri=os.environ.get("JERNERICS_MLFLOW_TRACKING_URI")
-        or mlflow_config.get("tracking_uri"),
-        username=os.environ.get("JERNERICS_MLFLOW_USERNAME")
-        or mlflow_config.get("username"),
-    )
-
-    return hpc, shell, binds, mlflow
+    return hpc, shell, binds
 
 
 def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
@@ -186,22 +174,21 @@ def load_config(config_file: str) -> SweepConfig:
     except (SyntaxError, ImportError, PermissionError) as e:
         raise RuntimeError(f"Failed to load config file '{config_file}': {e}") from e
 
-    if "configs" in module_ns and "_base" not in module_ns:
+    if "configs" in module_ns and "base" not in module_ns:
         warnings.warn(
             "'configs' is no longer supported. "
-            "Use '_base' for base config, 'search_space' for Optuna parameters, "
+            "Use 'base' for base config, 'search_space' for Optuna parameters, "
             "and 'n_trials' for the number of trials.",
             DeprecationWarning,
             stacklevel=2,
         )
 
     return SweepConfig(
-        _base=module_ns.get("_base", {}),
+        base=module_ns.get("base", {}),
         search_space=module_ns.get("search_space", None),
         n_trials=module_ns.get("n_trials", 1),
         sampler=module_ns.get("sampler", None),
-        objective_task=module_ns.get("objective_task", None),
-        objective_metric=module_ns.get("objective_metric", None),
+        objective=module_ns.get("objective", None),
         direction=module_ns.get("direction", "minimize"),
         slurm=module_ns.get("slurm", {}),
         runner=module_ns.get("runner", None),

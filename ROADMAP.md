@@ -22,51 +22,60 @@ Replaced the old dual-path executor (serial + thread with duplicated logic) with
 
 ---
 
-## Phase 2 — Extract the Runner Module
+## Completed: Phase 2 — Extract the Runner Module
 
-Replace `_get_sweep_runner_code()` f-string in `cli.py` with a real importable module.
+Replaced `_get_sweep_runner_code()` f-string in `cli.py` with a real importable module.
 
-### Why
-- Double-brace escaping makes the ~120-line f-string unreadable
-- Can't test directly — only runs inside a subprocess
-- Error messages point to line numbers in a string that doesn't exist on disk
-- Parameter passing is baked into the string
+- **`src/jernerics/runner.py`.** `run_trial()` is a real function, importable and testable. Invoked via `python -m jernerics.runner` with argparse CLI args.
+- **Study lifecycle separation.** Caller creates the Optuna study; runner loads it via `optuna.load_study()`. No more double-creation or race condition noise.
+- **`_base` → `base`.** Config variable renamed — no reason for the underscore prefix.
+- **`objective_task`/`objective_metric` → `objective`.** Single callable instead of two string keys. Handles nested access, aggregation, and structured results.
+- **All output to stderr.** Runner progress and error messages go to stderr; stdout is clean for future programmatic use.
+- **`_generate_sweep_script()` updated.** Bash script invokes `python -m jernerics.runner` instead of embedding a heredoc with f-string Python.
+- **`_get_sweep_runner_code()` deleted.**
 
-### Plan
-- [ ] Create `src/jernerics/runner.py` (or `__main__.py` for `python -m jernerics.runner`)
-- [ ] Move sweep trial logic from `_get_sweep_runner_code()` into a real function
-- [ ] Parameters via CLI args or JSON manifest file (cli writes it, runner reads it)
-- [ ] Update `run local` subprocess from `python -c <f-string>` to `python -m jernerics.runner`
-- [ ] Update SLURM script generation similarly
-- [ ] Write tests that import and test the runner directly
-- [ ] Delete `_get_sweep_runner_code()`
-
-### What the runner does
-1. Load config file → `SweepConfig`
-2. Build DAG from dag file
-3. Create/load Optuna study
-4. Trial loop: `study.ask()` → merge params with `_base` → `dag.run()` → extract objective → `study.tell()`
-5. Handle failures: mark trial FAIL, report to Optuna
-
-### Open decision
-Strip MLflow before or after extraction? Extracting first preserves behavior; stripping first means the runner is born clean.
+### Additional changes
+- Deleted `_get_mlflow_sync_script()` and `mlflow sync` command.
+- Removed all MLflow env vars from SLURM script generation and `run local`.
+- Removed `MlflowConfig`, `mlflow` dependency, `mlflow-export-import` dependency.
+- Removed `active_run_id` from `__init__.py`.
+- `load_jernerics_config()` now returns 3-tuple (was 4-tuple with MlflowConfig).
 
 ---
 
-## Phase 3 — Replace MLflow with Simple Tracking
+## Completed: Phase 3a — MLflow Removal
+
+All MLflow code deleted. No replacement tracking yet — Optuna SQLite stores params + objectives for now.
+
+- [x] Delete: `MlflowConfig`, `mlflow sync` command, env vars in SLURM scripts, `mlflow_export_import` dependency
+- [x] Update `__init__.py` — remove `active_run_id`
+
+---
+
+## Phase 3b — Custom Tracking
+
+Replace MLflow with a lightweight tracking layer + marimo dashboard.
 
 ### Why
 - MLflow is overkill for logging params + one metric per trial
-- Optuna SQLite already stores params + objectives
 - MLflow sync (local → remote) is fragile over unreliable WiFi
+- Need support for structured results (e.g., Pareto frontiers), not just flat scalars
+- Want project-level grouping and log-scale plots — MLflow doesn't provide these well
 - Write-local + rsync-eventually is more robust
 
+### Design decisions (settled)
+- **Writer**: JSONL per run (append-only, no lock contention, easy to rsync)
+- **Data model**: `log_params(dict)`, `log_metric(key, value, step?)`, `log_result(key, value)` for arbitrary structured data
+- **Visualization**: marimo notebooks querying the data store. Single core dashboard with project/experiment dropdowns, not per-project dashboards
+- **Sync**: rsync from HPC
+- **Optimization**: still single-scalar (via `objective` function). Multi-objective is a user decision expressed as an aggregate metric
+
 ### Plan
-- [ ] Create `tracking/writer.py` — `log_metric()` writes JSONL to run's state directory
-- [ ] Create `tracking/sync.py` — background rsync to homelab
-- [ ] Update runner to use new tracking instead of MLflow
-- [ ] Delete: `MlflowConfig`, `mlflow sync` command, env vars in SLURM scripts, `mlflow_export_import` dependency
-- [ ] Update `__init__.py` — replace `active_run_id` with `log_metric`
+- [ ] Design run directory structure and JSONL schema
+- [ ] Create `tracking/writer.py` — `log_metric()`, `log_params()`, `log_result()`
+- [ ] Create `tracking/sync.py` — rsync to homelab
+- [ ] Update runner to use new tracking
+- [ ] Build core marimo dashboard
 
 ---
 
@@ -82,5 +91,4 @@ Strip MLflow before or after extraction? Extracting first preserves behavior; st
 - [ ] Explore Submitit for SLURM submission
 - [ ] Explore structlog for structured logging
 - [ ] Decide: should `DAG.run()` unwrap `TaskResult` to `dict[str, Any]` for ergonomics?
-- [ ] Consider `_get_runner_code()` (single-run, non-sweep) — same f-string problem, smaller scope
 - [ ] Delete `old_executor.py`

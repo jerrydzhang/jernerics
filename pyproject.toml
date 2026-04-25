@@ -13,13 +13,7 @@ dependencies = [
     "tomli-w>=1.0.0",
     "pathspec>=0.12.1",
     "rich>=13.0.0",
-    "mlflow>=3.11.1",
     "optuna>=4.8.0",
-]
-
-[project.optional-dependencies]
-mlflow = [
-    "mlflow-export-import",
 ]
 
 [project.scripts]
@@ -40,9 +34,6 @@ requires = [
     "hatchling",
 ]
 build-backend = "hatchling.build"
-
-[tool.uv.sources]
-mlflow-export-import = { git = "https://github.com/mlflow/mlflow-export-import.git" }
 
 [tool.hatch.build.targets.wheel]
 packages = [

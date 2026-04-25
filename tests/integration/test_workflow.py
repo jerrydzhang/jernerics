@@ -20,7 +20,7 @@ dag = DAG(__file__)
 
         config_file = tmp_path / "config.py"
         config_file.write_text("""
-_base = {"seed": 42}
+base = {"seed": 42}
 n_trials = 2
 """)
 
@@ -59,7 +59,7 @@ dag = DAG(__file__)
 
         config_file = tmp_path / "config.py"
         config_file.write_text("""
-_base = {"seed": 1}
+base = {"seed": 1}
 """)
 
         result = subprocess.run(
@@ -123,7 +123,7 @@ dag = DAG(__file__)
 
         config_file = tmp_path / "config.py"
         config_file.write_text("""
-_base = {"seed": 1}
+base = {"seed": 1}
 """)
 
         result = subprocess.run(
@@ -150,7 +150,7 @@ dag = DAG(__file__)
 
         config_file = tmp_path / "my config.py"
         config_file.write_text("""
-_base = {"value": 42}
+base = {"value": 42}
 """)
 
         result = subprocess.run(

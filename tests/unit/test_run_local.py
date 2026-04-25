@@ -10,15 +10,14 @@ class TestRunLocalSingleConfig:
     @patch("jernerics.cli.load_config")
     def test_single_config_runs_once(self, mock_load, mock_run):
         mock_load.return_value = SweepConfig(
-            _base={"seed": 42},
+            base={"seed": 42},
             search_space=None,
             n_trials=1,
             sampler=None,
-            objective_task=None,
-            objective_metric=None,
             direction="minimize",
             slurm={},
             runner=None,
+            objective=None,
         )
         mock_run.return_value = MagicMock(returncode=0)
 
@@ -45,15 +44,14 @@ class TestRunLocalSweep:
     @patch("jernerics.cli.load_config")
     def test_sweep_runs_n_trials(self, mock_load, mock_run):
         mock_load.return_value = SweepConfig(
-            _base={"seed": 42},
+            base={"seed": 42},
             search_space=lambda trial: {"lr": trial.suggest_float("lr", 0.001, 0.1)},
             n_trials=5,
             sampler=None,
-            objective_task="train",
-            objective_metric="loss",
             direction="minimize",
             slurm={},
             runner=None,
+            objective=None,
         )
         mock_run.return_value = MagicMock(returncode=0)
 
