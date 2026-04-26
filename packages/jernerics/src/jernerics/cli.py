@@ -87,6 +87,10 @@ def run_local(
     project_dir = find_pyproject_dir()
     project_name = get_project_name(project_dir) if project_dir else None
 
+    jernerics_config, _, _ = (
+        load_jernerics_config(project_dir) if project_dir else (None, None, None)
+    )
+
     import optuna
 
     dag_dir = Path(os.path.dirname(dag_path) or ".")
@@ -131,7 +135,12 @@ def run_local(
                     storage_url,
                 ]
                 + (["--project-name", project_name] if project_name else [])
-                + (["--tracking-dir", str(tracker_dir)] if tracker_dir else []),
+                + (["--tracking-dir", str(tracker_dir)] if tracker_dir else [])
+                + (
+                    ["--server-addr", jernerics_config.tracking_server]
+                    if jernerics_config and jernerics_config.tracking_server
+                    else []
+                ),
                 cwd=os.path.dirname(dag_path) or ".",
                 env=env,
                 timeout=timeout,
@@ -480,6 +489,9 @@ def _generate_sweep_script(
         runner_args.extend(
             ["--tracking-dir", f"/work/.jernerics/tracking/{study_name}"]
         )
+
+    if hpc_config.tracking_server:
+        runner_args.extend(["--server-addr", hpc_config.tracking_server])
     runner_cmd = " \\\n        ".join(runner_args)
 
     lines.append(

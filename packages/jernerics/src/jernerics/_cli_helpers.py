@@ -68,6 +68,7 @@ class HpcConfig:
     cpus: int = 4
     max_concurrent_jobs: int = 10
     cache_dir: str | None = None
+    tracking_server: str | None = None
 
 
 class BindsConfig(dict[str, str]):
@@ -116,6 +117,8 @@ def load_jernerics_config(
         cpus=container_config.get("cpus", 4),
         max_concurrent_jobs=safety_config.get("max_concurrent_jobs", 10),
         cache_dir=hpc_config.get("cache_dir"),
+        tracking_server=os.environ.get("JERNERICS_TRACKING_SERVER")
+        or hpc_config.get("tracking_server"),
     )
 
     shell = ShellConfig(

@@ -80,6 +80,8 @@ class TrackingReader:
             yield envelope
 
     def read_envelope(self) -> Envelope | None:
+        """Reads the next envelope from the stream, or returns None if at EOF."""
+
         length = decode_varint(self.file)
         if length is None:
             return None
@@ -92,6 +94,14 @@ class TrackingReader:
         envelope = Envelope()
         envelope.ParseFromString(envelope_bytes)
         return envelope
+
+    def try_read_envelope(self) -> Envelope | None:
+        current_pos = self.file.tell()
+        try:
+            return self.read_envelope()
+        except EOFError:
+            self.file.seek(current_pos)
+            return None
 
     def close(self) -> None:
         self.file.close()

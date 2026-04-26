@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from jernerics.tracking.store import (
+from jernerics.tracking.wire import (
     TrackingReader,
     TrackingWriter,
     decode_varint,
@@ -13,19 +13,26 @@ from jernerics_proto import Envelope
 
 
 def make_param_envelope(
+    project: str = "testproj",
     study_name: str = "test",
     trial_id: int = 1,
     key: str = "lr",
     value: float = 0.001,
     timestamp_ns: int = 1000,
 ) -> Envelope:
-    env = Envelope(study_name=study_name, trial_id=trial_id, timestamp_ns=timestamp_ns)
+    env = Envelope(
+        project=project,
+        study_name=study_name,
+        trial_id=trial_id,
+        timestamp_ns=timestamp_ns,
+    )
     env.param.key = key
     env.param.value.float_val = value
     return env
 
 
 def make_metric_envelope(
+    project: str = "testproj",
     study_name: str = "test",
     trial_id: int = 1,
     key: str = "loss",
@@ -33,7 +40,12 @@ def make_metric_envelope(
     step: int = 100,
     timestamp_ns: int = 2000,
 ) -> Envelope:
-    env = Envelope(study_name=study_name, trial_id=trial_id, timestamp_ns=timestamp_ns)
+    env = Envelope(
+        project=project,
+        study_name=study_name,
+        trial_id=trial_id,
+        timestamp_ns=timestamp_ns,
+    )
     env.metric.key = key
     env.metric.value = value
     env.metric.step = step
@@ -41,38 +53,53 @@ def make_metric_envelope(
 
 
 def make_result_envelope(
+    project: str = "testproj",
     study_name: str = "test",
     trial_id: int = 1,
     key: str = "pareto",
     value: str = '{"x": [1, 2], "y": [3, 4]}',
     timestamp_ns: int = 3000,
 ) -> Envelope:
-    env = Envelope(study_name=study_name, trial_id=trial_id, timestamp_ns=timestamp_ns)
+    env = Envelope(
+        project=project,
+        study_name=study_name,
+        trial_id=trial_id,
+        timestamp_ns=timestamp_ns,
+    )
     env.result.key = key
     env.result.value = value
     return env
 
 
 def make_artifact_envelope(
+    project: str = "testproj",
     study_name: str = "test",
     trial_id: int = 1,
     key: str = "model",
     local_path: str = "/work/model.pt",
     timestamp_ns: int = 4000,
 ) -> Envelope:
-    env = Envelope(study_name=study_name, trial_id=trial_id, timestamp_ns=timestamp_ns)
+    env = Envelope(
+        project=project,
+        study_name=study_name,
+        trial_id=trial_id,
+        timestamp_ns=timestamp_ns,
+    )
     env.artifact.key = key
     env.artifact.local_path = local_path
     return env
 
 
 def make_sweep_meta_envelope(
+    project: str = "testproj",
     study_name: str = "test",
     git_hash: str = "abc123",
     config: str = "base = {}",
     timestamp_ns: int = 0,
 ) -> Envelope:
-    env = Envelope(study_name=study_name, trial_id=0, timestamp_ns=timestamp_ns)
+    env = Envelope(
+        project=project, study_name=study_name, trial_id=0, timestamp_ns=timestamp_ns
+    )
     env.sweep_meta.git_hash = git_hash
     env.sweep_meta.config = config
     return env
@@ -80,10 +107,7 @@ def make_sweep_meta_envelope(
 
 def read_all(path: Path) -> list[Envelope]:
     with TrackingReader(path) as reader:
-        result = []
-        for env in reader:
-            result.append(env)
-        return result
+        return list(reader)
 
 
 class TestEncodeVarint:
@@ -139,6 +163,7 @@ class TestSingleEnvelope:
             writer.write_envelope(original)
 
         [result] = read_all(p)
+        assert result.project == "testproj"
         assert result.study_name == "test"
         assert result.trial_id == 1
         assert result.WhichOneof("payload") == "param"
@@ -160,7 +185,9 @@ class TestSingleEnvelope:
 
     def test_metric_no_step(self, tmp_path: Path):
         p = tmp_path / "test.pb"
-        env = Envelope(study_name="test", trial_id=1, timestamp_ns=2000)
+        env = Envelope(
+            project="testproj", study_name="test", trial_id=1, timestamp_ns=2000
+        )
         env.metric.key = "accuracy"
         env.metric.value = 0.95
 

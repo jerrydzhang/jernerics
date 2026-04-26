@@ -84,8 +84,9 @@ This keeps HPC installs slim (no DuckDB, no server code) and the server package 
 - [x] Create `tracking/tracker.py` — `Tracker` class with `log_param()`, `log_metric()`, `log_result()`, `log_artifact()`
 - [x] Integrate tracker into runner, DAG executor, and CLI
 - [x] Monorepo refactor — split into three packages with uv workspace
-- [ ] Build gRPC server with DuckDB backend
-- [ ] Create sync client (`sync.py`) — background thread sends events to server via gRPC
+- [x] Build gRPC server with DuckDB backend
+- [x] Create sync client (`client.py`) — background thread sends events to server via gRPC
+- [ ] `jernerics sync` CLI command — replay orphaned .pb files to server
 - [ ] Add MinIO artifact storage
 - [ ] Build core marimo dashboard
 

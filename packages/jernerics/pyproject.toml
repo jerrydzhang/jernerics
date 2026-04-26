@@ -14,6 +14,7 @@ dependencies = [
     "rich>=13.0.0",
     "optuna>=4.8.0",
     "jernerics-proto",
+    "grpcio>=1.80.0",
 ]
 
 [tool.uv.sources]

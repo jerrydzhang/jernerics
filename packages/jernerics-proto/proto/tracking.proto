@@ -5,16 +5,19 @@ package jernerics.tracking;
 // The fundamental unit. One per log call.
 // Written to local file as delimited protobuf, sent over gRPC to server.
 message Envelope {
-  string study_name   = 1;
-  int32  trial_id     = 2;
-  int64  timestamp_ns = 3;
+  string project     = 1;
+  string study_name   = 2;
+  int32  trial_id     = 3;
+  int64  timestamp_ns = 4;
+  int32  seq          = 5;
 
   oneof payload {
-    SweepMetaEvent sweep_meta = 4;
-    ParamEvent     param      = 5;
-    MetricEvent    metric     = 6;
-    ResultEvent    result     = 7;
-    ArtifactEvent  artifact   = 8;
+    SweepMetaEvent sweep_meta = 9;
+    ParamEvent     param      = 10;
+    MetricEvent    metric     = 11;
+    ResultEvent    result     = 12;
+    ArtifactEvent  artifact   = 13;
+    TrialEndEvent  trial_end  = 14;
   }
 }
 
@@ -57,4 +60,13 @@ message ResultEvent {
 message ArtifactEvent {
   string key        = 1;
   string local_path = 2;
+}
+
+// Sentinel. Written once when the tracker closes, signals end of trial.
+message TrialEndEvent {}
+
+message Ack {}
+
+service TrackingService {
+  rpc SendEvent(Envelope) returns (Ack);
 }

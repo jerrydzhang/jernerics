@@ -41,6 +41,7 @@ def _make_hpc_config(**overrides):
         "cpus": 4,
         "max_concurrent_jobs": 10,
         "cache_dir": None,
+        "tracking_server": None,
     }
     defaults.update(overrides)
     return HpcConfig(**defaults)

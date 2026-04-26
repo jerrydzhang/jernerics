@@ -5,6 +5,7 @@ from jernerics_proto.tracking_pb2 import (
     ParamEvent,
     ResultEvent,
     SweepMetaEvent,
+    TrialEndEvent,
     Value,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "ParamEvent",
     "ResultEvent",
     "SweepMetaEvent",
+    "TrialEndEvent",
     "Value",
 ]

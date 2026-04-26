@@ -73,7 +73,6 @@
             packages = [
               virtualenv
               pkgs.uv
-              pkgs.protobuf
             ];
 
             env =
