@@ -61,21 +61,31 @@ Replace MLflow with a lightweight tracking layer + marimo dashboard.
 - MLflow sync (local → remote) is fragile over unreliable WiFi
 - Need support for structured results (e.g., Pareto frontiers), not just flat scalars
 - Want project-level grouping and log-scale plots — MLflow doesn't provide these well
-- Write-local + rsync-eventually is more robust
+- Write-local + sync-eventually is more robust
 
 ### Design decisions (settled)
-- **Writer**: JSONL per run (append-only, no lock contention, easy to rsync)
-- **Data model**: `log_params(dict)`, `log_metric(key, value, step?)`, `log_result(key, value)` for arbitrary structured data
-- **Visualization**: marimo notebooks querying the data store. Single core dashboard with project/experiment dropdowns, not per-project dashboards
-- **Sync**: rsync from HPC
+- **Schema + local format**: Protobuf (varint-length-prefixed delimited)
+- **Transport**: gRPC — both client and server use generated gRPC stubs. Client sends events, server receives and stores.
+- **Remote metrics store**: DuckDB (server-side only)
+- **Remote artifact store**: MinIO (not yet built)
+- **Visualization**: marimo notebooks querying DuckDB. Single core dashboard with project/experiment dropdowns, not per-project dashboards
 - **Optimization**: still single-scalar (via `objective` function). Multi-objective is a user decision expressed as an aggregate metric
+
+### Monorepo structure
+Three packages in a uv workspace:
+- `packages/jernerics-proto/` — proto schema + generated pb2/grpc files. Both other packages depend on this.
+- `packages/jernerics/` — client library (DAG executor, HPC, CLI, ProtobufTracker). Depends on `jernerics-proto`.
+- `packages/jernerics-server/` — gRPC service, DuckDB store, dashboard. Depends on `jernerics-proto`, `grpcio`, `duckdb`.
+
+This keeps HPC installs slim (no DuckDB, no server code) and the server package isolated.
 
 ### Plan
 - [x] Design run directory structure and schema
 - [x] Create `tracking/tracker.py` — `Tracker` class with `log_param()`, `log_metric()`, `log_result()`, `log_artifact()`
 - [x] Integrate tracker into runner, DAG executor, and CLI
-- [ ] Create `tracking/sync.py` — background sync thread to homelab server
+- [x] Monorepo refactor — split into three packages with uv workspace
 - [ ] Build gRPC server with DuckDB backend
+- [ ] Create sync client (`sync.py`) — background thread sends events to server via gRPC
 - [ ] Add MinIO artifact storage
 - [ ] Build core marimo dashboard
 
@@ -96,3 +106,5 @@ Replace MLflow with a lightweight tracking layer + marimo dashboard.
 - [ ] Decide: should `DAG.run()` unwrap `TaskResult` to `dict[str, Any]` for ergonomics?
 - [ ] Delete `old_executor.py`
 - [ ] Refactor DAG `resume()` — never used in production, needs review. Currently doesn't pass `tracker` to `execute_dag`.
+- [ ] Switch to uv2nix for Nix packaging (needed for server deployment to homelab)
+- [ ] Write new integration tests reflecting real usage patterns
