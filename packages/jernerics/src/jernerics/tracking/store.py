@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterator
 from pathlib import Path
 from typing import BinaryIO
 
@@ -72,7 +72,7 @@ class TrackingReader:
     def __exit__(self, *args) -> None:
         self.close()
 
-    def __iter__(self) -> Iterable[Envelope]:
+    def __iter__(self) -> Iterator[Envelope]:
         while True:
             envelope = self.read_envelope()
             if envelope is None:

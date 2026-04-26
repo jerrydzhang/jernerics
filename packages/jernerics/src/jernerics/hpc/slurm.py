@@ -170,7 +170,7 @@ class SlurmJobManager:
         return None
 
     def wait_for_completion(
-        self, job_id: str, poll_interval: int = 30, timeout: int | None = None
+        self, job_id: str, poll_interval: float = 30, timeout: float | None = None
     ) -> bool:
         import time
 

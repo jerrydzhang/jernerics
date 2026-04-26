@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import warnings
+from pathlib import Path
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -148,7 +149,7 @@ class TestExecuteDAG:
             return 999
 
         tasks = {"expensive": expensive}
-        state = RunState.create("test_dag.py", 0, ".jernerics")
+        state = RunState.create("test_dag.py", 0, Path(".jernerics"))
         state.init_task("expensive")
         state.update_task("expensive", TaskStatus.COMPLETED, output=42)
 
@@ -198,6 +199,7 @@ class TestExecuteDAG:
         assert results["failing"].is_error
         assert isinstance(results["failing"].error, ValueError)
         assert state.tasks["failing"].status == TaskStatus.FAILED
+        assert state.tasks["failing"].error is not None
         assert "boom" in state.tasks["failing"].error
 
     def test_execute_complex_dag(self):
@@ -313,7 +315,7 @@ class TestMaxWorkersValidation:
 
     def test_invalid_max_workers_string(self):
         try:
-            ThreadPoolRunner(max_workers="invalid")  # type: ignore[arg-type]
+            ThreadPoolRunner(max_workers="invalid")  # ty: ignore[invalid-argument-type]
             raise AssertionError("Should have raised ValueError")
         except ValueError as e:
             assert "max_workers must be a positive integer" in str(e)
@@ -399,7 +401,7 @@ class TestSyncRunner:
             return 999
 
         tasks = {"cached": cached}
-        state = RunState.create("test_dag.py", 0, ".jernerics")
+        state = RunState.create("test_dag.py", 0, Path(".jernerics"))
         state.init_task("cached")
         state.update_task("cached", TaskStatus.COMPLETED, output=42)
 

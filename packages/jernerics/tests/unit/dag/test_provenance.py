@@ -72,6 +72,7 @@ class TestResolveContainerPath:
 
         result = _resolve_container_path(str(container))
 
+        assert result is not None
         assert "path" in result
         assert "store_path" not in result
 

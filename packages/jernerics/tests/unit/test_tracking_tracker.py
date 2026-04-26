@@ -62,7 +62,7 @@ class TestLogParam:
         p = tmp_path / "test.pb"
         with ProtobufTracker("study", 1, p) as t:  # noqa: SIM117
             with pytest.raises(ValueError, match="Unsupported"):
-                t.log_param("bad", [1, 2, 3])  # type: ignore[arg-type]
+                t.log_param("bad", [1, 2, 3])  # ty: ignore[invalid-argument-type]
 
 
 class TestLogMetric:
