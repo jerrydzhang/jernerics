@@ -106,5 +106,5 @@ This keeps HPC installs slim (no DuckDB, no server code) and the server package 
 - [ ] Decide: should `DAG.run()` unwrap `TaskResult` to `dict[str, Any]` for ergonomics?
 - [ ] Delete `old_executor.py`
 - [ ] Refactor DAG `resume()` — never used in production, needs review. Currently doesn't pass `tracker` to `execute_dag`.
-- [ ] Switch to uv2nix for Nix packaging (needed for server deployment to homelab)
+- [x] Switch to uv2nix for Nix packaging (needed for server deployment to homelab)
 - [ ] Write new integration tests reflecting real usage patterns
