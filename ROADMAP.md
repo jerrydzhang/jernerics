@@ -71,10 +71,12 @@ Replace MLflow with a lightweight tracking layer + marimo dashboard.
 - **Optimization**: still single-scalar (via `objective` function). Multi-objective is a user decision expressed as an aggregate metric
 
 ### Plan
-- [ ] Design run directory structure and JSONL schema
-- [ ] Create `tracking/writer.py` — `log_metric()`, `log_params()`, `log_result()`
-- [ ] Create `tracking/sync.py` — rsync to homelab
-- [ ] Update runner to use new tracking
+- [x] Design run directory structure and schema
+- [x] Create `tracking/tracker.py` — `Tracker` class with `log_param()`, `log_metric()`, `log_result()`, `log_artifact()`
+- [x] Integrate tracker into runner, DAG executor, and CLI
+- [ ] Create `tracking/sync.py` — background sync thread to homelab server
+- [ ] Build gRPC server with DuckDB backend
+- [ ] Add MinIO artifact storage
 - [ ] Build core marimo dashboard
 
 ---
@@ -82,6 +84,7 @@ Replace MLflow with a lightweight tracking layer + marimo dashboard.
 ## Phase 4 — Simplify HPC Layer
 
 - [ ] Replace `FileSyncer` (tar/scp/extract) with rsync
+- [ ] Unify cache directory logic — all runtime data (optuna, tracking) goes through `paths.cache_dir()`, eliminate `/work/.jernerics/` fallback and `use_scratch` branching. `cache_dir` config works everywhere, defaults to `~/.cache/jernerics/`
 
 ---
 
@@ -92,3 +95,4 @@ Replace MLflow with a lightweight tracking layer + marimo dashboard.
 - [ ] Explore structlog for structured logging
 - [ ] Decide: should `DAG.run()` unwrap `TaskResult` to `dict[str, Any]` for ergonomics?
 - [ ] Delete `old_executor.py`
+- [ ] Refactor DAG `resume()` — never used in production, needs review. Currently doesn't pass `tracker` to `execute_dag`.

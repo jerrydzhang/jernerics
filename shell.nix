@@ -7,6 +7,8 @@ pkgs.mkShell {
   packages = with pkgs; [
     uv
     python3
+
+    protobuf
   ];
 
   env = lib.optionalAttrs pkgs.stdenv.isLinux {

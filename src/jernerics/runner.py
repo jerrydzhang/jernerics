@@ -1,11 +1,12 @@
-import pathlib
 import sys
+from pathlib import Path
 from typing import Any
 
 import optuna
 
 from jernerics._cli_helpers import load_config
 from jernerics.dag import DAG
+from jernerics.tracking import ProtobufTracker, Tracker
 
 
 def run_trial(
@@ -13,9 +14,10 @@ def run_trial(
     config_file: str,
     study_name: str,
     storage_url: str,
+    tracking_dir: str | None = None,
     project_name: str | None = None,
 ) -> None:
-    dag_dir = pathlib.Path(dag_file).parent
+    dag_dir = Path(dag_file).parent
     if str(dag_dir) not in sys.path:
         sys.path.insert(0, str(dag_dir))
 
@@ -39,6 +41,14 @@ def run_trial(
             pass
 
     trial = study.ask()
+
+    tracker: Tracker | None = None
+    if tracking_dir:
+        tracker = ProtobufTracker(
+            study_name,
+            trial.number,
+            Path(tracking_dir) / f"{trial.number}.pb",
+        )
     # Allow search_space to be None for the edge case where the
     # user wants no hyperparameters.
     params: dict[str, Any] = sweep.search_space(trial) if sweep.search_space else {}
@@ -58,6 +68,7 @@ def run_trial(
             config,
             config_index=trial.number,
             config_path=config_file,
+            tracker=tracker,
             runner=sweep.runner,
         )
 
@@ -79,6 +90,9 @@ def run_trial(
     except Exception:
         _tell(study, trial, state=optuna.trial.TrialState.FAIL)
         raise
+    finally:
+        if tracker:
+            tracker.close()
 
 
 if __name__ == "__main__":
@@ -89,6 +103,7 @@ if __name__ == "__main__":
     parser.add_argument("config_file")
     parser.add_argument("--study-name")
     parser.add_argument("--storage-url")
+    parser.add_argument("--tracking-dir")
     parser.add_argument("--project-name", default=None)
     args = parser.parse_args()
 
@@ -97,5 +112,6 @@ if __name__ == "__main__":
         config_file=args.config_file,
         study_name=args.study_name,
         storage_url=args.storage_url,
+        tracking_dir=args.tracking_dir,
         project_name=args.project_name,
     )

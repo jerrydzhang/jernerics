@@ -96,6 +96,11 @@ def run_local(
     study_name = f"local_{Path(config_path).stem}_{timestamp}"
     storage_url = f"sqlite:///{db_dir / (study_name + '.db')}"
 
+    # TODO: currently always created but should check if tracking
+    # is enabled (how is still tbd)
+    tracker_dir = dag_dir / ".jernerics" / "tracking" / study_name
+    tracker_dir.mkdir(parents=True, exist_ok=True)
+
     optuna.create_study(
         study_name=study_name,
         storage=storage_url,
@@ -125,7 +130,8 @@ def run_local(
                     "--storage-url",
                     storage_url,
                 ]
-                + (["--project-name", project_name] if project_name else []),
+                + (["--project-name", project_name] if project_name else [])
+                + (["--tracking-dir", str(tracker_dir)] if tracker_dir else []),
                 cwd=os.path.dirname(dag_path) or ".",
                 env=env,
                 timeout=timeout,
@@ -440,6 +446,8 @@ def _generate_sweep_script(
             f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
             f' direction={sweep.direction!r}, load_if_exists=True)"'
         )
+
+        lines.append(f"mkdir -p {scratch_dir}/tracking/{study_name}")
     else:
         lines.append("mkdir -p .jernerics/optuna")
         lines.append(
@@ -450,9 +458,11 @@ def _generate_sweep_script(
             f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
             f' direction={sweep.direction!r}, load_if_exists=True)"'
         )
+
+        lines.append(f"mkdir -p .jernerics/tracking/{study_name}")
     lines.append("")
 
-    runner_args = [
+    runner_args: list[str] = [
         "python",
         "-m",
         "jernerics.runner",
@@ -462,9 +472,14 @@ def _generate_sweep_script(
         study_name,
         "--storage-url",
         storage_url,
-    ]
-    if project_name:
-        runner_args.extend(["--project-name", project_name])
+    ] + (["--project-name", project_name] if project_name else [])
+
+    if use_scratch:
+        runner_args.extend(["--tracking-dir", f"/scratch/tracking/{study_name}"])
+    else:
+        runner_args.extend(
+            ["--tracking-dir", f"/work/.jernerics/tracking/{study_name}"]
+        )
     runner_cmd = " \\\n        ".join(runner_args)
 
     lines.append(

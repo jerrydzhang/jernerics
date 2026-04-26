@@ -6,6 +6,8 @@ from graphlib import TopologicalSorter
 from pathlib import Path
 from typing import Any
 
+from jernerics.tracking import Tracker
+
 from .executor import Runner, TaskResult, ThreadPoolRunner, execute_dag
 from .provenance import Provenance
 from .state import RunState, TaskStatus
@@ -99,10 +101,9 @@ class DAG:
         state_dir: Path | str | None = None,
         config_path: str | None = None,
         container_path: str | None = None,
+        tracker: Tracker | None = None,
         runner: Runner | None = None,
     ) -> dict[str, TaskResult]:
-        self.validate()
-
         if state_dir is not None:
             self.state_dir = Path(state_dir)
         elif self.dag_file:
@@ -137,6 +138,7 @@ class DAG:
                 config,
                 state=state,
                 runner=runner or ThreadPoolRunner(max_workers=None),
+                tracker=tracker,
             )
         except BaseException as e:
             exc_info = e

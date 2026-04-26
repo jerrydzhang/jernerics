@@ -31,7 +31,7 @@ class TestRunTask:
         def my_task(config):
             return config["value"]
 
-        result = _run_task(my_task, {}, {"value": 42})
+        result = _run_task(my_task, {}, {"value": 42}, None)
         assert result.value == 42
         assert not result.is_error
 
@@ -40,7 +40,7 @@ class TestRunTask:
         def my_task(upstream, config):
             return upstream * 2
 
-        result = _run_task(my_task, {"upstream": 10}, {})
+        result = _run_task(my_task, {"upstream": 10}, {}, None)
         assert result.value == 20
 
     def test_run_task_merges_inputs_and_config(self):
@@ -48,7 +48,7 @@ class TestRunTask:
         def my_task(data, config):
             return data + config["add"]
 
-        result = _run_task(my_task, {"data": 5}, {"add": 7})
+        result = _run_task(my_task, {"data": 5}, {"add": 7}, None)
         assert result.value == 12
 
     @given(st.integers(), st.integers())
@@ -57,7 +57,7 @@ class TestRunTask:
         def compute(x, y, config):
             return x + y
 
-        result = _run_task(compute, {"x": a, "y": b}, {})
+        result = _run_task(compute, {"x": a, "y": b}, {}, None)
         assert result.value == a + b
 
     def test_run_task_captures_exception(self):
@@ -65,7 +65,7 @@ class TestRunTask:
         def failing(config):
             raise ValueError("boom")
 
-        result = _run_task(failing, {}, {})
+        result = _run_task(failing, {}, {}, None)
         assert result.is_error
         assert isinstance(result.error, ValueError)
         assert "boom" in str(result.error)
@@ -478,6 +478,7 @@ class TestConfigParameterWarning:
                 my_task,
                 {"upstream_config": "upstream", "config": "will be overwritten"},
                 {"key": "value"},
+                None,
             )
 
             assert len(w) == 1

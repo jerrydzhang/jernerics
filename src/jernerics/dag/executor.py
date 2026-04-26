@@ -12,6 +12,8 @@ from datetime import UTC, datetime
 from graphlib import TopologicalSorter
 from typing import Any, Protocol, cast
 
+from jernerics.tracking import NullTracker, Tracker
+
 from .state import RunState, TaskStatus
 from .task import Task
 
@@ -99,6 +101,7 @@ def _get_default_max_workers() -> int:
 def execute_dag(
     tasks: dict[str, Task],
     config: dict[str, Any],
+    tracker: Tracker | None = None,
     state: RunState | None = None,
     runner: Runner | None = None,
 ) -> dict[str, TaskResult]:
@@ -184,7 +187,7 @@ def execute_dag(
                     )
                     state.to_json()
 
-                future = runner.submit(_run_task, task, inputs, config)
+                future = runner.submit(_run_task, task, inputs, config, tracker)
                 futures[future] = task_name
 
             if not futures:
@@ -226,7 +229,12 @@ def execute_dag(
     return results
 
 
-def _run_task(task: Task, inputs: dict[str, Any], config: dict[str, Any]) -> TaskResult:
+def _run_task(
+    task: Task,
+    inputs: dict[str, Any],
+    config: dict[str, Any],
+    tracker: Tracker | None,
+) -> TaskResult:
     sig = inspect.signature(task.func)
     if "config" in inputs and "config" in sig.parameters:
         warnings.warn(
@@ -235,7 +243,18 @@ def _run_task(task: Task, inputs: dict[str, Any], config: dict[str, Any]) -> Tas
             UserWarning,
             stacklevel=2,
         )
+    if "tracker" in inputs and "tracker" in sig.parameters:
+        warnings.warn(
+            f"Task '{task.name}' has a parameter named 'tracker' which will be "
+            f"overwritten by the DAG tracker. Consider renaming the parameter.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    tracker = tracker or NullTracker()
     kwargs = {**inputs, "config": config}
+    if "tracker" in sig.parameters:
+        kwargs["tracker"] = tracker
 
     try:
         result = task.func(**kwargs)
