@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-from jernerics._cli_helpers import HpcConfig, SweepConfig
+from jernerics.config import HpcConfig, SweepConfig
 
 
 def _generate_sweep_script(

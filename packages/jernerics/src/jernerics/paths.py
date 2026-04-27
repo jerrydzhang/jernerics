@@ -1,9 +1,7 @@
-from __future__ import annotations
-
 import os
 from pathlib import Path
 
-from jernerics._cli_helpers import (
+from jernerics.config import (
     ConfigNotFound,
     find_pyproject_dir,
     get_project_name,

@@ -133,7 +133,11 @@ class FileSyncer:
             f"{self.ssh.host}:{_quote_path(remote_path)}",
         ]
         result = subprocess.run(
-            scp_cmd, capture_output=True, text=True, timeout=DEFAULT_SCP_TIMEOUT
+            scp_cmd,
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_SCP_TIMEOUT,
+            check=False,
         )
         return result.returncode == 0
 
@@ -148,7 +152,11 @@ class FileSyncer:
             str(local_path),
         ]
         result = subprocess.run(
-            scp_cmd, capture_output=True, text=True, timeout=DEFAULT_SCP_TIMEOUT
+            scp_cmd,
+            capture_output=True,
+            text=True,
+            timeout=DEFAULT_SCP_TIMEOUT,
+            check=False,
         )
         return result.returncode == 0
 

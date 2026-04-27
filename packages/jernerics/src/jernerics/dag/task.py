@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -8,7 +6,7 @@ from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar, overload
 if TYPE_CHECKING:
     from .dag import DAG
 
-_active_dag: ContextVar[DAG | None] = ContextVar("_active_dag", default=None)
+_active_dag: ContextVar["DAG | None"] = ContextVar("_active_dag", default=None)
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -18,7 +16,7 @@ R = TypeVar("R")
 class Task:
     name: str
     func: Callable[..., Any]
-    depends_on: list[Task] = field(default_factory=list)
+    depends_on: list["Task"] = field(default_factory=list)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.func(*args, **kwargs)

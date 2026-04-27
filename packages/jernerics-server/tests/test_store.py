@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from jernerics_proto import (
     ArtifactEvent,
     Envelope,

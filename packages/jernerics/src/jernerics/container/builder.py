@@ -3,7 +3,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from jernerics._cli_helpers import (
+from jernerics.config import (
     find_pyproject_dir,
     get_project_name,
     load_jernerics_config,

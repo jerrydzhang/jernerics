@@ -1,362 +1,125 @@
-# AGENTS.md - Jernerics Codebase Guide
+# AGENTS.md
 
-This document provides guidelines for agentic coding agents working in this repository.
+## Commands
 
-## Project Overview
+All commands run from `packages/jernerics/` unless noted.
 
-Jernerics is a Python 3.12+ toolkit for building and evaluating ML models, providing utilities for DAG-based experiment execution, HPC cluster management via SLURM, and container-based reproducibility.
-
-## Build/Lint/Test Commands
-
-### Setup
 ```bash
-uv sync                    # Install all dependencies
-. .venv/bin/activate       # Activate virtual environment
+# Setup
+uv sync
+. .venv/bin/activate
+
+# Test
+pytest                                          # All tests
+pytest tests/unit/                               # Unit tests only
+pytest tests/unit/dag/test_task.py               # Specific file
+pytest tests/unit/dag/test_task.py::TestTaskDecorator::test_task_decorator_returns_task  # Single test
+pytest -x                                       # Stop on first failure
+
+# Lint & format (must pass before committing)
+ruff check .                                    # Lint
+ruff check . --fix                              # Auto-fix lint issues
+ruff format .                                   # Format
+ruff format . --check                           # Check formatting without changes
+
+# Type check
+ty check
+
+# All checks at once
+ruff check . && ruff format --check . && pytest
 ```
 
-### Testing
-```bash
-pytest                                      # Run all tests
-pytest tests/unit/                          # Run unit tests only
-pytest tests/integration/                   # Run integration tests only
-pytest tests/unit/dag/test_task.py          # Run specific test file
-pytest tests/unit/dag/test_task.py::TestTaskDecorator::test_task_decorator_returns_task  # Run single test
-pytest -x                                   # Stop on first failure
-pytest -v                                   # Verbose output
-pytest --cov=src                            # With coverage
+## Project Structure
+
+uv workspace monorepo at repo root:
+
+```
+packages/
+  jernerics-proto/       # Proto schema + generated code (pb2, pb2_grpc)
+  jernerics/             # Client library (HPC, DAG, CLI, tracking)
+  jernerics-server/      # gRPC service, DuckDB store, dashboard
 ```
 
-### Linting & Formatting
-```bash
-ruff check .                # Run linter
-ruff check . --fix          # Auto-fix lint issues
-ruff format .               # Format code
-ruff format . --check       # Check formatting without changes
-ty check                    # Type check with ty
+Source layout inside `packages/jernerics/`:
+
 ```
-
-### Pre-commit
-```bash
-pre-commit run --all-files  # Run all pre-commit hooks
-```
-
-## Code Style Guidelines
-
-### Imports
-
-```python
-from __future__ import annotations  # Always first for modern typing
-
-import standard_library_modules
-import third_party_modules
-from local_modules import ...
-```
-
-Order: future annotations → standard library → third-party → local imports. Group imports logically, use absolute imports for project modules.
-
-### Formatting
-
-- **Line length**: 88 characters (ruff default)
-- **Quotes**: Prefer double quotes for strings
-- **Indentation**: 4 spaces (no tabs)
-- **Trailing commas**: Use in multi-line collections
-
-### Type Hints
-
-```python
-from __future__ import annotations
-from typing import Any
-
-def function(
-    config: dict[str, Any],
-    path: str | Path | None = None,
-) -> dict[str, Any]:
-    ...
-```
-
-- Use `from __future__ import annotations` for modern type syntax
-- Use `|` for unions instead of `Union[]`
-- Use `list[X]`, `dict[K, V]` instead of `List`, `Dict`
-- Always annotate function parameters and return types
-- Use `Any` sparingly; prefer specific types
-
-### Naming Conventions
-
-```python
-class MyClass:                    # PascalCase for classes
-    def my_method(self): ...      # snake_case for methods/functions
-
-my_variable = 1                   # snake_case for variables
-MY_CONSTANT = 1                   # UPPER_SNAKE_CASE for constants
-
-def _private_function(): ...      # Underscore prefix for internal functions
-
-class HpcConfig: ...              # No abbreviations in class names
-class SSHClient: ...              # Acronyms kept uppercase
-```
-
-### Data Structures
-
-```python
-from dataclasses import dataclass, field
-
-@dataclass
-class Task:
-    name: str
-    func: Callable[..., Any]
-    depends_on: list[Task] = field(default_factory=list)
-```
-
-- Use `@dataclass` for data-holding classes
-- Use `field(default_factory=...)` for mutable defaults
-
-### Error Handling
-
-```python
-class ConfigNotFound(Exception):
-    pass
-
-def load_config(config_file: str) -> SweepConfig:
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_file}")
-```
-
-- Define custom exceptions at module level
-- Use descriptive error messages with context
-- Raise specific exception types (not generic `Exception`)
-
-### CLI Patterns
-
-```python
-import typer
-from typing_extensions import Annotated
-
-app = typer.Typer(help="Description.")
-
-@app.command()
-def command(
-    arg: Annotated[str, typer.Argument(help="Argument description.")],
-    option: Annotated[str | None, typer.Option("--option", "-o", help="Option desc.")] = None,
-):
-    ...
-```
-
-## Testing Guidelines
-
-### Test Organization
-```
+src/jernerics/
+  cli.py                 # Typer CLI — all commands
+  config.py              # HpcConfig, SweepConfig, config loading
+  runner.py              # Trial runner invoked via python -m jernerics.runner
+  paths.py               # Cache dir, work dir, bind resolution
+  dag/                   # DAG executor, task decorator, state, provenance
+  hpc/                   # SSH client, SLURM job manager, project sync
+  container/             # Container builder (SLURM submit + apptainer)
+  tracking/              # Protobuf tracker, wire format, gRPC sync client, replay
 tests/
-├── conftest.py              # Shared fixtures
-├── unit/                    # Unit tests (fast, isolated)
-│   ├── dag/
-│   ├── hpc/
-│   └── container/
-└── integration/             # Integration tests (slower, may use external resources)
+  unit/                  # Mirrors src/ structure
+  integration/
 ```
 
-### Test Structure
+Use `uv run` from `packages/jernerics/` — not `pip`, not bare `python`.
 
-```python
-from __future__ import annotations
+## Definition of Done
 
-from hypothesis import given
-from hypothesis import strategies as st
+A task is complete when ALL of the following pass:
 
-from jernerics.dag import DAG, task
+1. `ruff check .` exits 0
+2. `ruff format --check .` exits 0
+3. `pytest` exits 0 with no failures
+4. Changed files have been staged
 
+## Code Conventions
 
-class TestFeatureName:
-    def test_basic_case(self):
-        ...
+### What ruff already enforces (don't repeat in code)
 
-    def test_edge_case(self, tmp_path):  # Use pytest fixtures
-        ...
+- Line length 88, double quotes, 4-space indent, trailing commas in multi-line
+- Import ordering (stdlib → third-party → local)
+- Unused imports, unreachable code, etc.
 
-    @given(st.integers(), st.integers())  # Property-based testing
-    def test_with_various_inputs(self, a, b):
-        ...
+### What ruff does NOT enforce
+
+- **No comments on self-documenting code.** If you feel the need to comment, consider renaming first.
+- **Use `Self` from `typing`** for `__enter__` return types, not the class name directly.
+- **No `from __future__ import annotations`.** Removed project-wide — not needed for Python 3.12+. Use string annotations (`"Task"`) for forward references and `Self` from `typing` for self-referencing class methods.
+- **Use `@dataclass`** for data-holding classes. Use `field(default_factory=...)` for mutable defaults.
+- **Define custom exceptions** at module level with descriptive names (`ConfigNotFound`, not `Error`).
+- **Use `check=False`** on `subprocess.run` calls where you inspect `returncode` yourself.
+
+### Tilde expansion
+
+`~` only expands by the shell in specific contexts. Get this wrong and paths become literals.
+
+- **SSH commands** (via `_quote_path()`): `~` expands. Use it directly: `ssh.mkdir("~/projects/foo")`
+- **SLURM directives, quoted strings in scripts, heredocs**: `~` does NOT expand. Use `$HOME`: `remote_dir.replace("~", "$HOME")`
+- **Path arguments to `subprocess.run(["ssh", ...])`**: the remote shell expands `~` — safe to use.
+
+### Container-aware code
+
+`cli.py` generates bash scripts that run inside apptainer containers on HPC. When editing script generation:
+- The container sees `/work` (project source) and `/cache` (ephemeral data). Never hardcode host paths in generated scripts.
+- The runner is invoked as `python -m jernerics.runner` — it runs in the container's Python, not the local one.
+- `run local` and `run slurm` execute the same runner code. If something works locally but fails on HPC (or vice versa), the difference is the environment, not the code.
+
+### Two config layers
+
+1. **`pyproject.toml` `[tool.jernerics.*]`** — infrastructure (HPC host, SLURM defaults, bind mounts). Loaded by `load_jernerics_config()`.
+2. **User's experiment config** (Python file with `base`, `search_space`, `n_trials`, etc.). Loaded by `load_config()` via `runpy.run_path()`.
+
+When debugging config issues, check which layer owns the value.
+
+## When Blocked
+
+- If tests fail after 3 attempts: stop and report the failing test with full output
+- If a dependency is missing: check `pyproject.toml` first, then ask
+- If you encounter an import error: verify the file exists and the module name matches — recent renames may not be in your training data
+- **Never:** delete files to resolve errors, skip tests, modify test configuration files, or add `# type: ignore` / `# noqa` without justification
+
+## Packages
+
+Proto regeneration (from repo root):
+
+```bash
+cd packages/jernerics-proto && uv run python generate.py
 ```
 
-### Test Patterns
-
-```python
-class TestDAGValidation:
-    def test_validate_missing_dependency_raises(self):
-        @task
-        def a(config):
-            return 1
-
-        dag = DAG()
-        dag.add_task(a)
-
-        try:
-            dag.validate()
-            assert False, "Should have raised ValueError"
-        except ValueError as e:
-            assert "unregistered task" in str(e)
-```
-
-- Group related tests in classes
-- Use descriptive test names: `test_<what>_<condition>`
-- Use hypothesis for property-based testing
-- Use `tmp_path` fixture for filesystem tests
-
-## Architecture
-
-### Code Generation (cli.py)
-
-The core of `cli.py` is **code generation**: functions like `_get_runner_code()` and `_get_sweep_runner_code()` return Python source code as strings. This code is embedded in bash SLURM scripts via heredoc and runs **inside the apptainer container on HPC**.
-
-Implications when editing these functions:
-- You are writing Python that becomes a string literal. Double braces `{{}}` produce literal braces in output.
-- Changes to generated code take effect only after the container is rebuilt and redeployed. Use `jernerics run local` for quick iteration (it runs the same generated code via `python -c` in a subprocess).
-- The generated code imports `jernerics.dag` and the user's DAG file — it runs in the container's Python environment, not the local one.
-- `run local` and `run slurm` execute the same generated code paths. If something works locally but fails on HPC (or vice versa), the difference is in the environment, not the code.
-
-### Two-Layer Config System
-
-Jernerics has two config layers with different purposes and loading mechanisms:
-
-**1. `pyproject.toml` `[tool.jernerics.*]`** — Infrastructure config, loaded by `load_jernerics_config()`.
-Parsed into dataclasses (`HpcConfig`, `ShellConfig`, `BindsConfig`). Can be overridden by environment variables (`JERNERICS_HPC_HOST`).
-
-Sections: `hpc` (host, remote dir, cache), `container` (SLURM resource limits for build/run), `safety` (max concurrent jobs), `binds` (container bind mounts), `shell` (interactive shell defaults).
-
-**2. `config.py` (user's experiment config)** — Experiment config, loaded by `load_config()` via `runpy.run_path()`.
-Defines `base`, `search_space`, `n_trials`, `sampler`, `objective`, `direction`, `slurm` overrides. Returns a `SweepConfig` dataclass.
-
-When debugging config issues, check which layer owns the value you're looking for.
-
-### Container Builds
-
-`jernerics container build` submits a SLURM job that runs `apptainer build --fakeroot` on a compute node. It syncs the project to HPC, writes a build script, and submits it. The container must be rebuilt whenever `uv.lock` changes (tracked via `needs_rebuild()`). On HPC, containers are `.sif` files; locally they can be `.tar.gz` docker archives (see `find_container()` for the lookup order).
-
-## Project-Specific Patterns
-
-### DAG Tasks
-
-```python
-from jernerics.dag import DAG, task
-
-# Preferred: context manager auto-registers tasks
-with DAG() as dag:
-
-    @task
-    def setup(config):
-        return {"done": True}
-
-    @task(depends_on=[setup])
-    def train(setup, config):
-        return setup["done"]
-
-# Alternative: manual registration
-dag = DAG()
-
-@task
-def setup(config):
-    return {"done": True}
-
-dag.add_task(setup)
-```
-
-### Configuration Files
-
-```python
-import optuna
-from jernerics.dag.executor import ThreadPoolRunner, SyncRunner
-
-base = {"seed": 42, "model": "gpt"}
-
-def search_space(trial):
-    return {
-        "lr": trial.suggest_float("lr", 1e-5, 1e-1, log=True),
-        "batch_size": trial.suggest_int("batch_size", 16, 128),
-    }
-
-n_trials = 50
-sampler = optuna.samplers.TPESampler(seed=42)
-
-def objective(results):
-    return results["train"].value["loss"]
-
-direction = "minimize"
-
-slurm = {
-    "partition": "priority",
-    "time": "1:00:00",
-    "mem": "16G",
-}
-
-runner = ThreadPoolRunner(max_workers=4)  # or SyncRunner() for debugging
-```
-
-For single runs, omit `search_space` and set `n_trials = 1` (default). `load_config()` returns a `SweepConfig` dataclass.
-
-## Executor API
-
-The executor uses the Runner protocol. Two implementations:
-
-- `ThreadPoolRunner(max_workers=None)` — production, uses `FIRST_COMPLETED` for responsive scheduling
-- `SyncRunner()` — debugging (pdb), runs tasks inline with no threads
-
-`execute_dag()` returns `dict[str, TaskResult]` where `TaskResult` has `.value`, `.error`, `.error_traceback`, and `.is_error` property. `DAG.run()` and `DAG.resume()` return the same type.
-
-Users pass a runner instance in their config file:
-```python
-from jernerics.dag.executor import ThreadPoolRunner
-runner = ThreadPoolRunner(max_workers=4)
-```
-
-Serial execution is for debugging only. Not a first-class strategy.
-
-## HPC Environment Constraints
-
-**CRITICAL: Tilde (`~`) Expansion Rules**
-
-`~` expansion only happens by the shell in specific contexts. Understanding when it works is essential:
-
-**`~` DOES expand (use it directly):**
-- SSH commands via `_quote_path()` helper - the remote shell expands it
-- Example: `ssh.mkdir("~/projects/foo")` works correctly
-
-**`~` DOES NOT expand (use `$HOME` instead):**
-- SLURM `--output`/`--error` directives (not processed by shell)
-- Double-quoted strings in bash scripts (e.g., `"${PATH}:~/bin"` - ~ is literal)
-- Non-interactive shell scripts when paths are embedded in heredocs or quoted
-
-**Wrong (SLURM directive with ~):**
-```python
-f"#SBATCH --output={remote_dir}/build_%j.out"  # remote_dir = "~/projects/foo"
-```
-
-**Correct (use $HOME for SLURM):**
-```python
-slurm_dir = remote_dir.replace("~", "$HOME")
-f"#SBATCH --output={slurm_dir}/build_%j.out"  # "$HOME/projects/foo"
-```
-
-**Wrong (bind path in double quotes inside SLURM script):**
-```python
-bind_args.append(f'"{cache_path}:{container_path}"')  # cache_path = "~/cache"
-# Inside script: "~/cache:/work/cache" - ~ is literal inside ""
-```
-
-**Correct (use $HOME for bind paths):**
-```python
-cache_path = cache_path.replace("~", "$HOME")
-bind_args.append(f'"{cache_path}:{container_path}"')  # "$HOME/cache:/work/cache"
-```
-
-**Correct (SSH commands via _quote_path):**
-```python
-ssh.mkdir("~/projects/foo")  # Works - _quote_path preserves ~ for remote shell
-```
-
-The `_quote_path()` helper in `src/jernerics/hpc/ssh.py` preserves `~` for SSH commands where the remote shell will expand it. For all other contexts (SLURM directives, quoted strings in scripts), replace `~` with `$HOME`.
-
-## Important Notes
-
-- **No comments on self-documenting code** - Avoid redundant comments
-- **Pre-commit hooks run tests** - Ensure tests pass before committing
-- **Use uv** - This project uses uv, not pip directly
-- **Python 3.12+** - Use modern Python features
+Generated protobuf files are excluded from ruff via `extend-exclude` in root `pyproject.toml`. Do not add `# noqa` or `# type: ignore` to generated files.

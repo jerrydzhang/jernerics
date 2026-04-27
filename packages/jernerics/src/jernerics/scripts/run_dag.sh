@@ -30,7 +30,7 @@ config_index = int(os.environ["JERNERICS_CONFIG_INDEX"])
 sys.path.insert(0, str(pathlib.Path(dag_file).parent))
 
 from jernerics.dag import DAG
-from jernerics._cli_helpers import load_config
+from jernerics.config import load_config
 
 dag = DAG(dag_file)
 slurm_opts, configs, max_workers = load_config(config_file)

@@ -164,7 +164,7 @@ class TestSSHClient:
             mock_run.return_value = MagicMock(stdout="1234567890\n", returncode=0)
             result = client.getmtime("/path/to/file.txt")
 
-            assert result == 1234567890.0
+            assert result == pytest.approx(1234567890.0)
 
     def test_getmtime_failure(self):
         client = SSHClient("user@host.example.edu")

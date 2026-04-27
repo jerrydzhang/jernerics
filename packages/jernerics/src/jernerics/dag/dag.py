@@ -1,10 +1,9 @@
-from __future__ import annotations
-
 import runpy
+import types
 import warnings
 from graphlib import TopologicalSorter
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from jernerics.tracking import Tracker
 
@@ -29,13 +28,18 @@ class DAG:
         self._discovered = False
         self._token = None
 
-    def __enter__(self) -> DAG:
+    def __enter__(self) -> Self:
         from .task import _active_dag
 
         self._token = _active_dag.set(self)
         return self
 
-    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: types.TracebackType | None,
+    ) -> None:
         from .task import _active_dag
 
         if self._token is not None:
@@ -60,11 +64,11 @@ class DAG:
         except (SyntaxError, ImportError, PermissionError) as e:
             raise RuntimeError(f"Failed to load DAG file '{self.dag_file}': {e}") from e
 
-        for _name, obj in module_ns.items():
+        for obj in module_ns.values():
             if isinstance(obj, Task) and obj.name not in self.tasks:
                 self.add_task(obj)
 
-        for _name, obj in module_ns.items():
+        for obj in module_ns.values():
             if isinstance(obj, DAG) and obj is not self:
                 for task in obj.tasks.values():
                     if task.name not in self.tasks:

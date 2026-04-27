@@ -1,4 +1,4 @@
-from ._cli_helpers import SweepConfig
+from .config import SweepConfig
 from .dag import DAG, Provenance, RunState, Task, TaskState, TaskStatus, task
 
 __all__ = [

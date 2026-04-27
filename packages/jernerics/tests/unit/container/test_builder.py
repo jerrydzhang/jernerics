@@ -1,10 +1,8 @@
-from __future__ import annotations
-
 import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from jernerics._cli_helpers import HpcConfig
+from jernerics.config import HpcConfig
 from jernerics.container.builder import ContainerBuilder, _validate_slurm_value
 
 

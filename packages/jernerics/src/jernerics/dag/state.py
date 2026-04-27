@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -7,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 _logger = logging.getLogger(__name__)
 
@@ -80,7 +78,7 @@ class TaskState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> TaskState:
+    def from_dict(cls, data: dict[str, Any]) -> Self:
         output_data = data.get("output")
         persisted = data.get("persisted", True)
         try:
@@ -122,7 +120,7 @@ class RunState:
         return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     @classmethod
-    def create(cls, dag_file: str, config_index: int, state_dir: Path) -> RunState:
+    def create(cls, dag_file: str, config_index: int, state_dir: Path) -> Self:
         return cls(
             run_id=cls._generate_run_id(),
             created_at=cls._get_timestamp(),
@@ -164,7 +162,7 @@ class RunState:
         return state_file
 
     @classmethod
-    def from_json(cls, path: Path) -> RunState:
+    def from_json(cls, path: Path) -> Self:
         with open(path) as f:
             data = json.load(f)
 
@@ -185,7 +183,7 @@ class RunState:
         )
 
     @classmethod
-    def get_latest_run(cls, state_dir: Path, config_index: int) -> RunState | None:
+    def get_latest_run(cls, state_dir: Path, config_index: int) -> Self | None:
         runs_dir = state_dir / "runs"
         latest_file = runs_dir / f"latest_{config_index}.json"
         if latest_file.exists():

@@ -86,20 +86,45 @@ This keeps HPC installs slim (no DuckDB, no server code) and the server package 
 - [x] Monorepo refactor — split into three packages with uv workspace
 - [x] Build gRPC server with DuckDB backend
 - [x] Create sync client (`client.py`) — background thread sends events to server via gRPC
-- [ ] `jernerics sync` CLI command — replay orphaned .pb files to server
+- [x] `jernerics sync` CLI command — replay orphaned .pb files to server
 - [ ] Add MinIO artifact storage
 - [ ] Build core marimo dashboard
 
 ---
 
-## Phase 4 — Simplify HPC Layer
+## Completed: Phase 4 — Cache Paths + Sync
 
+- [x] Add `paths.cache_dir()` — resolves to `~/.cache/jernerics/<project>` locally, `hpc_config.cache_dir` on HPC
+- [x] Eliminate `use_scratch` branching in `_generate_sweep_script()` — container always sees `/work` + `/cache`
+- [x] Update `run_local` to use `cache_dir()` for optuna and tracking directories
+- [x] Add `jernerics sync` command — replays .pb files to tracking server via apptainer exec on HPC
+- [x] Add `tracking/data_sync.py` — concurrent replay with retry logic
+- [x] Add `tracking/replay_runner.py` — `__main__` entry point invoked on HPC
+- [x] Rename `hpc/sync.py` → `hpc/project_sync.py` for clarity
+
+### Remaining
 - [ ] Replace `FileSyncer` (tar/scp/extract) with rsync
-- [ ] Unify cache directory logic — all runtime data (optuna, tracking) goes through `paths.cache_dir()`, eliminate `/work/.jernerics/` fallback and `use_scratch` branching. `cache_dir` config works everywhere, defaults to `~/.cache/jernerics/`
+- [ ] `clean` command overhaul — should clean all cache contents, not just logs
+
+## Phase 5 — Multi-Backend Remote Execution
+
+Support running on bare metal workstations in addition to SLURM HPC.
+
+### Design Notes
+- Current SLURM coupling is concentrated in: `SlurmJobManager`, `_generate_sweep_script()`, `_get_hpc_client()`, `shell` command (`srun`)
+- Commands that are SSH + file ops only (no SLURM): `logs`, `results`, `clean`, `sync` — these need minimal changes
+- Commands deeply SLURM-coupled: `run slurm`, `container build`, `jobs`, `cancel`, `shell`
+- Natural abstraction: a `Remote` protocol with `SLURMRemote` and `BareMetalRemote` implementations
+- The path layout is already backend-agnostic (`/work` + `/cache` inside container)
+- The runner is already decoupled from SLURM (just `python -m jernerics.runner`)
+
+### Plan
+- [ ] Design `Remote` protocol abstraction
+- [ ] Implement `BareMetalRemote` (SSH + tmux/nohup for job management)
+- [ ] Refactor CLI commands to use `Remote` instead of direct SLURM calls
+- [ ] Add remote type to config (`[tool.jernerics.hpc] type = "slurm" | "bare"`)
 
 ---
-
-## Later / As Needed
 
 - [ ] Task hooks (`on_task_start`, `on_task_complete`, `on_task_fail`)
 - [ ] Explore Submitit for SLURM submission

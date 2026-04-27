@@ -1,281 +1,264 @@
+import optuna
 import pytest
-from jernerics._cli_helpers import (
+from jernerics.config import (
     ConfigNotFound,
-    HpcConfig,
-    ShellConfig,
-    _normalize_time,
+    ExitCode,
+    NoContainerFound,
+    SweepConfig,
+    find_container,
     find_pyproject_dir,
+    get_script_path,
+    is_tty,
+    load_config,
     load_jernerics_config,
 )
 
 
+class TestExitCode:
+    def test_exit_code_values(self):
+        assert ExitCode.SUCCESS == 0
+        assert ExitCode.GENERAL_ERROR == 1
+        assert ExitCode.SSH_ERROR == 2
+        assert ExitCode.CONFIG_ERROR == 3
+        assert ExitCode.SLURM_ERROR == 4
+        assert ExitCode.CONTAINER_ERROR == 5
+
+
+class TestIsTty:
+    def test_is_tty_returns_bool(self):
+        result = is_tty()
+        assert isinstance(result, bool)
+
+
+class TestGetScriptPath:
+    def test_get_script_path_existing_script(self):
+        path = get_script_path("run_with_container.sh")
+        assert path.endswith("run_with_container.sh")
+
+    def test_get_script_path_nonexistent_script(self):
+        with pytest.raises(FileNotFoundError, match="Script not found"):
+            get_script_path("nonexistent_script.sh")
+
+
 class TestLoadJernericsConfig:
-    def test_load_config_minimal(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
+    def test_load_jernerics_config_basic(self, tmp_project):
+        hpc, _shell, _binds = load_jernerics_config(tmp_project)
+
+        assert hpc.host == "user@hpc.example.edu"
+        assert hpc.remote_dir == "~/experiments/{project_name}"
+        assert hpc.partition == "priority"
+        assert hpc.time == "1:00:00"
+        assert hpc.mem == "16G"
+        assert hpc.cpus == 4
+
+    def test_load_jernerics_config_no_pyproject(self, tmp_path):
+        with pytest.raises(ConfigNotFound, match=r"No pyproject.toml found"):
+            load_jernerics_config(tmp_path)
+
+    def test_load_jernerics_config_malformed_toml(self, tmp_path):
+        project_dir = tmp_path / "malformed"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("invalid [toml content")
+
+        with pytest.raises(ConfigNotFound, match=r"Malformed pyproject.toml"):
+            load_jernerics_config(project_dir)
+
+    def test_load_jernerics_config_with_env_host(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "envtest"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
 [project]
-name = "test-project"
+name = "envtest"
+version = "0.1.0"
 """)
 
-        hpc_config, shell_config, _binds = load_jernerics_config(tmp_path)
-        assert isinstance(hpc_config, HpcConfig)
-        assert isinstance(shell_config, ShellConfig)
-        assert hpc_config.host is None
-        assert hpc_config.remote_dir == "~/experiments/{project_name}"
+        monkeypatch.setenv("JERNERICS_HPC_HOST", "env@host.example.edu")
+        hpc, _shell, _binds = load_jernerics_config(project_dir)
 
-    def test_load_config_with_hpc_settings(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-
-[tool.jernerics.hpc]
-host = "user@hpc.example.edu"
-remote_dir = "~/projects/{project_name}"
-""")
-
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.host == "user@hpc.example.edu"
-        assert hpc_config.remote_dir == "~/projects/{project_name}"
-
-    def test_load_config_with_cache_dir(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-
-[tool.jernerics.hpc]
-host = "user@hpc.example.edu"
-cache_dir = "/scratch/$USER/jernerics"
-""")
-
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.cache_dir == "/scratch/$USER/jernerics"
-
-    def test_load_config_cache_dir_defaults_to_none(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-""")
-
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.cache_dir is None
-
-    def test_load_config_with_container_settings(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-
-[tool.jernerics.container]
-partition = "gpu"
-time = "2:00:00"
-mem = "32G"
-cpus = 8
-""")
-
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.partition == "gpu"
-        assert hpc_config.time == "2:00:00"
-        assert hpc_config.mem == "32G"
-        assert hpc_config.cpus == 8
-
-    def test_load_config_with_safety_settings(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-
-[tool.jernerics.safety]
-max_concurrent_jobs = 5
-""")
-
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.max_concurrent_jobs == 5
-
-    def test_load_config_from_env(self, tmp_path, monkeypatch):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-""")
-
-        monkeypatch.setenv("JERNERICS_HPC_HOST", "env@hpc.example.edu")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.host == "env@hpc.example.edu"
-
-    def test_load_config_env_overrides_toml(self, tmp_path, monkeypatch):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-
-[tool.jernerics.hpc]
-host = "toml@hpc.example.edu"
-""")
-
-        monkeypatch.setenv("JERNERICS_HPC_HOST", "env@hpc.example.edu")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.host == "env@hpc.example.edu"
-
-    def test_load_config_no_pyproject(self, tmp_path):
-        with pytest.raises(ConfigNotFound):
-            load_jernerics_config(tmp_path / "nonexistent")
-
-
-class TestShellConfig:
-    def test_shell_config_defaults(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-""")
-
-        _, shell_config, _ = load_jernerics_config(tmp_path)
-        assert shell_config.partition is None
-        assert shell_config.cpus is None
-        assert shell_config.mem is None
-        assert shell_config.gpu == 0
-        assert shell_config.time is None
-
-    def test_shell_config_from_toml(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-
-[tool.jernerics.shell]
-partition = "gpu"
-cpus = 4
-mem = "8G"
-gpu = 2
-time = "2:00:00"
-""")
-
-        _, shell_config, _ = load_jernerics_config(tmp_path)
-        assert shell_config.partition == "gpu"
-        assert shell_config.cpus == 4
-        assert shell_config.mem == "8G"
-        assert shell_config.gpu == 2
-        assert shell_config.time == "2:00:00"
+        assert hpc.host == "env@host.example.edu"
 
 
 class TestFindPyprojectDir:
-    def test_find_in_current_dir(self, tmp_path):
-        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'")
+    def test_find_pyproject_dir_from_project(self, tmp_project):
+        result = find_pyproject_dir(tmp_project)
+        assert result == tmp_project
 
-        result = find_pyproject_dir(tmp_path)
-        assert result == tmp_path
-
-    def test_find_in_parent(self, tmp_path):
-        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'test'")
-        subdir = tmp_path / "subdir"
-        subdir.mkdir()
+    def test_find_pyproject_dir_from_subdir(self, tmp_project):
+        subdir = tmp_project / "src" / "mypackage"
+        subdir.mkdir(parents=True)
 
         result = find_pyproject_dir(subdir)
-        assert result == tmp_path
+        assert result == tmp_project
 
 
-class TestConfigEdgeCases:
-    def test_remote_path_fallback_to_remote_dir(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
+class TestFindContainer:
+    def test_find_container_explicit(self, tmp_path):
+        container = tmp_path / "container.sif"
+        container.write_text("")
 
-[tool.jernerics.hpc]
-remote_path = "~/custom/path/{project_name}"
-""")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.remote_dir == "~/custom/path/{project_name}"
+        result = find_container(str(container), False, str(tmp_path))
+        assert result == str(container)
 
-    def test_remote_dir_used_when_no_remote_path(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
+    def test_find_container_explicit_not_found(self, tmp_path):
+        with pytest.raises(NoContainerFound, match="Container not found"):
+            find_container(str(tmp_path / "missing.sif"), False, str(tmp_path))
 
-[tool.jernerics.hpc]
-remote_dir = "~/custom/dir/{project_name}"
-""")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.remote_dir == "~/custom/dir/{project_name}"
+    def test_find_container_no_container_flag(self, tmp_path):
+        result = find_container(None, True, str(tmp_path))
+        assert result is None
 
-    def test_remote_path_preferred_over_remote_dir(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
+    def test_find_container_default_sif(self, tmp_path):
+        sif_path = tmp_path / ".jernerics" / "container.sif"
+        sif_path.parent.mkdir(parents=True)
+        sif_path.write_text("")
 
-[tool.jernerics.hpc]
-remote_path = "~/preferred/{project_name}"
-remote_dir = "~/not_preferred/{project_name}"
-""")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.remote_dir == "~/preferred/{project_name}"
+        result = find_container(None, False, str(tmp_path))
+        assert result == str(sif_path)
+
+    def test_find_container_default_tar(self, tmp_path):
+        tar_path = tmp_path / ".jernerics" / "container.tar.gz"
+        tar_path.parent.mkdir(parents=True)
+        tar_path.write_text("")
+
+        result = find_container(None, False, str(tmp_path))
+        assert result == f"docker-archive://{tar_path}"
+
+    def test_find_container_not_found(self, tmp_path):
+        with pytest.raises(NoContainerFound, match="No container found"):
+            find_container(None, False, str(tmp_path))
 
 
-class TestNormalizeTime:
-    def test_none_string_returns_none(self):
-        assert _normalize_time("none") is None
+class TestLoadConfig:
+    def test_load_config_sweep(self, tmp_path):
+        config_content = """
+import optuna
+from jernerics.dag.executor import ThreadPoolRunner
 
-    def test_none_string_case_insensitive(self):
-        assert _normalize_time("None") is None
-        assert _normalize_time("NONE") is None
+base = {"seed": 42, "model": "gpt"}
 
-    def test_none_value_returns_none(self):
-        assert _normalize_time(None) is None
+def search_space(trial):
+    return {
+        "lr": trial.suggest_float("lr", 1e-5, 1e-1, log=True),
+        "batch_size": trial.suggest_int("batch_size", 16, 128),
+    }
 
-    def test_time_string_passes_through(self):
-        assert _normalize_time("1:00:00") == "1:00:00"
+n_trials = 50
+sampler = optuna.samplers.TPESampler(seed=42)
+objective = lambda results: results["train"].value["loss"]
+direction = "minimize"
 
-    def test_other_string_passes_through(self):
-        assert _normalize_time("72:00:00") == "72:00:00"
+slurm = {"partition": "gpu"}
+runner = ThreadPoolRunner(max_workers=4)
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
 
+        sweep = load_config(str(config_file))
 
-class TestTimeNoneInConfig:
-    def test_toml_time_none(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
+        assert isinstance(sweep, SweepConfig)
+        assert sweep.base == {"seed": 42, "model": "gpt"}
+        assert sweep.search_space is not None
+        assert sweep.n_trials == 50
+        assert isinstance(sweep.sampler, optuna.samplers.TPESampler)
+        assert sweep.objective is not None
+        assert sweep.direction == "minimize"
+        assert sweep.slurm == {"partition": "gpu"}
+        assert sweep.runner is not None
 
-[tool.jernerics.container]
-time = "none"
-""")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.time is None
+    def test_load_config_single_no_search_space(self, tmp_path):
+        config_content = """
+base = {"seed": 1, "lr": 0.001}
+n_trials = 1
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
 
-    def test_toml_time_none_case_insensitive(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
+        sweep = load_config(str(config_file))
 
-[tool.jernerics.container]
-time = "None"
-""")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.time is None
+        assert sweep.base == {"seed": 1, "lr": 0.001}
+        assert sweep.search_space is None
+        assert sweep.n_trials == 1
+        assert sweep.sampler is None
+        assert sweep.objective is None
+        assert sweep.direction == "minimize"
 
-    def test_toml_time_normal(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
+    def test_load_config_grid_sampler(self, tmp_path):
+        config_content = """
+import optuna
 
-[tool.jernerics.container]
-time = "2:00:00"
-""")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.time == "2:00:00"
+base = {}
+n_trials = 10
+sampler = optuna.samplers.GridSampler({"lr": [0.001, 0.01, 0.1]})
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
 
-    def test_toml_time_default(self, tmp_path):
-        pyproject = tmp_path / "pyproject.toml"
-        pyproject.write_text("""
-[project]
-name = "test-project"
-""")
-        hpc_config, _, _ = load_jernerics_config(tmp_path)
-        assert hpc_config.time == "1:00:00"
+        sweep = load_config(str(config_file))
+
+        assert isinstance(sweep.sampler, optuna.samplers.GridSampler)
+
+    def test_load_config_runner(self, tmp_path):
+        config_content = """
+slurm = {"time": "1:00:00", "mem": "4G"}
+from jernerics.dag.executor import SyncRunner
+runner = SyncRunner()
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep.slurm == {"time": "1:00:00", "mem": "4G"}
+        assert sweep.runner is not None
+
+    def test_load_config_missing_file_raises(self):
+        with pytest.raises(FileNotFoundError):
+            load_config("/nonexistent/config.py")
+
+    def test_load_config_no_base_defaults_empty(self, tmp_path):
+        config_content = """
+n_trials = 5
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep.base == {}
+
+    def test_load_config_defaults(self, tmp_path):
+        config_content = """
+pass
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep.base == {}
+        assert sweep.search_space is None
+        assert sweep.n_trials == 1
+        assert sweep.sampler is None
+        assert sweep.objective is None
+        assert sweep.direction == "minimize"
+        assert sweep.slurm == {}
+        assert sweep.runner is None
+
+    def test_load_config_with_special_characters_in_paths(self, tmp_path):
+        config_file = tmp_path / "config with spaces.py"
+        config_file.write_text('base = {"x": 1}')
+
+        sweep = load_config(str(config_file))
+
+        assert sweep.base == {"x": 1}
+
+    def test_load_config_directory_raises(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="Config path is not a file"):
+            load_config(str(tmp_path))
+
+    def test_load_config_syntax_error(self, tmp_path):
+        config_file = tmp_path / "config.py"
+        config_file.write_text("this is not valid python [")
+
+        with pytest.raises(RuntimeError, match="Failed to load config file"):
+            load_config(str(config_file))

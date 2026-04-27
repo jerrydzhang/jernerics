@@ -1,6 +1,5 @@
-from __future__ import annotations
-
 from pathlib import Path
+from typing import Self
 
 import duckdb
 from jernerics_proto import Envelope
@@ -99,7 +98,7 @@ class DuckDBStore:
         ):
             self._con.execute(stmt)
 
-    def __enter__(self) -> DuckDBStore:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *args: object) -> None:

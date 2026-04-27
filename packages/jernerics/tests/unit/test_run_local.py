@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 from unittest.mock import MagicMock, patch
 
-from jernerics._cli_helpers import SweepConfig
+from jernerics.config import SweepConfig
 
 
 class TestRunLocalSingleConfig:

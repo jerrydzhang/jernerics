@@ -1,11 +1,9 @@
-from __future__ import annotations
-
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import grpc
-from jernerics.tracking.client import FileSyncClient
+from jernerics.tracking.sync_client import FileSyncClient
 from jernerics.tracking.wire import TrackingWriter
 from jernerics_proto import (
     Envelope,

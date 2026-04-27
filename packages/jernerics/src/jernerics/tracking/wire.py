@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 from collections.abc import Iterator
 from pathlib import Path
-from typing import BinaryIO
+from typing import BinaryIO, Self
 
 from jernerics_proto import Envelope
 
@@ -45,7 +43,7 @@ class TrackingWriter:
         self.path = path
         self.file = open(path, "ab")  # noqa: SIM115
 
-    def __enter__(self) -> TrackingWriter:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *args) -> None:
@@ -66,7 +64,7 @@ class TrackingReader:
         self.path = path
         self.file = open(path, "rb")  # noqa: SIM115
 
-    def __enter__(self) -> TrackingReader:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *args) -> None:

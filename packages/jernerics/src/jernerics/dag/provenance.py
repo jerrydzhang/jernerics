@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import hashlib
 import json
 import os
@@ -9,7 +7,7 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 
 def _get_git_sha(repo_path: Path | None = None) -> str | None:
@@ -24,6 +22,7 @@ def _get_git_sha(repo_path: Path | None = None) -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
+            check=False,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -92,7 +91,7 @@ class Provenance:
         config_path: str | None = None,
         container_path: str | None = None,
         repo_path: Path | None = None,
-    ) -> Provenance:
+    ) -> Self:
         config_info: dict[str, Any] = {}
         if config_path:
             config_file = Path(config_path)
@@ -136,7 +135,7 @@ class Provenance:
         return provenance_file
 
     @classmethod
-    def from_json(cls, path: Path) -> Provenance:
+    def from_json(cls, path: Path) -> Self:
         with open(path) as f:
             data = json.load(f)
         return cls(

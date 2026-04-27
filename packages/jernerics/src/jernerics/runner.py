@@ -6,10 +6,10 @@ import grpc
 import optuna
 from jernerics_proto import tracking_pb2_grpc
 
-from jernerics._cli_helpers import load_config
+from jernerics.config import load_config
 from jernerics.dag import DAG
 from jernerics.tracking import ProtobufTracker, Tracker
-from jernerics.tracking.client import FileSyncClient
+from jernerics.tracking.sync_client import FileSyncClient
 
 
 def run_trial(
