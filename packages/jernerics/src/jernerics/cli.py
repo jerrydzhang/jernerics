@@ -40,10 +40,7 @@ container_app = typer.Typer()
 app.add_typer(container_app, name="container", help="Build and manage containers.")
 
 
-DEFAULT_SLURM = {
-    "output": ".jernerics/logs/%A_%a.out",
-    "error": ".jernerics/logs/%A_%a.err",
-}
+DEFAULT_SLURM: dict[str, str] = {}
 
 
 @run_app.command("local")
@@ -93,16 +90,16 @@ def run_local(
 
     import optuna
 
-    dag_dir = Path(os.path.dirname(dag_path) or ".")
-    db_dir = dag_dir / ".jernerics" / "optuna"
+    from .paths import cache_dir
+
+    project_cache = cache_dir()
+    db_dir = project_cache / "optuna"
     db_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     study_name = f"local_{Path(config_path).stem}_{timestamp}"
     storage_url = f"sqlite:///{db_dir / (study_name + '.db')}"
 
-    # TODO: currently always created but should check if tracking
-    # is enabled (how is still tbd)
-    tracker_dir = dag_dir / ".jernerics" / "tracking" / study_name
+    tracker_dir = project_cache / "tracking" / study_name
     tracker_dir.mkdir(parents=True, exist_ok=True)
 
     optuna.create_study(
@@ -144,6 +141,7 @@ def run_local(
                 cwd=os.path.dirname(dag_path) or ".",
                 env=env,
                 timeout=timeout,
+                check=False,
             )
             if result.returncode != 0:
                 print(f"Trial {i + 1} failed with code {result.returncode}")
@@ -316,20 +314,20 @@ def run_slurm(
     print(f"[1/4] Syncing project to {hpc_config.host}:{remote_dir}...")
     syncer.sync_project(project_dir)
 
-    print("[2/4] Ensuring log directory exists...")
-    ssh.mkdir(f"{remote_dir}/.jernerics/logs")
+    print("[2/4] Ensuring cache directory exists...")
 
     if hpc_config.cache_dir:
-        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
-        print(f"[3/4] Creating scratch directories in {cache_dir}/{project_name}...")
-        ssh.mkdir(f"{cache_dir}/{project_name}/optuna")
+        cache_host = hpc_config.cache_dir.replace("{project_name}", project_name)
+        cache_host = cache_host.replace("{project-name}", project_name)
+        print(f"[3/4] Creating cache directories in {cache_host}...")
+        ssh.mkdir(f"{cache_host}/optuna")
         if binds:
             for cache_subdir in binds.values():
-                cache_path = f"{cache_dir}/{project_name}/{cache_subdir}"
-                ssh.mkdir(cache_path)
+                ssh.mkdir(f"{cache_host}/{cache_subdir}")
     else:
         ssh.mkdir(f"{remote_dir}/.jernerics/optuna")
-        print("[3/4] (No cache dir configured)")
+        ssh.mkdir(f"{remote_dir}/.jernerics/logs")
+        print("[3/4] (Using remote_dir/.jernerics as cache)")
 
     if not syncer.container_exists():
         print(
@@ -376,8 +374,15 @@ def _generate_sweep_script(
 ) -> str:
     slurm_opts = dict(slurm_opts)
 
-    output_pattern = str(slurm_opts.get("output", "logs/slurm_%j.out"))
-    error_pattern = str(slurm_opts.get("error", "logs/slurm_%j.err"))
+    if hpc_config.cache_dir:
+        cache_host = hpc_config.cache_dir.replace("{project_name}", project_name)
+        cache_host = cache_host.replace("{project-name}", project_name)
+        cache_host = cache_host.replace("~", "$HOME")
+    else:
+        cache_host = f"{remote_dir}/.jernerics"
+
+    output_pattern = str(slurm_opts.get("output", f"{cache_host}/logs/%A_%a.out"))
+    error_pattern = str(slurm_opts.get("error", f"{cache_host}/logs/%A_%a.err"))
 
     def expand_path(p: str) -> str:
         if p.startswith("~"):
@@ -421,54 +426,28 @@ def _generate_sweep_script(
     lines.append("REMOTE_DIR=$(cd . && pwd)")
     lines.append("export JERNERICS_HPC=1")
 
-    use_scratch = bool(hpc_config.cache_dir)
+    storage_url = f"sqlite:////cache/optuna/{study_name}.db"
 
-    if use_scratch:
-        cache_dir = hpc_config.cache_dir.replace("{project_name}", project_name)
-        cache_dir = cache_dir.replace("~", "$HOME")
-        scratch_dir = f"{cache_dir}/{project_name}"
-
-    storage_url = (
-        f"sqlite:////scratch/optuna/{study_name}.db"
-        if use_scratch
-        else f"sqlite:////work/.jernerics/optuna/{study_name}.db"
-    )
-
-    bind_args = ['"${REMOTE_DIR}:/work"']
-    if use_scratch:
-        bind_args.append(f'"{scratch_dir}:/scratch"')
-        if binds:
-            for container_path, cache_subdir in binds.items():
-                cache_path = f"{scratch_dir}/{cache_subdir}"
-                bind_args.append(f'"{cache_path}:{container_path}"')
+    bind_args = [
+        '"${REMOTE_DIR}:/work"',
+        f'"{cache_host}:/cache"',
+    ]
+    if binds:
+        for container_path, cache_subdir in binds.items():
+            bind_args.append(f'"{cache_host}/{cache_subdir}:{container_path}"')
     bind_str = " \\\n    --bind ".join(bind_args)
 
     lines.append("")
-
-    if use_scratch:
-        lines.append(f"mkdir -p {scratch_dir}/optuna")
-        lines.append(
-            f"flock {scratch_dir}/optuna/init.lock apptainer exec"
-            f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
-            f' container.sif python -c "'
-            f"import optuna;"
-            f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
-            f' direction={sweep.direction!r}, load_if_exists=True)"'
-        )
-
-        lines.append(f"mkdir -p {scratch_dir}/tracking/{study_name}")
-    else:
-        lines.append("mkdir -p .jernerics/optuna")
-        lines.append(
-            f"flock .jernerics/optuna/init.lock apptainer exec"
-            f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
-            f' container.sif python -c "'
-            f"import optuna;"
-            f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
-            f' direction={sweep.direction!r}, load_if_exists=True)"'
-        )
-
-        lines.append(f"mkdir -p .jernerics/tracking/{study_name}")
+    lines.append(f"mkdir -p {cache_host}/optuna")
+    lines.append(
+        f"flock {cache_host}/optuna/init.lock apptainer exec"
+        f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
+        f' container.sif python -c "'
+        f"import optuna;"
+        f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
+        f' direction={sweep.direction!r}, load_if_exists=True)"'
+    )
+    lines.append(f"mkdir -p {cache_host}/tracking/{study_name}")
     lines.append("")
 
     runner_args: list[str] = [
@@ -481,14 +460,9 @@ def _generate_sweep_script(
         study_name,
         "--storage-url",
         storage_url,
+        "--tracking-dir",
+        f"/cache/tracking/{study_name}",
     ] + (["--project-name", project_name] if project_name else [])
-
-    if use_scratch:
-        runner_args.extend(["--tracking-dir", f"/scratch/tracking/{study_name}"])
-    else:
-        runner_args.extend(
-            ["--tracking-dir", f"/work/.jernerics/tracking/{study_name}"]
-        )
 
     if hpc_config.tracking_server:
         runner_args.extend(["--server-addr", hpc_config.tracking_server])
@@ -697,7 +671,7 @@ def logs(
         else:
             print(f"Error: Log file not found: {log_file}")
             raise SystemExit(ExitCode.GENERAL_ERROR)
-        subprocess.run(["ssh", ssh.host, "tail", "-f", log_file])
+        subprocess.run(["ssh", ssh.host, "tail", "-f", log_file], check=False)
     else:
         for attempt in range(max_retries):
             result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
@@ -741,6 +715,7 @@ def results(
         ["scp", "-r", remote_path, local_dir],
         capture_output=True,
         text=True,
+        check=False,
     )
 
     if result.returncode == 0:
@@ -872,7 +847,7 @@ def shell(
         shell_cmd = f"cd {quoted_remote_dir} && {quoted_srun} bash"
 
     print(f"Starting interactive shell on {hpc_config.host}...")
-    subprocess.run(["ssh", "-t", hpc_config.host, shell_cmd])
+    subprocess.run(["ssh", "-t", hpc_config.host, shell_cmd], check=False)
 
 
 @app.command("clean")
@@ -922,16 +897,22 @@ def clean(
     remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
 
+    if hpc_config.cache_dir:
+        cache_host = hpc_config.cache_dir.replace("{project_name}", project_name)
+        cache_host = cache_host.replace("{project-name}", project_name)
+    else:
+        cache_host = f"{remote_dir}/.jernerics"
+
     ssh = SSHClient(hpc_config.host)
 
     to_delete = []
     if all:
-        to_delete = ["results/", ".jernerics/logs/", "container.sif"]
+        to_delete = ["results/", f"{cache_host}/logs/", "container.sif"]
     else:
         if results:
             to_delete.append("results/")
         if logs:
-            to_delete.append(".jernerics/logs/")
+            to_delete.append(f"{cache_host}/logs/")
         if container:
             to_delete.append("container.sif")
 
@@ -956,6 +937,77 @@ def clean(
             print(f"Failed to delete {item}: {result.stderr}")
         else:
             print(f"Deleted: {item}")
+
+
+@app.command("sync")
+def sync(
+    study: Annotated[
+        str | None,
+        typer.Option("--study", "-s", help="Scope to a single study"),
+    ] = None,
+):
+    """Replay .pb tracking files to the tracking server."""
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        hpc_config, _, _ = load_jernerics_config(project_dir)
+    except ConfigNotFound as e:
+        print(f"Error: {e}")
+        print("Run 'jernerics init' to add [tool.jernerics] config.")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+
+    if not hpc_config.host:
+        print(
+            "Error: No HPC host configured.\n"
+            "  Set JERNERICS_HPC_HOST environment variable, or\n"
+            "  Add host to [tool.jernerics.hpc] in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    if not hpc_config.tracking_server:
+        print("Error: No tracking server configured.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    project_name = get_project_name(project_dir)
+    remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
+    remote_dir = remote_dir.replace("{project-name}", project_name)
+
+    if hpc_config.cache_dir:
+        cache_host = hpc_config.cache_dir.replace("{project_name}", project_name)
+        cache_host = cache_host.replace("{project-name}", project_name)
+    else:
+        cache_host = f"{remote_dir}/.jernerics"
+
+    ssh = SSHClient(hpc_config.host)
+
+    bind_args = f'"{_quote_path(remote_dir)}:/work" "{_quote_path(cache_host)}:/cache"'
+
+    inner_cmd = (
+        f"python -m jernerics.tracking.replay_runner"
+        f" --tracking-dir /cache/tracking"
+        f" --server-addr {hpc_config.tracking_server}"
+    )
+    if study:
+        inner_cmd += f" --study {shlex.quote(study)}"
+
+    cmd = (
+        f"cd {_quote_path(remote_dir)} && "
+        f"apptainer exec --fakeroot --contain --nv"
+        f" --pwd /work --bind {bind_args}"
+        f" container.sif {inner_cmd}"
+    )
+
+    print(f"Syncing tracking data from {hpc_config.host}...")
+    result = ssh.run(cmd, check=False)
+    print(result.stdout)
+    if result.returncode != 0:
+        print(f"Sync failed: {result.stderr}")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+
+    print("Sync complete.")
 
 
 def main():
@@ -1046,6 +1098,7 @@ def init(
         ["uv", "sync"],
         cwd=project_path,
         capture_output=True,
+        check=False,
         text=True,
     )
     if uv_result.returncode == 0:

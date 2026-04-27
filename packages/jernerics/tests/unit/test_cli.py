@@ -82,13 +82,10 @@ class TestCreateMinimalPyproject:
 
 
 class TestDefaultSlurm:
-    def test_default_slurm_values(self):
+    def test_default_slurm_is_empty(self):
         from jernerics.cli import DEFAULT_SLURM
 
-        assert "output" in DEFAULT_SLURM
-        assert "error" in DEFAULT_SLURM
-        assert "max_parallel" not in DEFAULT_SLURM
-        assert "%A_%a" in DEFAULT_SLURM["output"]
+        assert DEFAULT_SLURM == {}
 
 
 class TestInitCommand:

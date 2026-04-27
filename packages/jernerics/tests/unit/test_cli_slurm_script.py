@@ -109,7 +109,7 @@ class TestSweepScriptGeneration:
     def test_array_spec_calculation(self):
         from jernerics.cli import DEFAULT_SLURM
 
-        assert "output" in DEFAULT_SLURM
+        assert DEFAULT_SLURM == {}
 
     def test_study_name_format(self, tmp_path):
         sweep = SweepConfig(
@@ -139,7 +139,7 @@ class TestSweepScriptGeneration:
 
         assert f"study_name={study_name!r}" in script
         assert "sqlite:///" in script
-        assert ".jernerics/optuna/" in script
+        assert "/cache/optuna/" in script
 
     def test_no_mlflow_env_vars(self, tmp_path):
         sweep = SweepConfig(

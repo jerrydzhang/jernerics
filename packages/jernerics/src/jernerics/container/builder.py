@@ -9,9 +9,9 @@ from jernerics._cli_helpers import (
     load_jernerics_config,
 )
 from jernerics.container.templates import generate_container_def
+from jernerics.hpc.project_sync import FileSyncer
 from jernerics.hpc.slurm import SlurmJobManager
 from jernerics.hpc.ssh import SSHClient, _quote_path
-from jernerics.hpc.sync import FileSyncer
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
 

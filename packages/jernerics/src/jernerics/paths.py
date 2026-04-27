@@ -30,6 +30,40 @@ def work() -> Path:
     return project_dir
 
 
+def cache_dir() -> Path:
+    """
+    Resolve the host path to the project's cache directory.
+
+    Layout::
+
+        <cache_root>/<project_name>/
+          optuna/<study>.db
+          tracking/<study>/0.pb
+          logs/slurm_1234.out
+
+    Resolution:
+      - HPC: hpc_config.cache_dir/<project> (e.g. /scratch/$USER/jernerics/<project>)
+      - Local with cache_dir config: same
+      - Local fallback: ~/.cache/jernerics/<project>
+    """
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        return Path.home() / ".cache" / "jernerics"
+
+    project_name = get_project_name(project_dir)
+    try:
+        hpc_config, _, _ = load_jernerics_config(project_dir)
+    except ConfigNotFound:
+        return Path.home() / ".cache" / "jernerics" / project_name
+
+    if hpc_config.cache_dir:
+        base = hpc_config.cache_dir.replace("{project_name}", project_name)
+        base = base.replace("{project-name}", project_name)
+        return Path(base).expanduser()
+
+    return Path.home() / ".cache" / "jernerics" / project_name
+
+
 def bind(name: str) -> Path:
     project_dir = find_pyproject_dir()
     if project_dir is None:
@@ -39,7 +73,7 @@ def bind(name: str) -> Path:
         )
 
     try:
-        hpc_config, _, binds = load_jernerics_config(project_dir)
+        _hpc_config, _, binds = load_jernerics_config(project_dir)
     except ConfigNotFound as e:
         raise BindNotFound(f"Cannot resolve bind '{name}': {e}") from e
 
@@ -60,13 +94,4 @@ def bind(name: str) -> Path:
     if is_hpc():
         return Path(container_path)
 
-    project_name = get_project_name(project_dir)
-    if hpc_config.cache_dir:
-        cache_base = hpc_config.cache_dir.replace("{project_name}", project_name)
-        cache_base = cache_base.replace("{project-name}", project_name)
-        cache_path = Path(cache_base).expanduser() / project_name / name
-    else:
-        cache_path = Path.home() / ".cache" / "jernerics" / project_name / name
-
-    cache_path.mkdir(parents=True, exist_ok=True)
-    return cache_path
+    return cache_dir() / name

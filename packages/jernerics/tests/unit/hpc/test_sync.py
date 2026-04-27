@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pathspec
 import pytest
-from jernerics.hpc.sync import (
+from jernerics.hpc.project_sync import (
     DEFAULT_EXCLUDES,
     FileSyncer,
     _collect_files,
@@ -178,7 +178,7 @@ class TestFileSyncer:
         local_file = tmp_path / "test.txt"
         local_file.write_text("test content")
 
-        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+        with patch("jernerics.hpc.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.sync_file(local_file)
 
@@ -204,7 +204,7 @@ class TestFileSyncer:
         local_file = tmp_path / "test.txt"
         local_file.write_text("test content")
 
-        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+        with patch("jernerics.hpc.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.sync_file(local_file, "~/custom/path.txt")
 
@@ -217,7 +217,7 @@ class TestFileSyncer:
         mock_ssh.host = "user@host.example.edu"
         syncer = FileSyncer(mock_ssh, "~/projects/test")
 
-        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+        with patch("jernerics.hpc.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.download_file(
                 "~/projects/test/results.json", tmp_path / "results.json"
@@ -233,7 +233,7 @@ class TestFileSyncer:
         mock_ssh.host = "user@host.example.edu"
         syncer = FileSyncer(mock_ssh, "~/projects/test")
 
-        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+        with patch("jernerics.hpc.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.download_file("~/projects/test/results.json")
 
@@ -252,7 +252,7 @@ class TestFileSyncer:
         (tmp_path / "data" / "large.csv").write_text("data")
         (tmp_path / ".gitignore").write_text("data/\n*.csv\n")
 
-        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+        with patch("jernerics.hpc.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.sync_project(tmp_path, dry_run=True)
 
@@ -269,7 +269,7 @@ class TestFileSyncer:
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")
 
-        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+        with patch("jernerics.hpc.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.sync_project(tmp_path, dry_run=True)
 
@@ -293,7 +293,7 @@ class TestFileSyncer:
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")
 
-        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+        with patch("jernerics.hpc.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.sync_project(tmp_path, dry_run=False)
 
@@ -312,7 +312,7 @@ class TestFileSyncer:
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")
 
-        with patch("jernerics.hpc.sync.subprocess.run") as mock_run:
+        with patch("jernerics.hpc.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
 
             with pytest.raises(RuntimeError, match="Failed to extract tar archive"):
