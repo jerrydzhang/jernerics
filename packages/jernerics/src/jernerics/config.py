@@ -59,34 +59,27 @@ def _normalize_time(value: str | None) -> str | None:
 
 
 @dataclass
-class HpcConfig:
+class BackendConfig:
+    name: str
+    type: str  # "slurm" | "bare" | ...
+
+    # SSH backends
     host: str | None = None
     remote_dir: str = "~/experiments/{project_name}"
+    cache_dir: str | None = None
+
+    # SLURM resources
     partition: str = "priority"
     time: str | None = "1:00:00"
     mem: str = "16G"
     cpus: int = 4
     max_concurrent_jobs: int = 10
-    cache_dir: str | None = None
-    tracking_server: str | None = None
+
+    # Pueue (future)
+    parallel: int = 1
 
 
-class BindsConfig(dict[str, str]):
-    pass
-
-
-@dataclass
-class ShellConfig:
-    partition: str | None = None
-    cpus: int | None = None
-    mem: str | None = None
-    gpu: int = 0
-    time: str | None = None
-
-
-def load_jernerics_config(
-    project_dir: str | Path,
-) -> tuple[HpcConfig, ShellConfig, BindsConfig]:
+def _load_tool_config(project_dir: str | Path) -> dict:
     project_path = Path(project_dir)
     pyproject_path = project_path / "pyproject.toml"
 
@@ -99,39 +92,43 @@ def load_jernerics_config(
     except tomllib.TOMLDecodeError as e:
         raise ConfigNotFound(f"Malformed pyproject.toml: {e}") from e
 
-    tool_config = data.get("tool", {}).get("jernerics", {})
+    return data.get("tool", {}).get("jernerics", {})
 
-    hpc_config = tool_config.get("hpc", {})
-    container_config = tool_config.get("container", {})
-    safety_config = tool_config.get("safety", {})
-    shell_config = tool_config.get("shell", {})
-    binds_config = tool_config.get("binds", {})
 
-    hpc = HpcConfig(
-        host=os.environ.get("JERNERICS_HPC_HOST") or hpc_config.get("host"),
-        remote_dir=hpc_config.get("remote_path")
-        or hpc_config.get("remote_dir", "~/experiments/{project_name}"),
-        partition=container_config.get("partition", "priority"),
-        time=_normalize_time(container_config.get("time", "1:00:00")),
-        mem=container_config.get("mem", "16G"),
-        cpus=container_config.get("cpus", 4),
-        max_concurrent_jobs=safety_config.get("max_concurrent_jobs", 10),
-        cache_dir=hpc_config.get("cache_dir"),
-        tracking_server=os.environ.get("JERNERICS_TRACKING_SERVER")
-        or hpc_config.get("tracking_server"),
+def load_tracking_server(project_dir: str | Path) -> str | None:
+    tool_config = _load_tool_config(project_dir)
+    return os.environ.get("JERNERICS_TRACKING_SERVER") or tool_config.get(
+        "tracking_server"
     )
 
-    shell = ShellConfig(
-        partition=shell_config.get("partition"),
-        cpus=shell_config.get("cpus"),
-        mem=shell_config.get("mem"),
-        gpu=shell_config.get("gpu", 0),
-        time=shell_config.get("time"),
+
+def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
+    tool_config = _load_tool_config(project_dir)
+    backends = tool_config.get("backends", {})
+
+    if name not in backends:
+        available = list(backends.keys())
+        raise ConfigNotFound(
+            f"Backend '{name}' not found in [tool.jernerics.backends]."
+            f" Available: {available}"
+            if available
+            else "No backends configured."
+        )
+
+    bc = backends[name]
+    return BackendConfig(
+        name=name,
+        type=bc.get("type", "slurm"),
+        host=os.environ.get("JERNERICS_HPC_HOST") or bc.get("host"),
+        remote_dir=bc.get("remote_dir", "~/experiments/{project_name}"),
+        cache_dir=bc.get("cache_dir"),
+        partition=bc.get("partition", "priority"),
+        time=_normalize_time(bc.get("time", "1:00:00")),
+        mem=bc.get("mem", "16G"),
+        cpus=bc.get("cpus", 4),
+        max_concurrent_jobs=bc.get("max_concurrent_jobs", 10),
+        parallel=bc.get("parallel", 1),
     )
-
-    binds = BindsConfig(binds_config)
-
-    return hpc, shell, binds
 
 
 def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:

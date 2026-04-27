@@ -1,6 +1,7 @@
 import optuna
 import pytest
 from jernerics.config import (
+    BackendConfig,
     ConfigNotFound,
     ExitCode,
     NoContainerFound,
@@ -9,8 +10,9 @@ from jernerics.config import (
     find_pyproject_dir,
     get_script_path,
     is_tty,
+    load_backend_config,
     load_config,
-    load_jernerics_config,
+    load_tracking_server,
 )
 
 
@@ -40,42 +42,172 @@ class TestGetScriptPath:
             get_script_path("nonexistent_script.sh")
 
 
-class TestLoadJernericsConfig:
-    def test_load_jernerics_config_basic(self, tmp_project):
-        hpc, _shell, _binds = load_jernerics_config(tmp_project)
+class TestLoadBackendConfig:
+    def test_load_backend_config_basic(self, tmp_project):
+        config = load_backend_config("hpc", tmp_project)
 
-        assert hpc.host == "user@hpc.example.edu"
-        assert hpc.remote_dir == "~/experiments/{project_name}"
-        assert hpc.partition == "priority"
-        assert hpc.time == "1:00:00"
-        assert hpc.mem == "16G"
-        assert hpc.cpus == 4
+        assert config.name == "hpc"
+        assert config.type == "slurm"
+        assert config.host == "user@hpc.example.edu"
+        assert config.remote_dir == "~/experiments/{project_name}"
+        assert config.partition == "priority"
+        assert config.time == "1:00:00"
+        assert config.mem == "16G"
+        assert config.cpus == 4
 
-    def test_load_jernerics_config_no_pyproject(self, tmp_path):
+    def test_load_backend_config_not_found(self, tmp_project):
+        with pytest.raises(ConfigNotFound, match="Backend 'nonexistent' not found"):
+            load_backend_config("nonexistent", tmp_project)
+
+    def test_load_backend_config_no_pyproject(self, tmp_path):
         with pytest.raises(ConfigNotFound, match=r"No pyproject.toml found"):
-            load_jernerics_config(tmp_path)
+            load_backend_config("hpc", tmp_path)
 
-    def test_load_jernerics_config_malformed_toml(self, tmp_path):
+    def test_load_backend_config_malformed_toml(self, tmp_path):
         project_dir = tmp_path / "malformed"
         project_dir.mkdir()
         (project_dir / "pyproject.toml").write_text("invalid [toml content")
 
         with pytest.raises(ConfigNotFound, match=r"Malformed pyproject.toml"):
-            load_jernerics_config(project_dir)
+            load_backend_config("hpc", project_dir)
 
-    def test_load_jernerics_config_with_env_host(self, tmp_path, monkeypatch):
+    def test_load_backend_config_with_env_host(self, tmp_path, monkeypatch):
         project_dir = tmp_path / "envtest"
         project_dir.mkdir()
         (project_dir / "pyproject.toml").write_text("""
 [project]
 name = "envtest"
 version = "0.1.0"
+
+[tool.jernerics.backends.myhost]
+type = "slurm"
+host = "original@host.example.edu"
 """)
 
         monkeypatch.setenv("JERNERICS_HPC_HOST", "env@host.example.edu")
-        hpc, _shell, _binds = load_jernerics_config(project_dir)
+        config = load_backend_config("myhost", project_dir)
 
-        assert hpc.host == "env@host.example.edu"
+        assert config.host == "env@host.example.edu"
+
+    def test_load_backend_config_no_backends(self, tmp_path):
+        project_dir = tmp_path / "empty"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "empty"
+version = "0.1.0"
+""")
+        with pytest.raises(ConfigNotFound, match="No backends configured"):
+            load_backend_config("hpc", project_dir)
+
+    def test_load_backend_config_cache_dir(self, tmp_path):
+        project_dir = tmp_path / "cached"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "cached"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+cache_dir = "/scratch/$USER/jernerics"
+""")
+        config = load_backend_config("hpc", project_dir)
+
+        assert config.cache_dir == "/scratch/$USER/jernerics"
+
+    def test_load_backend_config_multiple_backends(self, tmp_path):
+        project_dir = tmp_path / "multi"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "multi"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+
+[tool.jernerics.backends.devbox]
+type = "bare"
+host = "user@workstation.local"
+""")
+        hpc = load_backend_config("hpc", project_dir)
+        devbox = load_backend_config("devbox", project_dir)
+
+        assert hpc.type == "slurm"
+        assert hpc.host == "user@hpc.example.edu"
+        assert devbox.type == "bare"
+        assert devbox.host == "user@workstation.local"
+
+
+class TestLoadTrackingServer:
+    def test_tracking_server_from_config(self, tmp_path):
+        project_dir = tmp_path / "tracked"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "tracked"
+version = "0.1.0"
+
+[tool.jernerics]
+tracking_server = "myhost:50051"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+""")
+        assert load_tracking_server(project_dir) == "myhost:50051"
+
+    def test_tracking_server_from_env(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "tracked"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "tracked"
+version = "0.1.0"
+""")
+        monkeypatch.setenv("JERNERICS_TRACKING_SERVER", "envhost:50051")
+        assert load_tracking_server(project_dir) == "envhost:50051"
+
+    def test_tracking_server_none(self, tmp_path):
+        project_dir = tmp_path / "untracked"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "untracked"
+version = "0.1.0"
+""")
+        assert load_tracking_server(project_dir) is None
+
+    def test_env_overrides_config(self, tmp_path, monkeypatch):
+        project_dir = tmp_path / "tracked"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "tracked"
+version = "0.1.0"
+
+[tool.jernerics]
+tracking_server = "confighost:50051"
+""")
+        monkeypatch.setenv("JERNERICS_TRACKING_SERVER", "envhost:9999")
+        assert load_tracking_server(project_dir) == "envhost:9999"
+
+
+class TestBackendConfig:
+    def test_defaults(self):
+        config = BackendConfig(name="test", type="slurm")
+        assert config.host is None
+        assert config.remote_dir == "~/experiments/{project_name}"
+        assert config.partition == "priority"
+        assert config.time == "1:00:00"
+        assert config.mem == "16G"
+        assert config.cpus == 4
+        assert config.max_concurrent_jobs == 10
+        assert config.parallel == 1
+        assert config.cache_dir is None
 
 
 class TestFindPyprojectDir:

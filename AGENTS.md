@@ -36,7 +36,7 @@ uv workspace monorepo at repo root:
 ```
 packages/
   jernerics-proto/       # Proto schema + generated code (pb2, pb2_grpc)
-  jernerics/             # Client library (HPC, DAG, CLI, tracking)
+  jernerics/             # Client library (backend, DAG, CLI, tracking)
   jernerics-server/      # gRPC service, DuckDB store, dashboard
 ```
 
@@ -45,16 +45,22 @@ Source layout inside `packages/jernerics/`:
 ```
 src/jernerics/
   cli.py                 # Typer CLI — all commands
-  config.py              # HpcConfig, SweepConfig, config loading
+  config.py              # BackendConfig, SweepConfig, config loading
   runner.py              # Trial runner invoked via python -m jernerics.runner
-  paths.py               # Cache dir, work dir, bind resolution
+  paths.py               # cache_dir(), work(), is_hpc()
   dag/                   # DAG executor, task decorator, state, provenance
-  hpc/                   # SSH client, SLURM job manager, project sync
-  container/             # Container builder (SLURM submit + apptainer)
+  backend/               # Multi-backend execution
+    slurm_backend.py     # SlurmBackend (sbatch + Apptainer)
+    models.py            # JobSpec, JobInfo dataclasses
+    components/          # Composable primitives
+      host.py            # Host protocol, LocalHost, SSHHost
+      container.py       # ContainerRuntime protocol, NoContainer, Docker, Apptainer
+      project_sync.py    # FileSyncer (tar/scp project sync)
+  container/
+    templates.py         # Container definition templates
   tracking/              # Protobuf tracker, wire format, gRPC sync client, replay
 tests/
   unit/                  # Mirrors src/ structure
-  integration/
 ```
 
 Use `uv run` from `packages/jernerics/` — not `pip`, not bare `python`.
@@ -89,23 +95,17 @@ A task is complete when ALL of the following pass:
 
 `~` only expands by the shell in specific contexts. Get this wrong and paths become literals.
 
-- **SSH commands** (via `_quote_path()`): `~` expands. Use it directly: `ssh.mkdir("~/projects/foo")`
-- **SLURM directives, quoted strings in scripts, heredocs**: `~` does NOT expand. Use `$HOME`: `remote_dir.replace("~", "$HOME")`
-- **Path arguments to `subprocess.run(["ssh", ...])`**: the remote shell expands `~` — safe to use.
+- **SSH commands** (via SSHHost passthrough args): `~` expands. Use it directly: `host.run(["mkdir", "-p", "~/foo"])`
+- **SLURM directives, quoted strings in scripts**: `~` does NOT expand. Use `$HOME`: `remote_dir.replace("~", "$HOME")`
 
 ### Container-aware code
 
-`cli.py` generates bash scripts that run inside apptainer containers on HPC. When editing script generation:
-- The container sees `/work` (project source) and `/cache` (ephemeral data). Never hardcode host paths in generated scripts.
-- The runner is invoked as `python -m jernerics.runner` — it runs in the container's Python, not the local one.
-- `run local` and `run slurm` execute the same runner code. If something works locally but fails on HPC (or vice versa), the difference is the environment, not the code.
+The container sees `/work` (project source) and `/cache` (ephemeral data). Never hardcode host paths in generated scripts. Use `paths.cache_dir()` for ephemeral storage — no custom bind mounts.
 
-### Two config layers
+### Config layers
 
-1. **`pyproject.toml` `[tool.jernerics.*]`** — infrastructure (HPC host, SLURM defaults, bind mounts). Loaded by `load_jernerics_config()`.
+1. **`pyproject.toml` `[tool.jernerics.*]`** — infrastructure (named backends, tracking server). Loaded by `load_backend_config(name)` and `load_tracking_server()`.
 2. **User's experiment config** (Python file with `base`, `search_space`, `n_trials`, etc.). Loaded by `load_config()` via `runpy.run_path()`.
-
-When debugging config issues, check which layer owns the value.
 
 ## When Blocked
 

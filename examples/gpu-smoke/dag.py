@@ -6,7 +6,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from gpu_smoke import check_gpu, save_json
-
 from jernerics.dag import DAG, task
 
 with DAG() as dag:

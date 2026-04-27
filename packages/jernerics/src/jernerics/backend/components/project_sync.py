@@ -1,11 +1,10 @@
+import shlex
 import subprocess
 import tarfile
 import tempfile
 from pathlib import Path
 
 import pathspec
-
-from jernerics.hpc.ssh import _quote_path
 
 DEFAULT_SCP_TIMEOUT = 300
 
@@ -26,6 +25,13 @@ DEFAULT_EXCLUDES = [
     ".mypy_cache/",
     ".ruff_cache/",
 ]
+
+
+def _quote_path(path: str) -> str:
+    """Quote a path for shell, preserving ~ expansion."""
+    if path.startswith("~"):
+        return "~" + shlex.quote(path[1:])
+    return shlex.quote(path)
 
 
 def _load_gitignore(project_path: Path) -> pathspec.PathSpec | None:
@@ -62,8 +68,8 @@ def _collect_files(
 
 
 class FileSyncer:
-    def __init__(self, ssh_client, remote_dir: str):
-        self.ssh = ssh_client
+    def __init__(self, host, remote_dir: str):
+        self.host = host
         self.remote_dir = remote_dir.rstrip("/")
 
     def sync_project(
@@ -81,7 +87,7 @@ class FileSyncer:
         if not files_to_sync:
             return True
 
-        self.ssh.mkdir(self.remote_dir)
+        self.host.mkdir(self.remote_dir)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             tmp_path = tmp.name
@@ -100,16 +106,16 @@ class FileSyncer:
             scp_cmd = [
                 "scp",
                 tmp_path,
-                f"{self.ssh.host}:{_quote_path(remote_tar_path)}",
+                f"{self.host.host}:{_quote_path(remote_tar_path)}",
             ]
             subprocess.run(scp_cmd, check=True, timeout=DEFAULT_SCP_TIMEOUT)
 
             quoted_dir = _quote_path(self.remote_dir)
-            result = self.ssh.run(
-                f"cd {quoted_dir} && tar xzf sync.tar.gz",
+            result = self.host.run(
+                [f"cd {quoted_dir} && tar xzf sync.tar.gz"],
                 check=False,
             )
-            self.ssh.run(f"rm -f {quoted_dir}/sync.tar.gz")
+            self.host.run([f"rm -f {quoted_dir}/sync.tar.gz"])
             if result.returncode != 0:
                 raise RuntimeError(
                     f"Failed to extract tar archive: {result.stderr or result.stdout}"
@@ -130,7 +136,7 @@ class FileSyncer:
         scp_cmd = [
             "scp",
             str(local_path),
-            f"{self.ssh.host}:{_quote_path(remote_path)}",
+            f"{self.host.host}:{_quote_path(remote_path)}",
         ]
         result = subprocess.run(
             scp_cmd,
@@ -148,7 +154,7 @@ class FileSyncer:
 
         scp_cmd = [
             "scp",
-            f"{self.ssh.host}:{_quote_path(remote_path)}",
+            f"{self.host.host}:{_quote_path(remote_path)}",
             str(local_path),
         ]
         result = subprocess.run(
@@ -161,13 +167,13 @@ class FileSyncer:
         return result.returncode == 0
 
     def container_exists(self) -> bool:
-        return self.ssh.file_exists(f"{self.remote_dir}/container.sif")
+        return self.host.file_exists(f"{self.remote_dir}/container.sif")
 
     def container_needs_rebuild(self, local_lock_path: str | Path) -> bool:
         if not self.container_exists():
             return True
 
-        remote_mtime = self.ssh.getmtime(f"{self.remote_dir}/container.sif")
+        remote_mtime = self.host.getmtime(f"{self.remote_dir}/container.sif")
         if remote_mtime is None:
             return True
 

@@ -8,40 +8,29 @@ from jernerics.cli import (
 
 
 class TestGetDefaultJernericsConfig:
-    def test_returns_dict_with_required_keys(self):
+    def test_returns_dict_with_backends(self):
         config = _get_default_jernerics_config("myproject")
 
-        assert "hpc" in config
-        assert "container" in config
-        assert "shell" in config
+        assert "backends" in config
+        assert "hpc" in config["backends"]
 
-    def test_hpc_config_structure(self):
+    def test_hpc_backend_structure(self):
         config = _get_default_jernerics_config("myproject")
+        hpc = config["backends"]["hpc"]
 
-        assert "host" in config["hpc"]
-        assert "remote_dir" in config["hpc"]
-        assert "myproject" in config["hpc"]["remote_dir"]
-
-    def test_container_config_structure(self):
-        config = _get_default_jernerics_config("myproject")
-
-        assert "partition" in config["container"]
-        assert "time" in config["container"]
-        assert "mem" in config["container"]
-        assert "cpus" in config["container"]
-
-    def test_shell_config_structure(self):
-        config = _get_default_jernerics_config("myproject")
-
-        assert "partition" in config["shell"]
-        assert "cpus" in config["shell"]
-        assert "mem" in config["shell"]
-        assert "gpu" in config["shell"]
+        assert hpc["type"] == "slurm"
+        assert "host" in hpc
+        assert "myproject" in hpc["remote_dir"]
+        assert "partition" in hpc
+        assert "time" in hpc
+        assert "mem" in hpc
+        assert "cpus" in hpc
 
     def test_uses_project_name_in_remote_dir(self):
         config = _get_default_jernerics_config("test-project-123")
+        hpc = config["backends"]["hpc"]
 
-        assert "test-project-123" in config["hpc"]["remote_dir"]
+        assert "test-project-123" in hpc["remote_dir"]
 
 
 class TestCreateMinimalPyproject:
@@ -78,12 +67,12 @@ class TestCreateMinimalPyproject:
         assert "requires" in pyproject["build-system"]
         assert "build-backend" in pyproject["build-system"]
 
+    def test_backends_in_config(self):
+        jernerics_config = _get_default_jernerics_config("myproject")
+        pyproject = _create_minimal_pyproject("myproject", jernerics_config)
 
-class TestDefaultSlurm:
-    def test_default_slurm_is_empty(self):
-        from jernerics.cli import DEFAULT_SLURM
-
-        assert DEFAULT_SLURM == {}
+        assert "backends" in pyproject["tool"]["jernerics"]
+        assert "hpc" in pyproject["tool"]["jernerics"]["backends"]
 
 
 class TestInitCommand:

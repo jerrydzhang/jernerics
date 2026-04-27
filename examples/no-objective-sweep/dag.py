@@ -5,9 +5,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from no_objective_sweep import compute_model_stats
-
 from jernerics.dag import DAG, task
+from no_objective_sweep import compute_model_stats
 
 with DAG() as dag:
 

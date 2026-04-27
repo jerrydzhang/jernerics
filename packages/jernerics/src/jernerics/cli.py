@@ -7,7 +7,7 @@ import subprocess
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import tomli_w
 import tomllib
@@ -15,32 +15,172 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from .backend.components.container import Apptainer
+from .backend.components.host import SSHHost
+from .backend.components.project_sync import FileSyncer
+from .backend.slurm_backend import SlurmBackend
 from .config import (
+    BackendConfig,
     ConfigNotFound,
     ExitCode,
-    SweepConfig,
     _normalize_time,
     find_pyproject_dir,
     get_project_name,
+    load_backend_config,
     load_config,
-    load_jernerics_config,
+    load_tracking_server,
 )
-from .container.builder import ContainerBuilder
 from .container.templates import generate_container_def, list_templates
-from .hpc import FileSyncer, SlurmJobManager, SSHClient
-from .hpc.slurm import expand_slurm_pattern
-from .hpc.ssh import _quote_path
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
 
 run_app = typer.Typer()
 app.add_typer(run_app, name="run", help="Run DAG experiments.")
 
-container_app = typer.Typer()
-app.add_typer(container_app, name="container", help="Build and manage containers.")
+
+SAFE_RELPATH = re.compile(r"^[a-zA-Z0-9_./\-]+$")
 
 
-DEFAULT_SLURM: dict[str, str] = {}
+def _validate_relpath(path: str, desc: str) -> str:
+    if not SAFE_RELPATH.match(path):
+        raise SystemExit(
+            f"Error: {desc} path '{path}' contains unsafe characters. "
+            "Only alphanumeric, underscore, hyphen, period, and slash allowed."
+        )
+    if ".." in path:
+        raise SystemExit(
+            f"Error: {desc} path '{path}' must not contain '..' (path traversal)."
+        )
+    return path
+
+
+def _resolve_remote_dir(config: BackendConfig, project_name: str) -> str:
+    remote_dir = config.remote_dir.replace("{project_name}", project_name)
+    return remote_dir.replace("{project-name}", project_name)
+
+
+def _resolve_cache_host(config: BackendConfig, project_name: str) -> str:
+    if config.cache_dir:
+        cache = config.cache_dir.replace("{project_name}", project_name)
+        cache = cache.replace("{project-name}", project_name)
+        return cache.replace("~", "$HOME")
+    return f"{_resolve_remote_dir(config, project_name)}/.jernerics"
+
+
+def _get_backend(backend_name: str) -> tuple[SlurmBackend, str, Path]:
+    """Load a backend by name. Returns (backend, project_name, project_dir)."""
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        config = load_backend_config(backend_name, project_dir)
+    except ConfigNotFound as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+
+    if not config.host:
+        print(
+            "Error: No host configured for backend "
+            f"'{backend_name}'.\n"
+            f"  Add host to [tool.jernerics.backends.{backend_name}] "
+            "in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    project_name = get_project_name(project_dir)
+    remote_dir = _resolve_remote_dir(config, project_name)
+    tracking_server = load_tracking_server(project_dir)
+
+    host = SSHHost(config.host)
+    container = Apptainer(host)
+    syncer = FileSyncer(host, remote_dir)
+
+    backend = SlurmBackend(
+        host=host,
+        container=container,
+        syncer=syncer,
+        remote_dir=remote_dir,
+        partition=config.partition,
+        time=config.time,
+        mem=config.mem,
+        cpus=config.cpus,
+        max_concurrent_jobs=config.max_concurrent_jobs,
+        cache_dir=config.cache_dir,
+        tracking_server=tracking_server,
+    )
+
+    return backend, project_name, project_dir
+
+
+def _build_setup_command(
+    study_name: str,
+    storage_url: str,
+    direction: str,
+) -> str:
+    return (
+        f'python -c "'
+        f"import optuna;"
+        f" optuna.create_study("
+        f"study_name={study_name!r},"
+        f" storage={storage_url!r},"
+        f" direction={direction!r},"
+        f' load_if_exists=True)"'
+    )
+
+
+def _build_trial_command(
+    dag_relpath: str,
+    config_relpath: str,
+    study_name: str,
+    storage_url: str,
+    project_name: str | None,
+    tracking_dir: str,
+    tracking_server: str | None,
+) -> str:
+    args = [
+        "python",
+        "-m",
+        "jernerics.runner",
+        f"/work/{dag_relpath}",
+        f"/work/{config_relpath}",
+        "--study-name",
+        study_name,
+        "--storage-url",
+        storage_url,
+        "--tracking-dir",
+        tracking_dir,
+    ]
+    if project_name:
+        args.extend(["--project-name", project_name])
+    if tracking_server:
+        args.extend(["--server-addr", tracking_server])
+    return " \\\n        ".join(args)
+
+
+def _save_job_meta(
+    project_dir: Path,
+    job_id: str,
+    output_pattern: str,
+    error_pattern: str,
+    remote_dir: str,
+    n_trials: int,
+) -> None:
+    job_meta = {
+        "job_id": job_id,
+        "output_pattern": output_pattern,
+        "error_pattern": error_pattern,
+        "remote_dir": remote_dir,
+        "n_trials": n_trials,
+    }
+    meta_dir = project_dir / ".jernerics" / "jobs"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    meta_file = meta_dir / f"{job_id}.json"
+    meta_file.write_text(json.dumps(job_meta, indent=2))
+
+
+# ── run local ────────────────────────────────────────────────────────────────
 
 
 @run_app.command("local")
@@ -74,19 +214,13 @@ def run_local(
 
     try:
         sweep = load_config(config_path)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
-    except RuntimeError as e:
+    except (FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     project_dir = find_pyproject_dir()
     project_name = get_project_name(project_dir) if project_dir else None
-
-    jernerics_config, _, _ = (
-        load_jernerics_config(project_dir) if project_dir else (None, None, None)
-    )
+    tracking_server = load_tracking_server(project_dir) if project_dir else None
 
     import optuna
 
@@ -133,11 +267,7 @@ def run_local(
                 ]
                 + (["--project-name", project_name] if project_name else [])
                 + (["--tracking-dir", str(tracker_dir)] if tracker_dir else [])
-                + (
-                    ["--server-addr", jernerics_config.tracking_server]
-                    if jernerics_config and jernerics_config.tracking_server
-                    else []
-                ),
+                + (["--server-addr", tracking_server] if tracking_server else []),
                 cwd=os.path.dirname(dag_path) or ".",
                 env=env,
                 timeout=timeout,
@@ -165,13 +295,16 @@ def run_local(
         raise SystemExit(ExitCode.GENERAL_ERROR)
 
 
-@run_app.command("slurm")
-def run_slurm(
+# ── run (remote) ─────────────────────────────────────────────────────────────
+
+
+@app.command("run")
+def run_remote(
     dag_file: Annotated[str, typer.Argument(help="Path to the DAG file.")],
     config_file: Annotated[str, typer.Argument(help="Path to the config file.")],
-    results_dir: Annotated[
-        str, typer.Option("--results-dir", "-r", help="Directory to store results.")
-    ] = "results",
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
     set_opt: Annotated[
         list[str] | None,
         typer.Option("--set", "-S", help="Set SLURM option (key=value)"),
@@ -196,26 +329,8 @@ def run_slurm(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        hpc_config, _, binds = load_jernerics_config(project_dir)
-    except ConfigNotFound as e:
-        print(f"Error: {e}")
-        print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
-
-    if not hpc_config.host:
-        print(
-            "Error: No HPC host configured.\n"
-            "  Set JERNERICS_HPC_HOST environment variable, or\n"
-            "  Add host to [tool.jernerics.hpc] in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
-
-    try:
         sweep = load_config(str(config_path))
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
-    except RuntimeError as e:
+    except (FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
@@ -230,25 +345,21 @@ def run_slurm(
             raise SystemExit(ExitCode.CONFIG_ERROR)
         cli_overrides[key] = value
 
-    project_name = get_project_name(project_dir)
-    remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
-    remote_dir = remote_dir.replace("{project-name}", project_name)
+    backend, project_name, project_dir = _get_backend(backend_name)
 
     slurm_opts = {
-        **DEFAULT_SLURM,
-        "partition": hpc_config.partition,
-        "time": hpc_config.time,
-        "mem": hpc_config.mem,
+        "partition": backend.partition,
+        "time": backend.time,
+        "mem": backend.mem,
         **{k: _normalize_time(v) if k == "time" else v for k, v in sweep.slurm.items()},
         **{
             k: _normalize_time(v) if k == "time" else v
             for k, v in cli_overrides.items()
         },
     }
-
     slurm_opts = {k: v for k, v in slurm_opts.items() if v is not None}
 
-    max_parallel = slurm_opts.pop("max_parallel", hpc_config.max_concurrent_jobs)
+    max_parallel = slurm_opts.pop("max_parallel", backend.max_concurrent_jobs)
     try:
         max_parallel_val = int(max_parallel) if max_parallel else 0
     except (ValueError, TypeError) as e:
@@ -256,261 +367,196 @@ def run_slurm(
         raise SystemExit(ExitCode.CONFIG_ERROR) from e
 
     n_trials = sweep.n_trials
-    if max_parallel_val > 0:
-        array_spec = f"1-{n_trials}%{max_parallel_val}"
-    else:
-        array_spec = f"1-{n_trials}"
 
-    dag_relpath = dag_path.relative_to(project_dir)
-    config_relpath = config_path.relative_to(project_dir)
-
-    SAFE_RELPATH = re.compile(r"^[a-zA-Z0-9_./\-]+$")
-
-    def validate_relpath(path: str, desc: str) -> str:
-        if not SAFE_RELPATH.match(path):
-            raise SystemExit(
-                f"Error: {desc} path '{path}' contains unsafe characters. "
-                "Only alphanumeric, underscore, hyphen, period, and slash allowed."
-            )
-        if ".." in path:
-            raise SystemExit(
-                f"Error: {desc} path '{path}' must not contain '..' (path traversal)."
-            )
-        return path
-
-    dag_relpath = validate_relpath(str(dag_relpath), "DAG file")
-    config_relpath = validate_relpath(str(config_relpath), "Config file")
+    dag_relpath = _validate_relpath(str(dag_path.relative_to(project_dir)), "DAG file")
+    config_relpath = _validate_relpath(
+        str(config_path.relative_to(project_dir)), "Config file"
+    )
 
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     study_name = f"{project_name}_{config_path.stem}_{timestamp}"
+    storage_url = f"sqlite:////cache/optuna/{study_name}.db"
 
-    script_content = _generate_sweep_script(
-        array_spec=array_spec,
-        slurm_opts=slurm_opts,
+    setup_command = _build_setup_command(
+        study_name=study_name,
+        storage_url=storage_url,
+        direction=sweep.direction,
+    )
+    trial_command = _build_trial_command(
         dag_relpath=dag_relpath,
         config_relpath=config_relpath,
-        remote_dir=remote_dir,
-        hpc_config=hpc_config,
-        binds=binds,
-        project_name=project_name,
         study_name=study_name,
-        sweep=sweep,
+        storage_url=storage_url,
+        project_name=project_name,
+        tracking_dir=f"/cache/tracking/{study_name}",
+        tracking_server=backend.tracking_server,
     )
+
+    cache_host = _resolve_cache_host(
+        load_backend_config(backend_name, project_dir), project_name
+    )
+    output_pattern = slurm_opts.get("output", f"{cache_host}/logs/%A_%a.out")
+    error_pattern = slurm_opts.get("error", f"{cache_host}/logs/%A_%a.err")
 
     if dry_run:
         print("=== DRY RUN ===")
-        print(f"Host: {hpc_config.host}")
-        print(f"Remote dir: {remote_dir}")
-        print(f"Project dir: {project_dir}")
+        print(f"Backend: {backend_name}")
+        print(f"Host: {backend.host.host}")
+        print(f"Remote dir: {backend.remote_dir}")
         print()
         print("=== SLURM SCRIPT ===")
-        print(script_content)
+        print(
+            backend._generate_sweep_script(
+                setup_command=setup_command,
+                trial_command=trial_command,
+                array_spec=f"1-{n_trials}"
+                + (f"%{max_parallel_val}" if max_parallel_val > 0 else ""),
+                study_name=study_name,
+                project_name=project_name,
+                slurm_overrides=slurm_opts,
+            )
+        )
         return
 
-    ssh = SSHClient(hpc_config.host)
-    syncer = FileSyncer(ssh, remote_dir)
-    slurm = SlurmJobManager(ssh)
-
-    print(f"[1/4] Syncing project to {hpc_config.host}:{remote_dir}...")
-    syncer.sync_project(project_dir)
+    print(f"[1/4] Syncing project to {backend.host.host}:{backend.remote_dir}...")
+    backend.syncer.sync_project(project_dir)
 
     print("[2/4] Ensuring cache directory exists...")
-
-    if hpc_config.cache_dir:
-        cache_host = hpc_config.cache_dir.replace("{project_name}", project_name)
-        cache_host = cache_host.replace("{project-name}", project_name)
-        print(f"[3/4] Creating cache directories in {cache_host}...")
-        ssh.mkdir(f"{cache_host}/optuna")
-        if binds:
-            for cache_subdir in binds.values():
-                ssh.mkdir(f"{cache_host}/{cache_subdir}")
+    if backend.cache_dir:
+        cache_host_path = _resolve_cache_host(
+            load_backend_config(backend_name, project_dir), project_name
+        )
+        backend.host.mkdir(f"{cache_host_path}/optuna")
     else:
-        ssh.mkdir(f"{remote_dir}/.jernerics/optuna")
-        ssh.mkdir(f"{remote_dir}/.jernerics/logs")
+        backend.host.mkdir(f"{backend.remote_dir}/.jernerics/optuna")
+        backend.host.mkdir(f"{backend.remote_dir}/.jernerics/logs")
         print("[3/4] (Using remote_dir/.jernerics as cache)")
 
-    if not syncer.container_exists():
+    if not backend.syncer.container_exists():
         print(
             "Error: container.sif not found on remote.\n"
-            "  Run 'jernerics container build' first."
+            "  Run 'jernerics build --backend <name>' first."
         )
         raise SystemExit(ExitCode.CONTAINER_ERROR)
 
     print("[4/4] Submitting job...")
     try:
-        job_id = slurm.submit_inline(script_content, workdir=remote_dir)
+        job_id = backend.submit_sweep(
+            setup_command=setup_command,
+            trial_command=trial_command,
+            n_trials=n_trials,
+            study_name=study_name,
+            project_name=project_name,
+            max_parallel=max_parallel_val or None,
+            slurm_overrides=slurm_opts,
+        )
 
-        job_meta = {
-            "job_id": job_id,
-            "output_pattern": str(slurm_opts.get("output", "logs/slurm_%j.out")),
-            "error_pattern": str(slurm_opts.get("error", "logs/slurm_%j.err")),
-            "remote_dir": remote_dir,
-            "n_trials": n_trials,
-        }
-        meta_dir = project_dir / ".jernerics" / "jobs"
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        meta_file = meta_dir / f"{job_id}.json"
-        meta_file.write_text(json.dumps(job_meta, indent=2))
+        _save_job_meta(
+            project_dir=project_dir,
+            job_id=job_id,
+            output_pattern=str(output_pattern),
+            error_pattern=str(error_pattern),
+            remote_dir=backend.remote_dir,
+            n_trials=n_trials,
+        )
 
         print(f"\nJob submitted: {job_id}")
         print("\nMonitor progress:")
-        print(f"  jernerics logs {job_id} --follow")
+        print(f"  jernerics logs --backend {backend_name} {job_id} --follow")
     except RuntimeError as e:
         print(f"Error: Failed to submit job: {e}")
         raise SystemExit(ExitCode.SLURM_ERROR) from None
 
 
-def _generate_sweep_script(
-    array_spec: str,
-    slurm_opts: dict[str, str],
-    dag_relpath: str,
-    config_relpath: str,
-    remote_dir: str,
-    hpc_config: Any,
-    binds: dict[str, str],
-    project_name: str,
-    study_name: str,
-    sweep: SweepConfig,
-) -> str:
-    slurm_opts = dict(slurm_opts)
-
-    if hpc_config.cache_dir:
-        cache_host = hpc_config.cache_dir.replace("{project_name}", project_name)
-        cache_host = cache_host.replace("{project-name}", project_name)
-        cache_host = cache_host.replace("~", "$HOME")
-    else:
-        cache_host = f"{remote_dir}/.jernerics"
-
-    output_pattern = str(slurm_opts.get("output", f"{cache_host}/logs/%A_%a.out"))
-    error_pattern = str(slurm_opts.get("error", f"{cache_host}/logs/%A_%a.err"))
-
-    def expand_path(p: str) -> str:
-        if p.startswith("~"):
-            p = "$HOME" + p[1:]
-        return p
-
-    def safe_shell_path(p: str) -> str:
-        if p.startswith("~"):
-            rest = p[1:]
-            if not rest or rest.startswith("/"):
-                escaped = rest.replace("\\", "\\\\").replace('"', '\\"')
-                escaped = escaped.replace("$", "\\$").replace("`", "\\`")
-                escaped = escaped.replace(";", "\\;").replace("|", "\\|")
-                escaped = escaped.replace("&", "\\&").replace("(", "\\(")
-                escaped = escaped.replace(")", "\\)").replace("\n", "")
-                return "~" + escaped
-        return shlex.quote(p)
-
-    slurm_opts["output"] = expand_path(output_pattern)
-    slurm_opts["error"] = expand_path(error_pattern)
-
-    lines = [
-        "#!/usr/bin/env bash",
-        "#SBATCH --parsable",
-        f"#SBATCH --array={array_spec}",
-    ]
-    for key, value in slurm_opts.items():
-        lines.append(f"#SBATCH --{key}={value}")
-    lines.append("")
-
-    output_path = str(slurm_opts["output"])
-    if "%" in output_path:
-        before_pattern = output_path[: output_path.index("%")]
-        last_slash = before_pattern.rfind("/")
-        output_dir = before_pattern[:last_slash] if last_slash >= 0 else "."
-    else:
-        output_dir = str(Path(output_path).parent)
-    lines.append(f"mkdir -p {safe_shell_path(output_dir)}")
-
-    lines.append(f"cd {safe_shell_path(remote_dir)}")
-    lines.append("REMOTE_DIR=$(cd . && pwd)")
-    lines.append("export JERNERICS_HPC=1")
-
-    storage_url = f"sqlite:////cache/optuna/{study_name}.db"
-
-    bind_args = [
-        '"${REMOTE_DIR}:/work"',
-        f'"{cache_host}:/cache"',
-    ]
-    if binds:
-        for container_path, cache_subdir in binds.items():
-            bind_args.append(f'"{cache_host}/{cache_subdir}:{container_path}"')
-    bind_str = " \\\n    --bind ".join(bind_args)
-
-    lines.append("")
-    lines.append(f"mkdir -p {cache_host}/optuna")
-    lines.append(
-        f"flock {cache_host}/optuna/init.lock apptainer exec"
-        f" --fakeroot --contain --nv --pwd /work --bind {bind_str}"
-        f' container.sif python -c "'
-        f"import optuna;"
-        f" optuna.create_study(study_name={study_name!r}, storage={storage_url!r},"
-        f' direction={sweep.direction!r}, load_if_exists=True)"'
-    )
-    lines.append(f"mkdir -p {cache_host}/tracking/{study_name}")
-    lines.append("")
-
-    runner_args: list[str] = [
-        "python",
-        "-m",
-        "jernerics.runner",
-        f"/work/{dag_relpath}",
-        f"/work/{config_relpath}",
-        "--study-name",
-        study_name,
-        "--storage-url",
-        storage_url,
-        "--tracking-dir",
-        f"/cache/tracking/{study_name}",
-    ] + (["--project-name", project_name] if project_name else [])
-
-    if hpc_config.tracking_server:
-        runner_args.extend(["--server-addr", hpc_config.tracking_server])
-    runner_cmd = " \\\n        ".join(runner_args)
-
-    lines.append(
-        f"apptainer exec --fakeroot --contain --nv"
-        f" --pwd /work --bind {bind_str} container.sif" + " \\"
-    )
-    lines.append(f"    {runner_cmd}")
-
-    return "\n".join(lines)
+# ── build ────────────────────────────────────────────────────────────────────
 
 
-def _get_hpc_client():
-    project_dir = find_pyproject_dir()
-    if project_dir is None:
-        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+@app.command("build")
+def build(
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
+    project_dir: Annotated[
+        str, typer.Argument(help="Project directory (default: current)")
+    ] = ".",
+    force: Annotated[
+        bool,
+        typer.Option("--force", "-f", help="Force rebuild even if up to date"),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Preview actions without executing"),
+    ] = False,
+):
+    project_path = Path(project_dir).resolve()
+    if not project_path.exists():
+        print(f"Error: Project directory not found: {project_path}")
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
+    backend, _, _ = _get_backend(backend_name)
+
+    lock_path = project_path / "uv.lock"
+    if not lock_path.exists():
+        print("Error: uv.lock not found. Run 'uv lock' first.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    container_def_path = project_path / "container.def"
+    if not container_def_path.exists():
+        container_def_path.write_text(generate_container_def("python"))
+        print("Created: container.def")
+
+    if (
+        not dry_run
+        and not force
+        and not backend.syncer.container_needs_rebuild(lock_path)
+    ):
+        print("Container is up to date. Use --force to rebuild.")
+        return
+
+    if dry_run:
+        print("=== DRY RUN ===")
+        print(f"Project dir: {project_path}")
+        print(f"Remote dir: {backend.remote_dir}")
+        print(f"Host: {backend.host.host}")
+        print()
+        print("Would sync files and submit build job.")
+        return
+
+    print(f"[1/3] Syncing project to {backend.host.host}:{backend.remote_dir}")
+    backend.syncer.sync_project(project_path)
+
+    print("[2/3] Creating logs directory...")
+    backend.host.mkdir(f"{backend.remote_dir}/logs")
+
+    print("[3/3] Submitting build job...")
     try:
-        hpc_config, _, binds = load_jernerics_config(project_dir)
-    except ConfigNotFound as e:
-        print(f"Error: {e}")
-        print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+        job_id = backend.submit_build_job()
 
-    if not hpc_config.host:
-        print(
-            "Error: No HPC host configured.\n"
-            "  Set JERNERICS_HPC_HOST environment variable, or\n"
-            "  Add host to [tool.jernerics.hpc] in pyproject.toml"
+        _save_job_meta(
+            project_dir=project_path,
+            job_id=job_id,
+            output_pattern=f"{backend.remote_dir}/logs/build_%j.out",
+            error_pattern=f"{backend.remote_dir}/logs/build_%j.err",
+            remote_dir=backend.remote_dir,
+            n_trials=1,
         )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
 
-    project_name = get_project_name(project_dir)
-    remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
-    remote_dir = remote_dir.replace("{project-name}", project_name)
+        print(f"\nBuild job submitted: {job_id}")
+        print("\nMonitor progress:")
+        print(f"  jernerics logs --backend {backend_name} {job_id} --follow")
+    except RuntimeError as e:
+        print(f"Error: Failed to submit build job: {e}")
+        raise SystemExit(ExitCode.SLURM_ERROR) from None
 
-    ssh = SSHClient(hpc_config.host)
-    syncer = FileSyncer(ssh, remote_dir)
-    slurm = SlurmJobManager(ssh)
 
-    return ssh, syncer, slurm, remote_dir, hpc_config, binds, project_name
+# ── jobs ─────────────────────────────────────────────────────────────────────
 
 
 @app.command("jobs")
 def jobs(
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
     all: Annotated[
         bool,
         typer.Option("--all", "-a", help="Include completed jobs"),
@@ -520,9 +566,8 @@ def jobs(
         typer.Option("--json", help="Output as JSON"),
     ] = False,
 ):
-    _, _, slurm, _, _, _, _ = _get_hpc_client()
-
-    job_list = slurm.list_jobs(include_completed=all)
+    backend, _, _ = _get_backend(backend_name)
+    job_list = backend.list_jobs(include_completed=all)
 
     if json_output:
         data = [
@@ -530,9 +575,6 @@ def jobs(
                 "job_id": job.job_id,
                 "name": job.name,
                 "status": job.status,
-                "partition": job.partition,
-                "time": job.time,
-                "nodes": job.nodes,
             }
             for job in job_list
         ]
@@ -547,23 +589,21 @@ def jobs(
     table.add_column("JOB_ID")
     table.add_column("NAME", max_width=20)
     table.add_column("STATUS")
-    table.add_column("PARTITION")
-    table.add_column("TIME")
 
     for job in job_list:
-        table.add_row(
-            str(job.job_id),
-            job.name,
-            job.status,
-            job.partition or "",
-            job.time,
-        )
+        table.add_row(job.job_id, job.name, job.status)
 
     Console().print(table)
 
 
+# ── cancel ───────────────────────────────────────────────────────────────────
+
+
 @app.command("cancel")
 def cancel(
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
     job_id: Annotated[
         str | None,
         typer.Argument(help="Job ID to cancel"),
@@ -573,10 +613,10 @@ def cancel(
         typer.Option("--all", "-a", help="Cancel all your jobs"),
     ] = False,
 ):
-    _, _, slurm, _, _, _, _ = _get_hpc_client()
+    backend, _, _ = _get_backend(backend_name)
 
     if all:
-        if slurm.cancel_all():
+        if backend.cancel_all():
             print("Cancelled all jobs.")
         else:
             print("Failed to cancel jobs.")
@@ -586,15 +626,21 @@ def cancel(
         print("Error: Specify a job ID or use --all")
         raise SystemExit(ExitCode.GENERAL_ERROR)
 
-    if slurm.cancel(job_id):
+    if backend.cancel(job_id):
         print(f"Cancelled job {job_id}.")
     else:
         print(f"Failed to cancel job {job_id}.")
 
 
+# ── logs ─────────────────────────────────────────────────────────────────────
+
+
 @app.command("logs")
 def logs(
     job_id: Annotated[str, typer.Argument(help="Job ID")],
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
     follow: Annotated[
         bool,
         typer.Option("--follow", "-f", help="Follow log output (tail -f)"),
@@ -608,20 +654,23 @@ def logs(
         typer.Option("--stderr", "-e", help="Show stderr instead of stdout"),
     ] = False,
 ):
-    ssh, _, _, remote_dir, _, _, _ = _get_hpc_client()
-    project_dir = find_pyproject_dir() or Path.cwd()
+    backend, _, project_dir = _get_backend(backend_name)
 
     meta_file = project_dir / ".jernerics" / "jobs" / f"{job_id}.json"
     if meta_file.exists():
         meta = json.loads(meta_file.read_text())
         output_pattern = meta.get("output_pattern", "logs/slurm_%j.out")
         error_pattern = meta.get("error_pattern", "logs/slurm_%j.err")
-        meta_remote_dir = meta.get("remote_dir", remote_dir)
+        meta_remote_dir = meta.get("remote_dir", backend.remote_dir)
         n_trials = meta.get("n_trials", 1)
     else:
-        output_pattern = "logs/slurm_%j.out"
-        error_pattern = "logs/slurm_%j.err"
-        meta_remote_dir = remote_dir
+        cache_host = _resolve_cache_host(
+            load_backend_config(backend_name, project_dir),
+            get_project_name(project_dir),
+        )
+        output_pattern = f"{cache_host}/logs/%A_%a.out"
+        error_pattern = f"{cache_host}/logs/%A_%a.err"
+        meta_remote_dir = backend.remote_dir
         n_trials = 1
 
     log_pattern = error_pattern if stderr else output_pattern
@@ -632,7 +681,8 @@ def logs(
     effective_array_index = array_index if array_index is not None else array_idx
     if effective_array_index is None and n_trials == 1:
         effective_array_index = 1
-    log_file = expand_slurm_pattern(
+
+    log_file = backend.resolve_log_path(
         log_pattern,
         job_id=job_id,
         array_task_id=effective_array_index,
@@ -651,7 +701,9 @@ def logs(
             print("Error: --follow requires --array-index for array jobs")
             raise SystemExit(ExitCode.GENERAL_ERROR)
         for attempt in range(max_retries):
-            result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
+            result = backend.host.run(
+                [f"cat {log_file}"], check=False, capture_output=True, text=True
+            )
             if result.returncode == 0:
                 print(result.stdout)
                 return
@@ -662,7 +714,7 @@ def logs(
         raise SystemExit(ExitCode.GENERAL_ERROR)
     elif follow:
         for attempt in range(max_retries):
-            result = ssh.run(f"test -f {log_file}", check=False)
+            result = backend.host.run([f"test -f {log_file}"], check=False)
             if result.returncode == 0:
                 break
             if attempt == 0:
@@ -671,10 +723,12 @@ def logs(
         else:
             print(f"Error: Log file not found: {log_file}")
             raise SystemExit(ExitCode.GENERAL_ERROR)
-        subprocess.run(["ssh", ssh.host, "tail", "-f", log_file], check=False)
+        subprocess.run(["ssh", backend.host.host, "tail", "-f", log_file], check=False)
     else:
         for attempt in range(max_retries):
-            result = ssh.run(f"cat {_quote_path(log_file)}", check=False)
+            result = backend.host.run(
+                [f"cat {log_file}"], check=False, capture_output=True, text=True
+            )
             if result.returncode == 0:
                 print(result.stdout)
                 return
@@ -685,180 +739,21 @@ def logs(
         raise SystemExit(ExitCode.GENERAL_ERROR)
 
 
-@app.command("results")
-def results(
-    job_id: Annotated[str, typer.Argument(help="Job ID")],
-    local_dir: Annotated[
-        str | None,
-        typer.Option("--local-dir", "-d", help="Local directory to download to"),
-    ] = None,
-    clean_logs: Annotated[
-        bool,
-        typer.Option("--clean-logs", help="Delete remote SLURM logs after download"),
-    ] = False,
-):
-    _, syncer, _, remote_dir, _, _, _ = _get_hpc_client()
-
-    if local_dir is None:
-        local_dir = f"results/{job_id}"
-
-    remote_results = f"{remote_dir}/results"
-
-    print(
-        f"Downloading results from {syncer.ssh.host}:{remote_results} to {local_dir}..."
-    )
-
-    Path(local_dir).mkdir(parents=True, exist_ok=True)
-
-    remote_path = f"{syncer.ssh.host}:{_quote_path(remote_results + '/.')}"
-    result = subprocess.run(
-        ["scp", "-r", remote_path, local_dir],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    if result.returncode == 0:
-        print(f"Results downloaded to {local_dir}")
-    else:
-        print(f"Error: Failed to download results: {result.stderr.strip()}")
-        raise SystemExit(ExitCode.SSH_ERROR)
-
-    if clean_logs:
-        project_dir = find_pyproject_dir() or Path.cwd()
-        meta_file = project_dir / ".jernerics" / "jobs" / f"{job_id}.json"
-
-        if not meta_file.exists():
-            print(f"Warning: No job metadata found for {job_id}, skipping log cleanup")
-            return
-
-        meta = json.loads(meta_file.read_text())
-        meta_remote_dir = meta.get("remote_dir", remote_dir)
-        n_trials = meta.get("n_trials", 1)
-        output_pattern = meta.get("output_pattern", DEFAULT_SLURM["output"])
-        error_pattern = meta.get("error_pattern", DEFAULT_SLURM["error"])
-
-        log_files: list[str] = []
-        for i in range(1, n_trials + 1):
-            for pattern in (output_pattern, error_pattern):
-                expanded = expand_slurm_pattern(pattern, job_id=job_id, array_task_id=i)
-                if not expanded.startswith(("/", "~")):
-                    expanded = f"{meta_remote_dir}/{expanded}"
-                log_files.append(expanded)
-
-        if not log_files:
-            return
-
-        quoted_files = " ".join(_quote_path(f) for f in log_files)
-        rm_result = syncer.ssh.run(f"rm -f {quoted_files}", check=False)
-
-        if rm_result.returncode == 0:
-            print(
-                f"Cleaned {len(log_files)} log files from "
-                f"{meta_remote_dir}/.jernerics/logs/"
-            )
-        else:
-            print(f"Warning: Failed to clean some log files: {rm_result.stderr}")
-
-
-@app.command("shell")
-def shell(
-    gpu: Annotated[
-        int | None,
-        typer.Option("--gpu", "-g", help="Number of GPUs (0 = no GPU)"),
-    ] = None,
-    cpus: Annotated[
-        int | None,
-        typer.Option("--cpus", "-c", help="Number of CPUs"),
-    ] = None,
-    mem: Annotated[
-        str | None,
-        typer.Option("--mem", "-m", help="Memory allocation (e.g., 4G)"),
-    ] = None,
-    time: Annotated[
-        str | None,
-        typer.Option("--time", "-t", help="Time limit (e.g., 1:00:00)"),
-    ] = None,
-    partition: Annotated[
-        str | None,
-        typer.Option("--partition", "-p", help="Partition name"),
-    ] = None,
-    no_container: Annotated[
-        bool,
-        typer.Option("--no-container", help="Don't enter container"),
-    ] = False,
-):
-    project_dir = find_pyproject_dir()
-    if project_dir is None:
-        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
-
-    try:
-        hpc_config, shell_config, _ = load_jernerics_config(project_dir)
-    except ConfigNotFound as e:
-        print(f"Error: {e}")
-        print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
-
-    if not hpc_config.host:
-        print(
-            "Error: No HPC host configured.\n"
-            "  Set JERNERICS_HPC_HOST environment variable, or\n"
-            "  Add host to [tool.jernerics.hpc] in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
-
-    gpu_val = gpu if gpu is not None else shell_config.gpu
-    cpus_val = cpus if cpus is not None else shell_config.cpus
-    mem_val = mem if mem is not None else shell_config.mem
-    time_val = time if time is not None else shell_config.time
-    partition_val = partition if partition is not None else shell_config.partition
-
-    project_name = get_project_name(project_dir)
-    remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
-    remote_dir = remote_dir.replace("{project-name}", project_name)
-
-    srun_args = ["srun", "--pty"]
-    if partition_val:
-        srun_args.extend(["--partition", partition_val])
-    if cpus_val is not None:
-        srun_args.extend(["--cpus-per-task", str(cpus_val)])
-    if mem_val:
-        srun_args.extend(["--mem", mem_val])
-    if time_val:
-        srun_args.extend(["--time", time_val])
-    if gpu_val and gpu_val > 0:
-        srun_args.extend(["--gres", f"gpu:{gpu_val}"])
-
-    ssh = SSHClient(hpc_config.host)
-    syncer = FileSyncer(ssh, remote_dir)
-
-    quoted_remote_dir = _quote_path(remote_dir)
-    quoted_srun = " ".join(_quote_path(arg) for arg in srun_args)
-
-    if not no_container and syncer.container_exists():
-        shell_cmd = (
-            f"cd {quoted_remote_dir} && "
-            f"{quoted_srun} "
-            f"apptainer exec --nv --bind {quoted_remote_dir}:/work"
-            f" --pwd /work container.sif bash"
-        )
-    else:
-        shell_cmd = f"cd {quoted_remote_dir} && {quoted_srun} bash"
-
-    print(f"Starting interactive shell on {hpc_config.host}...")
-    subprocess.run(["ssh", "-t", hpc_config.host, shell_cmd], check=False)
+# ── clean ────────────────────────────────────────────────────────────────────
 
 
 @app.command("clean")
 def clean(
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
     results: Annotated[
         bool,
         typer.Option("--results", help="Delete results/ directory"),
     ] = False,
     logs: Annotated[
         bool,
-        typer.Option("--logs", help="Delete .jernerics/logs/ directory"),
+        typer.Option("--logs", help="Delete logs"),
     ] = False,
     container: Annotated[
         bool,
@@ -873,37 +768,10 @@ def clean(
         typer.Option("--force", "-f", help="Actually delete (dry-run by default)"),
     ] = False,
 ):
-    project_dir = find_pyproject_dir()
-    if project_dir is None:
-        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
-
-    try:
-        hpc_config, _, _ = load_jernerics_config(project_dir)
-    except ConfigNotFound as e:
-        print(f"Error: {e}")
-        print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
-
-    if not hpc_config.host:
-        print(
-            "Error: No HPC host configured.\n"
-            "  Set JERNERICS_HPC_HOST environment variable, or\n"
-            "  Add host to [tool.jernerics.hpc] in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
-
-    project_name = get_project_name(project_dir)
-    remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
-    remote_dir = remote_dir.replace("{project-name}", project_name)
-
-    if hpc_config.cache_dir:
-        cache_host = hpc_config.cache_dir.replace("{project_name}", project_name)
-        cache_host = cache_host.replace("{project-name}", project_name)
-    else:
-        cache_host = f"{remote_dir}/.jernerics"
-
-    ssh = SSHClient(hpc_config.host)
+    backend, project_name, project_dir = _get_backend(backend_name)
+    cache_host = _resolve_cache_host(
+        load_backend_config(backend_name, project_dir), project_name
+    )
 
     to_delete = []
     if all:
@@ -922,7 +790,7 @@ def clean(
         )
         raise SystemExit(ExitCode.GENERAL_ERROR)
 
-    print(f"Would delete from {hpc_config.host}:{remote_dir}:")
+    print(f"Would delete from {backend.host.host}:{backend.remote_dir}:")
     for item in to_delete:
         print(f"  - {item}")
 
@@ -931,77 +799,57 @@ def clean(
         return
 
     for item in to_delete:
-        path = f"{remote_dir}/{item}"
-        result = ssh.run(f"rm -rf {_quote_path(path)}", check=False)
+        path = f"{backend.remote_dir}/{item}"
+        result = backend.host.run([f"rm -rf {path}"], check=False)
         if result.returncode != 0:
             print(f"Failed to delete {item}: {result.stderr}")
         else:
             print(f"Deleted: {item}")
 
 
+# ── sync ─────────────────────────────────────────────────────────────────────
+
+
 @app.command("sync")
 def sync(
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
     study: Annotated[
         str | None,
         typer.Option("--study", "-s", help="Scope to a single study"),
     ] = None,
 ):
-    """Replay .pb tracking files to the tracking server."""
-    project_dir = find_pyproject_dir()
-    if project_dir is None:
-        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+    backend, _, project_dir = _get_backend(backend_name)
 
-    try:
-        hpc_config, _, _ = load_jernerics_config(project_dir)
-    except ConfigNotFound as e:
-        print(f"Error: {e}")
-        print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
-
-    if not hpc_config.host:
-        print(
-            "Error: No HPC host configured.\n"
-            "  Set JERNERICS_HPC_HOST environment variable, or\n"
-            "  Add host to [tool.jernerics.hpc] in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
-
-    if not hpc_config.tracking_server:
+    if not backend.tracking_server:
         print("Error: No tracking server configured.")
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     project_name = get_project_name(project_dir)
-    remote_dir = hpc_config.remote_dir.replace("{project_name}", project_name)
-    remote_dir = remote_dir.replace("{project-name}", project_name)
+    cache_host = _resolve_cache_host(
+        load_backend_config(backend_name, project_dir), project_name
+    )
 
-    if hpc_config.cache_dir:
-        cache_host = hpc_config.cache_dir.replace("{project_name}", project_name)
-        cache_host = cache_host.replace("{project-name}", project_name)
-    else:
-        cache_host = f"{remote_dir}/.jernerics"
-
-    ssh = SSHClient(hpc_config.host)
-
-    bind_args = f'"{_quote_path(remote_dir)}:/work" "{_quote_path(cache_host)}:/cache"'
+    bind_args = f'"{backend.remote_dir}:/work" "{cache_host}:/cache"'
 
     inner_cmd = (
         f"python -m jernerics.tracking.replay_runner"
         f" --tracking-dir /cache/tracking"
-        f" --server-addr {hpc_config.tracking_server}"
+        f" --server-addr {backend.tracking_server}"
     )
     if study:
         inner_cmd += f" --study {shlex.quote(study)}"
 
     cmd = (
-        f"cd {_quote_path(remote_dir)} && "
+        f"cd {backend.remote_dir} && "
         f"apptainer exec --fakeroot --contain --nv"
         f" --pwd /work --bind {bind_args}"
         f" container.sif {inner_cmd}"
     )
 
-    print(f"Syncing tracking data from {hpc_config.host}...")
-    result = ssh.run(cmd, check=False)
+    print(f"Syncing tracking data from {backend.host.host}...")
+    result = backend.host.run([cmd], check=False, capture_output=True, text=True)
     print(result.stdout)
     if result.returncode != 0:
         print(f"Sync failed: {result.stderr}")
@@ -1010,8 +858,7 @@ def sync(
     print("Sync complete.")
 
 
-def main():
-    app()
+# ── init ─────────────────────────────────────────────────────────────────────
 
 
 @app.command("init")
@@ -1113,28 +960,23 @@ def init(
         "  2. Create your DAG and config files "
         "(e.g., experiments/dag.py, configs/default.py)"
     )
-    print("  3. Run 'jernerics container build' to build on HPC")
+    print("  3. Run 'jernerics build --backend <name>' to build on remote")
 
 
 def _get_default_jernerics_config(project_name: str) -> dict:
     return {
-        "hpc": {
-            "host": "your-username@hpc.example.edu",
-            "remote_dir": f"~/experiments/{project_name}",
-            "cache_dir": "/scratch/$USER/jernerics",
-        },
-        "container": {
-            "partition": "priority",
-            "time": "1:00:00",
-            "mem": "16G",
-            "cpus": 4,
-        },
-        "shell": {
-            "partition": "priority",
-            "cpus": 1,
-            "mem": "4G",
-            "gpu": 0,
-        },
+        "backends": {
+            "hpc": {
+                "type": "slurm",
+                "host": "your-username@hpc.example.edu",
+                "remote_dir": f"~/experiments/{project_name}",
+                "cache_dir": "/scratch/$USER/jernerics",
+                "partition": "priority",
+                "time": "1:00:00",
+                "mem": "16G",
+                "cpus": 4,
+            }
+        }
     }
 
 
@@ -1162,31 +1004,5 @@ def _create_minimal_pyproject(project_name: str, jernerics_config: dict) -> dict
     }
 
 
-@container_app.command("build")
-def container_build(
-    project_dir: Annotated[
-        str, typer.Argument(help="Project directory (default: current)")
-    ] = ".",
-    force: Annotated[
-        bool,
-        typer.Option("--force", "-f", help="Force rebuild even if up to date"),
-    ] = False,
-    dry_run: Annotated[
-        bool,
-        typer.Option("--dry-run", help="Preview actions without executing"),
-    ] = False,
-):
-    try:
-        builder = ContainerBuilder(project_dir)
-        builder.build(force=force, dry_run=dry_run)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        print("Run 'jernerics init' to create pyproject.toml")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
-    except ConfigNotFound as e:
-        print(f"Error: {e}")
-        print("Run 'jernerics init' to add [tool.jernerics] config.")
-        raise SystemExit(ExitCode.CONFIG_ERROR) from None
-    except ValueError as e:
-        print(f"Error: {e}")
-        raise SystemExit(ExitCode.CONTAINER_ERROR) from None
+def main():
+    app()

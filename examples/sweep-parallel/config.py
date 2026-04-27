@@ -1,8 +1,6 @@
-from __future__ import annotations
-
 import optuna
 
-_base = {"seed": 42}
+base = {"seed": 42}
 
 
 def search_space(trial):
@@ -14,8 +12,7 @@ def search_space(trial):
 
 n_trials = 10
 sampler = optuna.samplers.TPESampler(seed=42)
-objective_task = "evaluate"
-objective_metric = "loss"
+objective = lambda results: results["evaluate"]["loss"]
 direction = "minimize"
 
 slurm = {
@@ -24,5 +21,3 @@ slurm = {
     "mem": "4G",
     "max_parallel": 2,
 }
-max_workers = 2
-executor_type = "thread"

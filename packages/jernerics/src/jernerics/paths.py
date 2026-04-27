@@ -3,14 +3,10 @@ from pathlib import Path
 
 from jernerics.config import (
     ConfigNotFound,
+    _load_tool_config,
     find_pyproject_dir,
     get_project_name,
-    load_jernerics_config,
 )
-
-
-class BindNotFound(Exception):
-    pass
 
 
 def is_hpc() -> bool:
@@ -40,8 +36,7 @@ def cache_dir() -> Path:
           logs/slurm_1234.out
 
     Resolution:
-      - HPC: hpc_config.cache_dir/<project> (e.g. /scratch/$USER/jernerics/<project>)
-      - Local with cache_dir config: same
+      - HPC: cache_dir from backend config
       - Local fallback: ~/.cache/jernerics/<project>
     """
     project_dir = find_pyproject_dir()
@@ -50,46 +45,20 @@ def cache_dir() -> Path:
 
     project_name = get_project_name(project_dir)
     try:
-        hpc_config, _, _ = load_jernerics_config(project_dir)
+        tool_config = _load_tool_config(project_dir)
     except ConfigNotFound:
         return Path.home() / ".cache" / "jernerics" / project_name
 
-    if hpc_config.cache_dir:
-        base = hpc_config.cache_dir.replace("{project_name}", project_name)
+    backends = tool_config.get("backends", {})
+    cache_dir_value = None
+    for bc in backends.values():
+        if bc.get("cache_dir"):
+            cache_dir_value = bc["cache_dir"]
+            break
+
+    if cache_dir_value:
+        base = cache_dir_value.replace("{project_name}", project_name)
         base = base.replace("{project-name}", project_name)
         return Path(base).expanduser()
 
     return Path.home() / ".cache" / "jernerics" / project_name
-
-
-def bind(name: str) -> Path:
-    project_dir = find_pyproject_dir()
-    if project_dir is None:
-        raise BindNotFound(
-            f"Cannot resolve bind '{name}': "
-            "no pyproject.toml found in current directory or parents"
-        )
-
-    try:
-        _hpc_config, _, binds = load_jernerics_config(project_dir)
-    except ConfigNotFound as e:
-        raise BindNotFound(f"Cannot resolve bind '{name}': {e}") from e
-
-    container_path = None
-    for ctr_path, cache_subdir in binds.items():
-        if cache_subdir == name:
-            container_path = ctr_path
-            break
-
-    if container_path is None:
-        available = list(binds.values())
-        raise BindNotFound(
-            f"Bind '{name}' not found in [tool.jernerics.binds]. Available: {available}"
-            if available
-            else "No binds configured."
-        )
-
-    if is_hpc():
-        return Path(container_path)
-
-    return cache_dir() / name

@@ -10,20 +10,19 @@ dependencies = [
 
 [tool.uv.sources.jernerics]
 git = "https://github.com/jerrydzhang/jernerics.git"
-branch = "main"
+branch = "human-ownership"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/sweep_parallel"]
 
-[tool.jernerics.hpc]
+[tool.jernerics.backends.hpc]
+type = "slurm"
 host = "jez21005@hpc2.storrs.hpc.uconn.edu"
 remote_dir = "~/projects/jernerics-examples/sweep-parallel"
 cache_dir = "/scratch/qiy18011/jez21005/jernerics"
-
-[tool.jernerics.container]
 partition = "priority"
+time = "0:10:00"
 mem = "4G"
-time = "0:30:00"
 cpus = 4
 
 [build-system]

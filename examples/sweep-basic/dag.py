@@ -6,10 +6,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import mlflow
-from sweep_basic import fake_loss
-
 from jernerics import active_run_id
 from jernerics.dag import DAG, task
+from sweep_basic import fake_loss
 
 with DAG() as dag:
 

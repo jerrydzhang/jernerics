@@ -52,34 +52,10 @@ All MLflow code deleted. No replacement tracking yet — Optuna SQLite stores pa
 
 ---
 
-## Phase 3b — Custom Tracking
+## Completed: Phase 3b — Custom Tracking
 
-Replace MLflow with a lightweight tracking layer + marimo dashboard.
+Replaced MLflow with a lightweight tracking layer + marimo dashboard.
 
-### Why
-- MLflow is overkill for logging params + one metric per trial
-- MLflow sync (local → remote) is fragile over unreliable WiFi
-- Need support for structured results (e.g., Pareto frontiers), not just flat scalars
-- Want project-level grouping and log-scale plots — MLflow doesn't provide these well
-- Write-local + sync-eventually is more robust
-
-### Design decisions (settled)
-- **Schema + local format**: Protobuf (varint-length-prefixed delimited)
-- **Transport**: gRPC — both client and server use generated gRPC stubs. Client sends events, server receives and stores.
-- **Remote metrics store**: DuckDB (server-side only)
-- **Remote artifact store**: MinIO (not yet built)
-- **Visualization**: marimo notebooks querying DuckDB. Single core dashboard with project/experiment dropdowns, not per-project dashboards
-- **Optimization**: still single-scalar (via `objective` function). Multi-objective is a user decision expressed as an aggregate metric
-
-### Monorepo structure
-Three packages in a uv workspace:
-- `packages/jernerics-proto/` — proto schema + generated pb2/grpc files. Both other packages depend on this.
-- `packages/jernerics/` — client library (DAG executor, HPC, CLI, ProtobufTracker). Depends on `jernerics-proto`.
-- `packages/jernerics-server/` — gRPC service, DuckDB store, dashboard. Depends on `jernerics-proto`, `grpcio`, `duckdb`.
-
-This keeps HPC installs slim (no DuckDB, no server code) and the server package isolated.
-
-### Plan
 - [x] Design run directory structure and schema
 - [x] Create `tracking/tracker.py` — `Tracker` class with `log_param()`, `log_metric()`, `log_result()`, `log_artifact()`
 - [x] Integrate tracker into runner, DAG executor, and CLI
@@ -87,8 +63,6 @@ This keeps HPC installs slim (no DuckDB, no server code) and the server package 
 - [x] Build gRPC server with DuckDB backend
 - [x] Create sync client (`client.py`) — background thread sends events to server via gRPC
 - [x] `jernerics sync` CLI command — replay orphaned .pb files to server
-- [ ] Add MinIO artifact storage
-- [ ] Build core marimo dashboard
 
 ---
 
@@ -100,37 +74,81 @@ This keeps HPC installs slim (no DuckDB, no server code) and the server package 
 - [x] Add `jernerics sync` command — replays .pb files to tracking server via apptainer exec on HPC
 - [x] Add `tracking/data_sync.py` — concurrent replay with retry logic
 - [x] Add `tracking/replay_runner.py` — `__main__` entry point invoked on HPC
-- [x] Rename `hpc/sync.py` → `hpc/project_sync.py` for clarity
-
-### Remaining
-- [ ] Replace `FileSyncer` (tar/scp/extract) with rsync
-- [ ] `clean` command overhaul — should clean all cache contents, not just logs
-
-## Phase 5 — Multi-Backend Remote Execution
-
-Support running on bare metal workstations in addition to SLURM HPC.
-
-### Design Notes
-- Current SLURM coupling is concentrated in: `SlurmJobManager`, `_generate_sweep_script()`, `_get_hpc_client()`, `shell` command (`srun`)
-- Commands that are SSH + file ops only (no SLURM): `logs`, `results`, `clean`, `sync` — these need minimal changes
-- Commands deeply SLURM-coupled: `run slurm`, `container build`, `jobs`, `cancel`, `shell`
-- Natural abstraction: a `Remote` protocol with `SLURMRemote` and `BareMetalRemote` implementations
-- The path layout is already backend-agnostic (`/work` + `/cache` inside container)
-- The runner is already decoupled from SLURM (just `python -m jernerics.runner`)
-
-### Plan
-- [ ] Design `Remote` protocol abstraction
-- [ ] Implement `BareMetalRemote` (SSH + tmux/nohup for job management)
-- [ ] Refactor CLI commands to use `Remote` instead of direct SLURM calls
-- [ ] Add remote type to config (`[tool.jernerics.hpc] type = "slurm" | "bare"`)
+- [x] Rename `hpc/` → `backend/` (source and tests)
 
 ---
 
+## Completed: Phase 5a — Multi-Backend Config + CLI Rewrite
+
+Config schema and CLI rewritten for multi-backend execution. Named backends, `--backend` flag on all remote commands.
+
+### Config schema
+
+```toml
+[tool.jernerics]
+tracking_server = "hostname:50051"     # optional, global
+
+[tool.jernerics.backends.hpc]          # user-chosen name
+type = "slurm"
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}"
+cache_dir = "/scratch/$USER/jernerics"  # optional
+partition = "priority"
+time = "1:00:00"
+mem = "16G"
+cpus = 4
+max_concurrent_jobs = 10
+```
+
+### CLI commands
+
+| Command | Notes |
+|---------|-------|
+| `jernerics init` | Generates new config schema |
+| `jernerics run --backend <name> [dag] [config]` | Sync + submit sweep |
+| `jernerics run local [dag] [config]` | No backend needed, blocking |
+| `jernerics build --backend <name>` | Sync + submit container build |
+| `jernerics jobs --backend <name>` | List jobs |
+| `jernerics cancel --backend <name>` | Cancel jobs |
+| `jernerics logs --backend <name> <id>` | View/follow logs |
+| `jernerics clean --backend <name>` | Clean remote artifacts |
+| `jernerics sync --backend <name>` | Replay tracking data |
+
+### What changed
+- [x] New config: `BackendConfig` replaces `HpcConfig`, `ShellConfig`, `BindsConfig`
+- [x] New config: `load_backend_config(name)` + `load_tracking_server()` replace `load_jernerics_config()`
+- [x] New config: `backends` section with named entries, `tracking_server` at global level
+- [x] CLI: `--backend` flag on all remote commands (required, no default)
+- [x] CLI: `run slurm` → `run --backend <name>`
+- [x] CLI: `container build` → `build --backend <name>` (promoted to top-level)
+- [x] CLI: `shell` command deleted (just SSH in manually)
+- [x] CLI: `results` command deleted (tracking server handles this)
+- [x] Deleted: `SSHClient`, `SlurmJobManager`, `ContainerBuilder`, `_quote_path` (old versions)
+- [x] Deleted: `backend/slurm.py`, `backend/components/ssh.py`, `container/builder.py`
+- [x] Deleted: `binds` config, `paths.bind()`, `BindNotFound` — use `cache_dir() / "name"` instead
+- [x] `FileSyncer` updated: takes generic host (not SSHClient), uses `_quote_path` locally
+- [x] `SlurmBackend` updated: no binds parameter, uses two-mount bind args (`/work` + `/cache`)
+
+---
+
+## Phase 5b — Multi-Backend Implementation
+
+### Remaining
+- [ ] Replace `FileSyncer` (tar/scp/extract) with rsync
+- [ ] Implement `LocalSyncBackend` (blocking loop) — unifies with `run local`
+- [ ] Implement `LocalPueueBackend` and `BareBackend` (Pueue + Docker)
+- [ ] `clean` command overhaul — safety check (all tracking synced, no jobs running)
+- [ ] Integration test all CLI commands against real SLURM cluster
+
+---
+
+## Other backlog
+
 - [ ] Task hooks (`on_task_start`, `on_task_complete`, `on_task_fail`)
-- [ ] Explore Submitit for SLURM submission
 - [ ] Explore structlog for structured logging
 - [ ] Decide: should `DAG.run()` unwrap `TaskResult` to `dict[str, Any]` for ergonomics?
 - [ ] Delete `old_executor.py`
 - [ ] Refactor DAG `resume()` — never used in production, needs review. Currently doesn't pass `tracker` to `execute_dag`.
-- [x] Switch to uv2nix for Nix packaging (needed for server deployment to homelab)
 - [ ] Write new integration tests reflecting real usage patterns
+- [ ] Add MinIO artifact storage
+- [ ] Build core marimo dashboard

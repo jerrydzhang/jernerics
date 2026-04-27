@@ -12,11 +12,10 @@ def tmp_project(tmp_path):
 name = "test-project"
 version = "0.1.0"
 
-[tool.jernerics.hpc]
+[tool.jernerics.backends.hpc]
+type = "slurm"
 host = "user@hpc.example.edu"
 remote_dir = "~/experiments/{project_name}"
-
-[tool.jernerics.container]
 partition = "priority"
 time = "1:00:00"
 mem = "16G"
