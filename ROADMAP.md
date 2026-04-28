@@ -149,7 +149,7 @@ Unified backend interface with a `Backend` protocol, `SweepSpec` dataclass, and 
 - [ ] Replace `FileSyncer` (tar/scp/extract) with rsync
 - [ ] Implement `LocalSyncBackend` (blocking loop)
 - [ ] Implement `LocalPueueBackend` and `BareBackend` (Pueue + Docker)
-- [ ] `clean` command overhaul — safety check (all tracking synced, no jobs running)
+- [ ] `clean` command overhaul — safety check (all tracking synced, no jobs running). **Blocked by**: job resume needs a complete picture of what's safe to delete (zombie vs orphan .pb files, partial trial state). Do after resume lands.
 - [ ] Integration test all CLI commands against real SLURM cluster
 
 ---
@@ -175,8 +175,8 @@ Unified backend interface with a `Backend` protocol, `SweepSpec` dataclass, and 
 
 - [ ] Task hooks (`on_task_start`, `on_task_complete`, `on_task_fail`)
 - [ ] Explore structlog for structured logging
-- [ ] Decide: should `DAG.run()` unwrap `TaskResult` to `dict[str, Any]` for ergonomics?
-- [ ] Delete `old_executor.py`
+- [x] ~~`DAG.run()` unwrap decision~~ — returns `TaskResult` objects, indexable like dicts
+- [x] ~~Delete `old_executor.py`~~ — already done
 - [ ] Refactor DAG `resume()` — never used in production, needs review. Currently doesn't pass `tracker` to `execute_dag`.
 - [ ] Write new integration tests reflecting real usage patterns
 - [ ] Add MinIO artifact storage

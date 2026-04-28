@@ -87,6 +87,10 @@ class FileSyncer:
         if not files_to_sync:
             return True
 
+        if dry_run:
+            print(f"Would sync {len(files_to_sync)} files")
+            return True
+
         self.host.mkdir(self.remote_dir)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
@@ -97,10 +101,6 @@ class FileSyncer:
                 for file_path in files_to_sync:
                     arcname = file_path.relative_to(project_path)
                     tar.add(file_path, arcname=str(arcname))
-
-            if dry_run:
-                print(f"Would sync {len(files_to_sync)} files")
-                return True
 
             remote_tar_path = f"{self.remote_dir}/sync.tar.gz"
             scp_cmd = [
@@ -124,47 +124,6 @@ class FileSyncer:
             return True
         finally:
             Path(tmp_path).unlink(missing_ok=True)
-
-    def sync_file(self, local_path: str | Path, remote_path: str | None = None) -> bool:
-        local_path = Path(local_path)
-        if not local_path.exists():
-            raise FileNotFoundError(f"Local file not found: {local_path}")
-
-        if remote_path is None:
-            remote_path = f"{self.remote_dir}/{local_path.name}"
-
-        scp_cmd = [
-            "scp",
-            str(local_path),
-            f"{self.host.host}:{_quote_path(remote_path)}",
-        ]
-        result = subprocess.run(
-            scp_cmd,
-            capture_output=True,
-            text=True,
-            timeout=DEFAULT_SCP_TIMEOUT,
-            check=False,
-        )
-        return result.returncode == 0
-
-    def download_file(
-        self, remote_path: str, local_path: str | Path | None = None
-    ) -> bool:
-        local_path = Path(remote_path).name if local_path is None else Path(local_path)
-
-        scp_cmd = [
-            "scp",
-            f"{self.host.host}:{_quote_path(remote_path)}",
-            str(local_path),
-        ]
-        result = subprocess.run(
-            scp_cmd,
-            capture_output=True,
-            text=True,
-            timeout=DEFAULT_SCP_TIMEOUT,
-            check=False,
-        )
-        return result.returncode == 0
 
     def container_exists(self) -> bool:
         return self.host.file_exists(f"{self.remote_dir}/container.sif")
