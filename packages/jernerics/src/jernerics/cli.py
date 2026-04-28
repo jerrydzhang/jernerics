@@ -34,9 +34,6 @@ from .container.templates import generate_container_def, list_templates
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
 
-run_app = typer.Typer()
-app.add_typer(run_app, name="run", help="Run DAG experiments.")
-
 
 SAFE_RELPATH = re.compile(r"^[a-zA-Z0-9_./\-]+$")
 
@@ -183,7 +180,7 @@ def _save_job_meta(
 # ── run local ────────────────────────────────────────────────────────────────
 
 
-@run_app.command("local")
+@app.command("local")
 def run_local(
     dag_file: Annotated[str, typer.Argument(help="Path to the DAG file.")],
     config_file: Annotated[str, typer.Argument(help="Path to the config file.")],

@@ -26,6 +26,9 @@ class TaskResult:
     def is_error(self) -> bool:
         return self.error is not None
 
+    def __getitem__(self, key):
+        return self.value[key]
+
 
 class Handle(Protocol):
     def result(self) -> TaskResult: ...

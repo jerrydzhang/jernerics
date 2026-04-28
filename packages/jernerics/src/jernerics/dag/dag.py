@@ -108,6 +108,8 @@ class DAG:
         tracker: Tracker | None = None,
         runner: Runner | None = None,
     ) -> dict[str, TaskResult]:
+        self._ensure_discovered()
+
         if state_dir is not None:
             self.state_dir = Path(state_dir)
         elif self.dag_file:
