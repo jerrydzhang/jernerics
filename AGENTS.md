@@ -2,31 +2,27 @@
 
 ## Commands
 
-All commands run from `packages/jernerics/` unless noted.
+All commands run from repo root via `just`.
 
 ```bash
-# Setup
-uv sync
-. .venv/bin/activate
-
 # Test
-pytest                                          # All tests
-pytest tests/unit/                               # Unit tests only
-pytest tests/unit/dag/test_task.py               # Specific file
-pytest tests/unit/dag/test_task.py::TestTaskDecorator::test_task_decorator_returns_task  # Single test
-pytest -x                                       # Stop on first failure
+just test                                       # All tests
+just test-unit                                  # Unit tests only
+uv run pytest tests/unit/dag/test_task.py               # Specific file
+uv run pytest tests/unit/dag/test_task.py::TestTaskDecorator::test_task_decorator_returns_task  # Single test
+uv run pytest -x                                       # Stop on first failure
 
 # Lint & format (must pass before committing)
-ruff check .                                    # Lint
-ruff check . --fix                              # Auto-fix lint issues
-ruff format .                                   # Format
-ruff format . --check                           # Check formatting without changes
+just lint                                       # Lint
+just lint-fix                                   # Auto-fix lint issues
+just format                                     # Format
+just format-check                               # Check formatting without changes
 
 # Type check
-ty check
+just typecheck
 
 # All checks at once
-ruff check . && ruff format --check . && pytest
+just check
 ```
 
 ## Project Structure
@@ -63,15 +59,15 @@ tests/
   unit/                  # Mirrors src/ structure
 ```
 
-Use `uv run` from `packages/jernerics/` — not `pip`, not bare `python`.
+Use `uv run` from repo root — not `pip`, not bare `python`.
 
 ## Definition of Done
 
 A task is complete when ALL of the following pass:
 
-1. `ruff check .` exits 0
-2. `ruff format --check .` exits 0
-3. `pytest` exits 0 with no failures
+1. `just lint` exits 0
+2. `just format-check` exits 0
+3. `just test` exits 0 with no failures
 4. Changed files have been staged
 
 ## Code Conventions
@@ -107,6 +103,10 @@ The container sees `/work` (project source) and `/cache` (ephemeral data). Never
 1. **`pyproject.toml` `[tool.jernerics.*]`** — infrastructure (named backends, tracking server). Loaded by `load_backend_config(name)` and `load_tracking_server()`.
 2. **User's experiment config** (Python file with `base`, `search_space`, `n_trials`, etc.). Loaded by `load_config()` via `runpy.run_path()`.
 
+## Pre-commit and Commits
+
+**Never use `--no-verify` when committing.** This is non-negotiable. The previous commit passed all checks, so if pre-commit fails, something in the current changes broke it — fix it, don't skip it.
+
 ## When Blocked
 
 - If tests fail after 3 attempts: stop and report the failing test with full output
@@ -119,7 +119,7 @@ The container sees `/work` (project source) and `/cache` (ephemeral data). Never
 Proto regeneration (from repo root):
 
 ```bash
-cd packages/jernerics-proto && uv run python generate.py
+just proto
 ```
 
 Generated protobuf files are excluded from ruff via `extend-exclude` in root `pyproject.toml`. Do not add `# noqa` or `# type: ignore` to generated files.

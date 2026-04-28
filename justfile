@@ -19,4 +19,7 @@ test:
 test-unit:
     uv run pytest tests/unit
 
+proto:
+    cd packages/jernerics-proto && uv run python generate.py
+
 check: lint format-check typecheck test
