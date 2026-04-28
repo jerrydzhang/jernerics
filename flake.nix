@@ -73,6 +73,7 @@
             packages = [
               virtualenv
               pkgs.uv
+              pkgs.just
             ];
 
             env =
@@ -88,6 +89,7 @@
             shellHook = ''
               unset PYTHONPATH
               export REPO_ROOT=$(git rev-parse --show-toplevel)
+              export VIRTUAL_ENV=${virtualenv}
             '';
           };
         }

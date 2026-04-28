@@ -142,6 +142,16 @@ max_concurrent_jobs = 10
 
 ---
 
+## Completed: Phase 5c — Tooling
+
+- [x] Create justfile with `lint`, `format`, `typecheck`, `test`, `check` recipes
+- [x] Add `just` to Nix flake devShell
+- [x] Fix ty type checking: set `VIRTUAL_ENV` in flake shellHook + `environment.extra-paths` in `[tool.ty]` config
+- [x] Switch pre-commit hooks to local (system ruff/ty) so versions always agree
+- [x] Add `BLE001`, `PLW1510` to ruff ignore; exclude `examples/` from ruff
+
+---
+
 ## Other backlog
 
 - [ ] Task hooks (`on_task_start`, `on_task_complete`, `on_task_fail`)

@@ -28,6 +28,7 @@ exclude = [
     "asv_benchmarks/html",
     "asv_benchmarks/results",
     "asv_benchmarks/benchmarks/cache",
+    "examples",
 ]
 
 [tool.ruff.lint]
@@ -54,6 +55,8 @@ ignore = [
     "RUF012",
     "RUF015",
     "RUF021",
+    "BLE001",
+    "PLW1510",
 ]
 
 [tool.ty.src]
@@ -61,3 +64,13 @@ include = [
     "packages/*/src",
     "packages/*/tests",
 ]
+
+[tool.ty.environment]
+extra-paths = [
+    "packages/jernerics-proto/src",
+    "packages/jernerics/src",
+    "packages/jernerics-server/src",
+]
+
+[tool.ty.rules]
+possibly-missing-submodule = "ignore"
