@@ -255,7 +255,7 @@ echo "=== Build completed at $(date) ===
         return result.stdout.strip()
 
     def list_jobs(self, include_completed: bool = False) -> list[JobInfo]:
-        fmt = "%i\\t%j\\t%T"
+        fmt = "%i|%j|%T"
         result = self.host.run(
             [f"squeue -u $USER -o '{fmt}' 2>/dev/null || echo ''"],
             check=False,
@@ -268,7 +268,7 @@ echo "=== Build completed at $(date) ===
         for line in result.stdout.strip().split("\n")[1:]:
             if not line.strip():
                 continue
-            parts = line.split("\t")
+            parts = line.split("|")
             if len(parts) >= 3:
                 seen_ids.add(parts[0])
                 jobs.append(JobInfo(job_id=parts[0], name=parts[1], status=parts[2]))

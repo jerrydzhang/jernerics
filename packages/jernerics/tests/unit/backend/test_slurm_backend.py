@@ -324,7 +324,7 @@ class TestListJobs:
         host = MagicMock()
         host.run.return_value = MagicMock(
             returncode=0,
-            stdout="JOBID\tNAME\tSTATE\n123\tmyjob\tRUNNING\n456\tother\tPENDING",
+            stdout="JOBID|NAME|STATE\n123|myjob|RUNNING\n456|other|PENDING",
         )
         backend = _make_backend(host=host)
 
