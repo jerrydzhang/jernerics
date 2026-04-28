@@ -523,7 +523,7 @@ def build(
     backend.syncer.sync_project(project_path)
 
     print("[2/3] Creating logs directory...")
-    backend.host.mkdir(f"{backend.remote_dir}/logs")
+    backend.host.mkdir(f"{backend._cache_path()}/logs")
 
     print("[3/3] Submitting build job...")
     try:
@@ -532,8 +532,8 @@ def build(
         _save_job_meta(
             project_dir=project_path,
             job_id=job_id,
-            output_pattern=f"{backend.remote_dir}/logs/build_%j.out",
-            error_pattern=f"{backend.remote_dir}/logs/build_%j.err",
+            output_pattern=f"{backend._cache_path()}/logs/build_%j.out",
+            error_pattern=f"{backend._cache_path()}/logs/build_%j.err",
             remote_dir=backend.remote_dir,
             n_trials=1,
         )

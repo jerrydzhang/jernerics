@@ -199,12 +199,17 @@ class SlurmBackend:
 
         return "\n".join(lines)
 
+    def _cache_path(self) -> str:
+        if self.cache_dir:
+            return self.cache_dir.replace("~", "$HOME")
+        return f"{self.remote_dir}/.jernerics".replace("~", "$HOME")
+
     def submit_build_job(self) -> str:
         partition = _validate_slurm_value(self.partition, "partition")
         time_val = _validate_slurm_value(self.time or "1:00:00", "time")
         mem = _validate_slurm_value(self.mem, "mem")
         cpus = _validate_slurm_value(str(self.cpus), "cpus")
-        output_dir = f"{self.remote_dir}/logs".replace("~", "$HOME")
+        output_dir = f"{self._cache_path()}/logs"
 
         script = f"""#!/bin/bash
 #SBATCH --job-name=container-build
