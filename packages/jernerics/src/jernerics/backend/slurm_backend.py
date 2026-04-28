@@ -5,7 +5,7 @@ import time
 from jernerics.backend.components.container import Apptainer
 from jernerics.backend.components.host import SSHHost
 from jernerics.backend.components.project_sync import FileSyncer
-from jernerics.backend.models import JobInfo
+from jernerics.backend.models import JobInfo, SweepSpec
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
 
@@ -108,30 +108,84 @@ class SlurmBackend:
             return "$HOME" + p[1:]
         return p
 
-    def submit_sweep(
+    def _build_setup_command(
         self,
-        setup_command: str,
-        trial_command: str,
-        *,
-        n_trials: int,
         study_name: str,
-        project_name: str,
-        max_parallel: int | None = None,
-        slurm_overrides: dict[str, str] | None = None,
+        storage_url: str,
+        direction: str,
     ) -> str:
-        max_parallel_val = max_parallel or self.max_concurrent_jobs
+        return (
+            f'python -c "'
+            f"import optuna;"
+            f" optuna.create_study("
+            f"study_name={study_name!r},"
+            f" storage={storage_url!r},"
+            f" direction={direction!r},"
+            f' load_if_exists=True)"'
+        )
+
+    def _build_trial_command(
+        self,
+        dag_relpath: str,
+        config_relpath: str,
+        study_name: str,
+        storage_url: str,
+        project_name: str | None,
+        tracking_dir: str,
+        tracking_server: str | None,
+    ) -> str:
+        args = [
+            "python",
+            "-m",
+            "jernerics.runner",
+            f"/work/{dag_relpath}",
+            f"/work/{config_relpath}",
+            "--study-name",
+            study_name,
+            "--storage-url",
+            storage_url,
+            "--tracking-dir",
+            tracking_dir,
+        ]
+        if project_name:
+            args.extend(["--project-name", project_name])
+        if tracking_server:
+            args.extend(["--server-addr", tracking_server])
+        return " \\\n        ".join(args)
+
+    def submit_sweep(self, spec: SweepSpec, *, direction: str = "minimize") -> str:
+        max_parallel_val = spec.max_parallel or self.max_concurrent_jobs
         if max_parallel_val > 0:
-            array_spec = f"1-{n_trials}%{max_parallel_val}"
+            array_spec = f"1-{spec.n_trials}%{max_parallel_val}"
         else:
-            array_spec = f"1-{n_trials}"
+            array_spec = f"1-{spec.n_trials}"
+
+        dag_relpath = spec.dag_relpath or str(spec.dag_path.name)
+        config_relpath = spec.config_relpath or str(spec.config_path.name)
+        tracking_dir = "/cache/tracking/" + spec.study_name
+
+        setup_command = self._build_setup_command(
+            study_name=spec.study_name,
+            storage_url=spec.storage_url,
+            direction=direction,
+        )
+        trial_command = self._build_trial_command(
+            dag_relpath=dag_relpath,
+            config_relpath=config_relpath,
+            study_name=spec.study_name,
+            storage_url=spec.storage_url,
+            project_name=spec.project_name,
+            tracking_dir=tracking_dir,
+            tracking_server=self.tracking_server,
+        )
 
         script = self._generate_sweep_script(
             setup_command=setup_command,
             trial_command=trial_command,
             array_spec=array_spec,
-            study_name=study_name,
-            project_name=project_name,
-            slurm_overrides=slurm_overrides or {},
+            study_name=spec.study_name,
+            project_name=spec.project_name or "",
+            slurm_overrides=spec.slurm_overrides,
         )
 
         result = self.host.run(

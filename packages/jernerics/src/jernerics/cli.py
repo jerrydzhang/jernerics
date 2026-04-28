@@ -1,5 +1,4 @@
 import json
-import os
 import re
 import shlex
 import shutil
@@ -18,6 +17,8 @@ from rich.table import Table
 from .backend.components.container import Apptainer
 from .backend.components.host import SSHHost
 from .backend.components.project_sync import FileSyncer
+from .backend.local_backend import LocalBackend
+from .backend.models import SweepSpec
 from .backend.slurm_backend import SlurmBackend
 from .config import (
     BackendConfig,
@@ -62,6 +63,31 @@ def _resolve_cache_host(config: BackendConfig, project_name: str) -> str:
         cache = cache.replace("{project-name}", project_name)
         return cache.replace("~", "$HOME")
     return f"{_resolve_remote_dir(config, project_name)}/.jernerics"
+
+
+def _build_storage_url(cache_path: str, study_name: str) -> str:
+    return f"sqlite:////{cache_path}/optuna/{study_name}.db"
+
+
+def _save_job_meta(
+    project_dir: Path,
+    job_id: str,
+    output_pattern: str,
+    error_pattern: str,
+    remote_dir: str,
+    n_trials: int,
+) -> None:
+    job_meta = {
+        "job_id": job_id,
+        "output_pattern": output_pattern,
+        "error_pattern": error_pattern,
+        "remote_dir": remote_dir,
+        "n_trials": n_trials,
+    }
+    meta_dir = project_dir / ".jernerics" / "jobs"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    meta_file = meta_dir / f"{job_id}.json"
+    meta_file.write_text(json.dumps(job_meta, indent=2))
 
 
 def _get_backend(backend_name: str) -> tuple[SlurmBackend, str, Path]:
@@ -111,72 +137,6 @@ def _get_backend(backend_name: str) -> tuple[SlurmBackend, str, Path]:
     return backend, project_name, project_dir
 
 
-def _build_setup_command(
-    study_name: str,
-    storage_url: str,
-    direction: str,
-) -> str:
-    return (
-        f'python -c "'
-        f"import optuna;"
-        f" optuna.create_study("
-        f"study_name={study_name!r},"
-        f" storage={storage_url!r},"
-        f" direction={direction!r},"
-        f' load_if_exists=True)"'
-    )
-
-
-def _build_trial_command(
-    dag_relpath: str,
-    config_relpath: str,
-    study_name: str,
-    storage_url: str,
-    project_name: str | None,
-    tracking_dir: str,
-    tracking_server: str | None,
-) -> str:
-    args = [
-        "python",
-        "-m",
-        "jernerics.runner",
-        f"/work/{dag_relpath}",
-        f"/work/{config_relpath}",
-        "--study-name",
-        study_name,
-        "--storage-url",
-        storage_url,
-        "--tracking-dir",
-        tracking_dir,
-    ]
-    if project_name:
-        args.extend(["--project-name", project_name])
-    if tracking_server:
-        args.extend(["--server-addr", tracking_server])
-    return " \\\n        ".join(args)
-
-
-def _save_job_meta(
-    project_dir: Path,
-    job_id: str,
-    output_pattern: str,
-    error_pattern: str,
-    remote_dir: str,
-    n_trials: int,
-) -> None:
-    job_meta = {
-        "job_id": job_id,
-        "output_pattern": output_pattern,
-        "error_pattern": error_pattern,
-        "remote_dir": remote_dir,
-        "n_trials": n_trials,
-    }
-    meta_dir = project_dir / ".jernerics" / "jobs"
-    meta_dir.mkdir(parents=True, exist_ok=True)
-    meta_file = meta_dir / f"{job_id}.json"
-    meta_file.write_text(json.dumps(job_meta, indent=2))
-
-
 # ── run local ────────────────────────────────────────────────────────────────
 
 
@@ -184,33 +144,16 @@ def _save_job_meta(
 def run_local(
     dag_file: Annotated[str, typer.Argument(help="Path to the DAG file.")],
     config_file: Annotated[str, typer.Argument(help="Path to the config file.")],
-    results_dir: Annotated[
-        str, typer.Option("--results-dir", "-r", help="Directory to store results.")
-    ] = "results",
-    container: Annotated[
-        str | None,
-        typer.Option(
-            "--container", "-c", help="Path to container tarball or .sif file"
-        ),
-    ] = None,
-    gpu: Annotated[
-        bool,
-        typer.Option("--gpu/--no-gpu", help="Enable GPU support via --nv flag"),
-    ] = True,
-    timeout: Annotated[
-        int | None,
-        typer.Option("--timeout", "-t", help="Timeout in seconds for each config run"),
-    ] = None,
 ):
-    dag_path = os.path.abspath(dag_file)
-    config_path = os.path.abspath(config_file)
+    dag_path = Path(dag_file).resolve()
+    config_path = Path(config_file).resolve()
 
-    if not Path(dag_path).exists():
+    if not dag_path.exists():
         print(f"Error: DAG file not found: {dag_path}")
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        sweep = load_config(config_path)
+        sweep = load_config(str(config_path))
     except (FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
@@ -219,77 +162,31 @@ def run_local(
     project_name = get_project_name(project_dir) if project_dir else None
     tracking_server = load_tracking_server(project_dir) if project_dir else None
 
-    import optuna
-
     from .paths import cache_dir
 
     project_cache = cache_dir()
     db_dir = project_cache / "optuna"
     db_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    study_name = f"local_{Path(config_path).stem}_{timestamp}"
+    study_name = f"local_{config_path.stem}_{timestamp}"
     storage_url = f"sqlite:///{db_dir / (study_name + '.db')}"
 
-    tracker_dir = project_cache / "tracking" / study_name
-    tracker_dir.mkdir(parents=True, exist_ok=True)
-
-    optuna.create_study(
+    spec = SweepSpec(
+        dag_path=dag_path,
+        config_path=config_path,
         study_name=study_name,
-        storage=storage_url,
-        direction=sweep.direction,
-        sampler=sweep.sampler,
-        load_if_exists=True,
+        storage_url=storage_url,
+        n_trials=sweep.n_trials,
+        project_name=project_name,
+        server_addr=tracking_server,
     )
 
-    any_failed = False
-
-    for i in range(sweep.n_trials):
-        print(f"Running trial {i + 1}/{sweep.n_trials}", flush=True)
-
-        env = os.environ.copy()
-        env["JERNERICS_CONFIG_INDEX"] = str(i)
-
-        try:
-            result = subprocess.run(
-                [
-                    "python",
-                    "-m",
-                    "jernerics.runner",
-                    dag_path,
-                    config_path,
-                    "--study-name",
-                    study_name,
-                    "--storage-url",
-                    storage_url,
-                ]
-                + (["--project-name", project_name] if project_name else [])
-                + (["--tracking-dir", str(tracker_dir)] if tracker_dir else [])
-                + (["--server-addr", tracking_server] if tracking_server else []),
-                cwd=os.path.dirname(dag_path) or ".",
-                env=env,
-                timeout=timeout,
-                check=False,
-            )
-            if result.returncode != 0:
-                print(f"Trial {i + 1} failed with code {result.returncode}")
-                any_failed = True
-        except subprocess.TimeoutExpired:
-            print(f"Trial {i + 1} timed out after {timeout} seconds")
-            any_failed = True
+    backend = LocalBackend(tracking_server=tracking_server)
 
     try:
-        study = optuna.load_study(study_name=study_name, storage=storage_url)
-        completed = [
-            t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE
-        ]
-        if completed:
-            print(f"Best value: {study.best_value:.4f}")
-            print(f"Best params: {study.best_params}")
-    except KeyError:
-        pass
-
-    if any_failed:
-        raise SystemExit(ExitCode.GENERAL_ERROR)
+        backend.submit_sweep(spec, direction=sweep.direction)
+    except RuntimeError:
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
 
 
 # ── run (remote) ─────────────────────────────────────────────────────────────
@@ -372,21 +269,20 @@ def run_remote(
 
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     study_name = f"{project_name}_{config_path.stem}_{timestamp}"
-    storage_url = f"sqlite:////cache/optuna/{study_name}.db"
+    storage_url = _build_storage_url("cache", study_name)
 
-    setup_command = _build_setup_command(
+    spec = SweepSpec(
+        dag_path=dag_path,
+        config_path=config_path,
         study_name=study_name,
         storage_url=storage_url,
-        direction=sweep.direction,
-    )
-    trial_command = _build_trial_command(
+        n_trials=n_trials,
         dag_relpath=dag_relpath,
         config_relpath=config_relpath,
-        study_name=study_name,
-        storage_url=storage_url,
         project_name=project_name,
-        tracking_dir=f"/cache/tracking/{study_name}",
-        tracking_server=backend.tracking_server,
+        server_addr=backend.tracking_server,
+        max_parallel=max_parallel_val or None,
+        slurm_overrides=slurm_opts,
     )
 
     cache_host = _resolve_cache_host(
@@ -404,8 +300,20 @@ def run_remote(
         print("=== SLURM SCRIPT ===")
         print(
             backend._generate_sweep_script(
-                setup_command=setup_command,
-                trial_command=trial_command,
+                setup_command=backend._build_setup_command(
+                    study_name=study_name,
+                    storage_url=storage_url,
+                    direction=sweep.direction,
+                ),
+                trial_command=backend._build_trial_command(
+                    dag_relpath=dag_relpath,
+                    config_relpath=config_relpath,
+                    study_name=study_name,
+                    storage_url=storage_url,
+                    project_name=project_name,
+                    tracking_dir=f"/cache/tracking/{study_name}",
+                    tracking_server=backend.tracking_server,
+                ),
                 array_spec=f"1-{n_trials}"
                 + (f"%{max_parallel_val}" if max_parallel_val > 0 else ""),
                 study_name=study_name,
@@ -438,15 +346,7 @@ def run_remote(
 
     print("[4/4] Submitting job...")
     try:
-        job_id = backend.submit_sweep(
-            setup_command=setup_command,
-            trial_command=trial_command,
-            n_trials=n_trials,
-            study_name=study_name,
-            project_name=project_name,
-            max_parallel=max_parallel_val or None,
-            slurm_overrides=slurm_opts,
-        )
+        job_id = backend.submit_sweep(spec, direction=sweep.direction)
 
         _save_job_meta(
             project_dir=project_dir,

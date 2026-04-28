@@ -131,11 +131,23 @@ max_concurrent_jobs = 10
 
 ---
 
-## Phase 5b — Multi-Backend Implementation
+## Completed: Phase 5b — Backend Protocol + LocalBackend
 
-### Remaining
+Unified backend interface with a `Backend` protocol, `SweepSpec` dataclass, and `LocalBackend` implementation.
+
+- [x] `Backend` protocol (`submit_sweep`, `list_jobs`, `cancel`, `cancel_all`, `get_status`, `wait_for_completion`)
+- [x] `SweepSpec` dataclass — structured inputs replace raw bash command strings
+- [x] `LocalBackend` — blocking, in-process `run_trial()` calls. All job management raises `UnsupportedOperation`. No config required.
+- [x] `SlurmBackend.submit_sweep` refactored: accepts `SweepSpec`, command building moved from `cli.py` into `SlurmBackend`
+- [x] CLI: `jernerics local` rewritten as thin wrapper → builds `SweepSpec` → `LocalBackend.submit_sweep`
+- [x] CLI: `jernerics run` updated to use `SweepSpec` + refactored `SlurmBackend.submit_sweep`
+- [x] CLI: removed `_build_setup_command`, `_build_trial_command` from `cli.py`
+- [x] E2E verified: `LocalBackend` + gRPC tracking (all 6 event types: params, metrics, results, artifacts, sweep_meta, trial_end)
+- [x] E2E verified: `SlurmBackend` dry-run produces identical script to pre-refactor
+
+### Remaining (Phase 5c)
 - [ ] Replace `FileSyncer` (tar/scp/extract) with rsync
-- [ ] Implement `LocalSyncBackend` (blocking loop) — unifies with `run local`
+- [ ] Implement `LocalSyncBackend` (blocking loop)
 - [ ] Implement `LocalPueueBackend` and `BareBackend` (Pueue + Docker)
 - [ ] `clean` command overhaul — safety check (all tracking synced, no jobs running)
 - [ ] Integration test all CLI commands against real SLURM cluster
@@ -152,6 +164,13 @@ max_concurrent_jobs = 10
 
 ---
 
+## Completed: Server Entry Point
+
+- [x] `jernerics_server/__main__.py` — `python -m jernerics_server [--db PATH] [--port PORT]` with signal handling
+- [x] E2E verified: server → `LocalBackend` sweep → all event types in DuckDB
+
+---
+
 ## Other backlog
 
 - [ ] Task hooks (`on_task_start`, `on_task_complete`, `on_task_fail`)
@@ -162,3 +181,5 @@ max_concurrent_jobs = 10
 - [ ] Write new integration tests reflecting real usage patterns
 - [ ] Add MinIO artifact storage
 - [ ] Build core marimo dashboard
+- [ ] Server deploy: NixOS systemd service, health check, logging
+- [ ] Server query API or marimo dashboard for inspecting DuckDB remotely

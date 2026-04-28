@@ -1,12 +1,18 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from jernerics.config import SweepConfig
 
 
 class TestRunLocalSingleConfig:
-    @patch("jernerics.cli.subprocess.run")
+    @patch("jernerics.backend.local_backend.run_trial")
+    @patch("jernerics.backend.local_backend.cache_dir")
     @patch("jernerics.cli.load_config")
-    def test_single_config_runs_once(self, mock_load, mock_run):
+    def test_single_config_runs_once(self, mock_load, mock_cache_dir, mock_run_trial):
+        import tempfile
+        from pathlib import Path
+
+        from jernerics.cli import run_local
+
         mock_load.return_value = SweepConfig(
             base={"seed": 42},
             search_space=None,
@@ -17,11 +23,7 @@ class TestRunLocalSingleConfig:
             runner=None,
             objective=None,
         )
-        mock_run.return_value = MagicMock(returncode=0)
-
-        import tempfile
-
-        from jernerics.cli import run_local
+        mock_cache_dir.return_value = Path(tempfile.mkdtemp())
 
         with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
             f.write(b"pass")
@@ -34,13 +36,19 @@ class TestRunLocalSingleConfig:
 
             os.unlink(dag_path)
 
-        assert mock_run.call_count == 1
+        assert mock_run_trial.call_count == 1
 
 
 class TestRunLocalSweep:
-    @patch("jernerics.cli.subprocess.run")
+    @patch("jernerics.backend.local_backend.run_trial")
+    @patch("jernerics.backend.local_backend.cache_dir")
     @patch("jernerics.cli.load_config")
-    def test_sweep_runs_n_trials(self, mock_load, mock_run):
+    def test_sweep_runs_n_trials(self, mock_load, mock_cache_dir, mock_run_trial):
+        import tempfile
+        from pathlib import Path
+
+        from jernerics.cli import run_local
+
         mock_load.return_value = SweepConfig(
             base={"seed": 42},
             search_space=lambda trial: {"lr": trial.suggest_float("lr", 0.001, 0.1)},
@@ -51,11 +59,7 @@ class TestRunLocalSweep:
             runner=None,
             objective=None,
         )
-        mock_run.return_value = MagicMock(returncode=0)
-
-        import tempfile
-
-        from jernerics.cli import run_local
+        mock_cache_dir.return_value = Path(tempfile.mkdtemp())
 
         with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
             f.write(b"pass")
@@ -68,4 +72,4 @@ class TestRunLocalSweep:
 
             os.unlink(dag_path)
 
-        assert mock_run.call_count == 5
+        assert mock_run_trial.call_count == 5

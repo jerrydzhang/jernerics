@@ -1,4 +1,21 @@
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+@dataclass
+class SweepSpec:
+    dag_path: Path
+    config_path: Path
+    study_name: str
+    storage_url: str
+    n_trials: int
+    dag_relpath: str = ""
+    config_relpath: str = ""
+    tracking_dir: Path | None = None
+    project_name: str | None = None
+    server_addr: str | None = None
+    max_parallel: int | None = None
+    slurm_overrides: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

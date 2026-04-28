@@ -1,8 +1,10 @@
 """Tests for SlurmBackend script generation and job management."""
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from jernerics.backend.models import SweepSpec
 from jernerics.backend.slurm_backend import SlurmBackend, expand_slurm_pattern
 
 
@@ -273,13 +275,15 @@ class TestSubmitSweep:
         host.run.return_value = MagicMock(returncode=0, stdout="12345")
         backend = _make_backend(host=host)
 
-        job_id = backend.submit_sweep(
-            setup_command="setup",
-            trial_command="trial",
-            n_trials=10,
+        spec = SweepSpec(
+            dag_path=Path("dag.py"),
+            config_path=Path("config.py"),
             study_name="study",
+            storage_url="sqlite:////cache/optuna/study.db",
+            n_trials=10,
             project_name="proj",
         )
+        job_id = backend.submit_sweep(spec)
 
         assert job_id == "12345"
         host.run.assert_called_once()
@@ -293,13 +297,15 @@ class TestSubmitSweep:
         host.run.return_value = MagicMock(returncode=0, stdout="99")
         backend = _make_backend(host=host, remote_dir="~/projects/proj")
 
-        backend.submit_sweep(
-            setup_command="setup",
-            trial_command="trial",
-            n_trials=5,
+        spec = SweepSpec(
+            dag_path=Path("dag.py"),
+            config_path=Path("config.py"),
             study_name="study",
+            storage_url="sqlite:////cache/optuna/study.db",
+            n_trials=5,
             project_name="proj",
         )
+        backend.submit_sweep(spec)
 
         cmd = host.run.call_args[0][0]
         assert any("cd ~/projects/proj" in arg for arg in cmd)
@@ -309,14 +315,16 @@ class TestSubmitSweep:
         host.run.return_value = MagicMock(returncode=1, stderr="sbatch: error")
         backend = _make_backend(host=host)
 
+        spec = SweepSpec(
+            dag_path=Path("dag.py"),
+            config_path=Path("config.py"),
+            study_name="study",
+            storage_url="sqlite:////cache/optuna/study.db",
+            n_trials=5,
+            project_name="proj",
+        )
         with pytest.raises(RuntimeError, match="Failed to submit job"):
-            backend.submit_sweep(
-                setup_command="setup",
-                trial_command="trial",
-                n_trials=5,
-                study_name="study",
-                project_name="proj",
-            )
+            backend.submit_sweep(spec)
 
 
 class TestListJobs:
