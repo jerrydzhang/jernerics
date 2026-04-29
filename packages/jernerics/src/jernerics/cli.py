@@ -348,17 +348,6 @@ def run_remote(
 
     print("[4/4] Submitting job...")
     try:
-        job_id = backend.submit_sweep(spec, direction=sweep.direction)
-
-        _save_job_meta(
-            project_dir=project_dir,
-            job_id=job_id,
-            output_pattern=str(output_pattern),
-            error_pattern=str(error_pattern),
-            remote_dir=backend.remote_dir,
-            n_trials=n_trials,
-        )
-
         backend_config = load_backend_config(backend_name, project_dir)
         if backend_config.auto_retry:
             retry_dir = f"{cache_host}/retry"
@@ -370,31 +359,52 @@ def run_remote(
                 dag_relpath=dag_relpath,
                 config_relpath=config_relpath,
                 cli_overrides=cli_overrides,
+                ctx_path=ctx_path,
+                chain_depth=0,
             )
             backend.host.write_file(ctx_path, ctx.to_json())
 
-            checker_job_id = backend.submit_checker(
-                ctx_path=ctx_path,
-                chain_depth=0,
-                dependency_job_id=job_id,
-                project_name=project_name,
+            result = backend.submit_sweep(
+                spec, direction=sweep.direction, retry_ctx=ctx
             )
 
             _save_job_meta(
                 project_dir=project_dir,
-                job_id=checker_job_id,
-                output_pattern=f"{cache_host}/logs/checker_%j.out",
-                error_pattern=f"{cache_host}/logs/checker_%j.err",
+                job_id=result.job_id,
+                output_pattern=str(output_pattern),
+                error_pattern=str(error_pattern),
                 remote_dir=backend.remote_dir,
-                n_trials=0,
+                n_trials=n_trials,
+            )
+            if result.checker_job_id:
+                _save_job_meta(
+                    project_dir=project_dir,
+                    job_id=result.checker_job_id,
+                    output_pattern=f"{cache_host}/logs/checker_%j.out",
+                    error_pattern=f"{cache_host}/logs/checker_%j.err",
+                    remote_dir=backend.remote_dir,
+                    n_trials=0,
+                )
+
+            print(f"\nArray: {result.job_id}, Checker: {result.checker_job_id}")
+            monitor_id = result.job_id
+        else:
+            result = backend.submit_sweep(spec, direction=sweep.direction)
+
+            _save_job_meta(
+                project_dir=project_dir,
+                job_id=result.job_id,
+                output_pattern=str(output_pattern),
+                error_pattern=str(error_pattern),
+                remote_dir=backend.remote_dir,
+                n_trials=n_trials,
             )
 
-            print(f"\nArray: {job_id}, Checker: {checker_job_id}")
-        else:
-            print(f"\nJob submitted: {job_id}")
+            print(f"\nJob submitted: {result.job_id}")
+            monitor_id = result.job_id
 
         print("\nMonitor progress:")
-        print(f"  jernerics logs --backend {backend_name} {job_id} --follow")
+        print(f"  jernerics logs --backend {backend_name} {monitor_id} --follow")
     except RuntimeError as e:
         print(f"Error: Failed to submit job: {e}")
         raise SystemExit(ExitCode.SLURM_ERROR) from None

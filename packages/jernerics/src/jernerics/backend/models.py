@@ -30,6 +30,12 @@ class JobSpec:
 
 
 @dataclass
+class SubmitResult:
+    job_id: str
+    checker_job_id: str | None = None
+
+
+@dataclass
 class JobInfo:
     job_id: str
     name: str

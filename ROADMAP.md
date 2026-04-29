@@ -1,12 +1,29 @@
 # Jernerics Roadmap
 
+Share URL:
+https://pi.dev/session/#01f302a5d24f41f247c174642407b4f7
+Gist:
+https://gist.github.com/jerrydzhang/01f302a5d24f41f247c174642407b4f7
+
 Living document. Updated as decisions are made and phases complete.
 
 ## Project Direction
 
-Transitioning from a vibe-coded prototype to a tool where every line is understood. The work is a ground-up rewrite of core subsystems — fixing bugs, eliminating LLM-generated code, and replacing heavyweight dependencies with simple, inspectable alternatives.
+This branch is a ground-up rewrite of the codebase. The goal is full ownership — every line understood, no black boxes, no code that survives because it works and nobody knows why. The original prototype was vibe-coded and it shows: duplicated logic, unclear boundaries, and dependencies that paper over problems instead of solving them. This branch fixes that properly.
 
-Long-term: a lean experiment runner for HPC that does DAG scheduling, sweep optimization, and result tracking without the overhead.
+The project serves two purposes and both matter:
+
+1. **A tool I actually use.** A lean experiment runner for HPC — DAG scheduling, sweep optimization, result tracking — without the overhead of heavy frameworks. The main branch works for this today. This branch will replace it when it's done.
+2. **A project I enjoy working on.** This is weekend/hobby work. The process matters as much as the output. Understanding why things work, building things simply, and ending up with code I could explain to someone line by line.
+
+### Branch mechanics
+
+This is not a ship-fast branch. It merges when it's done. Intermediate states don't need to be self-consistent or usable — the main branch exists for real work. This means:
+
+- It's fine to break things and fix them later.
+- It's fine to leave subsystems incomplete between sessions.
+- The only constraint is that we can test when we need to.
+- No pressure to maintain a working state at every commit.
 
 ---
 
@@ -146,8 +163,8 @@ Unified backend interface with a `Backend` protocol, `SweepSpec` dataclass, and 
 - [x] E2E verified: `SlurmBackend` dry-run produces identical script to pre-refactor
 
 ### Remaining (Phase 5c)
-- [ ] Replace `FileSyncer` (tar/scp/extract) with rsync
-- [ ] Implement `LocalSyncBackend` (blocking loop)
+- [x] ~~Replace `FileSyncer` with rsync~~ — tar+scp is well-suited to WekaFS, code is now understood
+- [x] ~~Implement `LocalSyncBackend`~~ — already done as `LocalBackend`
 - [ ] Implement `LocalPueueBackend` and `BareBackend` (Pueue + Docker)
 - [ ] `clean` command overhaul — safety check (all tracking synced, no jobs running). **Blocked by**: job resume needs a complete picture of what's safe to delete (zombie vs orphan .pb files, partial trial state). Do after resume lands.
 - [ ] Integration test all CLI commands against real SLURM cluster

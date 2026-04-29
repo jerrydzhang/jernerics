@@ -1,7 +1,7 @@
 import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
-from jernerics.backend.models import JobInfo, SweepSpec
+from jernerics.backend.models import JobInfo, SubmitResult, SweepSpec
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
 
@@ -14,7 +14,9 @@ class LocalBackend:
     def __init__(self, tracking_server: str | None = None):
         self.tracking_server = tracking_server
 
-    def submit_sweep(self, spec: SweepSpec, *, direction: str = "minimize") -> str:
+    def submit_sweep(
+        self, spec: SweepSpec, *, direction: str = "minimize"
+    ) -> SubmitResult:
         project_cache = cache_dir()
         tracker_dir = spec.tracking_dir or (
             project_cache / "tracking" / spec.study_name
@@ -53,7 +55,7 @@ class LocalBackend:
         if any_failed:
             raise RuntimeError("One or more trials failed")
 
-        return "local"
+        return SubmitResult(job_id="local")
 
     def list_jobs(self, include_completed: bool = False) -> list[JobInfo]:
         raise UnsupportedOperation("LocalBackend does not support job listing")

@@ -1,11 +1,18 @@
 """Tests for SlurmBackend script generation and job management."""
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from jernerics.backend.models import SweepSpec
-from jernerics.backend.slurm_backend import SlurmBackend, expand_slurm_pattern
+from jernerics.backend.slurm_backend import (
+    SlurmBackend,
+    _compose_chain,
+    expand_slurm_pattern,
+)
+from jernerics.config import BackendConfig
+from jernerics.retry import RetryContext
 
 
 def _make_backend(**overrides):
@@ -284,9 +291,10 @@ class TestSubmitSweep:
             n_trials=10,
             project_name="proj",
         )
-        job_id = backend.submit_sweep(spec)
+        result = backend.submit_sweep(spec)
 
-        assert job_id == "12345"
+        assert result.job_id == "12345"
+        assert result.checker_job_id is None
         host.run.assert_called_once()
         call_args = host.run.call_args
         cmd = call_args[0][0]
@@ -393,3 +401,282 @@ class TestExpandSlurmPattern:
     def test_username(self):
         result = expand_slurm_pattern("%u")
         assert result != "%u"
+
+
+class TestBuildCheckerScript:
+    def test_basic_structure(self):
+        backend = _make_backend()
+        script = backend._build_checker_script(
+            ctx_path="/cache/retry/ctx.json",
+            chain_depth=1,
+            cache_host="/cache",
+            partition="priority",
+            dependency_job_id="10001",
+        )
+        assert "#!/usr/bin/env bash" in script
+        assert "#SBATCH --parsable" in script
+        assert "#SBATCH --partition=priority" in script
+        assert "#SBATCH --time=0:10:00" in script
+        assert "#SBATCH --mem=1G" in script
+        assert "#SBATCH --dependency=afterany:10001" in script
+        assert "retry_checker" in script
+
+    def test_output_patterns(self):
+        backend = _make_backend()
+        script = backend._build_checker_script(
+            ctx_path="/cache/retry/ctx.json",
+            chain_depth=0,
+            cache_host="/cache",
+            partition="p",
+            dependency_job_id="42",
+        )
+        assert "#SBATCH --output=/cache/logs/checker_%j.out" in script
+        assert "#SBATCH --error=/cache/logs/checker_%j.err" in script
+
+    def test_tilde_expanded(self):
+        backend = _make_backend(remote_dir="~/projects/p")
+        script = backend._build_checker_script(
+            ctx_path="/cache/ctx.json",
+            chain_depth=0,
+            cache_host="~/cache",
+            partition="p",
+            dependency_job_id="42",
+        )
+        assert "~" not in script
+        assert "$HOME/cache" in script
+
+    def test_no_dependency(self):
+        backend = _make_backend()
+        script = backend._build_checker_script(
+            ctx_path="/cache/ctx.json",
+            chain_depth=0,
+            cache_host="/cache",
+            partition="p",
+        )
+        assert "#SBATCH --dependency" not in script
+
+
+class TestFromConfigSubmitWithRetryCtx:
+    """Test the full path the retry checker uses.
+
+    from_config → submit_sweep with retry_ctx.
+    """
+
+    @staticmethod
+    def _make_config(**overrides):
+        cfg = BackendConfig(
+            name="hpc",
+            type="slurm",
+            host="user@hpc",
+            remote_dir="/scratch/user/proj",
+            cache_dir="/scratch/user/cache",
+            partition="priority",
+            time="1:00:00",
+            mem="16G",
+            cpus=4,
+            max_concurrent_jobs=10,
+            container_type="apptainer",
+            heartbeat_interval_s=60,
+        )
+        for k, v in overrides.items():
+            setattr(cfg, k, v)
+        return cfg
+
+    def test_from_config_creates_apptainer_container(self):
+        config = self._make_config(container_type="apptainer")
+        backend = SlurmBackend.from_config(config)
+        from jernerics.backend.components.container import Apptainer
+
+        assert isinstance(backend.container, Apptainer)
+
+    def test_from_config_creates_docker_container(self):
+        config = self._make_config(container_type="docker")
+        backend = SlurmBackend.from_config(config)
+        from jernerics.backend.components.container import Docker
+
+        assert isinstance(backend.container, Docker)
+
+    def test_submit_sweep_with_retry_ctx_produces_chain_script(self):
+        """Simulate what the checker does: from_config → submit_sweep(retry_ctx).
+
+        Uses a capturing host to intercept the composed script and verify
+        it's valid bash that would submit two chained sbatch jobs.
+        """
+        config = self._make_config()
+
+        captured_input = {}
+
+        class CapturingHost:
+            def run(self, command, **kwargs):
+                captured_input["command"] = command
+                captured_input["input"] = kwargs.get("input", "")
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="10001 10002",
+                    stderr="",
+                )
+
+            def mkdir(self, path):
+                pass
+
+            def file_exists(self, path):
+                return False
+
+            def getmtime(self, path):
+                return None
+
+            def remove_file(self, path):
+                pass
+
+            def write_file(self, path, content):
+                pass
+
+        host = CapturingHost()
+        backend = SlurmBackend.from_config(config, host=host)
+
+        spec = SweepSpec(
+            dag_path=Path("dag.py"),
+            config_path=Path("config.py"),
+            study_name="study",
+            storage_url="/cache/optuna/study.journal",
+            n_trials=3,
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+            project_name="proj",
+        )
+        retry_ctx = RetryContext(
+            study_name="study",
+            backend_name="hpc",
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+            ctx_path="/cache/retry/ctx.json",
+            chain_depth=1,
+        )
+
+        result = backend.submit_sweep(spec, retry_ctx=retry_ctx)
+
+        assert result.job_id == "10001"
+        assert result.checker_job_id == "10002"
+        assert captured_input["command"] == ["bash"]
+        script = captured_input["input"]
+
+        # The composed script contains both jobs chained together
+        assert "ARRAY_JOB_ID=$(sbatch --parsable" in script
+        assert "CHECKER_JOB_ID=$(sbatch --parsable" in script
+        assert "--dependency=afterany:$ARRAY_JOB_ID" in script
+
+        # The array script has the trial command (split across lines with \
+        assert "jernerics.runner" in script
+        assert "/work/dag.py" in script
+
+        # The checker script has the retry_checker invocation
+        assert "python -m jernerics.retry_checker" in script
+        assert "--context /cache/retry/ctx.json" in script
+        assert "--chain-depth 1" in script
+
+    def test_submit_sweep_without_retry_ctx_uses_sbatch_directly(self):
+        """Without retry_ctx, submit_sweep uses cd + sbatch --parsable."""
+        config = self._make_config()
+
+        class CapturingHost:
+            def run(self, command, **kwargs):
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="10001",
+                    stderr="",
+                )
+
+            def mkdir(self, path):
+                pass
+
+            def file_exists(self, path):
+                return False
+
+            def getmtime(self, path):
+                return None
+
+            def remove_file(self, path):
+                pass
+
+            def write_file(self, path, content):
+                pass
+
+        host = CapturingHost()
+        backend = SlurmBackend.from_config(config, host=host)
+
+        spec = SweepSpec(
+            dag_path=Path("dag.py"),
+            config_path=Path("config.py"),
+            study_name="study",
+            storage_url="/cache/optuna/study.journal",
+            n_trials=3,
+        )
+
+        result = backend.submit_sweep(spec)
+        assert result.job_id == "10001"
+        assert result.checker_job_id is None
+
+
+class TestComposeChainBashExecution:
+    """Test that _compose_chain produces valid bash that executes correctly."""
+
+    def test_composed_script_runs_in_bash(self, tmp_path):
+        """Run the composed script through bash with sbatch mocked as echo."""
+        mock_sbatch = tmp_path / "sbatch"
+        mock_sbatch.write_text("#!/usr/bin/env bash\necho 42")
+        mock_sbatch.chmod(0o755)
+
+        array_script = "#!/usr/bin/env bash\n#SBATCH --array=1-3\necho array"
+        checker_script = "#!/usr/bin/env bash\necho checker"
+        composed = _compose_chain(array_script, checker_script)
+
+        result = subprocess.run(
+            ["bash", "-c", composed],
+            capture_output=True,
+            text=True,
+            env={
+                **__import__("os").environ,
+                "PATH": f"{tmp_path}:{__import__('os').environ.get('PATH', '')}",
+            },
+        )
+
+        assert result.returncode == 0, (
+            f"bash failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        output = result.stdout.strip()
+        assert output == "42 42", f"Expected '42 42', got: {output}"
+
+    def test_heredoc_expansion_works(self, tmp_path):
+        """Verify $ARRAY_JOB_ID is available to the checker sbatch call."""
+        mock_sbatch = tmp_path / "sbatch"
+        # Second call gets --dependency flag with the captured ID
+        mock_sbatch.write_text(
+            "#!/usr/bin/env bash\n"
+            'if [[ "$*" == *"--dependency"* ]]; then\n'
+            '  echo "dep_$2"\n'
+            "else\n"
+            '  echo "100"\n'
+            "fi"
+        )
+        mock_sbatch.chmod(0o755)
+
+        composed = _compose_chain("echo array", "echo checker")
+
+        result = subprocess.run(
+            ["bash", "-c", composed],
+            capture_output=True,
+            text=True,
+            env={
+                **__import__("os").environ,
+                "PATH": f"{tmp_path}:{__import__('os').environ.get('PATH', '')}",
+            },
+        )
+
+        assert result.returncode == 0, (
+            f"bash failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        output = result.stdout.strip()
+        # First sbatch returns 100, second gets --dependency=afterany:100
+        assert output == "100 dep_--dependency=afterany:100", f"Got: {output}"

@@ -75,6 +75,9 @@ class BackendConfig:
     cpus: int = 4
     max_concurrent_jobs: int = 10
 
+    # Container
+    container_type: str = "apptainer"  # "apptainer" | "docker" | "none"
+
     # Pueue (future)
     parallel: int = 1
 
@@ -136,6 +139,7 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
         cpus=bc.get("cpus", 4),
         max_concurrent_jobs=bc.get("max_concurrent_jobs", 10),
         parallel=bc.get("parallel", 1),
+        container_type=bc.get("container_type", "apptainer"),
         auto_retry=bc.get("auto_retry", False),
         heartbeat_interval_s=bc.get("heartbeat_interval_s", 60),
         stale_after_s=bc.get("stale_after_s", 120),

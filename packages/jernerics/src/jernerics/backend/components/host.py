@@ -38,6 +38,37 @@ class LocalHost:
         Path(remote_path).write_text(content)
 
 
+class StdoutHost:
+    """Prints commands to stdout instead of executing them.
+
+    Used by retry_checker running inside a container — the composed bash
+    script is piped to bash on the login node via stdout.
+    """
+
+    def run(self, command: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
+        input_text = kwargs.get("input", "")
+        if input_text:
+            print(input_text)
+        return subprocess.CompletedProcess(
+            args=list(command), returncode=0, stdout="", stderr=""
+        )
+
+    def mkdir(self, remote_path: str) -> None:
+        pass
+
+    def file_exists(self, remote_path: str) -> bool:
+        return False
+
+    def getmtime(self, remote_path: str) -> float | None:
+        return None
+
+    def remove_file(self, remote_path: str) -> None:
+        pass
+
+    def write_file(self, remote_path: str, content: str) -> None:
+        pass
+
+
 class SSHHost(Host):
     def __init__(self, host: str):
         self.host = host
