@@ -10,6 +10,7 @@ class Host(Protocol):
     def file_exists(self, remote_path: str) -> bool: ...
     def getmtime(self, remote_path: str) -> float | None: ...
     def remove_file(self, remote_path: str) -> None: ...
+    def write_file(self, remote_path: str, content: str) -> None: ...
 
 
 class LocalHost:
@@ -32,6 +33,9 @@ class LocalHost:
         path = Path(remote_path)
         if path.is_file():
             path.unlink()
+
+    def write_file(self, remote_path: str, content: str) -> None:
+        Path(remote_path).write_text(content)
 
 
 class SSHHost(Host):
@@ -63,3 +67,11 @@ class SSHHost(Host):
 
     def remove_file(self, remote_path: str) -> None:
         self.run(["rm", "-f", remote_path], check=True)
+
+    def write_file(self, remote_path: str, content: str) -> None:
+        self.run(
+            [f"cat > {remote_path}"],
+            input=content,
+            text=True,
+            check=True,
+        )

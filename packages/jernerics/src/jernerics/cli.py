@@ -32,6 +32,7 @@ from .config import (
     load_tracking_server,
 )
 from .container.templates import generate_container_def, list_templates
+from .retry import RetryContext
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
 
@@ -358,7 +359,40 @@ def run_remote(
             n_trials=n_trials,
         )
 
-        print(f"\nJob submitted: {job_id}")
+        backend_config = load_backend_config(backend_name, project_dir)
+        if backend_config.auto_retry:
+            retry_dir = f"{cache_host}/retry"
+            backend.host.mkdir(retry_dir)
+            ctx_path = f"{retry_dir}/{study_name}_ctx.json"
+            ctx = RetryContext(
+                study_name=study_name,
+                backend_name=backend_name,
+                dag_relpath=dag_relpath,
+                config_relpath=config_relpath,
+                cli_overrides=cli_overrides,
+            )
+            backend.host.write_file(ctx_path, ctx.to_json())
+
+            checker_job_id = backend.submit_checker(
+                ctx_path=ctx_path,
+                chain_depth=0,
+                dependency_job_id=job_id,
+                project_name=project_name,
+            )
+
+            _save_job_meta(
+                project_dir=project_dir,
+                job_id=checker_job_id,
+                output_pattern=f"{cache_host}/logs/checker_%j.out",
+                error_pattern=f"{cache_host}/logs/checker_%j.err",
+                remote_dir=backend.remote_dir,
+                n_trials=0,
+            )
+
+            print(f"\nArray: {job_id}, Checker: {checker_job_id}")
+        else:
+            print(f"\nJob submitted: {job_id}")
+
         print("\nMonitor progress:")
         print(f"  jernerics logs --backend {backend_name} {job_id} --follow")
     except RuntimeError as e:
