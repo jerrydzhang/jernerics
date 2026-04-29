@@ -6,6 +6,7 @@ from jernerics.backend.components.container import Apptainer
 from jernerics.backend.components.host import SSHHost
 from jernerics.backend.components.project_sync import FileSyncer
 from jernerics.backend.models import JobInfo, SweepSpec
+from jernerics.retry import generate_sweep_script
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
 
@@ -216,49 +217,35 @@ class SlurmBackend:
         slurm_overrides: dict[str, str],
     ) -> str:
         cache_host = self._cache_host(project_name)
-
-        slurm_opts = {
-            "partition": self.partition,
-            "time": self.time,
-            "mem": self.mem,
-            **slurm_overrides,
-        }
-        slurm_opts: dict[str, str] = {
-            k: v for k, v in slurm_opts.items() if v is not None
-        }
-
-        output_pattern = str(slurm_opts.get("output", f"{cache_host}/logs/%A_%a.out"))
-        error_pattern = str(slurm_opts.get("error", f"{cache_host}/logs/%A_%a.err"))
-        slurm_opts["output"] = self._expand_path(output_pattern)
-        slurm_opts["error"] = self._expand_path(error_pattern)
-
-        lines = [
-            "#!/usr/bin/env bash",
-            "#SBATCH --parsable",
-            f"#SBATCH --array={array_spec}",
-        ]
-        for key, value in slurm_opts.items():
-            lines.append(f"#SBATCH --{key}={value}")
-        lines.append("")
-
-        output_dir = self._resolve_output_dir(str(slurm_opts["output"]))
-        lines.append(f"mkdir -p {output_dir}")
-        lines.append(f"cd {self.remote_dir}")
-        lines.append("REMOTE_DIR=$(cd . && pwd)")
-        lines.append("export JERNERICS_HPC=1")
-
         bind_args = self._bind_args(cache_host)
         wrapped_setup = self.container.wrap(setup_command, bind_args)
         wrapped_trial = self.container.wrap(trial_command, bind_args)
 
-        lines.append("")
-        lines.append(f"mkdir -p {cache_host}/optuna")
-        lines.append(f"flock {cache_host}/optuna/init.lock {wrapped_setup}")
-        lines.append(f"mkdir -p {cache_host}/tracking/{study_name}")
-        lines.append("")
-        lines.append(wrapped_trial)
+        slurm_opts = {**slurm_overrides}
+        output_pattern = slurm_opts.pop("output", None)
+        error_pattern = slurm_opts.pop("error", None)
+        if output_pattern:
+            slurm_opts["output"] = self._expand_path(output_pattern)
+        if error_pattern:
+            slurm_opts["error"] = self._expand_path(error_pattern)
 
-        return "\n".join(lines)
+        output_dir = self._resolve_output_dir(
+            slurm_opts.get("output", f"{cache_host}/logs/%A_%a.out")
+        )
+
+        return generate_sweep_script(
+            array_spec=array_spec,
+            study_name=study_name,
+            cache_host=cache_host,
+            remote_dir=self.remote_dir,
+            partition=self.partition,
+            time=self.time,
+            mem=self.mem,
+            slurm_overrides=slurm_opts,
+            wrapped_setup=wrapped_setup,
+            wrapped_trial=wrapped_trial,
+            output_dir=output_dir,
+        )
 
     def _cache_path(self) -> str:
         if self.cache_dir:

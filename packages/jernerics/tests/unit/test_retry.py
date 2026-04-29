@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from jernerics.retry import plan_retry
+from jernerics.retry import generate_checker_script, generate_sweep_script, plan_retry
 from optuna.trial import FrozenTrial, TrialState
 
 
@@ -323,3 +323,151 @@ class TestPlanRetryEdgeCases:
         # 3 - 2 complete - 1 running = 0
         assert plan.is_complete
         assert plan.fresh_needed == 0
+
+
+class TestGenerateSweepScript:
+    def test_basic_structure(self):
+        script = generate_sweep_script(
+            array_spec="1-50%4",
+            study_name="my_study",
+            cache_host="/cache/proj",
+            remote_dir="~/projects/proj",
+            partition="priority",
+            time="1:00:00",
+            mem="16G",
+            slurm_overrides={},
+            wrapped_setup="apptainer exec ... setup",
+            wrapped_trial="apptainer exec ... trial",
+            output_dir="/cache/proj/logs",
+        )
+        lines = script.splitlines()
+        assert lines[0] == "#!/usr/bin/env bash"
+        assert "#SBATCH --parsable" in script
+        assert "#SBATCH --array=1-50%4" in script
+        assert "#SBATCH --partition=priority" in script
+        assert "#SBATCH --time=1:00:00" in script
+        assert "#SBATCH --mem=16G" in script
+
+    def test_default_output_error_patterns(self):
+        script = generate_sweep_script(
+            array_spec="1-10",
+            study_name="s",
+            cache_host="/cache/p",
+            remote_dir="~/p",
+            partition="p",
+            time="1:00:00",
+            mem="16G",
+            slurm_overrides={},
+            wrapped_setup="setup",
+            wrapped_trial="trial",
+            output_dir="/cache/p/logs",
+        )
+        assert "#SBATCH --output=/cache/p/logs/%A_%a.out" in script
+        assert "#SBATCH --error=/cache/p/logs/%A_%a.err" in script
+
+    def test_custom_output_error_patterns(self):
+        script = generate_sweep_script(
+            array_spec="1-10",
+            study_name="s",
+            cache_host="/cache",
+            remote_dir="~/p",
+            partition="p",
+            time="1:00:00",
+            mem="16G",
+            slurm_overrides={"output": "/custom/%j.out", "error": "/custom/%j.err"},
+            wrapped_setup="setup",
+            wrapped_trial="trial",
+            output_dir="/custom",
+        )
+        assert "#SBATCH --output=/custom/%j.out" in script
+        assert "#SBATCH --error=/custom/%j.err" in script
+
+    def test_tilde_expanded(self):
+        script = generate_sweep_script(
+            array_spec="1-10",
+            study_name="s",
+            cache_host="~/cache",
+            remote_dir="~/p",
+            partition="p",
+            time="1:00:00",
+            mem="16G",
+            slurm_overrides={},
+            wrapped_setup="setup",
+            wrapped_trial="trial",
+            output_dir="$HOME/cache/logs",
+        )
+        assert "~" not in script
+        assert "$HOME/cache" in script
+
+    def test_setup_and_trial_commands_present(self):
+        script = generate_sweep_script(
+            array_spec="1-10",
+            study_name="s",
+            cache_host="/cache",
+            remote_dir="~/p",
+            partition="p",
+            time="1:00:00",
+            mem="16G",
+            slurm_overrides={},
+            wrapped_setup="apptainer exec ... setup_cmd",
+            wrapped_trial="apptainer exec ... trial_cmd",
+            output_dir="/cache/logs",
+        )
+        assert "flock /cache/optuna/init.lock apptainer exec ... setup_cmd" in script
+        assert "apptainer exec ... trial_cmd" in script
+
+    def test_none_time_excluded(self):
+        script = generate_sweep_script(
+            array_spec="1-10",
+            study_name="s",
+            cache_host="/cache",
+            remote_dir="~/p",
+            partition="p",
+            time=None,
+            mem="16G",
+            slurm_overrides={},
+            wrapped_setup="setup",
+            wrapped_trial="trial",
+            output_dir="/cache/logs",
+        )
+        assert "#SBATCH --time=" not in script
+
+
+class TestGenerateCheckerScript:
+    def test_basic_structure(self):
+        script = generate_checker_script(
+            cache_host="/cache",
+            remote_dir="~/projects/p",
+            partition="priority",
+            wrapped_checker="apptainer exec ... checker_cmd",
+            dependency_job_id="10001",
+        )
+        assert "#!/usr/bin/env bash" in script
+        assert "#SBATCH --parsable" in script
+        assert "#SBATCH --partition=priority" in script
+        assert "#SBATCH --time=0:10:00" in script
+        assert "#SBATCH --mem=1G" in script
+        assert "#SBATCH --dependency=afterany:10001" in script
+        assert "apptainer exec ... checker_cmd" in script
+
+    def test_output_patterns(self):
+        script = generate_checker_script(
+            cache_host="/cache",
+            remote_dir="~/p",
+            partition="p",
+            wrapped_checker="checker",
+            dependency_job_id="42",
+        )
+        assert "#SBATCH --output=/cache/logs/checker_%j.out" in script
+        assert "#SBATCH --error=/cache/logs/checker_%j.err" in script
+
+    def test_tilde_expanded(self):
+        script = generate_checker_script(
+            cache_host="~/cache",
+            remote_dir="~/p",
+            partition="p",
+            wrapped_checker="checker",
+            dependency_job_id="42",
+        )
+        assert "~" not in script
+        assert "$HOME/cache" in script

@@ -150,7 +150,7 @@ class TestGenerateSweepScript:
             project_name="proj",
             slurm_overrides={},
         )
-        assert "cd ~/projects/proj" in script
+        assert "cd $HOME/projects/proj" in script
         assert "REMOTE_DIR=$(cd . && pwd)" in script
         assert "export JERNERICS_HPC=1" in script
 

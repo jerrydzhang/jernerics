@@ -1,3 +1,5 @@
+import json
+import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -11,6 +13,23 @@ class RetryPlan:
     total_array_size: int
     is_complete: bool
     retry_counts: dict[int, int] = field(default_factory=dict)
+
+
+@dataclass
+class RetryContext:
+    study_name: str
+    backend_name: str
+    dag_relpath: str
+    config_relpath: str
+    cli_overrides: dict[str, str] = field(default_factory=dict)
+
+    def to_json(self) -> str:
+        return json.dumps(self.__dict__, indent=2)
+
+    @classmethod
+    def from_json(cls, text: str) -> "RetryContext":
+        data = json.loads(text)
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 def plan_retry(
@@ -67,3 +86,89 @@ def plan_retry(
         is_complete=is_complete,
         retry_counts=updated_ledger,
     )
+
+
+def _expand_path(p: str) -> str:
+    if p.startswith("~"):
+        return "$HOME" + p[1:]
+    return p
+
+
+def generate_sweep_script(
+    *,
+    array_spec: str,
+    study_name: str,
+    cache_host: str,
+    remote_dir: str,
+    partition: str,
+    time: str | None,
+    mem: str,
+    slurm_overrides: dict[str, str],
+    wrapped_setup: str,
+    wrapped_trial: str,
+    output_dir: str,
+) -> str:
+    cache_host = _expand_path(cache_host)
+    remote_dir = _expand_path(remote_dir)
+    slurm_opts: dict[str, str] = {
+        k: v
+        for k, v in {
+            "partition": partition,
+            "time": time,
+            "mem": mem,
+            **slurm_overrides,
+        }.items()
+        if v is not None
+    }
+
+    if "output" not in slurm_opts:
+        slurm_opts["output"] = f"{cache_host}/logs/%A_%a.out"
+    if "error" not in slurm_opts:
+        slurm_opts["error"] = f"{cache_host}/logs/%A_%a.err"
+
+    lines = [
+        "#!/usr/bin/env bash",
+        "#SBATCH --parsable",
+        f"#SBATCH --array={array_spec}",
+    ]
+    for key, value in slurm_opts.items():
+        lines.append(f"#SBATCH --{key}={value}")
+    lines.append("")
+
+    lines.append(f"mkdir -p {output_dir}")
+    lines.append(f"cd {remote_dir}")
+    lines.append("REMOTE_DIR=$(cd . && pwd)")
+    lines.append("export JERNERICS_HPC=1")
+
+    lines.append("")
+    lines.append(f"mkdir -p {cache_host}/optuna")
+    lines.append(f"flock {cache_host}/optuna/init.lock {wrapped_setup}")
+    lines.append(f"mkdir -p {cache_host}/tracking/{study_name}")
+    lines.append("")
+    lines.append(wrapped_trial)
+
+    return "\n".join(lines)
+
+
+def generate_checker_script(
+    *,
+    cache_host: str,
+    remote_dir: str,
+    partition: str,
+    wrapped_checker: str,
+    dependency_job_id: str,
+) -> str:
+    cache_host = _expand_path(cache_host)
+    remote_dir = _expand_path(remote_dir)
+    return textwrap.dedent(f"""\
+        #!/usr/bin/env bash
+        #SBATCH --parsable
+        #SBATCH --partition={partition}
+        #SBATCH --time=0:10:00
+        #SBATCH --mem=1G
+        #SBATCH --output={cache_host}/logs/checker_%j.out
+        #SBATCH --error={cache_host}/logs/checker_%j.err
+        #SBATCH --dependency=afterany:{dependency_job_id}
+
+        cd {remote_dir}
+        {wrapped_checker}""")
