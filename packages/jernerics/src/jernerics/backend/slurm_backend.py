@@ -207,6 +207,45 @@ class SlurmBackend:
             raise RuntimeError(f"Failed to submit job: {result.stderr.strip()}")
         return result.stdout.strip()
 
+    def submit_checker(
+        self,
+        ctx_path: str,
+        chain_depth: int,
+        dependency_job_id: str,
+        project_name: str,
+        partition: str | None = None,
+    ) -> str:
+        cache_host = self._cache_host(project_name)
+        bind_args = self._bind_args(cache_host)
+        checker_cmd = (
+            f"python -m jernerics.retry_checker"
+            f" --context {ctx_path}"
+            f" --chain-depth {chain_depth}"
+            f" 2>{cache_host}/logs/checker_inner_%j.err"
+        )
+        wrapped_checker = self.container.wrap(checker_cmd, bind_args)
+
+        from jernerics.retry import generate_checker_script
+
+        script = generate_checker_script(
+            cache_host=cache_host,
+            remote_dir=self.remote_dir,
+            partition=partition or self.partition,
+            wrapped_checker=f"{wrapped_checker} | bash",
+            dependency_job_id=dependency_job_id,
+        )
+
+        result = self.host.run(
+            [f"cd {self.remote_dir} && sbatch --parsable"],
+            input=script,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to submit checker job: {result.stderr.strip()}")
+        return result.stdout.strip()
+
     def _generate_sweep_script(
         self,
         setup_command: str,
