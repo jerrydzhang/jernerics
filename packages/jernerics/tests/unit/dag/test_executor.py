@@ -1,7 +1,6 @@
 import os
 import time
 import warnings
-from pathlib import Path
 
 from hypothesis import given
 from hypothesis import strategies as st
@@ -12,7 +11,6 @@ from jernerics.dag.executor import (
     _run_task,
     execute_dag,
 )
-from jernerics.dag.state import RunState, TaskStatus
 from jernerics.dag.task import task
 
 
@@ -121,84 +119,6 @@ class TestExecuteDAG:
         assert execution_order == ["first", "second"]
         assert results["first"].value == 1
         assert results["second"].value == 2
-
-    def test_execute_with_state(self, tmp_path):
-        @task
-        def my_task(config):
-            return 42
-
-        tasks = {"my_task": my_task}
-        state = RunState.create("test_dag.py", 0, tmp_path)
-        state.init_task("my_task")
-
-        results = execute_dag(tasks, {}, state=state)
-
-        assert results["my_task"].value == 42
-        assert state.tasks["my_task"].status == TaskStatus.COMPLETED
-        assert state.tasks["my_task"].output == 42
-
-    def test_execute_skips_completed_tasks(self):
-        call_count = 0
-
-        @task
-        def expensive(config):
-            nonlocal call_count
-            call_count += 1
-            return 999
-
-        tasks = {"expensive": expensive}
-        state = RunState.create("test_dag.py", 0, Path(".jernerics"))
-        state.init_task("expensive")
-        state.update_task("expensive", TaskStatus.COMPLETED, output=42)
-
-        results = execute_dag(tasks, {}, state=state)
-
-        assert call_count == 0
-        assert results["expensive"].value == 42
-
-    def test_execute_reruns_non_persisted_tasks(self, tmp_path):
-        import socket
-
-        call_count = 0
-
-        @task
-        def non_serializable(config):
-            nonlocal call_count
-            call_count += 1
-            sock = socket.socket()
-            return sock
-
-        tasks = {"non_serializable": non_serializable}
-        state = RunState.create("test_dag.py", 0, tmp_path)
-        state.init_task("non_serializable")
-
-        sock = socket.socket()
-        try:
-            state.update_task("non_serializable", TaskStatus.COMPLETED, output=sock)
-            state.tasks["non_serializable"].persisted = False
-
-            results = execute_dag(tasks, {}, state=state)
-
-            assert call_count == 1
-        finally:
-            sock.close()
-
-    def test_execute_records_failures(self, tmp_path):
-        @task
-        def failing(config):
-            raise ValueError("boom")
-
-        tasks = {"failing": failing}
-        state = RunState.create("test_dag.py", 0, tmp_path)
-        state.init_task("failing")
-
-        results = execute_dag(tasks, {}, state=state)
-
-        assert results["failing"].is_error
-        assert isinstance(results["failing"].error, ValueError)
-        assert state.tasks["failing"].status == TaskStatus.FAILED
-        assert state.tasks["failing"].error is not None
-        assert "boom" in state.tasks["failing"].error
 
     def test_execute_complex_dag(self):
         @task
@@ -375,94 +295,16 @@ class TestSyncRunner:
         assert order == ["first", "second"]
         assert results["second"].value == 2
 
-    def test_serial_executor_with_state(self, tmp_path):
-        @task
-        def my_task(config):
-            return 42
-
-        tasks = {"my_task": my_task}
-        state = RunState.create("test_dag.py", 0, tmp_path)
-        state.init_task("my_task")
-
-        results = execute_dag(tasks, {}, state=state, runner=SyncRunner())
-
-        assert results["my_task"].value == 42
-        assert state.tasks["my_task"].status == TaskStatus.COMPLETED
-
-    def test_serial_executor_skips_persisted(self):
-        call_count = 0
-
-        @task
-        def cached(config):
-            nonlocal call_count
-            call_count += 1
-            return 999
-
-        tasks = {"cached": cached}
-        state = RunState.create("test_dag.py", 0, Path(".jernerics"))
-        state.init_task("cached")
-        state.update_task("cached", TaskStatus.COMPLETED, output=42)
-
-        results = execute_dag(tasks, {}, state=state, runner=SyncRunner())
-
-        assert call_count == 0
-        assert results["cached"].value == 42
-
-    def test_serial_executor_handles_failure(self, tmp_path):
+    def test_serial_executor_handles_failure(self):
         @task
         def failing(config):
             raise ValueError("test error")
 
         tasks = {"failing": failing}
-        state = RunState.create("test_dag.py", 0, tmp_path)
-        state.init_task("failing")
-
-        results = execute_dag(tasks, {}, state=state, runner=SyncRunner())
+        results = execute_dag(tasks, {}, runner=SyncRunner())
 
         assert results["failing"].is_error
         assert isinstance(results["failing"].error, ValueError)
-        assert state.tasks["failing"].status == TaskStatus.FAILED
-
-    def test_serial_executor_upstream_failure(self, tmp_path):
-        @task
-        def failing(config):
-            raise RuntimeError("boom")
-
-        @task(depends_on=[failing])
-        def dependent(failing, config):
-            return "should not run"
-
-        tasks = {"failing": failing, "dependent": dependent}
-        state = RunState.create("test_dag.py", 0, tmp_path)
-        state.init_task("failing")
-        state.init_task("dependent")
-
-        results = execute_dag(tasks, {}, state=state, runner=SyncRunner())
-
-        assert results["dependent"].is_error
-        assert state.tasks["dependent"].status == TaskStatus.FAILED
-
-
-class TestStateReset:
-    def test_failed_tasks_reset_on_rerun(self, tmp_path):
-        call_count = 0
-
-        @task
-        def my_task(config):
-            nonlocal call_count
-            call_count += 1
-            return 42
-
-        tasks = {"my_task": my_task}
-        state = RunState.create("test_dag.py", 0, tmp_path)
-        state.init_task("my_task")
-        state.update_task("my_task", TaskStatus.FAILED, error="previous error")
-
-        results = execute_dag(tasks, {}, state=state)
-
-        assert call_count == 1
-        assert results["my_task"].value == 42
-        assert state.tasks["my_task"].status == TaskStatus.COMPLETED
 
 
 class TestConfigParameterWarning:

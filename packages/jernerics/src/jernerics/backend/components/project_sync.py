@@ -10,7 +10,6 @@ DEFAULT_SCP_TIMEOUT = 300
 
 DEFAULT_EXCLUDES = [
     ".git/",
-    ".jernerics/",
     "__pycache__/",
     "*.pyc",
     "*.sif",

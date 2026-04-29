@@ -6,13 +6,11 @@ import warnings
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from graphlib import TopologicalSorter
 from typing import Any, Protocol, cast
 
 from jernerics.tracking import NullTracker, Tracker
 
-from .state import RunState, TaskStatus
 from .task import Task
 
 
@@ -91,10 +89,6 @@ class ThreadPoolRunner:
         self._executor.shutdown(wait=True)
 
 
-def _get_timestamp() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def _get_default_max_workers() -> int:
     return os.cpu_count() or 4
 
@@ -103,7 +97,6 @@ def execute_dag(
     tasks: dict[str, Task],
     config: dict[str, Any],
     tracker: Tracker | None = None,
-    state: RunState | None = None,
     runner: Runner | None = None,
 ) -> dict[str, TaskResult]:
     if runner is None:
@@ -121,12 +114,6 @@ def execute_dag(
                 )
         graph[task_name] = dep_names
 
-    # retry failed tasks
-    if state:
-        for task_name, task_state in state.tasks.items():
-            if task_state.status == TaskStatus.FAILED:
-                state.update_task(task_name, TaskStatus.PENDING)
-
     sorter = TopologicalSorter(graph)
     sorter.prepare()
 
@@ -143,17 +130,6 @@ def execute_dag(
             for task_name in ready_task_names:
                 task = tasks[task_name]
 
-                # state persistence
-                if state and task_name in state.tasks:
-                    task_state = state.tasks[task_name]
-                    if (
-                        task_state.status == TaskStatus.COMPLETED
-                        and task_state.persisted
-                    ):
-                        results[task_name] = TaskResult(value=task_state.output)
-                        sorter.done(task_name)
-                        continue
-
                 # check upstream failures
                 if any(results[dep.name].is_error for dep in task.depends_on):
                     error_msg = (
@@ -161,17 +137,7 @@ def execute_dag(
                         " one or more dependencies failed."
                     )
                     results[task_name] = TaskResult(error=Exception(error_msg))
-
-                    if state:
-                        state.update_task(
-                            task_name,
-                            TaskStatus.FAILED,
-                            error=error_msg,
-                        )
-                        state.to_json()
-
                     sorter.done(task_name)
-
                     continue
 
                 inputs = {
@@ -179,14 +145,6 @@ def execute_dag(
                     for dep in task.depends_on
                     if not results[dep.name].is_error
                 }
-
-                if state:
-                    state.update_task(
-                        task_name,
-                        TaskStatus.RUNNING,
-                        started_at=_get_timestamp(),
-                    )
-                    state.to_json()
 
                 future = runner.submit(_run_task, task, inputs, config, tracker)
                 futures[future] = task_name
@@ -196,29 +154,7 @@ def execute_dag(
 
             for future, task_result in runner.collect(futures):
                 task_name = futures.pop(future)
-
                 results[task_name] = task_result
-
-                if state:
-                    state.update_task(
-                        task_name,
-                        (
-                            TaskStatus.COMPLETED
-                            if not task_result.is_error
-                            else TaskStatus.FAILED
-                        ),
-                        completed_at=_get_timestamp(),
-                        output=(
-                            task_result.value if not task_result.is_error else None
-                        ),
-                        error=(
-                            task_result.error_traceback
-                            if task_result.is_error
-                            else None
-                        ),
-                    )
-                    state.to_json()
-
                 sorter.done(task_name)
 
     except Exception:

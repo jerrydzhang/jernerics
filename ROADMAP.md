@@ -233,12 +233,20 @@ chain_depth_cap = 20
 - [ ] Explore structlog for structured logging
 - [x] ~~`DAG.run()` unwrap decision~~ — returns `TaskResult` objects, indexable like dicts
 - [x] ~~Delete `old_executor.py`~~ — already done
-- [ ] Refactor DAG `resume()` — never used in production, needs review. Currently doesn't pass `tracker` to `execute_dag`.
+- [x] ~~Refactor DAG `resume()`~~ — Removed DAG resume, provenance, RunState/TaskState/TaskStatus entirely. SweepMetaEvent in gRPC tracking replaces provenance. DAG resume is a user-space concern.
+- [x] ~~logs scoped per project~~ — All local state now lives in `~/.cache/jernerics/<project>/`. Remote cache defaults to `$HOME/.cache/jernerics/<project>/` (XDG-compliant). Custom `cache_dir` auto-appends `/<project>`. `.jernerics/` directory eliminated from project root. Job metadata moved to cache dir.
+- [x] ~~Clean up container config~~ — Removed dead `DEFAULT_CONTAINER_SIF`, `DEFAULT_CONTAINER_TAR`, `find_container`, `NoContainerFound`.
 - [ ] Write new integration tests reflecting real usage patterns
 - [ ] Add MinIO artifact storage
 - [ ] Build core marimo dashboard
 - [ ] Server deploy: NixOS systemd service, health check, logging
 - [ ] Server query API or marimo dashboard for inspecting DuckDB remotely
 - [ ] the commands that have the --follow flag such as "jernerics logs --backend hpc 24200529 --follow" should automatically exit when a job finishes (currently they have to be manually killed with Ctrl+C)
-- [ ] logs should be scoped per project currently they get put a directory that buckets all projects together, this makes cleaning up old logs difficult since you have to know which files belong to which project and makes manual inspection of logs more difficult since you have to open files to see which project they belong to. A better structure would be something like: `~/.cache/jernerics/<project_name>/logs/<job_id>.log` or potentually this even means that the cache dir should be `~/.cache/jernerics/<project_name>/` and then all the other files (optuna db, tracking pb files, etc) should also be scoped under the project name. This would make it much easier to manage multiple projects on the same machine and would make it easier to clean up old data when a project is finished since you could just delete the entire project directory. It would also make it easier to inspect logs since you could just look in the project directory for the logs instead of having to open files to see which project they belong to.
 - [ ] SearchSweep is tightly coupled with the slurm currently since it has a slurm_overrides field. Instead it seems that it should be a more generic dict to pass overrides and then let each backend translate into the proper format for that backend.
+
+# Code smell
+- slurm_backend.py defaults to:
+if host is None:
+    host = StdoutHost()
+we should really enforce that a host is always passed. The StdoutHost must be explicitly passed not as a default since that is confusing to the end user.
+

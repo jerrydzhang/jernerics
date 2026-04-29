@@ -94,8 +94,6 @@ def run_trial(
         try:
             results = dag.run(
                 config,
-                config_index=trial.number,
-                config_path=config_file,
                 tracker=tracker,
                 runner=sweep.runner,
             )

@@ -98,10 +98,8 @@ class TestGenerateSweepScript:
             project_name="proj",
             slurm_overrides={},
         )
-        assert (
-            "#SBATCH --output=$HOME/projects/proj/.jernerics/logs/%A_%a.out" in script
-        )
-        assert "#SBATCH --error=$HOME/projects/proj/.jernerics/logs/%A_%a.err" in script
+        assert "#SBATCH --output=$HOME/.cache/jernerics/proj/logs/%A_%a.out" in script
+        assert "#SBATCH --error=$HOME/.cache/jernerics/proj/logs/%A_%a.err" in script
 
     def test_output_error_patterns_with_cache_dir(self):
         backend = _make_backend(
@@ -231,9 +229,7 @@ class TestGenerateSweepScript:
             project_name="proj",
             slurm_overrides={},
         )
-        assert (
-            "mkdir -p $HOME/projects/myproject/.jernerics/tracking/my_study" in script
-        )
+        assert "mkdir -p $HOME/.cache/jernerics/proj/tracking/my_study" in script
 
     def test_optuna_directory_created(self):
         backend = _make_backend()
@@ -245,7 +241,7 @@ class TestGenerateSweepScript:
             project_name="proj",
             slurm_overrides={},
         )
-        assert "mkdir -p $HOME/projects/myproject/.jernerics/optuna" in script
+        assert "mkdir -p $HOME/.cache/jernerics/proj/optuna" in script
 
     def test_flock_guards_setup(self):
         backend = _make_backend()

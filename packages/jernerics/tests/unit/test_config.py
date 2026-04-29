@@ -4,9 +4,7 @@ from jernerics.config import (
     BackendConfig,
     ConfigNotFound,
     ExitCode,
-    NoContainerFound,
     SweepConfig,
-    find_container,
     find_pyproject_dir,
     get_script_path,
     is_tty,
@@ -221,43 +219,6 @@ class TestFindPyprojectDir:
 
         result = find_pyproject_dir(subdir)
         assert result == tmp_project
-
-
-class TestFindContainer:
-    def test_find_container_explicit(self, tmp_path):
-        container = tmp_path / "container.sif"
-        container.write_text("")
-
-        result = find_container(str(container), False, str(tmp_path))
-        assert result == str(container)
-
-    def test_find_container_explicit_not_found(self, tmp_path):
-        with pytest.raises(NoContainerFound, match="Container not found"):
-            find_container(str(tmp_path / "missing.sif"), False, str(tmp_path))
-
-    def test_find_container_no_container_flag(self, tmp_path):
-        result = find_container(None, True, str(tmp_path))
-        assert result is None
-
-    def test_find_container_default_sif(self, tmp_path):
-        sif_path = tmp_path / ".jernerics" / "container.sif"
-        sif_path.parent.mkdir(parents=True)
-        sif_path.write_text("")
-
-        result = find_container(None, False, str(tmp_path))
-        assert result == str(sif_path)
-
-    def test_find_container_default_tar(self, tmp_path):
-        tar_path = tmp_path / ".jernerics" / "container.tar.gz"
-        tar_path.parent.mkdir(parents=True)
-        tar_path.write_text("")
-
-        result = find_container(None, False, str(tmp_path))
-        assert result == f"docker-archive://{tar_path}"
-
-    def test_find_container_not_found(self, tmp_path):
-        with pytest.raises(NoContainerFound, match="No container found"):
-            find_container(None, False, str(tmp_path))
 
 
 class TestLoadConfig:

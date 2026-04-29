@@ -136,7 +136,7 @@ class SlurmBackend:
             cache = self.cache_dir.replace("{project_name}", project_name)
             cache = cache.replace("{project-name}", project_name)
             return cache.replace("~", "$HOME")
-        return f"{self.remote_dir}/.jernerics".replace("~", "$HOME")
+        return "$HOME/.cache/jernerics/" + project_name
 
     def _bind_args(self, cache_host: str) -> list[str]:
         return [
@@ -408,17 +408,15 @@ class SlurmBackend:
             output_dir=output_dir,
         )
 
-    def _cache_path(self) -> str:
-        if self.cache_dir:
-            return self.cache_dir.replace("~", "$HOME")
-        return f"{self.remote_dir}/.jernerics".replace("~", "$HOME")
+    def _cache_path(self, project_name: str) -> str:
+        return self._cache_host(project_name)
 
-    def submit_build_job(self) -> str:
+    def submit_build_job(self, project_name: str) -> str:
         partition = _validate_slurm_value(self.partition, "partition")
         time_val = _validate_slurm_value(self.time or "1:00:00", "time")
         mem = _validate_slurm_value(self.mem, "mem")
         cpus = _validate_slurm_value(str(self.cpus), "cpus")
-        output_dir = f"{self._cache_path()}/logs"
+        output_dir = f"{self._cache_path(project_name)}/logs"
 
         script = f"""#!/bin/bash
 #SBATCH --job-name=container-build

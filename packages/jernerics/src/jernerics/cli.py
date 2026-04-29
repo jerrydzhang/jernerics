@@ -32,6 +32,7 @@ from .config import (
     load_tracking_server,
 )
 from .container.templates import generate_container_def, list_templates
+from .paths import cache_dir
 from .retry import RetryContext
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
@@ -63,7 +64,7 @@ def _resolve_cache_host(config: BackendConfig, project_name: str) -> str:
         cache = config.cache_dir.replace("{project_name}", project_name)
         cache = cache.replace("{project-name}", project_name)
         return cache.replace("~", "$HOME")
-    return f"{_resolve_remote_dir(config, project_name)}/.jernerics"
+    return "$HOME/.cache/jernerics/" + project_name
 
 
 def _build_storage_path(cache_path: str, study_name: str) -> str:
@@ -71,7 +72,6 @@ def _build_storage_path(cache_path: str, study_name: str) -> str:
 
 
 def _save_job_meta(
-    project_dir: Path,
     job_id: str,
     output_pattern: str,
     error_pattern: str,
@@ -85,7 +85,7 @@ def _save_job_meta(
         "remote_dir": remote_dir,
         "n_trials": n_trials,
     }
-    meta_dir = project_dir / ".jernerics" / "jobs"
+    meta_dir = cache_dir() / "jobs"
     meta_dir.mkdir(parents=True, exist_ok=True)
     meta_file = meta_dir / f"{job_id}.json"
     meta_file.write_text(json.dumps(job_meta, indent=2))
@@ -163,8 +163,6 @@ def run_local(
     project_dir = find_pyproject_dir()
     project_name = get_project_name(project_dir) if project_dir else None
     tracking_server = load_tracking_server(project_dir) if project_dir else None
-
-    from .paths import cache_dir
 
     project_cache = cache_dir()
     optuna_dir = project_cache / "optuna"
@@ -333,15 +331,10 @@ def run_remote(
     backend.syncer.sync_project(project_dir)
 
     print("[2/4] Ensuring cache directory exists...")
-    if backend.cache_dir:
-        cache_host_path = _resolve_cache_host(
-            load_backend_config(backend_name, project_dir), project_name
-        )
-        backend.host.mkdir(f"{cache_host_path}/optuna")
-    else:
-        backend.host.mkdir(f"{backend.remote_dir}/.jernerics/optuna")
-        backend.host.mkdir(f"{backend.remote_dir}/.jernerics/logs")
-        print("[3/4] (Using remote_dir/.jernerics as cache)")
+    cache_host = _resolve_cache_host(
+        load_backend_config(backend_name, project_dir), project_name
+    )
+    backend.host.mkdir(f"{cache_host}/optuna")
 
     if not backend.syncer.container_exists():
         print(
@@ -375,7 +368,6 @@ def run_remote(
             )
 
             _save_job_meta(
-                project_dir=project_dir,
                 job_id=result.job_id,
                 output_pattern=str(output_pattern),
                 error_pattern=str(error_pattern),
@@ -384,7 +376,6 @@ def run_remote(
             )
             if result.checker_job_id:
                 _save_job_meta(
-                    project_dir=project_dir,
                     job_id=result.checker_job_id,
                     output_pattern=f"{cache_host}/logs/checker_%j.out",
                     error_pattern=f"{cache_host}/logs/checker_%j.err",
@@ -398,7 +389,6 @@ def run_remote(
             result = backend.submit_sweep(spec, direction=sweep.direction)
 
             _save_job_meta(
-                project_dir=project_dir,
                 job_id=result.job_id,
                 output_pattern=str(output_pattern),
                 error_pattern=str(error_pattern),
@@ -474,17 +464,17 @@ def build(
     backend.syncer.sync_project(project_path)
 
     print("[2/3] Creating logs directory...")
-    backend.host.mkdir(f"{backend._cache_path()}/logs")
+    project_name = get_project_name(project_path)
+    backend.host.mkdir(f"{backend._cache_path(project_name)}/logs")
 
     print("[3/3] Submitting build job...")
     try:
-        job_id = backend.submit_build_job()
+        job_id = backend.submit_build_job(project_name)
 
         _save_job_meta(
-            project_dir=project_path,
             job_id=job_id,
-            output_pattern=f"{backend._cache_path()}/logs/build_%j.out",
-            error_pattern=f"{backend._cache_path()}/logs/build_%j.err",
+            output_pattern=f"{backend._cache_path(project_name)}/logs/build_%j.out",
+            error_pattern=f"{backend._cache_path(project_name)}/logs/build_%j.err",
             remote_dir=backend.remote_dir,
             n_trials=1,
         )
@@ -604,7 +594,7 @@ def logs(
 ):
     backend, _, project_dir = _get_backend(backend_name)
 
-    meta_file = project_dir / ".jernerics" / "jobs" / f"{job_id}.json"
+    meta_file = cache_dir() / "jobs" / f"{job_id}.json"
     if meta_file.exists():
         meta = json.loads(meta_file.read_text())
         output_pattern = meta.get("output_pattern", "logs/slurm_%j.out")
@@ -918,7 +908,7 @@ def _get_default_jernerics_config(project_name: str) -> dict:
                 "type": "slurm",
                 "host": "your-username@hpc.example.edu",
                 "remote_dir": f"~/experiments/{project_name}",
-                "cache_dir": "/scratch/$USER/jernerics",
+                "cache_dir": "/scratch/$USER/jernerics",  # project_name auto-appended
                 "partition": "priority",
                 "time": "1:00:00",
                 "mem": "16G",

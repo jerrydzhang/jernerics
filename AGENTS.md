@@ -44,7 +44,7 @@ src/jernerics/
   config.py              # BackendConfig, SweepConfig, config loading
   runner.py              # Trial runner invoked via python -m jernerics.runner
   paths.py               # cache_dir(), work(), is_hpc()
-  dag/                   # DAG executor, task decorator, state, provenance
+  dag/                   # DAG executor, task decorator
   backend/               # Multi-backend execution
     slurm_backend.py     # SlurmBackend (sbatch + Apptainer)
     models.py            # JobSpec, JobInfo dataclasses

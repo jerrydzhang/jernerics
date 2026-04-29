@@ -29,11 +29,9 @@ def cache_dir() -> Path:
     Layout::
 
         ~/.cache/jernerics/<project_name>/
-          optuna/<study>.db
+          optuna/<study>.journal
           tracking/<study>/0.pb
-          logs/slurm_1234.out
-
-    HPC cache paths are resolved per-backend in cli.py.
+          jobs/<job_id>.json
     """
     project_dir = find_pyproject_dir()
     if project_dir is None:
