@@ -350,9 +350,10 @@ def run_remote(
     try:
         backend_config = load_backend_config(backend_name, project_dir)
         if backend_config.auto_retry:
-            retry_dir = f"{cache_host}/retry"
-            backend.host.mkdir(retry_dir)
-            ctx_path = f"{retry_dir}/{study_name}_ctx.json"
+            retry_dir_host = f"{cache_host}/retry"
+            backend.host.mkdir(retry_dir_host)
+            retry_dir_container = "/cache/retry"
+            ctx_path = f"{retry_dir_container}/{study_name}_ctx.json"
             ctx = RetryContext(
                 study_name=study_name,
                 backend_name=backend_name,
@@ -362,7 +363,8 @@ def run_remote(
                 ctx_path=ctx_path,
                 chain_depth=0,
             )
-            backend.host.write_file(ctx_path, ctx.to_json())
+            host_ctx_path = f"{retry_dir_host}/{study_name}_ctx.json"
+            backend.host.write_file(host_ctx_path, ctx.to_json())
 
             result = backend.submit_sweep(
                 spec, direction=sweep.direction, retry_ctx=ctx
