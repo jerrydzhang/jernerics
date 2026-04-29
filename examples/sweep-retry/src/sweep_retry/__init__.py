@@ -17,11 +17,24 @@ def crash_app(trial_number: int, crash_on: list[int]) -> bool:
     return trial_number in crash_on
 
 
-def crash_node(trial_number: int, crash_on: list[int]) -> bool:
-    """Simulate node death. Kills process immediately — no exception handling,
-    no cleanup. Optuna trial stays RUNNING, heartbeat file goes stale.
-    Checker detects stale, marks FAIL, enqueues same params."""
+def crash_node(
+    trial_number: int,
+    crash_on: list[int],
+    lr: float = 0,
+    lr_fatal: float = -1,
+) -> bool:
+    """Simulate node death. Kills process immediately.
+
+    By trial number (crash_on): specific trials die, retries get new
+    numbers and survive.
+
+    By param value (lr_fatal): any trial with lr < lr_fatal dies.
+    Retried trials get the same params via enqueue_trial, so they also
+    die — until max_retries is exhausted.
+    """
     if trial_number in crash_on:
+        os._exit(9)
+    if lr_fatal > 0 and lr < lr_fatal:
         os._exit(9)
     return False
 

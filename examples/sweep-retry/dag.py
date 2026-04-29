@@ -12,7 +12,12 @@ with DAG() as dag:
     def generate_data(config):
         trial_number = config.get("config_index", 0)
 
-        if crash_node(trial_number, config.get("crash_node_on", [])):
+        if crash_node(
+            trial_number,
+            config.get("crash_node_on", []),
+            lr=config.get("lr", 0),
+            lr_fatal=config.get("lr_fatal", -1),
+        ):
             pass  # os._exit already called, won't reach here
 
         if crash_app(trial_number, config.get("crash_app_on", [])):
