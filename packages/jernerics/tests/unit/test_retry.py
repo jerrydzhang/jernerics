@@ -471,3 +471,12 @@ class TestGenerateCheckerScript:
         )
         assert "~" not in script
         assert "$HOME/cache" in script
+
+    def test_no_dependency(self):
+        script = generate_checker_script(
+            cache_host="/cache",
+            remote_dir="~/p",
+            partition="p",
+            wrapped_checker="checker",
+        )
+        assert "#SBATCH --dependency" not in script

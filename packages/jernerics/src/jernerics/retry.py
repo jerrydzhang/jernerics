@@ -1,5 +1,4 @@
 import json
-import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -156,19 +155,26 @@ def generate_checker_script(
     remote_dir: str,
     partition: str,
     wrapped_checker: str,
-    dependency_job_id: str,
+    dependency_job_id: str | None = None,
 ) -> str:
     cache_host = _expand_path(cache_host)
     remote_dir = _expand_path(remote_dir)
-    return textwrap.dedent(f"""\
-        #!/usr/bin/env bash
-        #SBATCH --parsable
-        #SBATCH --partition={partition}
-        #SBATCH --time=0:10:00
-        #SBATCH --mem=1G
-        #SBATCH --output={cache_host}/logs/checker_%j.out
-        #SBATCH --error={cache_host}/logs/checker_%j.err
-        #SBATCH --dependency=afterany:{dependency_job_id}
-
-        cd {remote_dir}
-        {wrapped_checker}""")
+    lines = [
+        "#!/usr/bin/env bash",
+        "#SBATCH --parsable",
+        f"#SBATCH --partition={partition}",
+        "#SBATCH --time=0:10:00",
+        "#SBATCH --mem=1G",
+        f"#SBATCH --output={cache_host}/logs/checker_%j.out",
+        f"#SBATCH --error={cache_host}/logs/checker_%j.err",
+    ]
+    if dependency_job_id is not None:
+        lines.append(f"#SBATCH --dependency=afterany:{dependency_job_id}")
+    lines.extend(
+        [
+            "",
+            f"cd {remote_dir}",
+            wrapped_checker,
+        ]
+    )
+    return "\n".join(lines)

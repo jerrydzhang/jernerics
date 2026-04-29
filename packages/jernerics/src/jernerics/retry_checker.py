@@ -237,7 +237,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
         remote_dir=remote_dir,
         partition=partition,
         wrapped_checker=wrapped_checker,
-        dependency_job_id="$ARRAY_JOB_ID",
+        dependency_job_id=None,
     )
 
     print(_format_stdout(array_script, checker_script))
