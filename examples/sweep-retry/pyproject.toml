@@ -1,0 +1,39 @@
+[project]
+name = "sweep-retry"
+version = "0.1.0"
+description = "E2E test for jernerics retry: trials crash, checker detects and resubmits"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "jernerics",
+]
+
+[tool.uv.sources.jernerics]
+git = "https://github.com/jerrydzhang/jernerics.git"
+branch = "human-ownership"
+subdirectory = "packages/jernerics"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sweep_retry"]
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "jez21005@hpc2.storrs.hpc.uconn.edu"
+remote_dir = "~/projects/jernerics-examples/sweep-retry"
+cache_dir = "/scratch/qiy18011/jez21005/jernerics"
+partition = "priority"
+time = "0:05:00"
+mem = "2G"
+cpus = 2
+
+# Retry configuration
+auto_retry = true
+heartbeat_interval_s = 10
+stale_after_s = 20
+grace_period_s = 20
+max_retries = 3
+chain_depth_cap = 10
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
