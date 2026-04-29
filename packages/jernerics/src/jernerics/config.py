@@ -78,6 +78,14 @@ class BackendConfig:
     # Pueue (future)
     parallel: int = 1
 
+    # Auto-retry
+    auto_retry: bool = False
+    heartbeat_interval_s: int = 60
+    stale_after_s: int = 120
+    grace_period_s: int = 120
+    max_retries: int = 3
+    chain_depth_cap: int = 20
+
 
 def _load_tool_config(project_dir: str | Path) -> dict:
     project_path = Path(project_dir)
@@ -128,6 +136,12 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
         cpus=bc.get("cpus", 4),
         max_concurrent_jobs=bc.get("max_concurrent_jobs", 10),
         parallel=bc.get("parallel", 1),
+        auto_retry=bc.get("auto_retry", False),
+        heartbeat_interval_s=bc.get("heartbeat_interval_s", 60),
+        stale_after_s=bc.get("stale_after_s", 120),
+        grace_period_s=bc.get("grace_period_s", 120),
+        max_retries=bc.get("max_retries", 3),
+        chain_depth_cap=bc.get("chain_depth_cap", 20),
     )
 
 
