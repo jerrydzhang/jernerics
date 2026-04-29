@@ -16,10 +16,13 @@ objective_task = None
 objective_metric = None
 direction = "minimize"
 
-slurm = {
-    "partition": "priority",
-    "time": "0:05:00",
-    "mem": "2G",
+backend_overrides = {
+    "hpc": {
+        "partition": "priority",
+        "time": "0:05:00",
+        "mem": "2G",
+    },
 }
 max_workers = 2
 executor_type = "thread"
+

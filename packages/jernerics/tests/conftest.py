@@ -16,6 +16,8 @@ version = "0.1.0"
 type = "slurm"
 host = "user@hpc.example.edu"
 remote_dir = "~/experiments/{project_name}"
+
+[tool.jernerics.backends.hpc.slurm]
 partition = "priority"
 time = "1:00:00"
 mem = "16G"
@@ -40,7 +42,7 @@ def setup(config):
 
     (tmp_project / "config.py").write_text("""
 base = {"seed": 1}
-slurm = {}
+backend_overrides = {}
 """)
 
     (tmp_project / "uv.lock").write_text("version = 1\n")

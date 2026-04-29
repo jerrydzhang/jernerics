@@ -19,7 +19,7 @@ class TestRunLocalSingleConfig:
             n_trials=1,
             sampler=None,
             direction="minimize",
-            slurm={},
+            backend_overrides={},
             runner=None,
             objective=None,
         )
@@ -55,7 +55,7 @@ class TestRunLocalSweep:
             n_trials=5,
             sampler=None,
             direction="minimize",
-            slurm={},
+            backend_overrides={},
             runner=None,
             objective=None,
         )

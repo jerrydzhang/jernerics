@@ -33,9 +33,12 @@ n_trials = 2
 objective = lambda results: results["evaluate"]["loss"]
 direction = "minimize"
 
-slurm = {
-    "partition": "priority",
-    "time": "0:05:00",
-    "mem": "2G",
-    "max_parallel": 2,
+backend_overrides = {
+    "hpc": {
+        "partition": "priority",
+        "time": "0:05:00",
+        "mem": "2G",
+        "max_parallel": 2,
+    },
 }
+

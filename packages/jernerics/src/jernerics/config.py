@@ -36,7 +36,7 @@ class SweepConfig:
     sampler: BaseSampler | None
     objective: Callable[..., float] | None
     direction: str
-    slurm: dict[str, Any]
+    backend_overrides: dict[str, dict[str, Any]]
     runner: Runner | None
     grid: dict[str, list] | None = None
 
@@ -52,7 +52,7 @@ def _normalize_time(value: str | None) -> str | None:
 
 
 @dataclass
-class BackendConfig:
+class SharedConfig:
     name: str
     type: str  # "slurm" | "bare" | ...
 
@@ -60,13 +60,6 @@ class BackendConfig:
     host: str | None = None
     remote_dir: str = "~/experiments/{project_name}"
     cache_dir: str | None = None
-
-    # SLURM resources
-    partition: str = "priority"
-    time: str | None = "1:00:00"
-    mem: str = "16G"
-    cpus: int = 4
-    max_concurrent_jobs: int = 10
 
     # Container
     container_type: str = "apptainer"  # "apptainer" | "docker" | "none"
@@ -81,6 +74,28 @@ class BackendConfig:
     grace_period_s: int = 120
     max_retries: int = 3
     chain_depth_cap: int = 20
+
+
+@dataclass
+class SlurmConfig:
+    partition: str = "priority"
+    time: str | None = "1:00:00"
+    mem: str = "16G"
+    cpus: int = 4
+    max_concurrent_jobs: int = 10
+
+    def defaults_dict(self) -> dict[str, str | None]:
+        return {
+            "partition": self.partition,
+            "time": self.time,
+            "mem": self.mem,
+        }
+
+
+@dataclass
+class BackendConfig:
+    shared: SharedConfig
+    backend: SlurmConfig | None = None  # None for LocalBackend
 
 
 def _load_tool_config(project_dir: str | Path) -> dict:
@@ -120,17 +135,14 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
         )
 
     bc = backends[name]
-    return BackendConfig(
+    backend_type = bc.get("type", "slurm")
+
+    shared = SharedConfig(
         name=name,
-        type=bc.get("type", "slurm"),
+        type=backend_type,
         host=os.environ.get("JERNERICS_HPC_HOST") or bc.get("host"),
         remote_dir=bc.get("remote_dir", "~/experiments/{project_name}"),
         cache_dir=bc.get("cache_dir"),
-        partition=bc.get("partition", "priority"),
-        time=_normalize_time(bc.get("time", "1:00:00")),
-        mem=bc.get("mem", "16G"),
-        cpus=bc.get("cpus", 4),
-        max_concurrent_jobs=bc.get("max_concurrent_jobs", 10),
         parallel=bc.get("parallel", 1),
         container_type=bc.get("container_type", "apptainer"),
         auto_retry=bc.get("auto_retry", False),
@@ -140,6 +152,19 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
         max_retries=bc.get("max_retries", 3),
         chain_depth_cap=bc.get("chain_depth_cap", 20),
     )
+
+    backend_specific: SlurmConfig | None = None
+    if backend_type == "slurm":
+        slurm = bc.get("slurm", {})
+        backend_specific = SlurmConfig(
+            partition=slurm.get("partition", "priority"),
+            time=_normalize_time(slurm.get("time", "1:00:00")),
+            mem=slurm.get("mem", "16G"),
+            cpus=slurm.get("cpus", 4),
+            max_concurrent_jobs=slurm.get("max_concurrent_jobs", 10),
+        )
+
+    return BackendConfig(shared=shared, backend=backend_specific)
 
 
 def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
@@ -201,7 +226,7 @@ def load_config(config_file: str) -> SweepConfig:
         sampler=module_ns.get("sampler", None),
         objective=module_ns.get("objective", None),
         direction=module_ns.get("direction", "minimize"),
-        slurm=module_ns.get("slurm", {}),
+        backend_overrides=module_ns.get("backend_overrides", {}),
         runner=module_ns.get("runner", None),
         grid=module_ns.get("grid", None),
     )

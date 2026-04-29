@@ -11,7 +11,7 @@ from jernerics.backend.slurm_backend import (
     _compose_chain,
     expand_slurm_pattern,
 )
-from jernerics.config import BackendConfig
+from jernerics.config import BackendConfig, SharedConfig, SlurmConfig
 from jernerics.retry import RetryContext
 
 
@@ -62,7 +62,7 @@ class TestGenerateSweepScript:
             array_spec="1-50%4",
             study_name="study",
             project_name="proj",
-            slurm_overrides={"time": "2:00:00"},
+            backend_overrides={"time": "2:00:00"},
         )
         lines = script.splitlines()
 
@@ -81,7 +81,7 @@ class TestGenerateSweepScript:
             array_spec="1-100",
             study_name="s",
             project_name="p",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert "#SBATCH --array=1-100\n" in script
 
@@ -96,7 +96,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert "#SBATCH --output=$HOME/.cache/jernerics/proj/logs/%A_%a.out" in script
         assert "#SBATCH --error=$HOME/.cache/jernerics/proj/logs/%A_%a.err" in script
@@ -111,7 +111,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert "#SBATCH --output=$HOME/cache/proj/logs/%A_%a.out" in script
         assert "#SBATCH --error=$HOME/cache/proj/logs/%A_%a.err" in script
@@ -124,7 +124,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={"output": "/custom/%j.out", "error": "/custom/%j.err"},
+            backend_overrides={"output": "/custom/%j.out", "error": "/custom/%j.err"},
         )
         assert "#SBATCH --output=/custom/%j.out" in script
         assert "#SBATCH --error=/custom/%j.err" in script
@@ -137,7 +137,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={"output": "~/logs/%j.out"},
+            backend_overrides={"output": "~/logs/%j.out"},
         )
         assert "$HOME/logs/%j.out" in script
         output_line = [
@@ -153,7 +153,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert "cd $HOME/projects/proj" in script
         assert "REMOTE_DIR=$(cd . && pwd)" in script
@@ -168,7 +168,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert len(wrap_calls) == 2
         assert wrap_calls[0][0] == "optuna create study"
@@ -185,7 +185,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert wrap_calls[1][0] == "python -m jernerics.runner"
 
@@ -198,7 +198,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         binds = wrap_calls[0][1]
         assert '"${REMOTE_DIR}:/work"' in binds
@@ -214,7 +214,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         binds = wrap_calls[0][1]
         assert any("$HOME/cache/proj:/cache" in b for b in binds)
@@ -227,7 +227,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="my_study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert "mkdir -p $HOME/.cache/jernerics/proj/tracking/my_study" in script
 
@@ -239,7 +239,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert "mkdir -p $HOME/.cache/jernerics/proj/optuna" in script
 
@@ -252,7 +252,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert "flock" in script
         # flock should come before the trial command
@@ -268,7 +268,7 @@ class TestGenerateSweepScript:
             array_spec="1-10",
             study_name="study",
             project_name="proj",
-            slurm_overrides={},
+            backend_overrides={},
         )
         assert "#SBATCH --time=" not in script
 
@@ -460,34 +460,62 @@ class TestFromConfigSubmitWithRetryCtx:
 
     @staticmethod
     def _make_config(**overrides):
-        cfg = BackendConfig(
-            name="hpc",
-            type="slurm",
-            host="user@hpc",
-            remote_dir="/scratch/user/proj",
-            cache_dir="/scratch/user/cache",
-            partition="priority",
-            time="1:00:00",
-            mem="16G",
-            cpus=4,
-            max_concurrent_jobs=10,
-            container_type="apptainer",
-            heartbeat_interval_s=60,
-        )
+        shared_defaults = {
+            "name": "hpc",
+            "type": "slurm",
+            "host": "user@hpc",
+            "remote_dir": "/scratch/user/proj",
+            "cache_dir": "/scratch/user/cache",
+            "container_type": "apptainer",
+            "heartbeat_interval_s": 60,
+        }
+        slurm_defaults = {
+            "partition": "priority",
+            "time": "1:00:00",
+            "mem": "16G",
+            "cpus": 4,
+            "max_concurrent_jobs": 10,
+        }
+        slurm_keys = set(slurm_defaults)
         for k, v in overrides.items():
-            setattr(cfg, k, v)
-        return cfg
+            if k in slurm_keys:
+                slurm_defaults[k] = v
+            else:
+                shared_defaults[k] = v
+
+        return BackendConfig(
+            shared=SharedConfig(
+                name=str(shared_defaults["name"]),
+                type=str(shared_defaults["type"]),
+                host=str(shared_defaults["host"]),
+                remote_dir=str(shared_defaults["remote_dir"]),
+                cache_dir=str(shared_defaults["cache_dir"]),
+                container_type=str(shared_defaults["container_type"]),
+                heartbeat_interval_s=int(shared_defaults["heartbeat_interval_s"]),
+            ),
+            backend=SlurmConfig(
+                partition=str(slurm_defaults["partition"]),
+                time=str(slurm_defaults["time"]),
+                mem=str(slurm_defaults["mem"]),
+                cpus=int(slurm_defaults["cpus"]),
+                max_concurrent_jobs=int(slurm_defaults["max_concurrent_jobs"]),
+            ),
+        )
 
     def test_from_config_creates_apptainer_container(self):
+        from jernerics.backend.components.host import StdoutHost
+
         config = self._make_config(container_type="apptainer")
-        backend = SlurmBackend.from_config(config)
+        backend = SlurmBackend.from_config(config, host=StdoutHost())
         from jernerics.backend.components.container import Apptainer
 
         assert isinstance(backend.container, Apptainer)
 
     def test_from_config_creates_docker_container(self):
+        from jernerics.backend.components.host import StdoutHost
+
         config = self._make_config(container_type="docker")
-        backend = SlurmBackend.from_config(config)
+        backend = SlurmBackend.from_config(config, host=StdoutHost())
         from jernerics.backend.components.container import Docker
 
         assert isinstance(backend.container, Docker)

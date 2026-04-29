@@ -21,10 +21,11 @@ class TestGetDefaultJernericsConfig:
         assert hpc["type"] == "slurm"
         assert "host" in hpc
         assert "myproject" in hpc["remote_dir"]
-        assert "partition" in hpc
-        assert "time" in hpc
-        assert "mem" in hpc
-        assert "cpus" in hpc
+        assert "slurm" in hpc
+        assert hpc["slurm"]["partition"] == "priority"
+        assert hpc["slurm"]["time"] == "1:00:00"
+        assert hpc["slurm"]["mem"] == "16G"
+        assert hpc["slurm"]["cpus"] == 4
 
     def test_uses_project_name_in_remote_dir(self):
         config = _get_default_jernerics_config("test-project-123")

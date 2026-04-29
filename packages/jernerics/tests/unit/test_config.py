@@ -4,6 +4,8 @@ from jernerics.config import (
     BackendConfig,
     ConfigNotFound,
     ExitCode,
+    SharedConfig,
+    SlurmConfig,
     SweepConfig,
     find_pyproject_dir,
     get_script_path,
@@ -44,14 +46,15 @@ class TestLoadBackendConfig:
     def test_load_backend_config_basic(self, tmp_project):
         config = load_backend_config("hpc", tmp_project)
 
-        assert config.name == "hpc"
-        assert config.type == "slurm"
-        assert config.host == "user@hpc.example.edu"
-        assert config.remote_dir == "~/experiments/{project_name}"
-        assert config.partition == "priority"
-        assert config.time == "1:00:00"
-        assert config.mem == "16G"
-        assert config.cpus == 4
+        assert config.shared.name == "hpc"
+        assert config.shared.type == "slurm"
+        assert config.shared.host == "user@hpc.example.edu"
+        assert config.shared.remote_dir == "~/experiments/{project_name}"
+        assert config.backend is not None
+        assert config.backend.partition == "priority"
+        assert config.backend.time == "1:00:00"
+        assert config.backend.mem == "16G"
+        assert config.backend.cpus == 4
 
     def test_load_backend_config_not_found(self, tmp_project):
         with pytest.raises(ConfigNotFound, match="Backend 'nonexistent' not found"):
@@ -85,7 +88,7 @@ host = "original@host.example.edu"
         monkeypatch.setenv("JERNERICS_HPC_HOST", "env@host.example.edu")
         config = load_backend_config("myhost", project_dir)
 
-        assert config.host == "env@host.example.edu"
+        assert config.shared.host == "env@host.example.edu"
 
     def test_load_backend_config_no_backends(self, tmp_path):
         project_dir = tmp_path / "empty"
@@ -113,7 +116,7 @@ cache_dir = "/scratch/$USER/jernerics"
 """)
         config = load_backend_config("hpc", project_dir)
 
-        assert config.cache_dir == "/scratch/$USER/jernerics"
+        assert config.shared.cache_dir == "/scratch/$USER/jernerics"
 
     def test_load_backend_config_multiple_backends(self, tmp_path):
         project_dir = tmp_path / "multi"
@@ -134,10 +137,11 @@ host = "user@workstation.local"
         hpc = load_backend_config("hpc", project_dir)
         devbox = load_backend_config("devbox", project_dir)
 
-        assert hpc.type == "slurm"
-        assert hpc.host == "user@hpc.example.edu"
-        assert devbox.type == "bare"
-        assert devbox.host == "user@workstation.local"
+        assert hpc.shared.type == "slurm"
+        assert hpc.shared.host == "user@hpc.example.edu"
+        assert devbox.shared.type == "bare"
+        assert devbox.shared.host == "user@workstation.local"
+        assert devbox.backend is None
 
 
 class TestLoadTrackingServer:
@@ -196,16 +200,24 @@ tracking_server = "confighost:50051"
 
 class TestBackendConfig:
     def test_defaults(self):
-        config = BackendConfig(name="test", type="slurm")
-        assert config.host is None
-        assert config.remote_dir == "~/experiments/{project_name}"
-        assert config.partition == "priority"
-        assert config.time == "1:00:00"
-        assert config.mem == "16G"
-        assert config.cpus == 4
-        assert config.max_concurrent_jobs == 10
-        assert config.parallel == 1
-        assert config.cache_dir is None
+        config = BackendConfig(shared=SharedConfig(name="test", type="slurm"))
+        assert config.shared.host is None
+        assert config.shared.remote_dir == "~/experiments/{project_name}"
+        assert config.backend is None
+
+    def test_with_slurm_config(self):
+        config = BackendConfig(
+            shared=SharedConfig(name="test", type="slurm"),
+            backend=SlurmConfig(),
+        )
+        assert config.backend is not None
+        assert config.backend.partition == "priority"
+        assert config.backend.time == "1:00:00"
+        assert config.backend.mem == "16G"
+        assert config.backend.cpus == 4
+        assert config.backend.max_concurrent_jobs == 10
+        assert config.shared.parallel == 1
+        assert config.shared.cache_dir is None
 
 
 class TestFindPyprojectDir:
@@ -240,7 +252,7 @@ sampler = optuna.samplers.TPESampler(seed=42)
 objective = lambda results: results["train"].value["loss"]
 direction = "minimize"
 
-slurm = {"partition": "gpu"}
+backend_overrides = {"partition": "gpu"}
 runner = ThreadPoolRunner(max_workers=4)
 """
         config_file = tmp_path / "config.py"
@@ -255,7 +267,7 @@ runner = ThreadPoolRunner(max_workers=4)
         assert isinstance(sweep.sampler, optuna.samplers.TPESampler)
         assert sweep.objective is not None
         assert sweep.direction == "minimize"
-        assert sweep.slurm == {"partition": "gpu"}
+        assert sweep.backend_overrides == {"partition": "gpu"}
         assert sweep.runner is not None
 
     def test_load_config_single_no_search_space(self, tmp_path):
@@ -292,7 +304,7 @@ sampler = optuna.samplers.GridSampler({"lr": [0.001, 0.01, 0.1]})
 
     def test_load_config_runner(self, tmp_path):
         config_content = """
-slurm = {"time": "1:00:00", "mem": "4G"}
+backend_overrides = {"time": "1:00:00", "mem": "4G"}
 from jernerics.dag.executor import SyncRunner
 runner = SyncRunner()
 """
@@ -301,7 +313,7 @@ runner = SyncRunner()
 
         sweep = load_config(str(config_file))
 
-        assert sweep.slurm == {"time": "1:00:00", "mem": "4G"}
+        assert sweep.backend_overrides == {"time": "1:00:00", "mem": "4G"}
         assert sweep.runner is not None
 
     def test_load_config_missing_file_raises(self):
@@ -334,7 +346,7 @@ pass
         assert sweep.sampler is None
         assert sweep.objective is None
         assert sweep.direction == "minimize"
-        assert sweep.slurm == {}
+        assert sweep.backend_overrides == {}
         assert sweep.runner is None
 
     def test_load_config_with_special_characters_in_paths(self, tmp_path):

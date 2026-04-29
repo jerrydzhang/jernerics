@@ -55,13 +55,13 @@ def _validate_relpath(path: str, desc: str) -> str:
 
 
 def _resolve_remote_dir(config: BackendConfig, project_name: str) -> str:
-    remote_dir = config.remote_dir.replace("{project_name}", project_name)
+    remote_dir = config.shared.remote_dir.replace("{project_name}", project_name)
     return remote_dir.replace("{project-name}", project_name)
 
 
 def _resolve_cache_host(config: BackendConfig, project_name: str) -> str:
-    if config.cache_dir:
-        cache = config.cache_dir.replace("{project_name}", project_name)
+    if config.shared.cache_dir:
+        cache = config.shared.cache_dir.replace("{project_name}", project_name)
         cache = cache.replace("{project-name}", project_name)
         return cache.replace("~", "$HOME")
     return "$HOME/.cache/jernerics/" + project_name
@@ -104,7 +104,7 @@ def _get_backend(backend_name: str) -> tuple[SlurmBackend, str, Path]:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
-    if not config.host:
+    if not config.shared.host:
         print(
             "Error: No host configured for backend "
             f"'{backend_name}'.\n"
@@ -117,23 +117,25 @@ def _get_backend(backend_name: str) -> tuple[SlurmBackend, str, Path]:
     remote_dir = _resolve_remote_dir(config, project_name)
     tracking_server = load_tracking_server(project_dir)
 
-    host = SSHHost(config.host)
+    host = SSHHost(config.shared.host)
     container = Apptainer(host)
     syncer = FileSyncer(host, remote_dir)
 
+    assert config.backend is not None
+    slurm = config.backend
     backend = SlurmBackend(
         host=host,
         container=container,
         syncer=syncer,
         remote_dir=remote_dir,
-        partition=config.partition,
-        time=config.time,
-        mem=config.mem,
-        cpus=config.cpus,
-        max_concurrent_jobs=config.max_concurrent_jobs,
-        cache_dir=config.cache_dir,
+        partition=slurm.partition,
+        time=slurm.time,
+        mem=slurm.mem,
+        cpus=slurm.cpus,
+        max_concurrent_jobs=slurm.max_concurrent_jobs,
+        cache_dir=config.shared.cache_dir,
         tracking_server=tracking_server,
-        heartbeat_interval_s=config.heartbeat_interval_s,
+        heartbeat_interval_s=config.shared.heartbeat_interval_s,
     )
 
     return backend, project_name, project_dir
@@ -242,19 +244,24 @@ def run_remote(
 
     backend, project_name, project_dir = _get_backend(backend_name)
 
-    slurm_opts = {
-        "partition": backend.partition,
-        "time": backend.time,
-        "mem": backend.mem,
-        **{k: _normalize_time(v) if k == "time" else v for k, v in sweep.slurm.items()},
+    backend_config = load_backend_config(backend_name, project_dir)
+    slurm = backend_config.backend
+    experiment_overrides = sweep.backend_overrides.get(backend_name, {})
+
+    merged = {
+        **(slurm.defaults_dict() if slurm else {}),
+        **{
+            k: _normalize_time(v) if k == "time" else v
+            for k, v in experiment_overrides.items()
+        },
         **{
             k: _normalize_time(v) if k == "time" else v
             for k, v in cli_overrides.items()
         },
     }
-    slurm_opts = {k: v for k, v in slurm_opts.items() if v is not None}
+    merged = {k: v for k, v in merged.items() if v is not None}
 
-    max_parallel = slurm_opts.pop("max_parallel", backend.max_concurrent_jobs)
+    max_parallel = merged.pop("max_parallel", slurm.max_concurrent_jobs if slurm else 0)
     try:
         max_parallel_val = int(max_parallel) if max_parallel else 0
     except (ValueError, TypeError) as e:
@@ -283,15 +290,13 @@ def run_remote(
         project_name=project_name,
         server_addr=backend.tracking_server,
         max_parallel=max_parallel_val or None,
-        slurm_overrides=slurm_opts,
+        backend_overrides=merged,
         grid=sweep.grid,
     )
 
-    cache_host = _resolve_cache_host(
-        load_backend_config(backend_name, project_dir), project_name
-    )
-    output_pattern = slurm_opts.get("output", f"{cache_host}/logs/%A_%a.out")
-    error_pattern = slurm_opts.get("error", f"{cache_host}/logs/%A_%a.err")
+    cache_host = _resolve_cache_host(backend_config, project_name)
+    output_pattern = merged.get("output", f"{cache_host}/logs/%A_%a.out")
+    error_pattern = merged.get("error", f"{cache_host}/logs/%A_%a.err")
 
     if dry_run:
         print("=== DRY RUN ===")
@@ -322,7 +327,7 @@ def run_remote(
                 + (f"%{max_parallel_val}" if max_parallel_val > 0 else ""),
                 study_name=study_name,
                 project_name=project_name,
-                slurm_overrides=slurm_opts,
+                backend_overrides=merged,
             )
         )
         return
@@ -346,7 +351,7 @@ def run_remote(
     print("[4/4] Submitting job...")
     try:
         backend_config = load_backend_config(backend_name, project_dir)
-        if backend_config.auto_retry:
+        if backend_config.shared.auto_retry:
             retry_dir_host = f"{cache_host}/retry"
             backend.host.mkdir(retry_dir_host)
             retry_dir_container = "/cache/retry"
@@ -661,7 +666,20 @@ def logs(
         else:
             print(f"Error: Log file not found: {log_file}")
             raise SystemExit(ExitCode.GENERAL_ERROR)
-        subprocess.run(["ssh", backend.host.host, "tail", "-f", log_file], check=False)
+        # Determine the specific job ID for status polling
+        if effective_array_index is not None:
+            status_job_id = f"{base_job_id}_{effective_array_index}"
+        else:
+            status_job_id = base_job_id
+
+        tail_proc = subprocess.Popen(["ssh", backend.host.host, "tail", "-f", log_file])
+        try:
+            backend.wait_for_completion(status_job_id, poll_interval=10)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            tail_proc.terminate()
+            tail_proc.wait()
     else:
         for attempt in range(max_retries):
             result = backend.host.run(
@@ -909,10 +927,12 @@ def _get_default_jernerics_config(project_name: str) -> dict:
                 "host": "your-username@hpc.example.edu",
                 "remote_dir": f"~/experiments/{project_name}",
                 "cache_dir": "/scratch/$USER/jernerics",  # project_name auto-appended
-                "partition": "priority",
-                "time": "1:00:00",
-                "mem": "16G",
-                "cpus": 4,
+                "slurm": {
+                    "partition": "priority",
+                    "time": "1:00:00",
+                    "mem": "16G",
+                    "cpus": 4,
+                },
             }
         }
     }

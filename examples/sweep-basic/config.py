@@ -18,10 +18,13 @@ objective_task = "evaluate"
 objective_metric = "loss"
 direction = "minimize"
 
-slurm = {
-    "partition": "priority",
-    "time": "0:10:00",
-    "mem": "4G",
+backend_overrides = {
+    "hpc": {
+        "partition": "priority",
+        "time": "0:10:00",
+        "mem": "4G",
+    },
 }
 max_workers = 2
 executor_type = "thread"
+

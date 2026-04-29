@@ -3,6 +3,11 @@ import os
 import re
 import time
 
+from jernerics.backend.components.container import (
+    Apptainer,
+    Docker,
+    NoContainer,
+)
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSpec
 from jernerics.config import BackendConfig
 from jernerics.retry import RetryContext
@@ -91,22 +96,13 @@ class SlurmBackend:
         host=None,
         syncer=None,
     ) -> "SlurmBackend":
-        """Construct from config. Uses StdoutHost if no host provided.
+        """Construct from config.
 
-        With StdoutHost, submit_sweep prints the composed bash script to
-        stdout — used by the retry checker running inside a container.
+        `host` must be provided explicitly. Use StdoutHost() when composing
+        a bash script for piping (e.g. retry checker inside a container).
         """
-        from jernerics.backend.components.container import (
-            Apptainer,
-            Docker,
-            NoContainer,
-        )
-        from jernerics.backend.components.host import StdoutHost
 
-        if host is None:
-            host = StdoutHost()
-
-        container_type = backend_config.container_type
+        container_type = backend_config.shared.container_type
         if container_type == "apptainer":
             container = Apptainer(host)
         elif container_type == "docker":
@@ -116,19 +112,21 @@ class SlurmBackend:
         else:
             container = Apptainer(host)
 
+        assert backend_config.backend is not None
+        slurm = backend_config.backend
         return cls(
             host=host,
             container=container,
             syncer=syncer,
-            remote_dir=backend_config.remote_dir.replace("~", "$HOME"),
-            partition=backend_config.partition,
-            time=backend_config.time,
-            mem=backend_config.mem,
-            cpus=backend_config.cpus,
-            max_concurrent_jobs=backend_config.max_concurrent_jobs,
-            cache_dir=backend_config.cache_dir,
+            remote_dir=backend_config.shared.remote_dir.replace("~", "$HOME"),
+            partition=slurm.partition,
+            time=slurm.time,
+            mem=slurm.mem,
+            cpus=slurm.cpus,
+            max_concurrent_jobs=slurm.max_concurrent_jobs,
+            cache_dir=backend_config.shared.cache_dir,
             tracking_server=None,
-            heartbeat_interval_s=backend_config.heartbeat_interval_s,
+            heartbeat_interval_s=backend_config.shared.heartbeat_interval_s,
         )
 
     def _cache_host(self, project_name: str) -> str:
@@ -293,7 +291,7 @@ class SlurmBackend:
             array_spec=array_spec,
             study_name=spec.study_name,
             project_name=spec.project_name or "",
-            slurm_overrides=spec.slurm_overrides,
+            backend_overrides=spec.backend_overrides,
         )
 
     def _build_checker_script(
@@ -342,7 +340,7 @@ class SlurmBackend:
 
         project_name = spec.project_name or ""
         cache_host = self._cache_host(project_name)
-        partition = spec.slurm_overrides.get("partition", self.partition)
+        partition = spec.backend_overrides.get("partition", self.partition)
 
         checker_script = self._build_checker_script(
             ctx_path=retry_ctx.ctx_path,
@@ -375,14 +373,14 @@ class SlurmBackend:
         array_spec: str,
         study_name: str,
         project_name: str,
-        slurm_overrides: dict[str, str],
+        backend_overrides: dict[str, str],
     ) -> str:
         cache_host = self._cache_host(project_name)
         bind_args = self._bind_args(cache_host)
         wrapped_setup = self.container.wrap(setup_command, bind_args)
         wrapped_trial = self.container.wrap(trial_command, bind_args)
 
-        slurm_opts = {**slurm_overrides}
+        slurm_opts = {**backend_overrides}
         output_pattern = slurm_opts.pop("output", None)
         error_pattern = slurm_opts.pop("error", None)
         if output_pattern:
@@ -402,7 +400,7 @@ class SlurmBackend:
             partition=self.partition,
             time=self.time,
             mem=self.mem,
-            slurm_overrides=slurm_opts,
+            backend_overrides=slurm_opts,
             wrapped_setup=wrapped_setup,
             wrapped_trial=wrapped_trial,
             output_dir=output_dir,
@@ -610,7 +608,7 @@ def _format_sweep_script(
     partition: str,
     time: str | None,
     mem: str,
-    slurm_overrides: dict[str, str],
+    backend_overrides: dict[str, str],
     wrapped_setup: str,
     wrapped_trial: str,
     output_dir: str,
@@ -623,7 +621,7 @@ def _format_sweep_script(
             "partition": partition,
             "time": time,
             "mem": mem,
-            **slurm_overrides,
+            **backend_overrides,
         }.items()
         if v is not None
     }

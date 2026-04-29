@@ -7,10 +7,13 @@ objective_task = None
 objective_metric = None
 direction = "minimize"
 
-slurm = {
-    "time": "0:10:00",
-    "mem": "8G",
-    "cpus-per-task": "2",
-    "gres": "gpu:1",
-    "partition": "priority-gpu",
+backend_overrides = {
+    "hpc": {
+        "time": "0:10:00",
+        "mem": "8G",
+        "cpus-per-task": "2",
+        "gres": "gpu:1",
+        "partition": "priority-gpu",
+    },
 }
+
