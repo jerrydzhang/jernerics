@@ -5,6 +5,7 @@ from typing import Any
 import grpc
 import optuna
 from jernerics_proto import tracking_pb2_grpc
+from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.config import load_config
 from jernerics.dag import DAG
@@ -31,7 +32,10 @@ def run_trial(
 
     sweep = load_config(config_file)
     dag = DAG(dag_file, project_name)
-    study = optuna.load_study(study_name=study_name, storage=storage_url)
+    study = optuna.load_study(
+        study_name=study_name,
+        storage=JournalStorage(JournalFileBackend(storage_url)),
+    )
 
     def objective(trial: optuna.trial.Trial) -> float:
         tracker: Tracker | None = None

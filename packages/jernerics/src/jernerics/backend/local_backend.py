@@ -1,3 +1,6 @@
+import optuna
+from optuna.storages.journal import JournalFileBackend, JournalStorage
+
 from jernerics.backend.models import JobInfo, SweepSpec
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
@@ -12,17 +15,16 @@ class LocalBackend:
         self.tracking_server = tracking_server
 
     def submit_sweep(self, spec: SweepSpec, *, direction: str = "minimize") -> str:
-        import optuna
-
         project_cache = cache_dir()
         tracker_dir = spec.tracking_dir or (
             project_cache / "tracking" / spec.study_name
         )
         tracker_dir.mkdir(parents=True, exist_ok=True)
 
+        storage = JournalStorage(JournalFileBackend(spec.storage_url))
         optuna.create_study(
             study_name=spec.study_name,
-            storage=spec.storage_url,
+            storage=storage,
             direction=direction,
             load_if_exists=True,
         )

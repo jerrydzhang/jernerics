@@ -111,15 +111,16 @@ class SlurmBackend:
     def _build_setup_command(
         self,
         study_name: str,
-        storage_url: str,
+        storage_path: str,
         direction: str,
     ) -> str:
         return (
             f'python -c "'
-            f"import optuna;"
-            f" optuna.create_study("
+            f"from optuna.storages.journal import JournalFileBackend, JournalStorage; "
+            f"import optuna; "
+            f"optuna.create_study("
             f"study_name={study_name!r},"
-            f" storage={storage_url!r},"
+            f" storage=JournalStorage(JournalFileBackend({storage_path!r})),"
             f" direction={direction!r},"
             f' load_if_exists=True)"'
         )
@@ -129,7 +130,7 @@ class SlurmBackend:
         dag_relpath: str,
         config_relpath: str,
         study_name: str,
-        storage_url: str,
+        storage_path: str,
         project_name: str | None,
         tracking_dir: str,
         tracking_server: str | None,
@@ -143,7 +144,7 @@ class SlurmBackend:
             "--study-name",
             study_name,
             "--storage-url",
-            storage_url,
+            storage_path,
             "--tracking-dir",
             tracking_dir,
         ]
@@ -166,14 +167,14 @@ class SlurmBackend:
 
         setup_command = self._build_setup_command(
             study_name=spec.study_name,
-            storage_url=spec.storage_url,
+            storage_path=spec.storage_url,
             direction=direction,
         )
         trial_command = self._build_trial_command(
             dag_relpath=dag_relpath,
             config_relpath=config_relpath,
             study_name=spec.study_name,
-            storage_url=spec.storage_url,
+            storage_path=spec.storage_url,
             project_name=spec.project_name,
             tracking_dir=tracking_dir,
             tracking_server=self.tracking_server,

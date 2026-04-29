@@ -65,8 +65,8 @@ def _resolve_cache_host(config: BackendConfig, project_name: str) -> str:
     return f"{_resolve_remote_dir(config, project_name)}/.jernerics"
 
 
-def _build_storage_url(cache_path: str, study_name: str) -> str:
-    return f"sqlite:////{cache_path}/optuna/{study_name}.db"
+def _build_storage_path(cache_path: str, study_name: str) -> str:
+    return f"/{cache_path}/optuna/{study_name}.journal"
 
 
 def _save_job_meta(
@@ -165,17 +165,17 @@ def run_local(
     from .paths import cache_dir
 
     project_cache = cache_dir()
-    db_dir = project_cache / "optuna"
-    db_dir.mkdir(parents=True, exist_ok=True)
+    optuna_dir = project_cache / "optuna"
+    optuna_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     study_name = f"local_{config_path.stem}_{timestamp}"
-    storage_url = f"sqlite:///{db_dir / (study_name + '.db')}"
+    storage_path = str(optuna_dir / (study_name + ".journal"))
 
     spec = SweepSpec(
         dag_path=dag_path,
         config_path=config_path,
         study_name=study_name,
-        storage_url=storage_url,
+        storage_url=storage_path,
         n_trials=sweep.n_trials,
         project_name=project_name,
         server_addr=tracking_server,
@@ -269,7 +269,7 @@ def run_remote(
 
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     study_name = f"{project_name}_{config_path.stem}_{timestamp}"
-    storage_url = _build_storage_url("cache", study_name)
+    storage_url = _build_storage_path("cache", study_name)
 
     spec = SweepSpec(
         dag_path=dag_path,
@@ -302,14 +302,14 @@ def run_remote(
             backend._generate_sweep_script(
                 setup_command=backend._build_setup_command(
                     study_name=study_name,
-                    storage_url=storage_url,
+                    storage_path=storage_url,
                     direction=sweep.direction,
                 ),
                 trial_command=backend._build_trial_command(
                     dag_relpath=dag_relpath,
                     config_relpath=config_relpath,
                     study_name=study_name,
-                    storage_url=storage_url,
+                    storage_path=storage_url,
                     project_name=project_name,
                     tracking_dir=f"/cache/tracking/{study_name}",
                     tracking_server=backend.tracking_server,
