@@ -133,6 +133,7 @@ class TestPlanRetryStaleRunning:
             now=now,
         )
         assert 5 not in plan.stale_trial_ids
+        assert 5 in plan.exhausted_trial_ids
         assert plan.total_array_size == 5
         assert plan.fresh_needed == 5
 
@@ -220,6 +221,7 @@ class TestPlanRetryStaleRunning:
             now=now,
         )
         assert 20 not in plan4.stale_trial_ids
+        assert 20 in plan4.exhausted_trial_ids
         assert plan4.fresh_needed == 5  # give up, submit fresh
 
     def test_different_params_tracked_independently(self, tmp_path):

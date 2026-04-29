@@ -56,6 +56,9 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
         study.tell(trial_id, state=TrialState.FAIL)
         study.enqueue_trial(study.trials[trial_id].params)
 
+    for trial_id in plan.exhausted_trial_ids:
+        study.tell(trial_id, state=TrialState.FAIL)
+
     write_ledger(ledger_path, plan.retry_counts)
 
     max_parallel = int(

@@ -21,6 +21,7 @@ def param_key(params: dict[str, Any]) -> str:
 @dataclass
 class RetryPlan:
     stale_trial_ids: list[int]
+    exhausted_trial_ids: list[int]
     fresh_needed: int
     total_array_size: int
     is_complete: bool
@@ -69,6 +70,7 @@ def plan_retry(
     waiting = 0
     stale_trial_ids: list[int] = []
     stale_param_keys: list[str] = []
+    exhausted_trial_ids: list[int] = []
 
     for trial in trials:
         if trial.state == TrialState.COMPLETE or trial.state == TrialState.PRUNED:
@@ -91,6 +93,8 @@ def plan_retry(
                 if current_retries < max_retries:
                     stale_trial_ids.append(trial.number)
                     stale_param_keys.append(pkey)
+                else:
+                    exhausted_trial_ids.append(trial.number)
             else:
                 fresh_running += 1
 
@@ -107,6 +111,7 @@ def plan_retry(
 
     return RetryPlan(
         stale_trial_ids=stale_trial_ids,
+        exhausted_trial_ids=exhausted_trial_ids,
         fresh_needed=fresh_needed,
         total_array_size=total_array_size,
         is_complete=is_complete,
