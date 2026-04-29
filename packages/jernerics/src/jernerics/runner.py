@@ -12,6 +12,10 @@ from jernerics.tracking import ProtobufTracker, Tracker
 from jernerics.tracking.sync_client import FileSyncClient
 
 
+class _TaskFailure(Exception):
+    pass
+
+
 def run_trial(
     dag_file: str,
     config_file: str,
@@ -27,91 +31,80 @@ def run_trial(
 
     sweep = load_config(config_file)
     dag = DAG(dag_file, project_name)
-
     study = optuna.load_study(study_name=study_name, storage=storage_url)
 
-    # NOTE: the code uses a _tell() helper instead of bare study.tell()
-    # because GridSampler.after_trial() calls study.stop() when all grid points
-    # are exhausted, which raises RuntimeError in ask/tell mode (it is designed
-    # for study.optimize()). The trial is already recorded at that point, so we
-    # safely swallow the error. See: https://github.com/optuna/optuna/issues/5106
-    def _tell(study, trial, value=None, *, state=None):
+    def objective(trial: optuna.trial.Trial) -> float:
+        tracker: Tracker | None = None
+        sync_client: FileSyncClient | None = None
+        channel: grpc.Channel | None = None
+
+        if tracking_dir:
+            tracker = ProtobufTracker(
+                project_name or "",
+                study_name,
+                trial.number,
+                Path(tracking_dir) / f"{trial.number}.pb",
+            )
+
+        if server_addr and tracker:
+            assert tracking_dir is not None
+            channel = grpc.insecure_channel(server_addr)
+            stub = tracking_pb2_grpc.TrackingServiceStub(channel)
+            sync_client = FileSyncClient(
+                stub, Path(tracking_dir) / f"{trial.number}.pb"
+            )
+            sync_client.start()
+
+        params: dict[str, Any] = sweep.search_space(trial) if sweep.search_space else {}
+
+        if params and set(sweep.base) & set(params):
+            overlap = sorted(set(sweep.base) & set(params))
+            raise ValueError(
+                f"Config keys defined in both base and search_space: {overlap}. "
+                "Please remove the overlapping keys from either 'base' or "
+                "'search_space' in the config file."
+            )
+
+        config = {**sweep.base, **params}
+
         try:
-            if state is not None:
-                study.tell(trial, state=state)
-            else:
-                study.tell(trial, value)
-        except RuntimeError:
-            pass
+            results = dag.run(
+                config,
+                config_index=trial.number,
+                config_path=config_file,
+                tracker=tracker,
+                runner=sweep.runner,
+            )
 
-    trial = study.ask()
+            failed_tasks = [
+                (name, res) for name, res in results.items() if res.is_error
+            ]
+            if failed_tasks:
+                for task_name, task_result in failed_tasks:
+                    print(
+                        f"\t[{task_name}] Task failed with exception:",
+                        file=sys.stderr,
+                    )
+                    print(task_result.error_traceback, file=sys.stderr)
+                raise _TaskFailure
 
-    tracker: Tracker | None = None
-    sync_client: FileSyncClient | None = None
-    channel: grpc.Channel | None = None
+            print(f"Trial {trial.number + 1} completed", file=sys.stderr)
 
-    if tracking_dir:
-        tracker = ProtobufTracker(
-            project_name or "",
-            study_name,
-            trial.number,
-            Path(tracking_dir) / f"{trial.number}.pb",
-        )
-
-    if server_addr and tracker:
-        assert tracking_dir is not None
-        channel = grpc.insecure_channel(server_addr)
-        stub = tracking_pb2_grpc.TrackingServiceStub(channel)
-        sync_client = FileSyncClient(stub, Path(tracking_dir) / f"{trial.number}.pb")
-        sync_client.start()
-    # Allow search_space to be None for the edge case where the
-    # user wants no hyperparameters.
-    params: dict[str, Any] = sweep.search_space(trial) if sweep.search_space else {}
-
-    if params and set(sweep.base) & set(params):
-        overlap = sorted(set(sweep.base) & set(params))
-        raise ValueError(
-            f"Config keys defined in both base and search_space: {overlap}. "
-            "Please remove the overlapping keys from either 'base' or "
-            "'search_space' in the config file."
-        )
-
-    config = {**sweep.base, **params}
+            if sweep.objective:
+                return sweep.objective(results)
+            return 0.0
+        finally:
+            if tracker:
+                tracker.close()
+            if sync_client:
+                sync_client.join()
+            if channel:
+                channel.close()
 
     try:
-        results = dag.run(
-            config,
-            config_index=trial.number,
-            config_path=config_file,
-            tracker=tracker,
-            runner=sweep.runner,
-        )
-
-        failed_tasks = [(name, res) for name, res in results.items() if res.is_error]
-        if failed_tasks:
-            for task_name, task_result in failed_tasks:
-                print(f"\t[{task_name}] Task failed with exception:", file=sys.stderr)
-                print(task_result.error_traceback, file=sys.stderr)
-            _tell(study, trial, state=optuna.trial.TrialState.FAIL)
-            sys.exit(1)
-
-        if sweep.objective:
-            value = sweep.objective(results)
-            _tell(study, trial, value)
-        else:
-            _tell(study, trial, 0.0)
-
-        print(f"Trial {trial.number + 1} completed", file=sys.stderr)
-    except Exception:
-        _tell(study, trial, state=optuna.trial.TrialState.FAIL)
-        raise
-    finally:
-        if tracker:
-            tracker.close()
-        if sync_client:
-            sync_client.join()
-        if channel:
-            channel.close()
+        study.optimize(objective, n_trials=1)
+    except _TaskFailure:
+        sys.exit(1)
 
 
 if __name__ == "__main__":
