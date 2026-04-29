@@ -1,7 +1,10 @@
+import itertools
+
 import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSpec
+from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
 
@@ -24,12 +27,19 @@ class LocalBackend:
         tracker_dir.mkdir(parents=True, exist_ok=True)
 
         storage = JournalStorage(JournalFileBackend(spec.storage_url))
-        optuna.create_study(
+        sweep = load_config(str(spec.config_path))
+        study = optuna.create_study(
             study_name=spec.study_name,
             storage=storage,
             direction=direction,
+            sampler=sweep.sampler,
             load_if_exists=True,
         )
+
+        if spec.grid:
+            keys = sorted(spec.grid.keys())
+            for combo in itertools.product(*[spec.grid[k] for k in keys]):
+                study.enqueue_trial(dict(zip(keys, combo, strict=True)))
 
         any_failed = False
 

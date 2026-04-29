@@ -16,6 +16,7 @@ class SweepSpec:
     server_addr: str | None = None
     max_parallel: int | None = None
     slurm_overrides: dict[str, str] = field(default_factory=dict)
+    grid: dict[str, list] | None = None
 
 
 @dataclass

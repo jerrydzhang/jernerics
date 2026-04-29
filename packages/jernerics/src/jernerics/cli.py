@@ -181,6 +181,7 @@ def run_local(
         n_trials=sweep.n_trials,
         project_name=project_name,
         server_addr=tracking_server,
+        grid=sweep.grid,
     )
 
     backend = LocalBackend(tracking_server=tracking_server)
@@ -285,6 +286,7 @@ def run_remote(
         server_addr=backend.tracking_server,
         max_parallel=max_parallel_val or None,
         slurm_overrides=slurm_opts,
+        grid=sweep.grid,
     )
 
     cache_host = _resolve_cache_host(
@@ -306,6 +308,8 @@ def run_remote(
                     study_name=study_name,
                     storage_path=storage_url,
                     direction=sweep.direction,
+                    config_relpath=config_relpath,
+                    grid=sweep.grid,
                 ),
                 trial_command=backend._build_trial_command(
                     dag_relpath=dag_relpath,

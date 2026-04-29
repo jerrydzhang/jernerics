@@ -42,6 +42,7 @@ class SweepConfig:
     direction: str
     slurm: dict[str, Any]
     runner: Runner | None
+    grid: dict[str, list] | None = None
 
 
 class NoContainerFound(Exception):
@@ -201,7 +202,7 @@ def load_config(config_file: str) -> SweepConfig:
             stacklevel=2,
         )
 
-    return SweepConfig(
+    sweep = SweepConfig(
         base=module_ns.get("base", {}),
         search_space=module_ns.get("search_space", None),
         n_trials=module_ns.get("n_trials", 1),
@@ -210,7 +211,17 @@ def load_config(config_file: str) -> SweepConfig:
         direction=module_ns.get("direction", "minimize"),
         slurm=module_ns.get("slurm", {}),
         runner=module_ns.get("runner", None),
+        grid=module_ns.get("grid", None),
     )
+
+    if sweep.grid is not None:
+        n_combos = 1
+        for values in sweep.grid.values():
+            n_combos *= len(values)
+        if sweep.n_trials == 1:
+            sweep.n_trials = n_combos
+
+    return sweep
 
 
 def get_script_path(script_name: str, script_module: str = "jernerics.scripts") -> str:

@@ -171,6 +171,45 @@ Unified backend interface with a `Backend` protocol, `SweepSpec` dataclass, and 
 
 ---
 
+## Completed: Pass 2 — Auto-Retry System
+
+Automatic retry of failed/stale trials in SLURM array sweeps. Handles three failure
+modes: app crash (FAIL state), node death (stale RUNNING via heartbeat), and
+pre-start failure (no trial created).
+
+- [x] `retry.py` — `plan_retry()` computes stale/fresh/exhausted trial counts
+- [x] `retry_checker.py` — checker job that runs after array, detects stale trials, submits retry chain
+- [x] `RetryContext` — serialized context passed through chain (study name, config paths, depth)
+- [x] `param_key()` — BLAKE2b hash of params so retry counts persist across trial numbers
+- [x] Ledger tracks retry counts by param combo, not trial number — `max_retries` correctly enforced
+- [x] Exhausted stale trials marked FAIL so they don't stay RUNNING forever
+- [x] Heartbeat thread in runner — touches file every `heartbeat_interval_s`
+- [x] `chain_depth_cap` safety limit on recursive checker submission
+- [x] E2E tested: app crash (type 1), node death (type 2), persistent node death with retry exhaustion
+- [x] Grid pre-enqueue via `enqueue_trial` — avoids GridSampler/BruteForceSampler TOCTOU race
+- [x] Sentinel file for idempotent grid enqueue across concurrent array tasks
+- [x] Sampler now passed to `create_study` (was silently ignored before)
+
+### Config
+
+```toml
+[tool.jernerics.backends.hpc]
+auto_retry = true
+heartbeat_interval_s = 60
+stale_after_s = 120
+grace_period_s = 120
+max_retries = 3
+chain_depth_cap = 20
+```
+
+### Test configs (`examples/sweep-retry/`)
+
+| Config | What it tests |
+|--------|--------------|
+| `config_app_crash` | Type 1: RuntimeError → FAIL, fresh trials submitted |
+| `config_node_death` | Type 2: os._exit(9) → stale RUNNING, enqueued retry |
+| `config_node_death_persistent` | Type 2: param-based crash → retry exhaustion, fresh trial |
+
 ## Completed: Phase 5c — Tooling
 
 - [x] Create justfile with `lint`, `format`, `typecheck`, `test`, `check` recipes
@@ -200,3 +239,6 @@ Unified backend interface with a `Backend` protocol, `SweepSpec` dataclass, and 
 - [ ] Build core marimo dashboard
 - [ ] Server deploy: NixOS systemd service, health check, logging
 - [ ] Server query API or marimo dashboard for inspecting DuckDB remotely
+- [ ] the commands that have the --follow flag such as "jernerics logs --backend hpc 24200529 --follow" should automatically exit when a job finishes (currently they have to be manually killed with Ctrl+C)
+- [ ] logs should be scoped per project currently they get put a directory that buckets all projects together, this makes cleaning up old logs difficult since you have to know which files belong to which project and makes manual inspection of logs more difficult since you have to open files to see which project they belong to. A better structure would be something like: `~/.cache/jernerics/<project_name>/logs/<job_id>.log` or potentually this even means that the cache dir should be `~/.cache/jernerics/<project_name>/` and then all the other files (optuna db, tracking pb files, etc) should also be scoped under the project name. This would make it much easier to manage multiple projects on the same machine and would make it easier to clean up old data when a project is finished since you could just delete the entire project directory. It would also make it easier to inspect logs since you could just look in the project directory for the logs instead of having to open files to see which project they belong to.
+- [ ] SearchSweep is tightly coupled with the slurm currently since it has a slurm_overrides field. Instead it seems that it should be a more generic dict to pass overrides and then let each backend translate into the proper format for that backend.

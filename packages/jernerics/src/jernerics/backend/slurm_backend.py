@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import time
@@ -162,17 +163,47 @@ class SlurmBackend:
         study_name: str,
         storage_path: str,
         direction: str,
+        config_relpath: str = "",
+        grid: dict[str, list] | None = None,
     ) -> str:
-        return (
-            f'python -c "'
-            f"from optuna.storages.journal import JournalFileBackend, JournalStorage; "
-            f"import optuna; "
-            f"optuna.create_study("
-            f"study_name={study_name!r},"
-            f" storage=JournalStorage(JournalFileBackend({storage_path!r})),"
-            f" direction={direction!r},"
-            f' load_if_exists=True)"'
-        )
+        sampler_expr = "None"
+        if config_relpath:
+            sampler_expr = (
+                f"__import__('jernerics.config', fromlist=['load_config'])"
+                f".load_config('/work/{config_relpath}').sampler"
+            )
+
+        lines = [
+            'python -c "',
+            "from optuna.storages.journal import JournalFileBackend, JournalStorage; ",
+            "import optuna, itertools, json; ",
+            f"sampler = {sampler_expr}; ",
+            "study = optuna.create_study(",
+            f"study_name={study_name!r},",
+            f" storage=JournalStorage(JournalFileBackend({storage_path!r})),",
+            f" direction={direction!r},",
+            " sampler=sampler,",
+            " load_if_exists=True);",
+        ]
+
+        if grid:
+            import base64
+
+            grid_b64 = base64.b64encode(json.dumps(grid).encode()).decode()
+            lines.append(
+                "import base64, os; "
+                f"_sentinel = '/cache/optuna/{study_name}.grid_enqueued';"
+                f" grid = json.loads(base64.b64decode({grid_b64!r}));"
+                f" keys = sorted(grid.keys());"
+                f" [study.enqueue_trial(dict(zip(keys, combo, strict=True)))"
+                f" for combo in itertools.product(*[grid[k] for k in keys])"
+                " if not os.path.exists(_sentinel)];"
+                f" os.makedirs('/cache/optuna', exist_ok=True);"
+                f" open(_sentinel, 'a').close();"
+            )
+
+        lines.append('"')
+        return "".join(lines)
 
     def _build_trial_command(
         self,
@@ -242,6 +273,8 @@ class SlurmBackend:
             study_name=spec.study_name,
             storage_path=spec.storage_url,
             direction=direction,
+            config_relpath=config_relpath,
+            grid=spec.grid,
         )
         trial_command = self._build_trial_command(
             dag_relpath=dag_relpath,
