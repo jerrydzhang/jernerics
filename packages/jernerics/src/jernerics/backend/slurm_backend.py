@@ -416,7 +416,7 @@ echo "--- Build result ---"
 ls -lh container.sif
 
 echo
-echo "=== Build completed at $(date) ===
+echo "=== Build completed at $(date) ==="
 """
 
         result = self.host.run(

@@ -89,7 +89,7 @@ def run_trial(
                 "'search_space' in the config file."
             )
 
-        config = {**sweep.base, **params}
+        config = {**sweep.base, **params, "config_index": trial.number}
 
         try:
             results = dag.run(
