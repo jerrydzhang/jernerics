@@ -1,70 +1,61 @@
 # sweep-retry
 
 E2E test for the jernerics auto-retry system. One dag, two configs
-exercising three failure modes.
+exercising two failure modes.
 
 ## Test scenarios
 
-### config_transient.py — transient failures + happy path
+### config_app_crash — application crash (type 1)
 
-All lr values are safe (≥ 1e-3). Trials 1 and 4 crash by trial number.
-Retries get new trial numbers → succeed.
+Trials 1 and 4 raise RuntimeError. Optuna records FAIL state.
+Checker sees incomplete trials, submits fresh ones with new params.
 
 | Trial | lr | dropout | Result |
 |-------|------|---------|--------|
 | 0 | 1e-3 | 0.3 | complete |
-| 1 | 1e-3 | 0.7 | **CRASH** |
+| 1 | 1e-3 | 0.7 | **CRASH** (app) |
 | 2 | 1e-2 | 0.3 | complete |
 | 3 | 1e-2 | 0.7 | complete |
-| 4 | 1e-1 | 0.3 | **CRASH** |
+| 4 | 1e-1 | 0.3 | **CRASH** (app) |
 | 5 | 1e-1 | 0.7 | complete |
 
 ```
-Array 1 (6 tasks): 4 complete, 2 crash (trials 1,4).
-Checker 1: Detects stale. Marks FAIL. Enqueues retries.
+Array 1 (6 tasks): 4 complete, 2 crash.
+Checker 1: 2 fresh trials needed. Submits array of 2.
 Array 2 (2 tasks): New trial numbers. Both succeed.
 Checker 2: All done. Chain ends.
 ```
 
-### config_permanent.py — permanent failures + happy path
+### config_node_death — simulated node death (type 2)
 
-lr=1e-4 is in the bad region. No transient crashes. Same params on
-retry → same crash. After max_retries (3), trials 0 and 1 are abandoned.
+Trials 1 and 4 call `os._exit(9)`, killing the process immediately.
+No exception handling runs — Optuna trial stays RUNNING, heartbeat
+thread dies (file goes stale). Checker detects stale RUNNING trials,
+marks them FAIL, enqueues same params, writes ledger.
 
 | Trial | lr | dropout | Result |
 |-------|------|---------|--------|
-| 0 | 1e-4 | 0.3 | **CRASH (permanent)** |
-| 1 | 1e-4 | 0.7 | **CRASH (permanent)** |
-| 2 | 1e-3 | 0.3 | complete |
-| 3 | 1e-3 | 0.7 | complete |
-| 4 | 1e-2 | 0.3 | complete |
-| 5 | 1e-2 | 0.7 | complete |
+| 0 | 1e-3 | 0.3 | complete |
+| 1 | 1e-3 | 0.7 | **KILL** (os._exit) |
+| 2 | 1e-2 | 0.3 | complete |
+| 3 | 1e-2 | 0.7 | complete |
+| 4 | 1e-1 | 0.3 | **KILL** (os._exit) |
+| 5 | 1e-1 | 0.7 | complete |
 
 ```
-Array 1 (6 tasks): 4 complete, 2 crash (trials 0,1 — bad lr).
-Checker 1: Retries trials 0,1. Ledger: {0:1, 1:1}.
-Array 2 (2 tasks): Same lr=1e-4. Crash again.
-Checker 2: Retries again. Ledger: {0:2, 1:2}.
-Array 3 (2 tasks): Same crash.
-Checker 3: Retries again. Ledger: {0:3, 1:3}.
-Array 4 (2 tasks): Same crash.
-Checker 4: Exhausted (count ≥ max_retries). No retry for 0,1.
-           remaining_needed = 6 - 4 = 2 fresh trials.
-           Submits 2 fresh (new params from sampler).
-Array 5 (2 tasks): Fresh params. Both complete.
-Checker 5: All done. Chain ends.
+Array 1 (6 tasks): 4 complete, 2 killed.
+Checker 1: Detects 2 stale RUNNING trials. Marks FAIL. Enqueues same params.
+           Ledger: {"1": 1, "4": 1}. Submits array of 2 (retries).
+Array 2 (2 tasks): New trial numbers. Both succeed.
+Checker 2: All done. Chain ends.
 ```
 
 ## How crashes are controlled
 
-Everything is driven from the config. One dag handles both modes:
-
-- **Transient**: `base["crash_on_trials"] = [1, 4]` — crash specific
-  trial numbers. Retries get new numbers → succeed.
-- **Permanent**: grid includes lr values in the bad region (< 5e-4).
-  Same params on retry → same crash.
+- **App crash** (`crash_app_on`): raises RuntimeError. Optuna records FAIL.
+- **Node death** (`crash_node_on`): calls `os._exit(9)`. Process dies instantly.
+  Optuna trial stays RUNNING, heartbeat goes stale.
 - **Happy path**: trials not in either crash set complete normally.
-  Implicitly tested by the non-crashing trials in each config.
 
 ## Retry configuration
 
@@ -78,13 +69,13 @@ Fast intervals for testing (not production values):
 | `max_retries` | 3 | Each trial retried up to 3 times |
 | `chain_depth_cap` | 10 | Safety limit on chain length |
 
-## Failure mode: task never started
+## Failure mode: pre-start failure (type 3)
 
-Neither config simulates SLURM-level failures (task never starts).
-Those happen when the scheduler can't launch the task (auth error, node
-corruption). No Optuna trial is created. The checker sees
+Neither config simulates pre-start failures (auth error, node corruption
+before container starts). No Optuna trial is created. The checker sees
 `completed + running + waiting < n_trials` and submits fresh trials.
-Tested naturally on clusters with real scheduling issues.
+Tested by unit tests of `plan_retry`. Cannot be simulated in e2e without
+patching script generation.
 
 ## Prerequisites
 
@@ -104,39 +95,27 @@ Wait for build:
 jernerics logs --backend hpc <build_id> --follow
 ```
 
-### Step 2: Test transient failures
+### Step 2: Test app crash (type 1)
 
 ```bash
-jernerics run --backend hpc dag.py config_transient.py
+jernerics run --backend hpc dag.py config_app_crash.py
 ```
-
-Should print `Array: <id>, Checker: <id>`. Wait for completion.
 
 Verify:
-```bash
-jernerics jobs --backend hpc --all
-```
+- 2 array jobs + 2 checker jobs
+- Ledger: `{}` (no stale RUNNING retries, just fresh trials)
+- 6 COMPLETE trials in Optuna study
 
-Should show 2 array jobs + 2 checker jobs (chain terminated after retry succeeded).
-
-Ledger: `{"1": 1, "4": 1}` — each crashed trial retried once.
-
-### Step 3: Test permanent failures
+### Step 3: Test node death (type 2)
 
 ```bash
-jernerics run --backend hpc dag.py config_permanent.py
+jernerics run --backend hpc dag.py config_node_death.py
 ```
-
-Should print `Array: <id>, Checker: <id>`. Wait for completion.
 
 Verify:
-```bash
-jernerics jobs --backend hpc --all
-```
-
-Should show 5 array jobs + 5 checker jobs (3 retries exhausted, then 2 fresh).
-
-Ledger: `{"0": 3, "1": 3}` — bad-lr trials retried 3 times then abandoned.
+- 2 array jobs + 2 checker jobs
+- Ledger: `{"1": 1, "4": 1}` (stale RUNNING retried once)
+- 6 COMPLETE trials + 2 FAIL (original stale) in Optuna study
 
 ## What NOT to do
 

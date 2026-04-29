@@ -1,11 +1,12 @@
 import optuna
 
-# lr=1e-4 triggers permanent crash. Same params on retry → same crash.
-# No transient crashes (crash_on_trials is empty).
-base = {"seed": 42}
+# Type 1 failure: app-level crash on specific trial numbers.
+# Optuna records FAIL. Checker submits fresh trials (new params).
+# Retries get new trial numbers → succeed.
+base = {"seed": 42, "crash_app_on": [1, 4]}
 
 grid = {
-    "lr": [1e-4, 1e-3, 1e-2],
+    "lr": [1e-3, 1e-2, 1e-1],
     "dropout": [0.3, 0.7],
 }
 

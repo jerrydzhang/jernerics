@@ -1,9 +1,11 @@
 import optuna
 
-# All lr values are ≥ 1e-3, so no permanent failures.
-# Trials 1 and 4 crash transiently (by trial number).
+# Type 2 failure: simulated node death on specific trial numbers.
+# os._exit(9) kills process immediately — Optuna trial stays RUNNING,
+# heartbeat file goes stale. Checker detects stale, marks FAIL,
+# enqueues same params, increments ledger.
 # Retries get new trial numbers → succeed.
-base = {"seed": 42, "crash_on_trials": [1, 4]}
+base = {"seed": 42, "crash_node_on": [1, 4]}
 
 grid = {
     "lr": [1e-3, 1e-2, 1e-1],
