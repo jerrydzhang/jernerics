@@ -174,6 +174,7 @@ def generate_checker_script(
         [
             "",
             f"cd {remote_dir}",
+            "REMOTE_DIR=$(cd . && pwd)",
             wrapped_checker,
         ]
     )

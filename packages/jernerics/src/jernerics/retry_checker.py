@@ -8,7 +8,12 @@ from optuna.storages.journal import JournalFileBackend, JournalStorage
 from optuna.trial import TrialState
 
 from jernerics.config import load_backend_config, load_config
-from jernerics.retry import RetryContext, generate_checker_script, generate_sweep_script
+from jernerics.retry import (
+    RetryContext,
+    generate_checker_script,
+    generate_sweep_script,
+    plan_retry,
+)
 
 
 def _build_setup_command(study_name: str, storage_path: str, direction: str) -> str:
@@ -157,8 +162,6 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
 
     ledger = _read_ledger(ledger_path)
 
-    from jernerics.retry import plan_retry
-
     plan = plan_retry(
         trials=study.trials,
         heartbeats_dir=heartbeats_dir,
@@ -230,7 +233,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
         f" --context {ctx_path}"
         f" --chain-depth {next_chain_depth}"
     )
-    wrapped_checker = _wrap_apptainer(checker_cmd, cache_host)
+    wrapped_checker = _wrap_apptainer(checker_cmd, cache_host) + " | bash"
 
     checker_script = generate_checker_script(
         cache_host=cache_host,

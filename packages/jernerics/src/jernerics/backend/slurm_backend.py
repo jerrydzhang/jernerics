@@ -221,7 +221,6 @@ class SlurmBackend:
             f"python -m jernerics.retry_checker"
             f" --context {ctx_path}"
             f" --chain-depth {chain_depth}"
-            f" 2>{cache_host}/logs/checker_inner_%j.err"
         )
         wrapped_checker = self.container.wrap(checker_cmd, bind_args)
 
