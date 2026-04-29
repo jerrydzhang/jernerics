@@ -66,6 +66,7 @@ class SlurmBackend:
         max_concurrent_jobs: int = 10,
         cache_dir: str | None = None,
         tracking_server: str | None = None,
+        heartbeat_interval_s: float = 60.0,
     ):
         self.host = host
         self.container = container
@@ -78,6 +79,7 @@ class SlurmBackend:
         self.max_concurrent_jobs = max_concurrent_jobs
         self.cache_dir = cache_dir
         self.tracking_server = tracking_server
+        self.heartbeat_interval_s = heartbeat_interval_s
 
     capabilities = frozenset()
 
@@ -134,6 +136,7 @@ class SlurmBackend:
         project_name: str | None,
         tracking_dir: str,
         tracking_server: str | None,
+        heartbeat_interval_s: float = -1.0,
     ) -> str:
         args = [
             "python",
@@ -152,6 +155,8 @@ class SlurmBackend:
             args.extend(["--project-name", project_name])
         if tracking_server:
             args.extend(["--server-addr", tracking_server])
+        if heartbeat_interval_s > 0:
+            args.extend(["--heartbeat-interval", str(heartbeat_interval_s)])
         return " \\\n        ".join(args)
 
     def submit_sweep(self, spec: SweepSpec, *, direction: str = "minimize") -> str:
@@ -178,6 +183,7 @@ class SlurmBackend:
             project_name=spec.project_name,
             tracking_dir=tracking_dir,
             tracking_server=self.tracking_server,
+            heartbeat_interval_s=self.heartbeat_interval_s,
         )
 
         script = self._generate_sweep_script(

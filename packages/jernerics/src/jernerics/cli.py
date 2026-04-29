@@ -132,6 +132,7 @@ def _get_backend(backend_name: str) -> tuple[SlurmBackend, str, Path]:
         max_concurrent_jobs=config.max_concurrent_jobs,
         cache_dir=config.cache_dir,
         tracking_server=tracking_server,
+        heartbeat_interval_s=config.heartbeat_interval_s,
     )
 
     return backend, project_name, project_dir

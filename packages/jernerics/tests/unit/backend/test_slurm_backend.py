@@ -21,6 +21,7 @@ def _make_backend(**overrides):
         "max_concurrent_jobs": 10,
         "cache_dir": None,
         "tracking_server": None,
+        "heartbeat_interval_s": 60.0,
     }
     defaults.update(overrides)
 

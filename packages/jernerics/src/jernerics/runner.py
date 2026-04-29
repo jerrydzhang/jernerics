@@ -1,4 +1,5 @@
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,11 @@ class _TaskFailure(Exception):
     pass
 
 
+def _heartbeat_loop(path: Path, interval: float, stop: threading.Event) -> None:
+    while not stop.wait(interval):
+        path.touch()
+
+
 def run_trial(
     dag_file: str,
     config_file: str,
@@ -25,6 +31,7 @@ def run_trial(
     tracking_dir: str | None = None,
     project_name: str | None = None,
     server_addr: str | None = None,
+    heartbeat_interval_s: float = 60.0,
 ) -> None:
     dag_dir = Path(dag_file).parent
     if str(dag_dir) not in sys.path:
@@ -41,6 +48,7 @@ def run_trial(
         tracker: Tracker | None = None
         sync_client: FileSyncClient | None = None
         channel: grpc.Channel | None = None
+        heartbeat_stop: threading.Event | None = None
 
         if tracking_dir:
             tracker = ProtobufTracker(
@@ -58,6 +66,18 @@ def run_trial(
                 stub, Path(tracking_dir) / f"{trial.number}.pb"
             )
             sync_client.start()
+
+        if tracking_dir:
+            hb_dir = Path(tracking_dir) / "heartbeats"
+            hb_dir.mkdir(parents=True, exist_ok=True)
+            hb_path = hb_dir / f"{trial.number}.heartbeat"
+            hb_path.touch()
+            heartbeat_stop = threading.Event()
+            threading.Thread(
+                target=_heartbeat_loop,
+                args=(hb_path, heartbeat_interval_s, heartbeat_stop),
+                daemon=True,
+            ).start()
 
         params: dict[str, Any] = sweep.search_space(trial) if sweep.search_space else {}
 
@@ -98,6 +118,8 @@ def run_trial(
                 return sweep.objective(results)
             return 0.0
         finally:
+            if heartbeat_stop:
+                heartbeat_stop.set()
             if tracker:
                 tracker.close()
             if sync_client:
@@ -122,6 +144,7 @@ if __name__ == "__main__":
     parser.add_argument("--tracking-dir")
     parser.add_argument("--project-name", default=None)
     parser.add_argument("--server-addr", default=None)
+    parser.add_argument("--heartbeat-interval", type=float, default=60.0)
     args = parser.parse_args()
 
     run_trial(
@@ -132,4 +155,5 @@ if __name__ == "__main__":
         tracking_dir=args.tracking_dir,
         project_name=args.project_name,
         server_addr=args.server_addr,
+        heartbeat_interval_s=args.heartbeat_interval,
     )
