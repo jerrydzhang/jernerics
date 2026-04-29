@@ -242,7 +242,7 @@ chain_depth_cap = 20
 - [ ] Server deploy: NixOS systemd service, health check, logging
 - [ ] Server query API or marimo dashboard for inspecting DuckDB remotely
 - [ ] the commands that have the --follow flag such as "jernerics logs --backend hpc 24200529 --follow" should automatically exit when a job finishes (currently they have to be manually killed with Ctrl+C)
-- [ ] SearchSweep is tightly coupled with the slurm currently since it has a slurm_overrides field. Instead it seems that it should be a more generic dict to pass overrides and then let each backend translate into the proper format for that backend.
+- [x] ~~SearchSweep is tightly coupled with the slurm currently since it has a slurm_overrides field~~ — `BackendConfig` split into `SharedConfig` + `SlurmConfig`. `SweepSpec.slurm_overrides` → `backend_overrides`. `SweepConfig.slurm` → `backend_overrides` (dict keyed by backend name). Three-way merge uses `SlurmConfig.defaults_dict()` instead of hardcoded SLURM field names in CLI. E2E verified with sweep-parallel on HPC.
 
 # Code smell
 - slurm_backend.py defaults to:
