@@ -74,6 +74,8 @@
               virtualenv
               pkgs.uv
               pkgs.just
+              pkgs.pueue
+	      pkgs.docker
             ];
 
             env =

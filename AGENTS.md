@@ -1,16 +1,28 @@
 # AGENTS.md
 
+## Environment
+
+The project uses **uv2nix** (not a local `.venv`). All Python packages live in the Nix store. The devShell sets:
+
+- `VIRTUAL_ENV` → points to the nix-built virtualenv
+- `LD_LIBRARY_PATH` → includes `stdenv.cc.cc.lib` for native extensions (numpy, grpc, duckdb)
+- `PYTHONPATH` → unset (editable overlay uses `$REPO_ROOT`)
+
+**Never create or use a `.venv` directory.** If `uv run` creates one, delete it. All commands should use the nix shell environment directly.
+
+**Never use `uv run` or `uv sync` to execute code or install packages.** These commands create or pick up a stale local `.venv` that shadows the nix store packages, causing import errors and test failures. Use `python3`, `pytest`, or `just` recipes instead — the devShell already has everything installed.
+
 ## Commands
 
-All commands run from repo root via `just`.
+All commands run from repo root inside the nix devShell (`nix develop`).
 
 ```bash
 # Test
 just test                                       # All tests
 just test-unit                                  # Unit tests only
-uv run pytest tests/unit/dag/test_task.py               # Specific file
-uv run pytest tests/unit/dag/test_task.py::TestTaskDecorator::test_task_decorator_returns_task  # Single test
-uv run pytest -x                                       # Stop on first failure
+pytest tests/unit/dag/test_task.py              # Specific file
+pytest tests/unit/dag/test_task.py::TestTaskDecorator::test_task_decorator_returns_task  # Single test
+pytest -x                                       # Stop on first failure
 
 # Lint & format (must pass before committing)
 just lint                                       # Lint
@@ -47,9 +59,13 @@ src/jernerics/
   dag/                   # DAG executor, task decorator
   backend/               # Multi-backend execution
     slurm_backend.py     # SlurmBackend (sbatch + Apptainer)
-    models.py            # JobSpec, JobInfo dataclasses
+    pueue_backend.py      # PueueBackend (pueue + Docker/Apptainer/none)
+    local_backend.py      # LocalBackend (blocking, in-process)
+    factory.py            # make_backend() dispatches on config.shared.type
+    protocol.py           # Backend protocol (10 methods)
+    models.py             # SweepSpec, SubmitResult, JobInfo dataclasses
     components/          # Composable primitives
-      host.py            # Host protocol, LocalHost, SSHHost
+      host.py            # Host protocol, LocalHost, SSHHost, StdoutHost
       container.py       # ContainerRuntime protocol, NoContainer, Docker, Apptainer
       project_sync.py    # FileSyncer (tar/scp project sync)
   container/
@@ -59,7 +75,7 @@ tests/
   unit/                  # Mirrors src/ structure
 ```
 
-Use `uv run` from repo root — not `pip`, not bare `python`.
+Run commands inside the nix devShell. The `just` recipes wrap `uv run` internally, but direct `pytest` invocations also work since `VIRTUAL_ENV` is set by the shell hook. Never create a `.venv`.
 
 ## Definition of Done
 
@@ -107,12 +123,30 @@ The container sees `/work` (project source) and `/cache` (ephemeral data). Never
 
 **Never use `--no-verify` when committing.** This is non-negotiable. The previous commit passed all checks, so if pre-commit fails, something in the current changes broke it — fix it, don't skip it.
 
+**Never claim errors are "pre-existing" without verifying.** This is the most common failure mode. When lint, type checks, or tests fail, the agent reflexively labels them pre-existing to justify skipping. The previous commit passed — if something fails now, your changes caused it. Verify with `git stash && just lint` if genuinely uncertain.
+
 ## When Blocked
 
+- If tests fail with `libstdc++.so.6: cannot open shared object file`: you are not in the nix devShell. Run `nix develop` first.
 - If tests fail after 3 attempts: stop and report the failing test with full output
 - If a dependency is missing: check `pyproject.toml` first, then ask
 - If you encounter an import error: verify the file exists and the module name matches — recent renames may not be in your training data
 - **Never:** delete files to resolve errors, skip tests, modify test configuration files, or add `# type: ignore` / `# noqa` without justification
+- **Never:** create a `.venv`. If one exists, delete it — the nix store has the correct packages.
+
+## Decision Points
+
+When implementing a scoped task, **stop and report back** if you encounter:
+
+- A non-trivial design decision (multiple reasonable approaches)
+- An ambiguity in the spec that affects behavior
+- A failure you can't resolve in one attempt
+
+Do not resolve these on your own. Explain the situation and wait for direction. Continuing past a decision point without consulting the user is worse than stopping early.
+
+## Type Checking
+
+When `just typecheck` (or `ty`) reports errors, fix the underlying type issues. **Never exclude entire packages or directories from type checking to suppress errors.** If a dependency can't be resolved (e.g., duckdb only in jernerics-server's venv), use targeted `# ty: ignore[unresolved-import]` on specific import lines — not broad exclusions.
 
 ## Packages
 

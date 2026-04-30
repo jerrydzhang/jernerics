@@ -191,6 +191,8 @@ class TestReplayTracking:
         assert result.files_processed == 2
         assert result.events_sent == 2
         assert result.errors == []
+        assert not (study_dir / "0.pb").exists()
+        assert not (study_dir / "1.pb").exists()
 
     def test_scopes_to_study(self, tmp_path: Path) -> None:
         mock_stub = MagicMock()
@@ -206,6 +208,8 @@ class TestReplayTracking:
 
         assert result.files_processed == 1
         assert result.events_sent == 1
+        assert not (tracking / "study_b" / "0.pb").exists()
+        assert (tracking / "study_a" / "0.pb").exists()
 
     def test_returns_empty_result_for_no_files(self, tmp_path: Path) -> None:
         mock_stub = MagicMock()
@@ -215,6 +219,7 @@ class TestReplayTracking:
         result = replay_tracking(tracking, mock_stub, max_retries=3)
 
         assert result == ReplayResult()
+        assert not result.errors
 
     def test_records_partial_failure(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
@@ -233,3 +238,5 @@ class TestReplayTracking:
         assert result.files_processed == 2
         assert len(result.errors) == 1
         assert result.events_sent == 1
+        assert (study_dir / "0.pb").exists()
+        assert (study_dir / "1.pb").exists()

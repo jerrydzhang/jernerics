@@ -166,7 +166,7 @@ Unified backend interface with a `Backend` protocol, `SweepSpec` dataclass, and 
 - [x] ~~Replace `FileSyncer` with rsync~~ — tar+scp is well-suited to WekaFS, code is now understood
 - [x] ~~Implement `LocalSyncBackend`~~ — already done as `LocalBackend`
 - [ ] Implement `LocalPueueBackend` and `BareBackend` (Pueue + Docker)
-- [ ] `clean` command overhaul — safety check (all tracking synced, no jobs running). **Blocked by**: job resume needs a complete picture of what's safe to delete (zombie vs orphan .pb files, partial trial state). Do after resume lands.
+- [x] `clean` command overhaul — Two modes: cache-only (`clean --backend <name>`) and full (`clean --backend <name> --full`). Hard blocks on active jobs, unsynced `.pb` files, missing target directories. `sync` now deletes `.pb` files after successful replay, establishing the invariant: `.pb` files on remote ⟹ unsynced data. Dry run by default, `--force` to execute. `--full` preserves `saved/` directory.
 - [ ] Integration test all CLI commands against real SLURM cluster
 
 ---
@@ -241,12 +241,10 @@ chain_depth_cap = 20
 - [ ] Build core marimo dashboard
 - [ ] Server deploy: NixOS systemd service, health check, logging
 - [ ] Server query API or marimo dashboard for inspecting DuckDB remotely
-- [ ] the commands that have the --follow flag such as "jernerics logs --backend hpc 24200529 --follow" should automatically exit when a job finishes (currently they have to be manually killed with Ctrl+C)
+- [x] the commands that have the --follow flag such as "jernerics logs --backend hpc 24200529 --follow" should automatically exit when a job finishes (currently they have to be manually killed with Ctrl+C)
 - [x] ~~SearchSweep is tightly coupled with the slurm currently since it has a slurm_overrides field~~ — `BackendConfig` split into `SharedConfig` + `SlurmConfig`. `SweepSpec.slurm_overrides` → `backend_overrides`. `SweepConfig.slurm` → `backend_overrides` (dict keyed by backend name). Three-way merge uses `SlurmConfig.defaults_dict()` instead of hardcoded SLURM field names in CLI. E2E verified with sweep-parallel on HPC.
 
 # Code smell
-- slurm_backend.py defaults to:
-if host is None:
-    host = StdoutHost()
-we should really enforce that a host is always passed. The StdoutHost must be explicitly passed not as a default since that is confusing to the end user.
+- ~~cli.py and retry_checker.py have duplicated logic on merging the multiple BackendConfigs from the cli, python config file, and the pyproject.toml~~ — Resolved by moving override merging into `SlurmBackend.prepare_and_submit`. The retry checker still duplicates SLURM-specific merge logic (`slurm.defaults_dict()`). See HANDOFF.md §6.
+- ~~`Docker.wrap()` uses `--bind` (apptainer flag) instead of `-v` (docker flag).~~ Fixed.
 

@@ -28,6 +28,12 @@ time = "0:10:00"
 mem = "4G"
 cpus = 4
 
+[tool.jernerics.backends.pueue-local]
+type = "pueue"
+parallel = 2
+container_type = "none"
+remote_dir = "."
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

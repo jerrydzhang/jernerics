@@ -1,23 +1,31 @@
 # sweep-parallel
 
-Integration test for the jernerics CLI against a real SLURM cluster. Exercises the parallel array job path with `max_parallel=2`.
+Integration test for the jernerics CLI against real backends. Exercises the parallel job path with `max_parallel=2`.
 
 ## What this tests
 
+- `run --backend hpc` — parallel sweep via SLURM array jobs (10 trials, 2 concurrent)
+- `run --backend pueue-local` — parallel sweep via local pueue daemon (10 trials, 2 concurrent)
 - `build --backend hpc` — container build via SLURM
-- `run --backend hpc` — parallel sweep submission (10 trials, 2 concurrent)
-- `jobs --backend hpc` — job listing
-- `logs --backend hpc` — log retrieval for array jobs
-- `cancel --backend hpc` — job cancellation
-- `clean --backend hpc` — artifact cleanup
+- `jobs --backend <name>` — job listing
+- `logs --backend <name>` — log retrieval
+- `cancel --backend <name>` — job cancellation
+- `clean --backend <name>` — artifact cleanup
 
 ## Prerequisites
+
+### HPC (SLURM)
 
 1. **SSH access** to `jez21005@hpc2.storrs.hpc.uconn.edu` — verify with `ssh jez21005@hpc2.storrs.hpc.uconn.edu echo ok`
 2. **jernerics installed** and on the `human-ownership` branch — `uv sync` from `packages/jernerics/`
 3. **uv.lock present** — required for container build. Already in this directory.
 
-## Integration test procedure
+### Local (pueue)
+
+1. **pueue daemon running** — verify with `pueue status`
+2. **jernerics installed** in the nix devShell
+
+## HPC integration test procedure
 
 Run these commands from this directory (`examples/sweep-parallel/`).
 
@@ -129,6 +137,52 @@ jernerics run local dag.py config.py
 **Note:** `config.py` has `n_trials = 10`. For faster local testing, you can create a temp config with `n_trials = 1`.
 
 **Pass:** Runs all trials locally, prints "Best value:" at the end.
+
+## Local pueue integration test procedure
+
+Run these commands from this directory (`examples/sweep-parallel/`).
+
+### Step 1: Dry run
+
+```bash
+jernerics run --backend pueue-local dag.py config.py --dry-run
+```
+
+**Pass:** Prints "=== DRY RUN ===", "Backend: pueue-local (pueue)", group name, trial count. Does NOT submit a job.
+
+### Step 2: Submit sweep
+
+```bash
+jernerics run --backend pueue-local dag.py config.py
+```
+
+**Pass:** Prints "Sweep submitted: group <name>".
+
+### Step 3: Check status
+
+```bash
+pueue status
+```
+
+**Pass:** Shows the pueue group with setup + trial tasks.
+
+### Step 4: Read logs
+
+Wait for tasks to complete, then:
+
+```bash
+jernerics logs --backend pueue-local <task_id>
+```
+
+**Pass:** Shows trial output with "Trial N completed" and optuna results.
+
+### Step 5: Clean up
+
+```bash
+pueue reset --force
+```
+
+**Pass:** Cleans all pueue state.
 
 ## Expected DAG data flow
 

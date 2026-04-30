@@ -146,4 +146,13 @@ def replay_tracking(
         f"{aggregated.events_failed} failures.",
         file=sys.stderr,
     )
+
+    if not aggregated.errors:
+        for path in pb_files:
+            path.unlink()
+        print(
+            f"Deleted {len(pb_files)} synced .pb file(s).",
+            file=sys.stderr,
+        )
+
     return aggregated
