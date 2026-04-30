@@ -245,7 +245,7 @@ class SlurmBackend:
         config_relpath = spec.config_relpath or str(spec.config_path.name)
         project_name = spec.project_name or ""
         cache_host = self._paths.resolve_cache(project_name)
-        tracking_dir = f"{cache_host}/tracking/{spec.study_name}"
+        tracking_dir = self._paths.tracking_dir(spec.study_name)
 
         setup_command = build_setup_command(
             study_name=spec.study_name,
@@ -445,7 +445,7 @@ class SlurmBackend:
                         study_name=spec.study_name,
                         storage_path=spec.storage_url,
                         project_name=spec.project_name,
-                        tracking_dir=f"/cache/tracking/{spec.study_name}",
+                        tracking_dir=self._paths.tracking_dir(spec.study_name),
                         tracking_server=self.tracking_server,
                         work_prefix=self._paths.work_prefix,
                         multiline=True,

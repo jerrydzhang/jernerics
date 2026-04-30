@@ -31,7 +31,7 @@ class TestGenerateSubmitJob:
         """The build script is passed to pueue via bash -c '...'."""
         backend = _make_backend()
         script = backend.generate_submit_job("echo hello", name="build")
-        assert "bash -c 'echo hello'" in script
+        assert "bash -e -c 'echo hello'" in script
         # No nested heredoc
         assert "JERNERICS_EOF" not in script
         assert "$(cat <<" not in script
@@ -61,4 +61,39 @@ class TestGenerateSubmitJob:
         build_script = "set -e\ncd /home/proj\ndocker build -t img ."
         backend = _make_backend()
         script = backend.generate_submit_job(build_script, name="build")
-        assert "bash -c 'set -e\ncd /home/proj\ndocker build -t img .'" in script
+        assert "bash -e -c 'set -e\ncd /home/proj\ndocker build -t img .'" in script
+
+
+class TestTrackingDirIsContainerAware:
+    """_generate_submit_script must use container-aware tracking_dir."""
+
+    def _make_spec(self):
+        from pathlib import Path
+
+        from jernerics.backend.models import SweepSubmission
+
+        return SweepSubmission(
+            dag_path=Path("dag.py"),
+            config_path=Path("config.py"),
+            study_name="mystudy",
+            storage_url="/cache/optuna/mystudy.journal",
+            n_trials=3,
+        )
+
+    def test_with_apptainer_uses_cache_prefix(self):
+        from jernerics.backend.components.container import Apptainer
+
+        backend = _make_backend(container=Apptainer())
+        script = backend._generate_submit_script(self._make_spec())
+        assert "--tracking-dir" in script
+        assert "/cache/tracking/mystudy" in script
+
+    def test_with_no_container_uses_host_cache_path(self):
+        from jernerics.backend.components.container import NoContainer
+
+        backend = _make_backend(
+            container=NoContainer(), cache_dir="$HOME/.cache/jernerics"
+        )
+        script = backend._generate_submit_script(self._make_spec())
+        assert "--tracking-dir" in script
+        assert "$HOME/.cache/jernerics/tracking/mystudy" in script

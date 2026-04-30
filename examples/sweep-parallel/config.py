@@ -20,7 +20,7 @@ backend_overrides = {
         "partition": "priority",
         "time": "0:10:00",
         "mem": "4G",
-        "max_parallel": 2,
+        "max_parallel": 10,
     },
 }
 

@@ -134,7 +134,7 @@ class PueueBackend:
         # Script content must not contain single quotes.
         return (
             f"BUILD_ID=$(pueue add --label {name}"
-            f" -- bash -c '{script}'"
+            f" -- bash -e -c '{script}'"
             " 2>&1 | grep -oE '[0-9]+')\n"
             "echo $BUILD_ID"
         )
@@ -205,7 +205,7 @@ class PueueBackend:
         project_name = spec.project_name or ""
         cache_host = self._paths.resolve_cache(project_name)
         bind_args = self._paths.bind_args(cache_host)
-        tracking_dir = f"{cache_host}/tracking/{spec.study_name}"
+        tracking_dir = self._paths.tracking_dir(spec.study_name)
 
         dag_relpath = spec.dag_relpath or str(spec.dag_path.name)
         config_relpath = spec.config_relpath or str(spec.config_path.name)

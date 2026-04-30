@@ -694,6 +694,84 @@ class TestFromConfigSubmitWithRetryCtx:
         assert result.checker_job_id is None
 
 
+class TestTrackingDirIsContainerAware:
+    """submit_sweep must use container-aware tracking_dir."""
+
+    def _make_capturing_host(self):
+        captured = {}
+
+        class CapturingHost:
+            def run(self, command, **kwargs):
+                captured["command"] = command
+                captured["input"] = kwargs.get("input", "")
+                return subprocess.CompletedProcess(
+                    args=list(command),
+                    returncode=0,
+                    stdout="10001",
+                    stderr="",
+                )
+
+            def mkdir(self, path):
+                pass
+
+            def file_exists(self, path):
+                return False
+
+            def getmtime(self, path):
+                return None
+
+            def remove_file(self, path):
+                pass
+
+            def write_file(self, path, content):
+                pass
+
+        return CapturingHost(), captured
+
+    def _make_spec(self):
+        return SweepSubmission(
+            dag_path=Path("dag.py"),
+            config_path=Path("config.py"),
+            study_name="mystudy",
+            storage_url="/cache/optuna/mystudy.journal",
+            n_trials=3,
+        )
+
+    def test_with_apptainer_uses_cache_prefix(self):
+        from jernerics.backend.components.container import Apptainer
+
+        host, captured = self._make_capturing_host()
+        backend = SlurmBackend(
+            host=host,
+            container=Apptainer(),
+            remote_dir="$HOME/projects/proj",
+            cache_dir=None,
+            syncer=MagicMock(),
+        )
+
+        backend.submit_sweep(self._make_spec())
+        script = captured["input"]
+        assert "--tracking-dir" in script
+        assert "/cache/tracking/mystudy" in script
+
+    def test_with_no_container_uses_host_cache_path(self):
+        from jernerics.backend.components.container import NoContainer
+
+        host, captured = self._make_capturing_host()
+        backend = SlurmBackend(
+            host=host,
+            container=NoContainer(),
+            remote_dir="$HOME/projects/proj",
+            cache_dir=None,
+            syncer=MagicMock(),
+        )
+
+        backend.submit_sweep(self._make_spec())
+        script = captured["input"]
+        assert "--tracking-dir" in script
+        assert "$HOME/.cache/jernerics/tracking/mystudy" in script
+
+
 class TestComposeChainBashExecution:
     """Test that _compose_chain produces valid bash that executes correctly."""
 
