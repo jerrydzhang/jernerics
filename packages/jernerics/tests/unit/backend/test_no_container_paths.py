@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 from jernerics.backend.components.container import NoContainer
 from jernerics.backend.components.host import LocalHost
-from jernerics.backend.models import SweepSpec
+from jernerics.backend.models import SweepSubmission
 from jernerics.backend.pueue_backend import PueueBackend
 from jernerics.backend.slurm_backend import SlurmBackend
 
@@ -32,25 +32,25 @@ class TestPueueNoContainerPaths:
 
     def test_work_prefix_uses_remote_dir(self):
         backend = self._make_backend()
-        assert backend._work_prefix == "/home/user/projects/myproject"
+        assert backend._paths.work_prefix == "/home/user/projects/myproject"
 
     def test_cache_prefix_uses_cache_dir(self):
         backend = self._make_backend()
-        assert backend._cache_prefix == "/home/user/.cache/jernerics"
+        assert backend._paths.cache_prefix == "/home/user/.cache/jernerics"
 
     def test_work_prefix_with_container(self):
         container = MagicMock()
         backend = self._make_backend(container=container)
-        assert backend._work_prefix == "/work"
+        assert backend._paths.work_prefix == "/work"
 
     def test_cache_prefix_with_container(self):
         container = MagicMock()
         backend = self._make_backend(container=container)
-        assert backend._cache_prefix == "/cache"
+        assert backend._paths.cache_prefix == "/cache"
 
     def test_trial_command_uses_host_paths(self):
         backend = self._make_backend()
-        spec = SweepSpec(
+        spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
             study_name="study",
@@ -68,7 +68,7 @@ class TestPueueNoContainerPaths:
 
     def test_setup_command_uses_host_paths(self):
         backend = self._make_backend()
-        spec = SweepSpec(
+        spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
             study_name="study",
@@ -108,25 +108,25 @@ class TestSlurmNoContainerPaths:
 
     def test_work_prefix_uses_remote_dir(self):
         backend = self._make_backend()
-        assert backend._work_prefix == "/home/user/projects/proj"
+        assert backend._paths.work_prefix == "/home/user/projects/proj"
 
     def test_cache_prefix_uses_cache_dir(self):
         backend = self._make_backend()
-        assert backend._cache_prefix == "/home/user/.cache/jernerics"
+        assert backend._paths.cache_prefix == "/home/user/.cache/jernerics"
 
     def test_work_prefix_with_container(self):
         container = MagicMock()
         backend = self._make_backend(container=container)
-        assert backend._work_prefix == "/work"
+        assert backend._paths.work_prefix == "/work"
 
     def test_cache_prefix_with_container(self):
         container = MagicMock()
         backend = self._make_backend(container=container)
-        assert backend._cache_prefix == "/cache"
+        assert backend._paths.cache_prefix == "/cache"
 
     def test_trial_command_uses_host_paths(self):
         backend = self._make_backend()
-        spec = SweepSpec(
+        spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
             study_name="study",
@@ -139,5 +139,5 @@ class TestSlurmNoContainerPaths:
         script = backend._build_array_script(spec, "minimize")
         assert "/home/user/projects/proj/dag.py" in script
         assert "/home/user/projects/proj/config.py" in script
-        assert "/home/user/.cache/jernerics/tracking/study" in script
+        assert "/home/user/.cache/jernerics/proj/tracking/study" in script
         assert "/work/" not in script

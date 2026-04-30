@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from jernerics.backend.models import SweepSpec
+from jernerics.backend.models import SweepSubmission
 from jernerics.backend.slurm_backend import (
     SlurmBackend,
     _compose_chain,
@@ -284,7 +284,7 @@ class TestSubmitSweep:
         host.run.return_value = MagicMock(returncode=0, stdout="12345")
         backend = _make_backend(host=host)
 
-        spec = SweepSpec(
+        spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
             study_name="study",
@@ -307,7 +307,7 @@ class TestSubmitSweep:
         host.run.return_value = MagicMock(returncode=0, stdout="99")
         backend = _make_backend(host=host, remote_dir="~/projects/proj")
 
-        spec = SweepSpec(
+        spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
             study_name="study",
@@ -325,7 +325,7 @@ class TestSubmitSweep:
         host.run.return_value = MagicMock(returncode=1, stderr="sbatch: error")
         backend = _make_backend(host=host)
 
-        spec = SweepSpec(
+        spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
             study_name="study",
@@ -564,7 +564,7 @@ class TestFromConfigSubmitWithRetryCtx:
         host = CapturingHost()
         backend = SlurmBackend.from_config(config, host=host)
 
-        spec = SweepSpec(
+        spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
             study_name="study",
@@ -635,7 +635,7 @@ class TestFromConfigSubmitWithRetryCtx:
         host = CapturingHost()
         backend = SlurmBackend.from_config(config, host=host)
 
-        spec = SweepSpec(
+        spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
             study_name="study",

@@ -11,7 +11,7 @@ from jernerics_proto import tracking_pb2_grpc
 
 from .wire import TrackingReader
 
-# Default retry settings (matches FileSyncClient).
+# Default retry settings (matches StreamClient).
 _RETRY_BASE_INTERVAL = 0.5
 _RETRY_MAX_WAIT = 10.0
 

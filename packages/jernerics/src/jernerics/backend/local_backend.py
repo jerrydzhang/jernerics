@@ -3,7 +3,7 @@ import itertools
 import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
-from jernerics.backend.models import JobInfo, SubmitResult, SweepSpec
+from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
 from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
@@ -22,7 +22,7 @@ class LocalBackend:
         return str(project_cache / "optuna" / f"{study_name}.journal")
 
     def submit_sweep(
-        self, spec: SweepSpec, *, direction: str = "minimize"
+        self, spec: SweepSubmission, *, direction: str = "minimize"
     ) -> SubmitResult:
         project_cache = cache_dir()
         tracker_dir = spec.tracking_dir or (
@@ -92,7 +92,7 @@ class LocalBackend:
 
     def prepare_and_submit(
         self,
-        spec: SweepSpec,
+        spec: SweepSubmission,
         *,
         project_dir,
         project_name: str,

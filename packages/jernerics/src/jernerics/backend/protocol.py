@@ -1,13 +1,13 @@
 from pathlib import Path
 from typing import Any, Protocol
 
-from .models import JobInfo, SubmitResult, SweepSpec
+from .models import JobInfo, SubmitResult, SweepSubmission
 
 
 class Backend(Protocol):
     def storage_path(self, study_name: str, project_name: str) -> str: ...
     def submit_sweep(
-        self, spec: SweepSpec, *, direction: str = "minimize"
+        self, spec: SweepSubmission, *, direction: str = "minimize"
     ) -> SubmitResult: ...
 
     def list_jobs(self, include_completed: bool = False) -> list[JobInfo]: ...
@@ -24,7 +24,7 @@ class Backend(Protocol):
 
     def prepare_and_submit(
         self,
-        spec: SweepSpec,
+        spec: SweepSubmission,
         *,
         project_dir: Path,
         project_name: str,

@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import grpc
-from jernerics.tracking.sync_client import FileSyncClient
+from jernerics.tracking.sync_client import StreamClient
 from jernerics.tracking.wire import TrackingWriter
 from jernerics_proto import (
     Envelope,
@@ -72,7 +72,7 @@ class TestHappyPath:
             for env in events:
                 writer.write_envelope(env)
 
-        client = FileSyncClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
+        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
         client.start()
         client.join()
         server.stop(grace=0)
@@ -96,7 +96,7 @@ class TestShutdown:
             writer.write_envelope(_param_envelope(0, "lr", 0.01))
             writer.write_envelope(_trial_end_envelope(1))
 
-        client = FileSyncClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
+        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
         client.start()
         client.join()
         server.stop(grace=0)
@@ -112,7 +112,7 @@ class TestShutdown:
         with TrackingWriter(pb_file) as writer:
             writer.write_envelope(_param_envelope(0, "lr", 0.01))
 
-        client = FileSyncClient(stub, pb_file, poll_interval=0.05, flush_timeout=0.5)
+        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=0.5)
         client.start()
         client.join()
 
@@ -139,9 +139,7 @@ class TestRetryOnFailure:
             writer.write_envelope(_param_envelope(0, "lr", 0.01))
             writer.write_envelope(_trial_end_envelope(1))
 
-        client = FileSyncClient(
-            mock_stub, pb_file, poll_interval=0.01, flush_timeout=5.0
-        )
+        client = StreamClient(mock_stub, pb_file, poll_interval=0.01, flush_timeout=5.0)
         client.start()
         client.join()
 
@@ -154,7 +152,7 @@ class TestDeferredFileCreation:
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
-        client = FileSyncClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
+        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
         client.start()
 
         time.sleep(0.2)
@@ -185,7 +183,7 @@ class TestPartialEvent:
         with open(pb_file, "ab") as f:
             f.write(encode_varint(1000) + b"\x00\x00\x00\x00\x00")
 
-        client = FileSyncClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
+        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
         client.start()
         client.join()
         server.stop(grace=0)

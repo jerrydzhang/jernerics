@@ -5,12 +5,19 @@ import time
 from pathlib import Path
 from typing import Any
 
+from jernerics.backend.components.command_builders import (
+    build_checker_command,
+    build_setup_command,
+    build_trial_command,
+)
 from jernerics.backend.components.container import (
     Apptainer,
     Docker,
     NoContainer,
 )
-from jernerics.backend.models import JobInfo, SubmitResult, SweepSpec
+from jernerics.backend.components.job_meta import save_job_meta
+from jernerics.backend.components.path_resolver import PathResolver
+from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
 from jernerics.config import BackendConfig, SlurmConfig, _normalize_time
 from jernerics.retry import RetryContext
 
@@ -98,6 +105,14 @@ class SlurmBackend:
         self.max_retries = max_retries
         self.chain_depth_cap = chain_depth_cap
 
+        self._paths = PathResolver(
+            remote_dir=remote_dir,
+            cache_dir=cache_dir,
+            container=container,
+            work_mount_source="${REMOTE_DIR}",
+            quote_binds=True,
+        )
+
     capabilities = frozenset()
 
     @classmethod
@@ -147,36 +162,8 @@ class SlurmBackend:
             chain_depth_cap=backend_config.shared.chain_depth_cap,
         )
 
-    @property
-    def _work_prefix(self) -> str:
-        if isinstance(self.container, NoContainer):
-            return self.remote_dir
-        return "/work"
-
-    @property
-    def _cache_prefix(self) -> str:
-        if isinstance(self.container, NoContainer):
-            return (self.cache_dir or "$HOME/.cache/jernerics").replace("~", "$HOME")
-        return "/cache"
-
     def storage_path(self, study_name: str, project_name: str) -> str:
-        if isinstance(self.container, NoContainer):
-            cache = self._cache_host(project_name)
-            return f"{cache}/optuna/{study_name}.journal"
-        return f"/cache/optuna/{study_name}.journal"
-
-    def _cache_host(self, project_name: str) -> str:
-        if self.cache_dir:
-            cache = self.cache_dir.replace("{project_name}", project_name)
-            cache = cache.replace("{project-name}", project_name)
-            return cache.replace("~", "$HOME")
-        return "$HOME/.cache/jernerics/" + project_name
-
-    def _bind_args(self, cache_host: str) -> list[str]:
-        return [
-            '"${REMOTE_DIR}:/work"',
-            f'"{cache_host}:/cache"',
-        ]
+        return self._paths.storage_path(study_name, project_name)
 
     def _resolve_output_dir(self, output_path: str) -> str:
         if "%" in output_path:
@@ -192,104 +179,9 @@ class SlurmBackend:
             return "$HOME" + p[1:]
         return p
 
-    def _build_setup_command(
-        self,
-        study_name: str,
-        storage_path: str,
-        direction: str,
-        config_relpath: str = "",
-        grid: dict[str, list] | None = None,
-    ) -> str:
-        sampler_expr = "None"
-        if config_relpath:
-            sampler_expr = (
-                f"__import__('jernerics.config', fromlist=['load_config'])"
-                f".load_config('{self._work_prefix}/{config_relpath}').sampler"
-            )
-
-        lines = [
-            'python -c "',
-            "from optuna.storages.journal import JournalFileBackend, JournalStorage; ",
-            "import optuna, itertools, json; ",
-            f"sampler = {sampler_expr}; ",
-            "study = optuna.create_study(",
-            f"study_name={study_name!r},",
-            f" storage=JournalStorage(JournalFileBackend({storage_path!r})),",
-            f" direction={direction!r},",
-            " sampler=sampler,",
-            " load_if_exists=True);",
-        ]
-
-        if grid:
-            import base64
-
-            grid_b64 = base64.b64encode(json.dumps(grid).encode()).decode()
-            lines.append(
-                "import base64, os; "
-                f"_sentinel = '{self._cache_prefix}/optuna/{study_name}.grid_enqueued';"
-                f" grid = json.loads(base64.b64decode({grid_b64!r}));"
-                f" keys = sorted(grid.keys());"
-                f" [study.enqueue_trial(dict(zip(keys, combo, strict=True)))"
-                f" for combo in itertools.product(*[grid[k] for k in keys])"
-                " if not os.path.exists(_sentinel)];"
-                f" os.makedirs('{self._cache_prefix}/optuna', exist_ok=True);"
-                f" open(_sentinel, 'a').close();"
-            )
-
-        lines.append('"')
-        return "".join(lines)
-
-    def _build_trial_command(
-        self,
-        dag_relpath: str,
-        config_relpath: str,
-        study_name: str,
-        storage_path: str,
-        project_name: str | None,
-        tracking_dir: str,
-        tracking_server: str | None,
-        heartbeat_interval_s: float = -1.0,
-    ) -> str:
-        args = [
-            "python",
-            "-m",
-            "jernerics.runner",
-            f"{self._work_prefix}/{dag_relpath}",
-            f"{self._work_prefix}/{config_relpath}",
-            "--study-name",
-            study_name,
-            "--storage-url",
-            storage_path,
-            "--tracking-dir",
-            tracking_dir,
-        ]
-        if project_name:
-            args.extend(["--project-name", project_name])
-        if tracking_server:
-            args.extend(["--server-addr", tracking_server])
-        if heartbeat_interval_s > 0:
-            args.extend(["--heartbeat-interval", str(heartbeat_interval_s)])
-        return " \\\n        ".join(args)
-
-    def _build_checker_command(
-        self,
-        ctx_path: str,
-        chain_depth: int,
-    ) -> str:
-        args = [
-            "python",
-            "-m",
-            "jernerics.retry_checker",
-            "--context",
-            ctx_path,
-            "--chain-depth",
-            str(chain_depth),
-        ]
-        return " ".join(args)
-
     def _build_array_script(
         self,
-        spec: SweepSpec,
+        spec: SweepSubmission,
         direction: str,
     ) -> str:
         """Generate the SLURM array job script."""
@@ -302,17 +194,19 @@ class SlurmBackend:
         dag_relpath = spec.dag_relpath or str(spec.dag_path.name)
         config_relpath = spec.config_relpath or str(spec.config_path.name)
         project_name = spec.project_name or ""
-        cache_host = self._cache_host(project_name)
+        cache_host = self._paths.resolve_cache(project_name)
         tracking_dir = f"{cache_host}/tracking/{spec.study_name}"
 
-        setup_command = self._build_setup_command(
+        setup_command = build_setup_command(
             study_name=spec.study_name,
             storage_path=spec.storage_url,
             direction=direction,
             config_relpath=config_relpath,
             grid=spec.grid,
+            work_prefix=self._paths.work_prefix,
+            cache_prefix=self._paths.cache_prefix,
         )
-        trial_command = self._build_trial_command(
+        trial_command = build_trial_command(
             dag_relpath=dag_relpath,
             config_relpath=config_relpath,
             study_name=spec.study_name,
@@ -321,6 +215,8 @@ class SlurmBackend:
             tracking_dir=tracking_dir,
             tracking_server=self.tracking_server,
             heartbeat_interval_s=self.heartbeat_interval_s,
+            work_prefix=self._paths.work_prefix,
+            multiline=True,
         )
 
         return self._generate_sweep_script(
@@ -341,9 +237,9 @@ class SlurmBackend:
         dependency_job_id: str | None = None,
     ) -> str:
         """Generate the SLURM checker job script."""
-        checker_cmd = self._build_checker_command(ctx_path, chain_depth)
+        checker_cmd = build_checker_command(ctx_path, chain_depth)
         wrapped_checker = self.container.wrap(
-            f"{checker_cmd} 2>/dev/null", self._bind_args(cache_host)
+            f"{checker_cmd} 2>/dev/null", self._paths.bind_args(cache_host)
         )
         wrapped_checker += " | bash"
 
@@ -357,7 +253,7 @@ class SlurmBackend:
 
     def submit_sweep(
         self,
-        spec: SweepSpec,
+        spec: SweepSubmission,
         *,
         direction: str = "minimize",
         retry_ctx: RetryContext | None = None,
@@ -377,7 +273,7 @@ class SlurmBackend:
             return SubmitResult(job_id=result.stdout.strip())
 
         project_name = spec.project_name or ""
-        cache_host = self._cache_host(project_name)
+        cache_host = self._paths.resolve_cache(project_name)
         partition = spec.backend_overrides.get("partition", self.partition)
 
         checker_script = self._build_checker_script(
@@ -403,27 +299,6 @@ class SlurmBackend:
         job_id = parts[0]
         checker_id = parts[1] if len(parts) > 1 else None
         return SubmitResult(job_id=job_id, checker_job_id=checker_id)
-
-    @staticmethod
-    def _save_job_meta(
-        job_id: str,
-        output_pattern: str,
-        error_pattern: str,
-        remote_dir: str,
-        n_trials: int,
-        local_cache_dir: Path,
-    ) -> None:
-        job_meta = {
-            "job_id": job_id,
-            "output_pattern": output_pattern,
-            "error_pattern": error_pattern,
-            "remote_dir": remote_dir,
-            "n_trials": n_trials,
-        }
-        meta_dir = local_cache_dir / "jobs"
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        meta_file = meta_dir / f"{job_id}.json"
-        meta_file.write_text(json.dumps(job_meta, indent=2))
 
     def _merge_overrides(
         self,
@@ -453,7 +328,7 @@ class SlurmBackend:
 
     def prepare_and_submit(
         self,
-        spec: SweepSpec,
+        spec: SweepSubmission,
         *,
         project_dir: Path,
         project_name: str,
@@ -477,7 +352,7 @@ class SlurmBackend:
                 f"max_parallel must be an integer, got: {max_parallel!r}"
             ) from e
 
-        updated_spec = SweepSpec(
+        updated_spec = SweepSubmission(
             dag_path=spec.dag_path,
             config_path=spec.config_path,
             study_name=spec.study_name,
@@ -492,7 +367,7 @@ class SlurmBackend:
             grid=spec.grid,
         )
 
-        cache_host = self._cache_host(project_name)
+        cache_host = self._paths.resolve_cache(project_name)
         output_pattern = merged.get("output", f"{cache_host}/logs/%A_%a.out")
         error_pattern = merged.get("error", f"{cache_host}/logs/%A_%a.err")
 
@@ -505,14 +380,16 @@ class SlurmBackend:
             print("=== SLURM SCRIPT ===")
             print(
                 self._generate_sweep_script(
-                    setup_command=self._build_setup_command(
+                    setup_command=build_setup_command(
                         study_name=spec.study_name,
                         storage_path=spec.storage_url,
                         direction=direction,
                         config_relpath=spec.config_relpath,
                         grid=spec.grid,
+                        work_prefix=self._paths.work_prefix,
+                        cache_prefix=self._paths.cache_prefix,
                     ),
-                    trial_command=self._build_trial_command(
+                    trial_command=build_trial_command(
                         dag_relpath=spec.dag_relpath,
                         config_relpath=spec.config_relpath,
                         study_name=spec.study_name,
@@ -520,6 +397,8 @@ class SlurmBackend:
                         project_name=spec.project_name,
                         tracking_dir=f"/cache/tracking/{spec.study_name}",
                         tracking_server=self.tracking_server,
+                        work_prefix=self._paths.work_prefix,
+                        multiline=True,
                     ),
                     array_spec=f"1-{spec.n_trials}"
                     + (f"%{max_parallel_val}" if max_parallel_val > 0 else ""),
@@ -566,7 +445,7 @@ class SlurmBackend:
 
             result = self.submit_sweep(updated_spec, direction=direction, retry_ctx=ctx)
 
-            self._save_job_meta(
+            save_job_meta(
                 job_id=result.job_id,
                 output_pattern=str(output_pattern),
                 error_pattern=str(error_pattern),
@@ -575,7 +454,7 @@ class SlurmBackend:
                 local_cache_dir=local_cache_dir,
             )
             if result.checker_job_id:
-                self._save_job_meta(
+                save_job_meta(
                     job_id=result.checker_job_id,
                     output_pattern=f"{cache_host}/logs/checker_%j.out",
                     error_pattern=f"{cache_host}/logs/checker_%j.err",
@@ -590,7 +469,7 @@ class SlurmBackend:
             result = self.submit_sweep(updated_spec, direction=direction)
 
             if local_cache_dir is not None:
-                self._save_job_meta(
+                save_job_meta(
                     job_id=result.job_id,
                     output_pattern=str(output_pattern),
                     error_pattern=str(error_pattern),
@@ -617,7 +496,7 @@ class SlurmBackend:
 
         container_def_path = project_dir / "container.def"
         if not container_def_path.exists():
-            from jernerics.container.templates import generate_container_def
+            from jernerics.container.starters import generate_container_def
 
             container_def_path.write_text(generate_container_def("python"))
             print("Created: container.def")
@@ -643,16 +522,16 @@ class SlurmBackend:
         self.syncer.sync_project(project_dir)
 
         print("[2/3] Creating logs directory...")
-        self.host.mkdir(f"{self._cache_path(project_name)}/logs")
+        self.host.mkdir(f"{self._paths.resolve_cache(project_name)}/logs")
 
         print("[3/3] Submitting build job...")
         job_id = self.submit_build_job(project_name)
 
         if local_cache_dir is not None:
-            self._save_job_meta(
+            save_job_meta(
                 job_id=job_id,
-                output_pattern=f"{self._cache_path(project_name)}/logs/build_%j.out",
-                error_pattern=f"{self._cache_path(project_name)}/logs/build_%j.err",
+                output_pattern=f"{self._paths.resolve_cache(project_name)}/logs/build_%j.out",
+                error_pattern=f"{self._paths.resolve_cache(project_name)}/logs/build_%j.err",
                 remote_dir=self.remote_dir,
                 n_trials=1,
                 local_cache_dir=local_cache_dir,
@@ -667,7 +546,7 @@ class SlurmBackend:
         full: bool = False,
         force: bool = False,
     ) -> None:
-        cache_host = self._cache_host(project_name)
+        cache_host = self._paths.resolve_cache(project_name)
         remote_dir = self.remote_dir
 
         target_desc = "cache + project directory" if full else "cache directory"
@@ -794,7 +673,7 @@ class SlurmBackend:
             n_trials = 1
 
         if output_pattern is None or error_pattern is None:
-            cache_host = self._cache_host("")
+            cache_host = self._paths.resolve_cache("")
             output_pattern = f"{cache_host}/logs/%A_%a.out"
             error_pattern = f"{cache_host}/logs/%A_%a.err"
 
@@ -891,8 +770,8 @@ class SlurmBackend:
         project_name: str,
         backend_overrides: dict[str, str],
     ) -> str:
-        cache_host = self._cache_host(project_name)
-        bind_args = self._bind_args(cache_host)
+        cache_host = self._paths.resolve_cache(project_name)
+        bind_args = self._paths.bind_args(cache_host)
         wrapped_setup = self.container.wrap(setup_command, bind_args)
         wrapped_trial = self.container.wrap(trial_command, bind_args)
 
@@ -922,15 +801,12 @@ class SlurmBackend:
             output_dir=output_dir,
         )
 
-    def _cache_path(self, project_name: str) -> str:
-        return self._cache_host(project_name)
-
     def submit_build_job(self, project_name: str) -> str:
         partition = _validate_slurm_value(self.partition, "partition")
         time_val = _validate_slurm_value(self.time or "1:00:00", "time")
         mem = _validate_slurm_value(self.mem, "mem")
         cpus = _validate_slurm_value(str(self.cpus), "cpus")
-        output_dir = f"{self._cache_path(project_name)}/logs"
+        output_dir = f"{self._paths.resolve_cache(project_name)}/logs"
 
         script = f"""#!/bin/bash
 #SBATCH --job-name=container-build
@@ -1100,8 +976,8 @@ echo "=== Build completed at $(date) ==="
 
         import shlex
 
-        cache_host = self._cache_host(project_name)
-        bind_args = self._bind_args(cache_host)
+        cache_host = self._paths.resolve_cache(project_name)
+        bind_args = self._paths.bind_args(cache_host)
 
         inner_cmd = (
             "python -m jernerics.tracking.replay_runner"

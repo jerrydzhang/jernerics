@@ -13,9 +13,9 @@ from rich.console import Console
 from rich.table import Table
 
 from .backend.components.host import LocalHost, SSHHost
-from .backend.components.project_sync import FileSyncer
+from .backend.components.project_sync import ProjectSync
 from .backend.local_backend import LocalBackend
-from .backend.models import SweepSpec
+from .backend.models import SweepSubmission
 from .backend.pueue_backend import PueueBackend
 from .backend.slurm_backend import SlurmBackend
 from .config import (
@@ -27,7 +27,7 @@ from .config import (
     load_config,
     load_tracking_server,
 )
-from .container.templates import generate_container_def, list_templates
+from .container.starters import generate_container_def, list_starters
 from .paths import cache_dir
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
@@ -73,7 +73,7 @@ def _get_backend(backend_name: str) -> tuple[SlurmBackend | PueueBackend, str, P
 
     if config.shared.host:
         host = SSHHost(config.shared.host)
-        syncer = FileSyncer(host, remote_dir)
+        syncer = ProjectSync(host, remote_dir)
     else:
         host = LocalHost()
         syncer = None
@@ -120,7 +120,7 @@ def run_local(
     study_name = f"local_{config_path.stem}_{timestamp}"
     storage_path = str(optuna_dir / (study_name + ".journal"))
 
-    spec = SweepSpec(
+    spec = SweepSubmission(
         dag_path=dag_path,
         config_path=config_path,
         study_name=study_name,
@@ -200,7 +200,7 @@ def run_remote(
     study_name = f"{project_name}_{config_path.stem}_{timestamp}"
     storage_url = backend.storage_path(study_name, project_name)
 
-    spec = SweepSpec(
+    spec = SweepSubmission(
         dag_path=dag_path,
         config_path=config_path,
         study_name=study_name,
@@ -447,8 +447,8 @@ def init(
     project_dir: Annotated[
         str, typer.Argument(help="Directory to initialize (default: current)")
     ] = ".",
-    template: Annotated[
-        str, typer.Option("--template", "-t", help="Container template to use")
+    starter: Annotated[
+        str, typer.Option("--starter", "-s", help="Container starter to use")
     ] = "python",
     force: Annotated[
         bool,
@@ -464,10 +464,10 @@ def init(
     project_path = Path(project_dir).resolve()
     project_name = project_path.name
 
-    if template not in list_templates():
+    if starter not in list_starters():
         print(
-            f"Error: Unknown template: {template}. "
-            f"Available: {', '.join(list_templates())}"
+            f"Error: Unknown starter: {starter}. "
+            f"Available: {', '.join(list_starters())}"
         )
         raise SystemExit(ExitCode.GENERAL_ERROR)
 
@@ -509,7 +509,7 @@ def init(
 
     container_def_path = project_path / "container.def"
     if not container_def_path.exists():
-        container_def_path.write_text(generate_container_def(template))
+        container_def_path.write_text(generate_container_def(starter))
         print("Created: container.def")
     else:
         print("Skipped: container.def (already exists)")

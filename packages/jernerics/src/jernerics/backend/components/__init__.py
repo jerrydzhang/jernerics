@@ -5,15 +5,15 @@ from jernerics.backend.components.container import (
     NoContainer,
 )
 from jernerics.backend.components.host import Host, LocalHost, SSHHost
-from jernerics.backend.components.project_sync import FileSyncer
+from jernerics.backend.components.project_sync import ProjectSync
 
 __all__ = [
     "Apptainer",
     "ContainerRuntime",
     "Docker",
-    "FileSyncer",
     "Host",
     "LocalHost",
     "NoContainer",
+    "ProjectSync",
     "SSHHost",
 ]

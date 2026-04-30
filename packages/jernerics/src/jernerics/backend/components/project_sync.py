@@ -66,7 +66,7 @@ def _collect_files(
     return files
 
 
-class FileSyncer:
+class ProjectSync:
     def __init__(self, host, remote_dir: str):
         self.host = host
         self.remote_dir = remote_dir.rstrip("/")

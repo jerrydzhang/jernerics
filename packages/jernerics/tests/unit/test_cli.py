@@ -116,7 +116,7 @@ class TestInitCommand:
             with pytest.raises(SystemExit):
                 init(str(project_dir))
 
-    def test_init_invalid_template(self, tmp_path):
+    def test_init_invalid_starter(self, tmp_path):
         project_dir = tmp_path / "new-project"
 
         with patch("shutil.which") as mock_which:
@@ -125,7 +125,7 @@ class TestInitCommand:
             from jernerics.cli import init
 
             with pytest.raises(SystemExit):
-                init(str(project_dir), template="nonexistent")
+                init(str(project_dir), starter="nonexistent")
 
     def test_init_preserves_existing_container_def(self, tmp_path):
         project_dir = tmp_path / "existing-project"

@@ -11,7 +11,7 @@ from jernerics_proto.tracking_pb2 import Envelope
 from .wire import TrackingReader
 
 
-class FileSyncClient:
+class StreamClient:
     def __init__(
         self,
         stub: tracking_pb2_grpc.TrackingServiceStub,

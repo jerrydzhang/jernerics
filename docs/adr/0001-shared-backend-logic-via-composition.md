@@ -1,0 +1,3 @@
+# Shared backend logic via composition and standalone functions
+
+Both `SlurmBackend` and `PueueBackend` duplicate ~60% of their logic (path resolution, command generation, job metadata). We extract the shared parts as a compositional `PathResolver` object and standalone command builder functions — not a base class. Inheritance would couple the backends' evolution; composition lets each backend remain independent while delegating the genuinely shared logic. The orchestration methods (`build`, `clean`, `sync`, `prepare_and_submit`) stay per-backend because their similarities are structural, not conceptual — they may diverge further as new backends are added.

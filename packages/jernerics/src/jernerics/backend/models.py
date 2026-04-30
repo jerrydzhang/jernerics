@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 @dataclass
-class SweepSpec:
+class SweepSubmission:
     dag_path: Path
     config_path: Path
     study_name: str

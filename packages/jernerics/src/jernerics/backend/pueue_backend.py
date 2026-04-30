@@ -3,8 +3,15 @@ import time
 from pathlib import Path
 from typing import Any
 
+from jernerics.backend.components.command_builders import (
+    build_checker_command,
+    build_setup_command,
+    build_trial_command,
+)
 from jernerics.backend.components.container import NoContainer
-from jernerics.backend.models import JobInfo, SubmitResult, SweepSpec
+from jernerics.backend.components.job_meta import save_job_meta
+from jernerics.backend.components.path_resolver import PathResolver
+from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
 from jernerics.config import BackendConfig, PueueConfig
 from jernerics.retry import RetryContext
 
@@ -114,6 +121,12 @@ class PueueBackend:
         self.max_retries = max_retries
         self.chain_depth_cap = chain_depth_cap
 
+        self._paths = PathResolver(
+            remote_dir=remote_dir,
+            cache_dir=cache_dir,
+            container=container,
+        )
+
     @classmethod
     def from_config(
         cls,
@@ -162,161 +175,36 @@ class PueueBackend:
             chain_depth_cap=shared.chain_depth_cap,
         )
 
-    @property
-    def _work_prefix(self) -> str:
-        if isinstance(self.container, NoContainer):
-            return self.remote_dir
-        return "/work"
-
-    @property
-    def _cache_prefix(self) -> str:
-        if isinstance(self.container, NoContainer):
-            return self.cache_dir.replace("~", "$HOME")
-        return "/cache"
-
     def storage_path(self, study_name: str, project_name: str) -> str:
-        if isinstance(self.container, NoContainer):
-            cache = self._resolve_cache(project_name)
-            return f"{cache}/optuna/{study_name}.journal"
-        return f"/cache/optuna/{study_name}.journal"
-
-    def _resolve_cache(self, project_name: str) -> str:
-        cache = self.cache_dir
-        template = "project_name"
-        if "{" + template + "}" in cache:
-            cache = cache.replace("{" + template + "}", project_name)
-        elif project_name:
-            cache = f"{cache}/{project_name}"
-        return cache.replace("~", "$HOME")
-
-    def _bind_args(self, cache_host: str) -> list[str]:
-        return [
-            f"{self.remote_dir}:/work",
-            f"{cache_host}:/cache",
-        ]
-
-    def _build_setup_command(
-        self,
-        study_name: str,
-        storage_path: str,
-        direction: str,
-        config_relpath: str = "",
-        grid: dict[str, list] | None = None,
-        work_prefix: str = "/work",
-        cache_prefix: str = "/cache",
-    ) -> str:
-        sampler_expr = "None"
-        if config_relpath:
-            sampler_expr = (
-                f"__import__('jernerics.config', fromlist=['load_config'])"
-                f".load_config('{work_prefix}/{config_relpath}').sampler"
-            )
-
-        lines = [
-            'python -c "',
-            "from optuna.storages.journal import JournalFileBackend, JournalStorage; ",
-            "import optuna, itertools, json; ",
-            f"sampler = {sampler_expr}; ",
-            "study = optuna.create_study(",
-            f"study_name={study_name!r},",
-            f" storage=JournalStorage(JournalFileBackend({storage_path!r})),",
-            f" direction={direction!r},",
-            " sampler=sampler,",
-            " load_if_exists=True);",
-        ]
-
-        if grid:
-            import base64
-
-            grid_b64 = base64.b64encode(json.dumps(grid).encode()).decode()
-            lines.append(
-                "import base64, os; "
-                f"_sentinel = '{cache_prefix}/optuna/{study_name}.grid_enqueued';"
-                f" grid = json.loads(base64.b64decode({grid_b64!r}));"
-                f" keys = sorted(grid.keys());"
-                f" [study.enqueue_trial(dict(zip(keys, combo, strict=True)))"
-                f" for combo in itertools.product(*[grid[k] for k in keys])"
-                " if not os.path.exists(_sentinel)];"
-                f" os.makedirs('{cache_prefix}/optuna', exist_ok=True);"
-                f" open(_sentinel, 'a').close();"
-            )
-
-        lines.append('"')
-        return "".join(lines)
-
-    def _build_trial_command(
-        self,
-        dag_relpath: str,
-        config_relpath: str,
-        study_name: str,
-        storage_path: str,
-        project_name: str | None,
-        tracking_dir: str,
-        tracking_server: str | None,
-        work_prefix: str = "/work",
-    ) -> str:
-        args = [
-            "python",
-            "-m",
-            "jernerics.runner",
-            f"{work_prefix}/{dag_relpath}",
-            f"{work_prefix}/{config_relpath}",
-            "--study-name",
-            study_name,
-            "--storage-url",
-            storage_path,
-            "--tracking-dir",
-            tracking_dir,
-        ]
-        if project_name:
-            args.extend(["--project-name", project_name])
-        if tracking_server:
-            args.extend(["--server-addr", tracking_server])
-        return " ".join(args)
-
-    def _build_checker_command(
-        self,
-        ctx_path: str,
-        chain_depth: int,
-    ) -> str:
-        args = [
-            "python",
-            "-m",
-            "jernerics.retry_checker",
-            "--context",
-            ctx_path,
-            "--chain-depth",
-            str(chain_depth),
-        ]
-        return " ".join(args)
+        return self._paths.storage_path(study_name, project_name)
 
     def _generate_submit_script(
         self,
-        spec: SweepSpec,
+        spec: SweepSubmission,
         *,
         direction: str = "minimize",
         retry_ctx: RetryContext | None = None,
     ) -> str:
         project_name = spec.project_name or ""
-        cache_host = self._resolve_cache(project_name)
-        bind_args = self._bind_args(cache_host)
+        cache_host = self._paths.resolve_cache(project_name)
+        bind_args = self._paths.bind_args(cache_host)
         tracking_dir = f"{cache_host}/tracking/{spec.study_name}"
 
         dag_relpath = spec.dag_relpath or str(spec.dag_path.name)
         config_relpath = spec.config_relpath or str(spec.config_path.name)
 
-        setup_cmd = self._build_setup_command(
+        setup_cmd = build_setup_command(
             study_name=spec.study_name,
             storage_path=spec.storage_url,
             direction=direction,
             config_relpath=config_relpath,
             grid=spec.grid,
-            work_prefix=self._work_prefix,
-            cache_prefix=self._cache_prefix,
+            work_prefix=self._paths.work_prefix,
+            cache_prefix=self._paths.cache_prefix,
         )
         wrapped_setup = self.container.wrap(setup_cmd, bind_args)
 
-        trial_cmd = self._build_trial_command(
+        trial_cmd = build_trial_command(
             dag_relpath=dag_relpath,
             config_relpath=config_relpath,
             study_name=spec.study_name,
@@ -324,7 +212,7 @@ class PueueBackend:
             project_name=spec.project_name,
             tracking_dir=tracking_dir,
             tracking_server=self.tracking_server,
-            work_prefix=self._work_prefix,
+            work_prefix=self._paths.work_prefix,
         )
         wrapped_trial = self.container.wrap(trial_cmd, bind_args)
 
@@ -360,7 +248,7 @@ class PueueBackend:
             )
 
         if retry_ctx is not None:
-            checker_cmd = self._build_checker_command(
+            checker_cmd = build_checker_command(
                 retry_ctx.ctx_path, retry_ctx.chain_depth
             )
             wrapped_checker = self.container.wrap(
@@ -394,7 +282,7 @@ class PueueBackend:
 
     def submit_sweep(
         self,
-        spec: SweepSpec,
+        spec: SweepSubmission,
         *,
         direction: str = "minimize",
         retry_ctx: RetryContext | None = None,
@@ -498,27 +386,9 @@ class PueueBackend:
         except json.JSONDecodeError:
             return result.stdout
 
-    @staticmethod
-    def _save_job_meta(
-        job_id: str,
-        remote_dir: str,
-        n_trials: int,
-        local_cache_dir: Path,
-    ) -> None:
-        job_meta = {
-            "job_id": job_id,
-            "backend": "pueue",
-            "remote_dir": remote_dir,
-            "n_trials": n_trials,
-        }
-        meta_dir = local_cache_dir / "jobs"
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        meta_file = meta_dir / f"{job_id}.json"
-        meta_file.write_text(json.dumps(job_meta, indent=2))
-
     def prepare_and_submit(
         self,
-        spec: SweepSpec,
+        spec: SweepSubmission,
         *,
         project_dir: Path,
         project_name: str,
@@ -542,7 +412,7 @@ class PueueBackend:
 
         if self.auto_retry and local_cache_dir is not None:
             project_name_val = project_name or ""
-            cache_host = self._resolve_cache(project_name_val)
+            cache_host = self._paths.resolve_cache(project_name_val)
 
             if isinstance(self.container, NoContainer):
                 cache_host = cache_host.replace("$HOME", str(Path.home()))
@@ -580,8 +450,9 @@ class PueueBackend:
             result = self.submit_sweep(spec, direction=direction)
 
         if local_cache_dir is not None:
-            self._save_job_meta(
+            save_job_meta(
                 job_id=result.job_id,
+                backend="pueue",
                 remote_dir=self.remote_dir,
                 n_trials=spec.n_trials,
                 local_cache_dir=local_cache_dir,
@@ -613,7 +484,7 @@ class PueueBackend:
         has_build_file = container_def_path.exists() or dockerfile_path.exists()
 
         if not has_build_file:
-            from jernerics.container.templates import generate_container_def
+            from jernerics.container.starters import generate_container_def
 
             container_def_path.write_text(generate_container_def("python"))
             print("Created: container.def")
@@ -654,7 +525,7 @@ class PueueBackend:
         full: bool = False,
         force: bool = False,
     ) -> None:
-        cache_host = self._resolve_cache(project_name)
+        cache_host = self._paths.resolve_cache(project_name)
 
         target_desc = "cache + project directory" if full else "cache directory"
         if hasattr(self.host, "host"):
@@ -745,8 +616,8 @@ class PueueBackend:
 
         import shlex
 
-        cache_host = self._resolve_cache(project_name)
-        bind_args = self._bind_args(cache_host)
+        cache_host = self._paths.resolve_cache(project_name)
+        bind_args = self._paths.bind_args(cache_host)
 
         inner_cmd = (
             "python -m jernerics.tracking.replay_runner"

@@ -7,7 +7,7 @@ from optuna.storages.journal import JournalFileBackend, JournalStorage
 from optuna.trial import TrialState
 
 from jernerics.backend.factory import make_backend
-from jernerics.backend.models import SweepSpec
+from jernerics.backend.models import SweepSubmission
 from jernerics.config import (
     PueueConfig,
     SlurmConfig,
@@ -101,7 +101,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
     }
     merged = {k: v for k, v in merged.items() if v is not None}
 
-    retry_spec = SweepSpec(
+    retry_spec = SweepSubmission(
         dag_path=Path(f"{ctx.project_dir}/{ctx.dag_relpath}"),
         config_path=Path(f"{ctx.project_dir}/{ctx.config_relpath}"),
         study_name=ctx.study_name,

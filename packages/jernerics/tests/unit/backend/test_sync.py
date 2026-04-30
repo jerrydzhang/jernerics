@@ -5,7 +5,7 @@ import pathspec
 import pytest
 from jernerics.backend.components.project_sync import (
     DEFAULT_EXCLUDES,
-    FileSyncer,
+    ProjectSync,
     _collect_files,
     _load_gitignore,
     _should_include,
@@ -80,22 +80,22 @@ class TestCollectFiles:
         assert "lib.py" not in names
 
 
-class TestFileSyncer:
+class TestProjectSync:
     def test_init_sets_attributes(self):
         mock_ssh = MagicMock()
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
         assert syncer.host is mock_ssh
         assert syncer.remote_dir == "~/projects/test"
 
     def test_init_strips_trailing_slash(self):
         mock_ssh = MagicMock()
-        syncer = FileSyncer(mock_ssh, "~/projects/test/")
+        syncer = ProjectSync(mock_ssh, "~/projects/test/")
         assert syncer.remote_dir == "~/projects/test"
 
     def test_container_exists_true(self):
         mock_ssh = MagicMock()
         mock_ssh.file_exists.return_value = True
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         result = syncer.container_exists()
 
@@ -105,7 +105,7 @@ class TestFileSyncer:
     def test_container_exists_false(self):
         mock_ssh = MagicMock()
         mock_ssh.file_exists.return_value = False
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         result = syncer.container_exists()
 
@@ -114,7 +114,7 @@ class TestFileSyncer:
     def test_container_needs_rebuild_no_container(self):
         mock_ssh = MagicMock()
         mock_ssh.file_exists.return_value = False
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         result = syncer.container_needs_rebuild("/path/to/uv.lock")
 
@@ -124,7 +124,7 @@ class TestFileSyncer:
         mock_ssh = MagicMock()
         mock_ssh.file_exists.return_value = True
         mock_ssh.getmtime.return_value = None
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         result = syncer.container_needs_rebuild("/path/to/uv.lock")
 
@@ -134,7 +134,7 @@ class TestFileSyncer:
         mock_ssh = MagicMock()
         mock_ssh.file_exists.return_value = True
         mock_ssh.getmtime.return_value = 1000.0
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         lock_file = tmp_path / "uv.lock"
         lock_file.write_text("version = 1")
@@ -149,7 +149,7 @@ class TestFileSyncer:
         mock_ssh = MagicMock()
         mock_ssh.file_exists.return_value = True
         mock_ssh.getmtime.return_value = 2000.0
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         lock_file = tmp_path / "uv.lock"
         lock_file.write_text("version = 1")
@@ -164,7 +164,7 @@ class TestFileSyncer:
         mock_ssh = MagicMock()
         mock_ssh.file_exists.return_value = True
         mock_ssh.getmtime.return_value = 1000.0
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         result = syncer.container_needs_rebuild(tmp_path / "missing.lock")
 
@@ -173,7 +173,7 @@ class TestFileSyncer:
     def test_sync_project_respects_gitignore(self, tmp_path):
         mock_ssh = MagicMock()
         mock_ssh.host = "user@host.example.edu"
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("content")
@@ -192,7 +192,7 @@ class TestFileSyncer:
     def test_sync_project_includes_all_by_default(self, tmp_path):
         mock_ssh = MagicMock()
         mock_ssh.host = "user@host.example.edu"
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         (tmp_path / "experiments").mkdir()
         (tmp_path / "experiments" / "dag.py").write_text("dag")
@@ -211,7 +211,7 @@ class TestFileSyncer:
     def test_sync_project_empty_project(self, tmp_path):
         mock_ssh = MagicMock()
         mock_ssh.host = "user@host.example.edu"
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         result = syncer.sync_project(tmp_path, dry_run=True)
 
@@ -221,7 +221,7 @@ class TestFileSyncer:
         mock_ssh = MagicMock()
         mock_ssh.host = "user@host.example.edu"
         mock_ssh.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")
@@ -242,7 +242,7 @@ class TestFileSyncer:
         mock_ssh.run.return_value = MagicMock(
             returncode=1, stderr="tar error", stdout=""
         )
-        syncer = FileSyncer(mock_ssh, "~/projects/test")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")

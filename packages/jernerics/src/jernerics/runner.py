@@ -11,7 +11,7 @@ from optuna.storages.journal import JournalFileBackend, JournalStorage
 from jernerics.config import load_config
 from jernerics.dag import DAG
 from jernerics.tracking import ProtobufTracker, Tracker
-from jernerics.tracking.sync_client import FileSyncClient
+from jernerics.tracking.sync_client import StreamClient
 
 
 class _TaskFailure(Exception):
@@ -46,7 +46,7 @@ def run_trial(
 
     def objective(trial: optuna.trial.Trial) -> float:
         tracker: Tracker | None = None
-        sync_client: FileSyncClient | None = None
+        sync_client: StreamClient | None = None
         channel: grpc.Channel | None = None
         heartbeat_stop: threading.Event | None = None
 
@@ -62,9 +62,7 @@ def run_trial(
             assert tracking_dir is not None
             channel = grpc.insecure_channel(server_addr)
             stub = tracking_pb2_grpc.TrackingServiceStub(channel)
-            sync_client = FileSyncClient(
-                stub, Path(tracking_dir) / f"{trial.number}.pb"
-            )
+            sync_client = StreamClient(stub, Path(tracking_dir) / f"{trial.number}.pb")
             sync_client.start()
 
         if tracking_dir:
