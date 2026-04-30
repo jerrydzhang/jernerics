@@ -1,4 +1,3 @@
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pathspec
@@ -110,65 +109,6 @@ class TestProjectSync:
         result = syncer.container_exists()
 
         assert result is False
-
-    def test_container_needs_rebuild_no_container(self):
-        mock_ssh = MagicMock()
-        mock_ssh.file_exists.return_value = False
-        syncer = ProjectSync(mock_ssh, "~/projects/test")
-
-        result = syncer.container_needs_rebuild("/path/to/uv.lock")
-
-        assert result is True
-
-    def test_container_needs_rebuild_no_mtime(self):
-        mock_ssh = MagicMock()
-        mock_ssh.file_exists.return_value = True
-        mock_ssh.getmtime.return_value = None
-        syncer = ProjectSync(mock_ssh, "~/projects/test")
-
-        result = syncer.container_needs_rebuild("/path/to/uv.lock")
-
-        assert result is True
-
-    def test_container_needs_rebuild_lock_newer(self, tmp_path):
-        mock_ssh = MagicMock()
-        mock_ssh.file_exists.return_value = True
-        mock_ssh.getmtime.return_value = 1000.0
-        syncer = ProjectSync(mock_ssh, "~/projects/test")
-
-        lock_file = tmp_path / "uv.lock"
-        lock_file.write_text("version = 1")
-
-        with patch.object(Path, "stat") as mock_stat:
-            mock_stat.return_value = MagicMock(st_mtime=2000.0)
-            result = syncer.container_needs_rebuild(lock_file)
-
-        assert result is True
-
-    def test_container_needs_rebuild_container_newer(self, tmp_path):
-        mock_ssh = MagicMock()
-        mock_ssh.file_exists.return_value = True
-        mock_ssh.getmtime.return_value = 2000.0
-        syncer = ProjectSync(mock_ssh, "~/projects/test")
-
-        lock_file = tmp_path / "uv.lock"
-        lock_file.write_text("version = 1")
-
-        with patch.object(Path, "stat") as mock_stat:
-            mock_stat.return_value = MagicMock(st_mtime=1000.0)
-            result = syncer.container_needs_rebuild(lock_file)
-
-        assert result is False
-
-    def test_container_needs_rebuild_lock_missing(self, tmp_path):
-        mock_ssh = MagicMock()
-        mock_ssh.file_exists.return_value = True
-        mock_ssh.getmtime.return_value = 1000.0
-        syncer = ProjectSync(mock_ssh, "~/projects/test")
-
-        result = syncer.container_needs_rebuild(tmp_path / "missing.lock")
-
-        assert result is True
 
     def test_sync_project_respects_gitignore(self, tmp_path):
         mock_ssh = MagicMock()

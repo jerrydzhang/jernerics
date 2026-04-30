@@ -14,7 +14,6 @@ def _make_backend(
     container = MagicMock()
     container.wrap = lambda cmd, binds: f"apptainer exec ... {cmd}"
     syncer = MagicMock()
-    syncer.container_needs_rebuild.return_value = False
 
     backend = SlurmBackend(
         host=host or MagicMock(),
@@ -189,36 +188,6 @@ class TestCleanForceExecution:
             call for call in host.run.call_args_list if call[0][0][:2] == ["rm", "-rf"]
         ]
         assert len(rm_calls) == 2
-
-    def test_preserves_saved_directory_on_full_force(self, capsys) -> None:
-        host = MagicMock()
-        host.host = "user@hpc.example.edu"
-
-        def run_side_effect(cmd, **kwargs):
-            result = MagicMock()
-            result.stdout.strip.return_value = ""
-            result.returncode = 0
-            result.stderr = ""
-            return result
-
-        host.run.side_effect = run_side_effect
-
-        backend = _make_backend(host=host, remote_dir="$HOME/experiments/test_project")
-        backend.clean("test_project", full=True, force=True)
-
-        output = capsys.readouterr().out
-        rm_calls = [
-            call for call in host.run.call_args_list if call[0][0][:2] == ["rm", "-rf"]
-        ]
-        assert len(rm_calls) == 2
-        mv_calls = [
-            call for call in host.run.call_args_list if call[0][0][:1] == ["mv"]
-        ]
-        assert len(mv_calls) == 2
-        mkdir_calls = [
-            call for call in host.run.call_args_list if call[0][0][:1] == ["mkdir"]
-        ]
-        assert len(mkdir_calls) == 1
 
     def test_fails_when_rm_errors(self) -> None:
         host = MagicMock()

@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## Project Documentation
+
+- **`CONTEXT.md`** — Domain glossary. Read this before working on the project. It defines canonical terms (sweep, trial, task, backend, deploy, etc.) and flags ambiguities. When you use a term, check that it matches the glossary.
+- **`docs/adr/`** — Architectural decision records. Check these before proposing changes that might conflict with past decisions.
+
 ## Environment
 
 The project uses **uv2nix** (not a local `.venv`). All Python packages live in the Nix store. The devShell sets:

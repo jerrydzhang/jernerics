@@ -26,6 +26,7 @@ class TestPueueNoContainerPaths:
             "grace_period_s": 120,
             "max_retries": 3,
             "chain_depth_cap": 20,
+            "build_dir": None,
         }
         defaults.update(overrides)
         return PueueBackend(**defaults)
@@ -102,6 +103,7 @@ class TestSlurmNoContainerPaths:
             "grace_period_s": 120,
             "max_retries": 3,
             "chain_depth_cap": 20,
+            "build_dir": None,
         }
         defaults.update(overrides)
         return SlurmBackend(**defaults)

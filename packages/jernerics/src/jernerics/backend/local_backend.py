@@ -3,14 +3,10 @@ import itertools
 import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
-from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
+from jernerics.backend.models import SubmitResult, SweepSubmission
 from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
-
-
-class UnsupportedOperation(Exception):
-    pass
 
 
 class LocalBackend:
@@ -70,73 +66,3 @@ class LocalBackend:
             raise RuntimeError("One or more trials failed")
 
         return SubmitResult(job_id="local")
-
-    def list_jobs(self, include_completed: bool = False) -> list[JobInfo]:
-        raise UnsupportedOperation("LocalBackend does not support job listing")
-
-    def cancel(self, job_id: str) -> bool:
-        raise UnsupportedOperation("LocalBackend does not support job cancellation")
-
-    def cancel_all(self) -> bool:
-        raise UnsupportedOperation("LocalBackend does not support job cancellation")
-
-    def get_status(self, job_id: str) -> str | None:
-        raise UnsupportedOperation("LocalBackend does not support job status queries")
-
-    def wait_for_completion(
-        self, job_id: str, poll_interval: float = 30, timeout: float | None = None
-    ) -> bool:
-        raise UnsupportedOperation(
-            "LocalBackend.submit_sweep is blocking; wait_for_completion is unnecessary"
-        )
-
-    def prepare_and_submit(
-        self,
-        spec: SweepSubmission,
-        *,
-        project_dir,
-        project_name: str,
-        direction: str,
-        dry_run: bool = False,
-        backend_name: str = "",
-        experiment_overrides=None,
-        cli_overrides=None,
-        local_cache_dir=None,
-    ):
-        raise UnsupportedOperation(
-            "LocalBackend uses submit_sweep directly via 'jernerics local'"
-        )
-
-    def build(
-        self,
-        project_dir,
-        *,
-        project_name: str,
-        force: bool = False,
-        dry_run: bool = False,
-        local_cache_dir=None,
-    ) -> None:
-        raise UnsupportedOperation("LocalBackend does not support remote builds")
-
-    def clean(
-        self, project_name: str, *, full: bool = False, force: bool = False
-    ) -> None:
-        raise UnsupportedOperation("LocalBackend does not support remote cleaning")
-
-    def get_logs(
-        self,
-        job_id: str,
-        *,
-        follow: bool = False,
-        stderr: bool = False,
-        local_cache_dir=None,
-    ) -> None:
-        raise UnsupportedOperation("LocalBackend does not support remote log viewing")
-
-    def sync(
-        self,
-        project_name: str,
-        *,
-        study: str | None = None,
-    ) -> None:
-        raise UnsupportedOperation("LocalBackend does not support remote sync")

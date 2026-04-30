@@ -126,18 +126,3 @@ class ProjectSync:
 
     def container_exists(self) -> bool:
         return self.host.file_exists(f"{self.remote_dir}/container.sif")
-
-    def container_needs_rebuild(self, local_lock_path: str | Path) -> bool:
-        if not self.container_exists():
-            return True
-
-        remote_mtime = self.host.getmtime(f"{self.remote_dir}/container.sif")
-        if remote_mtime is None:
-            return True
-
-        local_path = Path(local_lock_path)
-        if not local_path.exists():
-            return True
-
-        local_mtime = local_path.stat().st_mtime
-        return local_mtime > remote_mtime

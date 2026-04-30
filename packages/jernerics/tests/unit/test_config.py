@@ -1,6 +1,7 @@
 import optuna
 import pytest
 from jernerics.config import (
+    ApptainerConfig,
     BackendConfig,
     ConfigNotFound,
     ExitCode,
@@ -166,6 +167,62 @@ container_type = "docker"
         assert config.backend.parallel == 4
         assert config.shared.container_type == "docker"
         assert config.shared.parallel == 4
+
+    def test_load_backend_config_apptainer_build_dir(self, tmp_path):
+        project_dir = tmp_path / "apptainer-cfg"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "apptainer-cfg"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+container_type = "apptainer"
+
+[tool.jernerics.backends.hpc.apptainer]
+build_dir = "/dev/shm/build"
+""")
+        config = load_backend_config("hpc", project_dir)
+
+        assert isinstance(config.container, ApptainerConfig)
+        assert config.container.build_dir == "/dev/shm/build"
+
+    def test_load_backend_config_no_apptainer_section_gives_none(self, tmp_path):
+        project_dir = tmp_path / "no-apptainer"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "no-apptainer"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+container_type = "docker"
+""")
+        config = load_backend_config("hpc", project_dir)
+
+        assert config.container is None
+
+    def test_load_backend_config_apptainer_no_section_gives_default(self, tmp_path):
+        project_dir = tmp_path / "apptainer-default"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "apptainer-default"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+container_type = "apptainer"
+""")
+        config = load_backend_config("hpc", project_dir)
+
+        assert isinstance(config.container, ApptainerConfig)
+        assert config.container.build_dir is None
 
     def test_load_backend_config_pueue_defaults(self, tmp_path):
         project_dir = tmp_path / "pueue-defaults"

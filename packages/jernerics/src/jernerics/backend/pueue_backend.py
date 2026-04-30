@@ -8,11 +8,10 @@ from jernerics.backend.components.command_builders import (
     build_setup_command,
     build_trial_command,
 )
-from jernerics.backend.components.container import NoContainer
 from jernerics.backend.components.job_meta import save_job_meta
 from jernerics.backend.components.path_resolver import PathResolver
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
-from jernerics.config import BackendConfig, PueueConfig
+from jernerics.config import ApptainerConfig, BackendConfig, PueueConfig
 from jernerics.retry import RetryContext
 
 
@@ -106,6 +105,7 @@ class PueueBackend:
         grace_period_s: int = 120,
         max_retries: int = 3,
         chain_depth_cap: int = 20,
+        build_dir: str | None = None,
     ):
         self.host = host
         self.container = container
@@ -125,6 +125,18 @@ class PueueBackend:
             remote_dir=remote_dir,
             cache_dir=cache_dir,
             container=container,
+            build_dir=build_dir,
+        )
+
+    def generate_submit_job(
+        self, script: str, *, name: str, log_dir: str | None = None
+    ) -> str:
+        # Script content must not contain single quotes.
+        return (
+            f"BUILD_ID=$(pueue add --label {name}"
+            f" -- bash -c '{script}'"
+            " 2>&1 | grep -oE '[0-9]+')\n"
+            "echo $BUILD_ID"
         )
 
     @classmethod
@@ -151,13 +163,17 @@ class PueueBackend:
 
         container_type = shared.container_type
         if container_type == "docker":
-            container = Docker(host)
+            container = Docker()
         elif container_type == "apptainer":
-            container = Apptainer(host)
+            container = Apptainer()
         elif container_type == "none":
             container = NoContainer()
         else:
-            container = Docker(host)
+            container = Docker()
+
+        build_dir = None
+        if isinstance(backend_config.container, ApptainerConfig):
+            build_dir = backend_config.container.build_dir
 
         return cls(
             host=host,
@@ -173,6 +189,7 @@ class PueueBackend:
             grace_period_s=shared.grace_period_s,
             max_retries=shared.max_retries,
             chain_depth_cap=shared.chain_depth_cap,
+            build_dir=build_dir,
         )
 
     def storage_path(self, study_name: str, project_name: str) -> str:
@@ -406,57 +423,36 @@ class PueueBackend:
             print(f"Trials: {spec.n_trials}")
             return None
 
-        if self.syncer is not None:
-            print(f"Syncing project to {self.host.host}:{self.remote_dir}...")
-            self.syncer.sync_project(project_dir)
+        from jernerics.backend.orchestration import prepare_and_submit
 
-        if self.auto_retry and local_cache_dir is not None:
-            project_name_val = project_name or ""
-            cache_host = self._paths.resolve_cache(project_name_val)
+        def save_meta(result: SubmitResult) -> None:
+            if local_cache_dir is not None:
+                save_job_meta(
+                    job_id=result.job_id,
+                    backend="pueue",
+                    remote_dir=self.remote_dir,
+                    n_trials=spec.n_trials,
+                    local_cache_dir=local_cache_dir,
+                )
 
-            if isinstance(self.container, NoContainer):
-                cache_host = cache_host.replace("$HOME", str(Path.home()))
-                retry_dir_host = f"{cache_host}/retry"
-                self.host.mkdir(retry_dir_host)
-                checker_ctx_path = f"{retry_dir_host}/{spec.study_name}_ctx.json"
-                tracking_dir_ctx = f"{cache_host}/tracking/{spec.study_name}"
-                project_dir_ctx = str(Path(self.remote_dir).resolve())
-                storage_url_ctx = spec.storage_url.replace("$HOME", str(Path.home()))
-            else:
-                retry_dir_host = f"{cache_host}/retry"
-                self.host.mkdir(retry_dir_host)
-                checker_ctx_path = f"/cache/retry/{spec.study_name}_ctx.json"
-                tracking_dir_ctx = f"/cache/tracking/{spec.study_name}"
-                project_dir_ctx = "/work"
-                storage_url_ctx = spec.storage_url
-
-            ctx = RetryContext(
-                study_name=spec.study_name,
-                backend_name=backend_name,
-                dag_relpath=spec.dag_relpath,
-                config_relpath=spec.config_relpath,
-                cli_overrides=cli_overrides or {},
-                storage_path=storage_url_ctx,
-                tracking_dir=tracking_dir_ctx,
-                project_dir=project_dir_ctx,
-                ctx_path=checker_ctx_path,
-                chain_depth=0,
-            )
-            host_ctx_path = f"{retry_dir_host}/{spec.study_name}_ctx.json"
-            self.host.write_file(host_ctx_path, ctx.to_json())
-
-            result = self.submit_sweep(spec, direction=direction, retry_ctx=ctx)
-        else:
-            result = self.submit_sweep(spec, direction=direction)
-
-        if local_cache_dir is not None:
-            save_job_meta(
-                job_id=result.job_id,
-                backend="pueue",
-                remote_dir=self.remote_dir,
-                n_trials=spec.n_trials,
-                local_cache_dir=local_cache_dir,
-            )
+        result = prepare_and_submit(
+            host=self.host,
+            container=self.container,
+            syncer=self.syncer,
+            paths=self._paths,
+            remote_dir=self.remote_dir,
+            spec=spec,
+            project_dir=project_dir,
+            project_name=project_name,
+            direction=direction,
+            backend_name=backend_name,
+            auto_retry=self.auto_retry,
+            local_cache_dir=local_cache_dir,
+            cli_overrides=cli_overrides,
+            ensure_submission_ready=lambda: None,
+            submit_sweep=self.submit_sweep,
+            save_meta=save_meta,
+        )
 
         retry_suffix = (
             " (with auto-retry)"
@@ -475,48 +471,20 @@ class PueueBackend:
         dry_run: bool = False,
         local_cache_dir: Path | None = None,
     ) -> None:
-        lock_path = project_dir / "uv.lock"
-        if not lock_path.exists():
-            raise FileNotFoundError("uv.lock not found. Run 'uv lock' first.")
+        from jernerics.backend.orchestration import submit_build
 
-        container_def_path = project_dir / "container.def"
-        dockerfile_path = project_dir / "Dockerfile"
-        has_build_file = container_def_path.exists() or dockerfile_path.exists()
-
-        if not has_build_file:
-            from jernerics.container.starters import generate_container_def
-
-            container_def_path.write_text(generate_container_def("python"))
-            print("Created: container.def")
-
-        if not dry_run and not force:
-            needs_rebuild = (
-                self.syncer is not None
-                and self.syncer.container_needs_rebuild(lock_path)
-            )
-            if not needs_rebuild and self.container.exists(self.remote_dir):
-                print("Container is up to date. Use --force to rebuild.")
-                return
-
-        if dry_run:
-            print("=== DRY RUN ===")
-            print(f"Project dir: {project_dir}")
-            print(f"Remote dir: {self.remote_dir}")
-            if hasattr(self.host, "host"):
-                print(f"Host: {self.host.host}")
-            print()
-            print("Would sync files and build container.")
-            return
-
-        if self.syncer is not None:
-            print(f"[1/2] Syncing project to {self.host.host}:{self.remote_dir}...")
-            self.syncer.sync_project(project_dir)
-        else:
-            print("[1/2] Local build, no sync needed.")
-
-        print("[2/2] Building container...")
-        self.container.build(self.remote_dir)
-        print("Build complete.")
+        submit_build(
+            host=self.host,
+            container=self.container,
+            syncer=self.syncer,
+            paths=self._paths,
+            remote_dir=self.remote_dir,
+            project_dir=project_dir,
+            project_name=project_name,
+            force=force,
+            dry_run=dry_run,
+            generate_submit_job=self.generate_submit_job,
+        )
 
     def clean(
         self,
@@ -525,85 +493,32 @@ class PueueBackend:
         full: bool = False,
         force: bool = False,
     ) -> None:
-        cache_host = self._paths.resolve_cache(project_name)
+        from jernerics.backend.orchestration import clean as shared_clean
 
-        target_desc = "cache + project directory" if full else "cache directory"
-        if hasattr(self.host, "host"):
-            print(f"Target: {target_desc} on {self.host.host}")
-        else:
-            print(f"Target: {target_desc}")
-        print(f"  cache:   {cache_host}")
-        if full:
-            print(f"  project: {self.remote_dir}")
+        def list_active():
+            try:
+                data = _query_pueue_status(self.host)
+                return [
+                    j
+                    for j in _parse_pueue_status(data)
+                    if j.status not in ("COMPLETED", "FAILED", "STASHED", "LOCKED")
+                ]
+            except PueueDaemonError:
+                return []
 
-        try:
-            data = _query_pueue_status(self.host)
-            active = [
-                j
-                for j in _parse_pueue_status(data)
-                if j.status not in ("COMPLETED", "FAILED", "STASHED", "LOCKED")
-            ]
-        except PueueDaemonError:
-            active = []
+        def scheduler_cleanup():
+            self.host.run(["pueue", "clean"], check=False, capture_output=True)
 
-        if active:
-            print(f"\nError: {len(active)} active job(s). Cancel them first.")
-            for j in active:
-                print(f"  {j.job_id}  {j.name}  {j.status}")
-            raise RuntimeError("Active jobs prevent cleaning")
-
-        result = self.host.run(
-            [f"find {cache_host}/tracking -name '*.pb' 2>/dev/null | head -n 1"],
-            check=False,
-            capture_output=True,
-            text=True,
+        shared_clean(
+            host=self.host,
+            paths=self._paths,
+            remote_dir=self.remote_dir,
+            project_name=project_name,
+            full=full,
+            force=force,
+            list_active_jobs=list_active,
+            scheduler_cleanup=scheduler_cleanup,
         )
-        if result.stdout.strip():
-            print("\nError: Unsynced tracking data found. Run sync first.")
-            raise RuntimeError("Unsynced tracking data")
-
-        r = self.host.run(["test", "-d", cache_host], check=False, capture_output=True)
-        if r.returncode != 0:
-            print(f"\nError: cache directory '{cache_host}' not found.")
-            raise FileNotFoundError(f"Cache directory not found: {cache_host}")
-
-        if full:
-            r = self.host.run(
-                ["test", "-d", self.remote_dir],
-                check=False,
-                capture_output=True,
-            )
-            if r.returncode != 0:
-                print(f"\nError: project directory '{self.remote_dir}' not found.")
-                raise FileNotFoundError(
-                    f"Project directory not found: {self.remote_dir}"
-                )
-
-        if not force:
-            print("\nDry run. Use --force to execute.")
-            return
-
-        self.host.run(["pueue", "clean"], check=False, capture_output=True)
-
-        r = self.host.run(
-            ["rm", "-rf", cache_host], check=False, capture_output=True, text=True
-        )
-        if r.returncode != 0:
-            print(f"Failed to delete {cache_host}: {r.stderr}")
-            raise RuntimeError(f"Failed to delete {cache_host}")
-        print(f"Deleted: {cache_host}")
-
-        if full:
-            r = self.host.run(
-                ["rm", "-rf", self.remote_dir],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if r.returncode != 0:
-                print(f"Failed to delete {self.remote_dir}: {r.stderr}")
-                raise RuntimeError(f"Failed to delete {self.remote_dir}")
-            print(f"Deleted: {self.remote_dir}")
 
     def sync(
         self,
@@ -611,33 +526,17 @@ class PueueBackend:
         *,
         study: str | None = None,
     ) -> None:
-        if not self.tracking_server:
-            raise RuntimeError("No tracking server configured")
+        from jernerics.backend.orchestration import sync as shared_sync
 
-        import shlex
-
-        cache_host = self._paths.resolve_cache(project_name)
-        bind_args = self._paths.bind_args(cache_host)
-
-        inner_cmd = (
-            "python -m jernerics.tracking.replay_runner"
-            " --tracking-dir /cache/tracking"
-            f" --server-addr {self.tracking_server}"
+        shared_sync(
+            host=self.host,
+            container=self.container,
+            paths=self._paths,
+            remote_dir=self.remote_dir,
+            project_name=project_name,
+            tracking_server=self.tracking_server,
+            study=study,
         )
-        if study:
-            inner_cmd += f" --study {shlex.quote(study)}"
-
-        wrapped = self.container.wrap(inner_cmd, bind_args)
-        cmd = f"cd {self.remote_dir} && {wrapped}"
-
-        host_desc = getattr(self.host, "host", "local")
-        print(f"Syncing tracking data from {host_desc}...")
-        result = self.host.run([cmd], check=False, capture_output=True, text=True)
-        print(result.stdout)
-        if result.returncode != 0:
-            print(f"Sync failed: {result.stderr}")
-            raise RuntimeError(f"Sync failed: {result.stderr}")
-        print("Sync complete.")
 
     def get_logs(
         self,

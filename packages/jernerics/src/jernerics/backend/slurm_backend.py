@@ -18,7 +18,12 @@ from jernerics.backend.components.container import (
 from jernerics.backend.components.job_meta import save_job_meta
 from jernerics.backend.components.path_resolver import PathResolver
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
-from jernerics.config import BackendConfig, SlurmConfig, _normalize_time
+from jernerics.config import (
+    ApptainerConfig,
+    BackendConfig,
+    SlurmConfig,
+    _normalize_time,
+)
 from jernerics.retry import RetryContext
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
@@ -86,6 +91,7 @@ class SlurmBackend:
         grace_period_s: int = 120,
         max_retries: int = 3,
         chain_depth_cap: int = 20,
+        build_dir: str | None = None,
     ):
         self.host = host
         self.container = container
@@ -111,9 +117,47 @@ class SlurmBackend:
             container=container,
             work_mount_source="${REMOTE_DIR}",
             quote_binds=True,
+            build_dir=build_dir,
         )
 
     capabilities = frozenset()
+
+    def generate_submit_job(
+        self,
+        script: str,
+        *,
+        name: str = "build",
+        log_dir: str | None = None,
+    ) -> str:
+        partition = _validate_slurm_value(self.partition, "partition")
+        time_val = _validate_slurm_value(self.time or "1:00:00", "time")
+        mem = _validate_slurm_value(self.mem, "mem")
+        cpus = _validate_slurm_value(str(self.cpus), "cpus")
+
+        sbatch_script = (
+            "#!/bin/bash\n"
+            f"#SBATCH --job-name={name}\n"
+            f"#SBATCH --partition={partition}\n"
+            f"#SBATCH --time={time_val}\n"
+            f"#SBATCH --mem={mem}\n"
+            f"#SBATCH --cpus-per-task={cpus}\n"
+        )
+        if log_dir is not None:
+            expanded = _expand_path(log_dir)
+            sbatch_script += (
+                f"#SBATCH --output={expanded}/build_%j.out\n"
+                f"#SBATCH --error={expanded}/build_%j.err\n"
+            )
+        sbatch_script += "\n" + script
+
+        lines = [
+            "BUILD_JOB_ID=$(sbatch --parsable <<'JERNERICS_EOF'",
+            sbatch_script,
+            "JERNERICS_EOF",
+            ")",
+            "echo $BUILD_JOB_ID",
+        ]
+        return "\n".join(lines)
 
     @classmethod
     def from_config(
@@ -132,16 +176,21 @@ class SlurmBackend:
 
         container_type = backend_config.shared.container_type
         if container_type == "apptainer":
-            container = Apptainer(host)
+            container = Apptainer()
         elif container_type == "docker":
-            container = Docker(host)
+            container = Docker()
         elif container_type == "none":
             container = NoContainer()
         else:
-            container = Apptainer(host)
+            container = Apptainer()
 
         assert isinstance(backend_config.backend, SlurmConfig)
         slurm = backend_config.backend
+
+        build_dir = None
+        if isinstance(backend_config.container, ApptainerConfig):
+            build_dir = backend_config.container.build_dir
+
         return cls(
             host=host,
             container=container,
@@ -160,6 +209,7 @@ class SlurmBackend:
             grace_period_s=backend_config.shared.grace_period_s,
             max_retries=backend_config.shared.max_retries,
             chain_depth_cap=backend_config.shared.chain_depth_cap,
+            build_dir=build_dir,
         )
 
     def storage_path(self, study_name: str, project_name: str) -> str:
@@ -409,66 +459,49 @@ class SlurmBackend:
             )
             return None
 
-        print(f"[1/4] Syncing project to {self.host.host}:{self.remote_dir}...")
-        self.syncer.sync_project(project_dir)
+        from jernerics.backend.orchestration import prepare_and_submit
 
-        print("[2/4] Ensuring cache directory exists...")
-        self.host.mkdir(f"{cache_host}/optuna")
+        def ensure_ready():
+            self.host.mkdir(f"{cache_host}/optuna")
 
-        if not self.syncer.container_exists():
-            print(
-                "Error: container.sif not found on remote.\n"
-                "  Run 'jernerics build --backend <name>' first."
+            if not self.syncer.container_exists():
+                print(
+                    "Error: container.sif not found on remote.\n"
+                    "  Run 'jernerics build --backend <name>' first."
+                )
+                raise RuntimeError("container.sif not found on remote")
+
+        def do_submit(
+            sweep_spec: SweepSubmission,
+            direction: str,
+            retry_ctx=None,
+        ) -> SubmitResult:
+            return self.submit_sweep(
+                sweep_spec, direction=direction, retry_ctx=retry_ctx
             )
-            raise RuntimeError("container.sif not found on remote")
 
-        print("[4/4] Submitting job...")
-        if self.auto_retry and local_cache_dir is not None:
-            retry_dir_host = f"{cache_host}/retry"
-            self.host.mkdir(retry_dir_host)
-            retry_dir_container = "/cache/retry"
-            ctx_path = f"{retry_dir_container}/{spec.study_name}_ctx.json"
-            ctx = RetryContext(
-                study_name=spec.study_name,
-                backend_name=backend_name,
-                dag_relpath=spec.dag_relpath,
-                config_relpath=spec.config_relpath,
-                cli_overrides=cli_overrides or {},
-                storage_path=spec.storage_url,
-                tracking_dir=f"/cache/tracking/{spec.study_name}",
-                project_dir="/work",
-                ctx_path=ctx_path,
-                chain_depth=0,
-            )
-            host_ctx_path = f"{retry_dir_host}/{spec.study_name}_ctx.json"
-            self.host.write_file(host_ctx_path, ctx.to_json())
-
-            result = self.submit_sweep(updated_spec, direction=direction, retry_ctx=ctx)
-
-            save_job_meta(
-                job_id=result.job_id,
-                output_pattern=str(output_pattern),
-                error_pattern=str(error_pattern),
-                remote_dir=self.remote_dir,
-                n_trials=spec.n_trials,
-                local_cache_dir=local_cache_dir,
-            )
-            if result.checker_job_id:
+        def save_meta(result: SubmitResult) -> None:
+            if local_cache_dir is None:
+                return
+            if self.auto_retry:
                 save_job_meta(
-                    job_id=result.checker_job_id,
-                    output_pattern=f"{cache_host}/logs/checker_%j.out",
-                    error_pattern=f"{cache_host}/logs/checker_%j.err",
+                    job_id=result.job_id,
+                    output_pattern=str(output_pattern),
+                    error_pattern=str(error_pattern),
                     remote_dir=self.remote_dir,
-                    n_trials=0,
+                    n_trials=spec.n_trials,
                     local_cache_dir=local_cache_dir,
                 )
-
-            print(f"\nArray: {result.job_id}, Checker: {result.checker_job_id}")
-            return result
-        else:
-            result = self.submit_sweep(updated_spec, direction=direction)
-
-            if local_cache_dir is not None:
+                if result.checker_job_id:
+                    save_job_meta(
+                        job_id=result.checker_job_id,
+                        output_pattern=f"{cache_host}/logs/checker_%j.out",
+                        error_pattern=f"{cache_host}/logs/checker_%j.err",
+                        remote_dir=self.remote_dir,
+                        n_trials=0,
+                        local_cache_dir=local_cache_dir,
+                    )
+            else:
                 save_job_meta(
                     job_id=result.job_id,
                     output_pattern=str(output_pattern),
@@ -478,8 +511,31 @@ class SlurmBackend:
                     local_cache_dir=local_cache_dir,
                 )
 
+        result = prepare_and_submit(
+            host=self.host,
+            container=self.container,
+            syncer=self.syncer,
+            paths=self._paths,
+            remote_dir=self.remote_dir,
+            spec=updated_spec,
+            project_dir=project_dir,
+            project_name=project_name,
+            direction=direction,
+            backend_name=backend_name,
+            auto_retry=self.auto_retry,
+            local_cache_dir=local_cache_dir,
+            cli_overrides=cli_overrides,
+            ensure_submission_ready=ensure_ready,
+            submit_sweep=do_submit,
+            save_meta=save_meta,
+        )
+
+        has_retry = self.auto_retry and local_cache_dir is not None
+        if has_retry and result.checker_job_id:
+            print(f"\nArray: {result.job_id}, Checker: {result.checker_job_id}")
+        else:
             print(f"\nJob submitted: {result.job_id}")
-            return result
+        return result
 
     def build(
         self,
@@ -490,54 +546,33 @@ class SlurmBackend:
         dry_run: bool = False,
         local_cache_dir: Path | None = None,
     ) -> None:
-        lock_path = project_dir / "uv.lock"
-        if not lock_path.exists():
-            raise FileNotFoundError("uv.lock not found. Run 'uv lock' first.")
+        from jernerics.backend.orchestration import submit_build
 
-        container_def_path = project_dir / "container.def"
-        if not container_def_path.exists():
-            from jernerics.container.starters import generate_container_def
+        cache_host = self._paths.resolve_cache(project_name)
+        self.host.mkdir(f"{cache_host}/logs")
 
-            container_def_path.write_text(generate_container_def("python"))
-            print("Created: container.def")
+        job_id = submit_build(
+            host=self.host,
+            container=self.container,
+            syncer=self.syncer,
+            paths=self._paths,
+            remote_dir=self.remote_dir,
+            project_dir=project_dir,
+            project_name=project_name,
+            force=force,
+            dry_run=dry_run,
+            generate_submit_job=self.generate_submit_job,
+        )
 
-        if (
-            not dry_run
-            and not force
-            and not self.syncer.container_needs_rebuild(lock_path)
-        ):
-            print("Container is up to date. Use --force to rebuild.")
-            return
-
-        if dry_run:
-            print("=== DRY RUN ===")
-            print(f"Project dir: {project_dir}")
-            print(f"Remote dir: {self.remote_dir}")
-            print(f"Host: {self.host.host}")
-            print()
-            print("Would sync files and submit build job.")
-            return
-
-        print(f"[1/3] Syncing project to {self.host.host}:{self.remote_dir}")
-        self.syncer.sync_project(project_dir)
-
-        print("[2/3] Creating logs directory...")
-        self.host.mkdir(f"{self._paths.resolve_cache(project_name)}/logs")
-
-        print("[3/3] Submitting build job...")
-        job_id = self.submit_build_job(project_name)
-
-        if local_cache_dir is not None:
+        if job_id and local_cache_dir is not None:
             save_job_meta(
                 job_id=job_id,
-                output_pattern=f"{self._paths.resolve_cache(project_name)}/logs/build_%j.out",
-                error_pattern=f"{self._paths.resolve_cache(project_name)}/logs/build_%j.err",
+                output_pattern=f"{cache_host}/logs/build_%j.out",
+                error_pattern=f"{cache_host}/logs/build_%j.err",
                 remote_dir=self.remote_dir,
                 n_trials=1,
                 local_cache_dir=local_cache_dir,
             )
-
-        print(f"\nBuild job submitted: {job_id}")
 
     def clean(
         self,
@@ -546,100 +581,25 @@ class SlurmBackend:
         full: bool = False,
         force: bool = False,
     ) -> None:
-        cache_host = self._paths.resolve_cache(project_name)
-        remote_dir = self.remote_dir
+        from jernerics.backend.orchestration import clean as shared_clean
 
-        target_desc = "cache + project directory" if full else "cache directory"
-        print(f"Target: {target_desc} on {self.host.host}")
-        print(f"  cache:   {cache_host}")
-        if full:
-            print(f"  project: {remote_dir}")
+        def list_active():
+            return [
+                j
+                for j in self.list_jobs()
+                if j.status not in ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT")
+            ]
 
-        jobs = self.list_jobs()
-        active = [
-            j
-            for j in jobs
-            if j.status not in ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT")
-        ]
-        if active:
-            print(f"\nError: {len(active)} active job(s) found. Cancel them first.")
-            for j in active:
-                print(f"  {j.job_id}  {j.name}  {j.status}")
-            raise RuntimeError("Active jobs prevent cleaning")
-
-        result = self.host.run(
-            [f"find {cache_host}/tracking -name '*.pb' 2>/dev/null | head -n 1"],
-            check=False,
-            capture_output=True,
-            text=True,
+        shared_clean(
+            host=self.host,
+            paths=self._paths,
+            remote_dir=self.remote_dir,
+            project_name=project_name,
+            full=full,
+            force=force,
+            list_active_jobs=list_active,
+            scheduler_cleanup=lambda: None,
         )
-        if result.stdout.strip():
-            print("\nError: Unsynced tracking data found. Run sync first.")
-            raise RuntimeError("Unsynced tracking data")
-
-        r = self.host.run(["test", "-d", cache_host], check=False, capture_output=True)
-        if r.returncode != 0:
-            print(f"\nError: cache directory '{cache_host}' not found on remote.")
-            raise FileNotFoundError(f"Cache directory not found: {cache_host}")
-
-        if full:
-            r = self.host.run(
-                ["test", "-d", remote_dir], check=False, capture_output=True
-            )
-            if r.returncode != 0:
-                print(f"\nError: project directory '{remote_dir}' not found on remote.")
-                raise FileNotFoundError(f"Project directory not found: {remote_dir}")
-
-        if not force:
-            print("\nDry run. Use --force to execute.")
-            return
-
-        r = self.host.run(
-            ["rm", "-rf", cache_host], check=False, capture_output=True, text=True
-        )
-        if r.returncode != 0:
-            print(f"Failed to delete {cache_host}: {r.stderr}")
-            raise RuntimeError(f"Failed to delete {cache_host}")
-        print(f"Deleted: {cache_host}")
-
-        if full:
-            saved_path = f"{remote_dir}/saved"
-            r = self.host.run(
-                ["test", "-d", saved_path], check=False, capture_output=True
-            )
-            has_saved = r.returncode == 0
-
-            if has_saved:
-                saved_tmp = f"{remote_dir}/__saved_backup"
-                self.host.run(
-                    ["mv", saved_path, saved_tmp],
-                    check=True,
-                    capture_output=True,
-                )
-
-            r = self.host.run(
-                ["rm", "-rf", remote_dir],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if r.returncode != 0:
-                print(f"Failed to delete {remote_dir}: {r.stderr}")
-                raise RuntimeError(f"Failed to delete {remote_dir}")
-            print(f"Deleted: {remote_dir}")
-
-            if has_saved:
-                self.host.run(
-                    ["mkdir", "-p", remote_dir],
-                    check=True,
-                    capture_output=True,
-                )
-                self.host.run(
-                    ["mv", saved_tmp, saved_path],
-                    check=True,
-                    capture_output=True,
-                )
-                print(f"Preserved: {saved_path}")
 
     def get_logs(
         self,
@@ -801,56 +761,6 @@ class SlurmBackend:
             output_dir=output_dir,
         )
 
-    def submit_build_job(self, project_name: str) -> str:
-        partition = _validate_slurm_value(self.partition, "partition")
-        time_val = _validate_slurm_value(self.time or "1:00:00", "time")
-        mem = _validate_slurm_value(self.mem, "mem")
-        cpus = _validate_slurm_value(str(self.cpus), "cpus")
-        output_dir = f"{self._paths.resolve_cache(project_name)}/logs"
-
-        script = f"""#!/bin/bash
-#SBATCH --job-name=container-build
-#SBATCH --partition={partition}
-#SBATCH --time={time_val}
-#SBATCH --mem={mem}
-#SBATCH --cpus-per-task={cpus}
-#SBATCH --output={output_dir}/build_%j.out
-#SBATCH --error={output_dir}/build_%j.err
-
-set -e
-
-echo "=== Build started at $(date) ==="
-echo "Running on $(hostname)"
-
-export APPTAINER_TMPDIR=/dev/shm/apptainer-build-$SLURM_JOB_ID
-mkdir -p $APPTAINER_TMPDIR
-trap 'rm -rf $APPTAINER_TMPDIR' EXIT
-
-cd {self.remote_dir}
-
-echo
-echo "--- Building container with Apptainer ---"
-time apptainer build --fakeroot --force container.sif container.def
-
-echo
-echo "--- Build result ---"
-ls -lh container.sif
-
-echo
-echo "=== Build completed at $(date) ==="
-"""
-
-        result = self.host.run(
-            ["sbatch", "--parsable"],
-            input=script,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to submit build job: {result.stderr.strip()}")
-        return result.stdout.strip()
-
     def list_jobs(self, include_completed: bool = False) -> list[JobInfo]:
         fmt = "%i|%j|%T"
         result = self.host.run(
@@ -971,34 +881,17 @@ echo "=== Build completed at $(date) ==="
         *,
         study: str | None = None,
     ) -> None:
-        if not self.tracking_server:
-            raise RuntimeError("No tracking server configured")
+        from jernerics.backend.orchestration import sync as shared_sync
 
-        import shlex
-
-        cache_host = self._paths.resolve_cache(project_name)
-        bind_args = self._paths.bind_args(cache_host)
-
-        inner_cmd = (
-            "python -m jernerics.tracking.replay_runner"
-            " --tracking-dir /cache/tracking"
-            f" --server-addr {self.tracking_server}"
+        shared_sync(
+            host=self.host,
+            container=self.container,
+            paths=self._paths,
+            remote_dir=self.remote_dir,
+            project_name=project_name,
+            tracking_server=self.tracking_server,
+            study=study,
         )
-        if study:
-            inner_cmd += f" --study {shlex.quote(study)}"
-
-        wrapped = self.container.wrap(inner_cmd, bind_args)
-
-        cmd = f"cd {self.remote_dir} && {wrapped}"
-
-        host_desc = getattr(self.host, "host", "local")
-        print(f"Syncing tracking data from {host_desc}...")
-        result = self.host.run([cmd], check=False, capture_output=True, text=True)
-        print(result.stdout)
-        if result.returncode != 0:
-            print(f"Sync failed: {result.stderr}")
-            raise RuntimeError(f"Sync failed: {result.stderr}")
-        print("Sync complete.")
 
     def resolve_log_path(
         self,

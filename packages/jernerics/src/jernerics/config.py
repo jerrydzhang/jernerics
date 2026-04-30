@@ -98,9 +98,15 @@ class PueueConfig:
 
 
 @dataclass
+class ApptainerConfig:
+    build_dir: str | None = None
+
+
+@dataclass
 class BackendConfig:
     shared: SharedConfig
     backend: SlurmConfig | PueueConfig | None = None  # None for LocalBackend
+    container: ApptainerConfig | None = None
 
 
 def _load_tool_config(project_dir: str | Path) -> dict:
@@ -173,7 +179,18 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
             parallel=bc.get("parallel", 1),
         )
 
-    return BackendConfig(shared=shared, backend=backend_specific)
+    container_config: ApptainerConfig | None = None
+    if bc.get("container_type", "apptainer") == "apptainer":
+        apptainer = bc.get("apptainer", {})
+        container_config = ApptainerConfig(
+            build_dir=apptainer.get("build_dir"),
+        )
+
+    return BackendConfig(
+        shared=shared,
+        backend=backend_specific,
+        container=container_config,
+    )
 
 
 def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:

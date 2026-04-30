@@ -69,7 +69,6 @@ def _get_backend(backend_name: str) -> tuple[SlurmBackend | PueueBackend, str, P
 
     remote_dir = config.shared.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
-    remote_dir = remote_dir.replace("~", "$HOME")
 
     if config.shared.host:
         host = SSHHost(config.shared.host)

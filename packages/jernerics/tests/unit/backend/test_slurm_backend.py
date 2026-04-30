@@ -11,7 +11,7 @@ from jernerics.backend.slurm_backend import (
     _compose_chain,
     expand_slurm_pattern,
 )
-from jernerics.config import BackendConfig, SharedConfig, SlurmConfig
+from jernerics.config import ApptainerConfig, BackendConfig, SharedConfig, SlurmConfig
 from jernerics.retry import RetryContext
 
 
@@ -34,6 +34,7 @@ def _make_backend(**overrides):
         "grace_period_s": 120,
         "max_retries": 3,
         "chain_depth_cap": 20,
+        "build_dir": None,
     }
     defaults.update(overrides)
 
@@ -455,6 +456,51 @@ class TestBuildCheckerScript:
             partition="p",
         )
         assert "#SBATCH --dependency" not in script
+
+
+class TestFromConfigWiresBuildDir:
+    def test_slurm_from_config_wires_build_dir(self):
+        from jernerics.backend.components.host import StdoutHost
+
+        config = TestFromConfigSubmitWithRetryCtx._make_config()
+        config = BackendConfig(
+            shared=config.shared,
+            backend=config.backend,
+            container=ApptainerConfig(build_dir="/dev/shm/build/{project_name}"),
+        )
+        backend = SlurmBackend.from_config(config, host=StdoutHost())
+        assert backend._paths.resolve_build_dir("my-proj") == "/dev/shm/build/my-proj"
+
+    def test_slurm_from_config_no_container_gives_none(self):
+        from jernerics.backend.components.host import StdoutHost
+
+        config = TestFromConfigSubmitWithRetryCtx._make_config()
+        backend = SlurmBackend.from_config(config, host=StdoutHost())
+        assert backend._paths.resolve_build_dir("my-proj") is None
+
+
+class TestGenerateSubmitJobNoShmHack:
+    def test_no_apptainer_tmpdir(self):
+        backend = _make_backend()
+        script = backend.generate_submit_job("echo hello", name="build")
+        assert "APPTAINER_TMPDIR" not in script
+        assert "/dev/shm" not in script
+
+
+class TestGenerateSubmitJobLogDir:
+    def test_includes_log_dir_directives(self):
+        backend = _make_backend()
+        script = backend.generate_submit_job(
+            "echo hello", name="build", log_dir="/cache/logs"
+        )
+        assert "#SBATCH --output=/cache/logs/build_%j.out" in script
+        assert "#SBATCH --error=/cache/logs/build_%j.err" in script
+
+    def test_no_log_dir_directives_when_unset(self):
+        backend = _make_backend()
+        script = backend.generate_submit_job("echo hello", name="build")
+        assert "#SBATCH --output" not in script
+        assert "#SBATCH --error" not in script
 
 
 class TestFromConfigSubmitWithRetryCtx:
