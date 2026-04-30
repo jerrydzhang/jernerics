@@ -281,6 +281,7 @@ def prepare_and_submit(
             project_dir=paths.work_prefix,
             ctx_path=paths.retry_ctx_path(spec.study_name),
             chain_depth=0,
+            project_name=project_name,
         )
         host_ctx_path = paths.retry_host_path(cache_host, spec.study_name)
         host.write_file(host_ctx_path, retry_ctx.to_json())

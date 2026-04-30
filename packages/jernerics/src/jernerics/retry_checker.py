@@ -109,7 +109,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
         n_trials=plan.total_array_size,
         dag_relpath=ctx.dag_relpath,
         config_relpath=ctx.config_relpath,
-        project_name=None,
+        project_name=ctx.project_name,
         max_parallel=max_parallel if max_parallel > 0 else None,
         backend_overrides=merged,
     )

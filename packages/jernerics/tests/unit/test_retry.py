@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from jernerics.retry import param_key, plan_retry
+from jernerics.retry import RetryContext, param_key, plan_retry
 from optuna.trial import FrozenTrial, TrialState
 
 
@@ -487,3 +487,36 @@ class TestPlanRetryEdgeCases:
         )
         assert plan.is_complete
         assert plan.fresh_needed == 0
+
+
+class TestRetryContextProjectName:
+    def test_project_name_survives_serialization_roundtrip(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+            project_name="sweep-retry",
+        )
+        restored = RetryContext.from_json(ctx.to_json())
+        assert restored.project_name == "sweep-retry"
+
+    def test_project_name_defaults_to_none(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+        )
+        assert ctx.project_name is None
+
+    def test_project_none_survives_serialization_roundtrip(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+            project_name=None,
+        )
+        restored = RetryContext.from_json(ctx.to_json())
+        assert restored.project_name is None
