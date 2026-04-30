@@ -6,9 +6,14 @@ import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 from optuna.trial import TrialState
 
+from jernerics.backend.factory import make_backend
 from jernerics.backend.models import SweepSpec
-from jernerics.backend.slurm_backend import SlurmBackend
-from jernerics.config import load_backend_config, load_config
+from jernerics.config import (
+    PueueConfig,
+    SlurmConfig,
+    load_backend_config,
+    load_config,
+)
 from jernerics.retry import (
     RetryContext,
     plan_retry,
@@ -20,12 +25,12 @@ from jernerics.retry import (
 def run_checker(ctx_path: str, chain_depth: int) -> None:
     ctx = RetryContext.from_json(Path(ctx_path).read_text())
 
-    project_dir = Path("/work")
+    project_dir = Path(ctx.project_dir)
     backend_config = load_backend_config(ctx.backend_name, project_dir)
-    sweep = load_config(f"/work/{ctx.config_relpath}")
+    sweep = load_config(f"{ctx.project_dir}/{ctx.config_relpath}")
 
-    storage_path = f"/cache/optuna/{ctx.study_name}.journal"
-    tracking_dir = f"/cache/tracking/{ctx.study_name}"
+    storage_path = ctx.storage_path or f"/cache/optuna/{ctx.study_name}.journal"
+    tracking_dir = ctx.tracking_dir or f"/cache/tracking/{ctx.study_name}"
     heartbeats_dir = Path(f"{tracking_dir}/heartbeats")
     ledger_path = Path(f"{tracking_dir}/.retry_ledger.json")
 
@@ -61,18 +66,28 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
 
     write_ledger(ledger_path, plan.retry_counts)
 
-    slurm = backend_config.backend
+    backend_specific = backend_config.backend
     max_parallel = int(
         ctx.cli_overrides.get(
             "max_parallel",
             sweep.backend_overrides.get(ctx.backend_name, {}).get(
-                "max_parallel", slurm.max_concurrent_jobs if slurm else 0
+                "max_parallel",
+                backend_specific.max_concurrent_jobs
+                if isinstance(backend_specific, SlurmConfig)
+                else backend_specific.parallel
+                if isinstance(backend_specific, PueueConfig)
+                else 1,
             ),
         )
     )
 
+    if isinstance(backend_specific, SlurmConfig):
+        defaults = backend_specific.defaults_dict()
+    else:
+        defaults = {}
+
     merged = {
-        **(slurm.defaults_dict() if slurm else {}),
+        **defaults,
         **{
             k: v
             for k, v in sweep.backend_overrides.get(ctx.backend_name, {}).items()
@@ -87,8 +102,8 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
     merged = {k: v for k, v in merged.items() if v is not None}
 
     retry_spec = SweepSpec(
-        dag_path=Path(f"/work/{ctx.dag_relpath}"),
-        config_path=Path(f"/work/{ctx.config_relpath}"),
+        dag_path=Path(f"{ctx.project_dir}/{ctx.dag_relpath}"),
+        config_path=Path(f"{ctx.project_dir}/{ctx.config_relpath}"),
         study_name=ctx.study_name,
         storage_url=storage_path,
         n_trials=plan.total_array_size,
@@ -105,13 +120,16 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
         dag_relpath=ctx.dag_relpath,
         config_relpath=ctx.config_relpath,
         cli_overrides=ctx.cli_overrides,
+        storage_path=ctx.storage_path,
+        tracking_dir=ctx.tracking_dir,
+        project_dir=ctx.project_dir,
         ctx_path=ctx_path,
         chain_depth=chain_depth + 1,
     )
 
     from jernerics.backend.components.host import StdoutHost
 
-    backend = SlurmBackend.from_config(backend_config, host=StdoutHost())
+    backend = make_backend(backend_config, host=StdoutHost())
     backend.submit_sweep(retry_spec, direction=sweep.direction, retry_ctx=retry_ctx)
 
 

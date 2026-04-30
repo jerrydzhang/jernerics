@@ -17,6 +17,10 @@ class LocalBackend:
     def __init__(self, tracking_server: str | None = None):
         self.tracking_server = tracking_server
 
+    def storage_path(self, study_name: str, project_name: str) -> str:
+        project_cache = cache_dir()
+        return str(project_cache / "optuna" / f"{study_name}.journal")
+
     def submit_sweep(
         self, spec: SweepSpec, *, direction: str = "minimize"
     ) -> SubmitResult:
@@ -85,3 +89,54 @@ class LocalBackend:
         raise UnsupportedOperation(
             "LocalBackend.submit_sweep is blocking; wait_for_completion is unnecessary"
         )
+
+    def prepare_and_submit(
+        self,
+        spec: SweepSpec,
+        *,
+        project_dir,
+        project_name: str,
+        direction: str,
+        dry_run: bool = False,
+        backend_name: str = "",
+        experiment_overrides=None,
+        cli_overrides=None,
+        local_cache_dir=None,
+    ):
+        raise UnsupportedOperation(
+            "LocalBackend uses submit_sweep directly via 'jernerics local'"
+        )
+
+    def build(
+        self,
+        project_dir,
+        *,
+        project_name: str,
+        force: bool = False,
+        dry_run: bool = False,
+        local_cache_dir=None,
+    ) -> None:
+        raise UnsupportedOperation("LocalBackend does not support remote builds")
+
+    def clean(
+        self, project_name: str, *, full: bool = False, force: bool = False
+    ) -> None:
+        raise UnsupportedOperation("LocalBackend does not support remote cleaning")
+
+    def get_logs(
+        self,
+        job_id: str,
+        *,
+        follow: bool = False,
+        stderr: bool = False,
+        local_cache_dir=None,
+    ) -> None:
+        raise UnsupportedOperation("LocalBackend does not support remote log viewing")
+
+    def sync(
+        self,
+        project_name: str,
+        *,
+        study: str | None = None,
+    ) -> None:
+        raise UnsupportedOperation("LocalBackend does not support remote sync")

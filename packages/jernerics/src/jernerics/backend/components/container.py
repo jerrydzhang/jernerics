@@ -85,7 +85,7 @@ class Docker:
     ) -> str:
         bind_args = []
         for bind in binds:
-            bind_args.extend(["--bind", bind])
+            bind_args.extend(["-v", bind])
 
         flags = ["--rm"]
         if gpu:

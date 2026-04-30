@@ -4,6 +4,7 @@ from jernerics.config import (
     BackendConfig,
     ConfigNotFound,
     ExitCode,
+    PueueConfig,
     SharedConfig,
     SlurmConfig,
     SweepConfig,
@@ -51,6 +52,7 @@ class TestLoadBackendConfig:
         assert config.shared.host == "user@hpc.example.edu"
         assert config.shared.remote_dir == "~/experiments/{project_name}"
         assert config.backend is not None
+        assert isinstance(config.backend, SlurmConfig)
         assert config.backend.partition == "priority"
         assert config.backend.time == "1:00:00"
         assert config.backend.mem == "16G"
@@ -143,6 +145,47 @@ host = "user@workstation.local"
         assert devbox.shared.host == "user@workstation.local"
         assert devbox.backend is None
 
+    def test_load_backend_config_pueue(self, tmp_path):
+        project_dir = tmp_path / "pueue"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "pueue-proj"
+version = "0.1.0"
+
+[tool.jernerics.backends.local-pueue]
+type = "pueue"
+parallel = 4
+container_type = "docker"
+""")
+        config = load_backend_config("local-pueue", project_dir)
+
+        assert config.shared.type == "pueue"
+        assert config.shared.host is None
+        assert isinstance(config.backend, PueueConfig)
+        assert config.backend.parallel == 4
+        assert config.shared.container_type == "docker"
+        assert config.shared.parallel == 4
+
+    def test_load_backend_config_pueue_defaults(self, tmp_path):
+        project_dir = tmp_path / "pueue-defaults"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "pueue-defaults"
+version = "0.1.0"
+
+[tool.jernerics.backends.local-pueue]
+type = "pueue"
+""")
+        config = load_backend_config("local-pueue", project_dir)
+
+        assert config.shared.type == "pueue"
+        assert config.shared.container_type == "apptainer"
+        assert config.shared.parallel == 1
+        assert isinstance(config.backend, PueueConfig)
+        assert config.backend.parallel == 1
+
 
 class TestLoadTrackingServer:
     def test_tracking_server_from_config(self, tmp_path):
@@ -211,6 +254,7 @@ class TestBackendConfig:
             backend=SlurmConfig(),
         )
         assert config.backend is not None
+        assert isinstance(config.backend, SlurmConfig)
         assert config.backend.partition == "priority"
         assert config.backend.time == "1:00:00"
         assert config.backend.mem == "16G"

@@ -35,6 +35,9 @@ class RetryContext:
     dag_relpath: str
     config_relpath: str
     cli_overrides: dict[str, str] = field(default_factory=dict)
+    storage_path: str = ""
+    tracking_dir: str = ""
+    project_dir: str = "/work"
 
     # Set at submission time, not serialized
     ctx_path: str = ""

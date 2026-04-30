@@ -29,6 +29,11 @@ def _make_backend(**overrides):
         "cache_dir": None,
         "tracking_server": None,
         "heartbeat_interval_s": 60.0,
+        "auto_retry": False,
+        "stale_after_s": 120,
+        "grace_period_s": 120,
+        "max_retries": 3,
+        "chain_depth_cap": 20,
     }
     defaults.update(overrides)
 

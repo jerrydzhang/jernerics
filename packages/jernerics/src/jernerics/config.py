@@ -93,9 +93,14 @@ class SlurmConfig:
 
 
 @dataclass
+class PueueConfig:
+    parallel: int = 1
+
+
+@dataclass
 class BackendConfig:
     shared: SharedConfig
-    backend: SlurmConfig | None = None  # None for LocalBackend
+    backend: SlurmConfig | PueueConfig | None = None  # None for LocalBackend
 
 
 def _load_tool_config(project_dir: str | Path) -> dict:
@@ -153,7 +158,7 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
         chain_depth_cap=bc.get("chain_depth_cap", 20),
     )
 
-    backend_specific: SlurmConfig | None = None
+    backend_specific: SlurmConfig | PueueConfig | None = None
     if backend_type == "slurm":
         slurm = bc.get("slurm", {})
         backend_specific = SlurmConfig(
@@ -162,6 +167,10 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
             mem=slurm.get("mem", "16G"),
             cpus=slurm.get("cpus", 4),
             max_concurrent_jobs=slurm.get("max_concurrent_jobs", 10),
+        )
+    elif backend_type == "pueue":
+        backend_specific = PueueConfig(
+            parallel=bc.get("parallel", 1),
         )
 
     return BackendConfig(shared=shared, backend=backend_specific)

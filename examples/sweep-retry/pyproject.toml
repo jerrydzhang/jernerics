@@ -34,6 +34,18 @@ time = "0:05:00"
 mem = "2G"
 cpus = 2
 
+[tool.jernerics.backends.pueue-local]
+type = "pueue"
+parallel = 4
+container_type = "none"
+remote_dir = "."
+auto_retry = true
+heartbeat_interval_s = 10
+stale_after_s = 20
+grace_period_s = 20
+max_retries = 3
+chain_depth_cap = 10
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
