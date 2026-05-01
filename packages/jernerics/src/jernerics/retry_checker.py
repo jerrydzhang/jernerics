@@ -205,6 +205,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
         n_trials=plan.total_array_size,
         study_name=ctx.study_name,
         log_dir=f"{cache_host}/logs",
+        cache_dir=cache_host,
         max_parallel=max_parallel if max_parallel > 0 else None,
         overrides=merged,
     )

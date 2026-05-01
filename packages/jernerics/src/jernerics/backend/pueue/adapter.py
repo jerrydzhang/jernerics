@@ -121,7 +121,7 @@ class PueueAdapter:
         lines = [
             f"pueue group add {group} 2>/dev/null || true",
             f"pueue parallel {max_parallel} --group {group}",
-            f"mkdir -p {self.cache_dir}/optuna {self.cache_dir}/tracking/{group}",
+            f"mkdir -p {params.cache_dir}/optuna {params.cache_dir}/tracking/{group}",
             "",
             f"cat > {setup_path} << 'JERNERICS_EOF'",
             params.setup_command,

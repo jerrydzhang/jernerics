@@ -11,6 +11,7 @@ class SweepSubmissionParams:
     n_trials: int
     study_name: str
     log_dir: str
+    cache_dir: str = ""
     post_hook_command: str | None = None
     max_parallel: int | None = None
     overrides: dict[str, str] = field(default_factory=dict)

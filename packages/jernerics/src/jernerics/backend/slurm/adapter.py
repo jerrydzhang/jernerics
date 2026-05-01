@@ -247,24 +247,27 @@ class SlurmAdapter:
         return slurm_opts
 
     def render_sweep(self, params: SweepSubmissionParams) -> str:
-        array_script = self._render_array_script(params)
+        cache_host = params.cache_dir or self.cache_host
+        array_script = self._render_array_script(params, cache_host=cache_host)
 
         if params.post_hook_command is None:
             return array_script
 
         checker_script = _format_checker_script(
-            cache_host=self.cache_host,
+            cache_host=cache_host,
             remote_dir=self.remote_dir,
             partition=params.overrides.get("partition", self.partition),
             wrapped_checker=params.post_hook_command,
         )
         return _compose_chain(array_script, checker_script)
 
-    def _render_array_script(self, params: SweepSubmissionParams) -> str:
+    def _render_array_script(
+        self, params: SweepSubmissionParams, *, cache_host: str
+    ) -> str:
         return _format_array_script(
             array_spec=self._array_spec(params),
             study_name=params.study_name,
-            cache_host=self.cache_host,
+            cache_host=cache_host,
             remote_dir=self.remote_dir,
             partition=self.partition,
             time=self.time,

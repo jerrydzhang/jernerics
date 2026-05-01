@@ -28,6 +28,7 @@ def _make_params(
     n_trials=3,
     study_name="mystudy",
     log_dir="/cache/logs",
+    cache_dir="",
     post_hook_command=None,
     max_parallel=None,
     overrides=None,
@@ -40,6 +41,7 @@ def _make_params(
         n_trials=n_trials,
         study_name=study_name,
         log_dir=log_dir,
+        cache_dir=cache_dir,
         post_hook_command=post_hook_command,
         max_parallel=max_parallel,
         overrides=overrides or {},
@@ -99,11 +101,11 @@ class TestRenderSweep:
         assert "pueue parallel 3 --group mystudy" in script
 
     def test_creates_optuna_and_tracking_dirs(self):
-        adapter = _make_adapter(cache_dir="$HOME/.cache/jernerics")
-        params = _make_params()
+        cache = "$HOME/.cache/jernerics"
+        adapter = _make_adapter(cache_dir=cache)
+        params = _make_params(cache_dir=cache)
         script = adapter.render_sweep(params)
 
-        cache = "$HOME/.cache/jernerics"
         assert f"mkdir -p {cache}/optuna {cache}/tracking/mystudy" in script
 
     def test_no_checker_without_post_hook(self):

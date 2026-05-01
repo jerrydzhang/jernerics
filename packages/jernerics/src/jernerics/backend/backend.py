@@ -95,6 +95,7 @@ class Backend:
             n_trials=spec.n_trials,
             study_name=spec.study_name,
             log_dir=f"{cache_host}/logs",
+            cache_dir=cache_host,
             max_parallel=max_parallel,
             overrides=overrides or {},
         )
@@ -170,12 +171,18 @@ class Backend:
         # Readiness check
         cache_host = self.paths.resolve_cache()
         self.host.mkdir(f"{cache_host}/optuna")
-        if self.syncer is not None and not self.syncer.container_exists():
-            print(
-                "Error: container.sif not found on remote.\n"
-                "  Run 'jernerics build --backend <name>' first."
+        if self.syncer is not None:
+            result = self.host.run(
+                self.container.exists_command(self.remote_dir),
+                check=False,
+                capture_output=True,
             )
-            raise RuntimeError("container.sif not found on remote")
+            if result.returncode != 0:
+                print(
+                    "Error: container not found on remote.\n"
+                    "  Run 'jernerics build --backend <name>' first."
+                )
+                raise RuntimeError("container not found on remote")
 
         # Retry context
         retry_ctx_path = None
