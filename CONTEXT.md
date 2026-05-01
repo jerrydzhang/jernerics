@@ -18,7 +18,7 @@ A node in a DAG — a Python function decorated with `@task`, with declared depe
 A directed acyclic graph of tasks, defined in a Python file. The unit of work executed per trial.
 
 **Backend**:
-A scheduler-backed execution environment that runs sweeps. Slurm and Pueue are the two backend types. Composed from a Host, a ContainerRuntime, and a ProjectSync.
+A scheduler-backed execution environment that runs sweeps. Slurm and Pueue are the two backend types. Composed from an Orchestrator, a Scheduler Adapter, and a ProjectSync.
 _Avoid_: executor, runner (those refer to the DAG executor, not the backend)
 
 **Local runner**:
@@ -76,8 +76,17 @@ A file touched periodically by a running trial. Used to detect stale (presumably
 The system that detects stale trials (via heartbeats), marks them failed in Optuna, and resubmits them. Composed of a retry plan, a retry context, and a checker job.
 _Avoid_: auto-retry (that's the config flag name, not the concept)
 
-**Checker**:
-The process that runs on the remote, inspects heartbeats, builds a retry plan, and resubmits stale trials. Runs as a chained job on scheduler backends.
+**Scheduler adapter**:
+A per-scheduler component that knows how to format and submit jobs to one scheduler type (Slurm, Pueue). Owns script generation and job lifecycle (list, cancel, status, wait). Interprets scheduler-specific overrides. Receives pre-wrapped command strings — does not see the container runtime or path resolver.
+_Avoid_: backend (that's the composed system, not just the scheduler part)
+
+**Orchestrator**:
+The shared layer that composes host + container runtime + path resolver + project syncer + scheduler adapter. Owns the deploy sequence: sync project → check readiness → build command strings → submit via adapter → save meta. Builds the three command strings (setup, trial, post-hook) that the adapter receives.
+_Avoid_: orchestration (that's the module name, not the concept)
+
+**Post-hook**:
+The process that runs on the remote after all trials finish. Currently performs retry detection and resubmission. Will expand to include optuna sync and artifact upload. Generalizing the checker into an extensible post-sweep pipeline.
+_Avoid_: checker (that's the current implementation name — it will grow beyond checking)
 
 ## Relationships
 
@@ -89,7 +98,10 @@ The process that runs on the remote, inspects heartbeats, builds a retry plan, a
 - A **DAG** contains **Tasks** with declared dependencies.
 - A **DAG Runner** executes tasks within a DAG (sync or thread-pool).
 - The **Runner script** (`runner.py`) is invoked inside the execution environment to run a single trial — it loads the Optuna study, executes the DAG, and handles tracking.
-- A **Deploy** (sync → build → submit) sends a **Sweep** to a **Backend**.
+- An **Orchestrator** composes the deploy sequence. It builds command strings and delegates scheduling to a **Scheduler Adapter**.
+- A **Scheduler Adapter** receives pre-wrapped command strings (setup, trial, post-hook) and decides how to compose them on its scheduler (e.g. Slurm uses `--dependency`, Pueue uses inline `wait`).
+- A **Deploy** (sync → build → submit) sends a **Sweep** to a **Backend** via the **Orchestrator**.
+- A **Post-hook** runs after all trials finish. Currently implements retry. Will expand to optuna sync and artifact upload.
 - Heartbeat and retry are separate subsystems — heartbeat detects staleness, retry acts on it — but they belong to the same domain (auto-retry).
 
 **Container runtime**:
@@ -97,7 +109,7 @@ A pure command factory — produces shell commands for building, checking, and w
 _Avoid_: container (ambiguous — could mean the running container instance)
 
 **Job submission**:
-`generate_submit_job(command, ...) -> str` produces a bash script fragment that submits one command to the scheduler and captures its ID. Shared across backends. Sweep submission (array vs N individual) is backend-specific, not a job submission.
+The scheduler adapter's `submit_job` method produces a bash script fragment that submits one command to the scheduler and captures its ID. Sweep submission (array + post-hook composition) is adapter-specific.
 
 ## Flagged ambiguities
 
@@ -108,3 +120,5 @@ _Avoid_: container (ambiguous — could mean the running container instance)
 - "path" is ambiguous between **host path** and **container path** — always use the full compound term when context doesn't make it obvious.
 - "local backend" was used for both the in-process debugger and a potential local pueue backend — resolved: **local runner** for the in-process thing, **local pueue** for the scheduler-backed local execution.
 - "container template" implies variable substitution — resolved: **container starter** is a minimal definition file copied into a new project.
+- "checker" was the name for the post-sweep process — resolved: **post-hook** is the canonical concept; "checker" is the current retry-only implementation.
+- "backend" was used for both the composed system and the per-scheduler component — resolved: **backend** is the composed system; **scheduler adapter** is the per-scheduler component.

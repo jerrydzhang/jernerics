@@ -1,3 +1,0 @@
-# Pure container runtimes and shared orchestration functions
-
-Revises ADR 0001. Container runtimes become pure command factories (`build_command()`, `exists_command()`, `wrap()`) with no host reference — no side effects. This enables shared standalone orchestration functions for `build`, `clean`, `sync`, and `prepare_and_submit` that compose host + container + scheduler via `generate_submit_job()`, which returns a script fragment. Sweep submission stays backend-specific (array vs N individual). `PathResolver` is the single source of truth for all path resolution — no `isinstance` checks in orchestration. `LocalBackend` no longer implements the `Backend` protocol; it's a separate in-process runner for debugging.
