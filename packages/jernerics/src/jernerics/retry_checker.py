@@ -31,6 +31,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
 
     storage_path = ctx.storage_path or f"/cache/optuna/{ctx.study_name}.journal"
     tracking_dir = ctx.tracking_dir or f"/cache/tracking/{ctx.study_name}"
+
     heartbeats_dir = Path(f"{tracking_dir}/heartbeats")
     ledger_path = Path(f"{tracking_dir}/.retry_ledger.json")
 
@@ -129,7 +130,9 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
 
     from jernerics.backend.components.host import StdoutHost
 
-    backend = make_backend(backend_config, host=StdoutHost())
+    backend = make_backend(
+        backend_config, host=StdoutHost(), project_name=ctx.project_name or ""
+    )
     backend.submit_sweep(retry_spec, direction=sweep.direction, retry_ctx=retry_ctx)
 
 

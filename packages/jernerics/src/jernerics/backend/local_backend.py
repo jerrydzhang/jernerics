@@ -13,7 +13,7 @@ class LocalBackend:
     def __init__(self, tracking_server: str | None = None):
         self.tracking_server = tracking_server
 
-    def storage_path(self, study_name: str, project_name: str) -> str:
+    def storage_path(self, study_name: str) -> str:
         project_cache = cache_dir()
         return str(project_cache / "optuna" / f"{study_name}.journal")
 

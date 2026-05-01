@@ -27,6 +27,7 @@ def _make_slurm_backend(**overrides):
         "max_retries": 3,
         "chain_depth_cap": 20,
         "build_dir": None,
+        "project_name": "",
     }
     defaults.update(overrides)
     defaults["container"].wrap = lambda cmd, binds: f"wrapped({cmd})"
@@ -49,6 +50,7 @@ def _make_pueue_backend(**overrides):
         "max_retries": 3,
         "chain_depth_cap": 20,
         "build_dir": None,
+        "project_name": "",
     }
     defaults.update(overrides)
     defaults["container"].wrap = lambda cmd, binds: f"wrapped({cmd})"

@@ -106,6 +106,7 @@ class PueueBackend:
         max_retries: int = 3,
         chain_depth_cap: int = 20,
         build_dir: str | None = None,
+        project_name: str = "",
     ):
         self.host = host
         self.container = container
@@ -126,6 +127,7 @@ class PueueBackend:
             cache_dir=cache_dir,
             container=container,
             build_dir=build_dir,
+            project_name=project_name,
         )
 
     def generate_submit_job(
@@ -147,6 +149,7 @@ class PueueBackend:
         host,
         syncer=None,
         tracking_server: str | None = None,
+        project_name: str = "",
     ) -> "PueueBackend":
         from jernerics.backend.components.container import (
             Apptainer,
@@ -190,10 +193,11 @@ class PueueBackend:
             max_retries=shared.max_retries,
             chain_depth_cap=shared.chain_depth_cap,
             build_dir=build_dir,
+            project_name=project_name,
         )
 
-    def storage_path(self, study_name: str, project_name: str) -> str:
-        return self._paths.storage_path(study_name, project_name)
+    def storage_path(self, study_name: str) -> str:
+        return self._paths.storage_path(study_name)
 
     def _generate_submit_script(
         self,
@@ -202,8 +206,7 @@ class PueueBackend:
         direction: str = "minimize",
         retry_ctx: RetryContext | None = None,
     ) -> str:
-        project_name = spec.project_name or ""
-        cache_host = self._paths.resolve_cache(project_name)
+        cache_host = self._paths.resolve_cache()
         bind_args = self._paths.bind_args(cache_host)
         tracking_dir = self._paths.tracking_dir(spec.study_name)
 
@@ -268,10 +271,13 @@ class PueueBackend:
             checker_cmd = build_checker_command(
                 retry_ctx.ctx_path, retry_ctx.chain_depth
             )
-            wrapped_checker = self.container.wrap(
-                f"{checker_cmd} 2>/dev/null", bind_args
+            retry_script = (
+                f"/tmp/jernerics_{spec.study_name}_retry_d{retry_ctx.chain_depth}.sh"
             )
-            wrapped_checker += " | bash"
+            wrapped_checker = self.container.wrap(
+                f"{checker_cmd} 2>/dev/null > {retry_script} && bash {retry_script}",
+                bind_args,
+            )
 
             trial_ids = " ".join(f"$TRIAL_{i + 1}_ID" for i in range(spec.n_trials))
             checker_inner_path = f"/tmp/jernerics_{spec.study_name}_checker.sh"

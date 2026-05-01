@@ -35,6 +35,7 @@ def _make_backend(**overrides):
         "max_retries": 3,
         "chain_depth_cap": 20,
         "build_dir": None,
+        "project_name": "",
     }
     defaults.update(overrides)
 
@@ -61,13 +62,12 @@ def _wrap_spy(backend):
 
 class TestGenerateSweepScript:
     def test_sbatch_directives(self):
-        backend = _make_backend()
+        backend = _make_backend(project_name="proj")
         script = backend._generate_sweep_script(
             setup_command="setup_cmd",
             trial_command="trial_cmd",
             array_spec="1-50%4",
             study_name="study",
-            project_name="proj",
             backend_overrides={"time": "2:00:00"},
         )
         lines = script.splitlines()
@@ -86,7 +86,6 @@ class TestGenerateSweepScript:
             trial_command="trial",
             array_spec="1-100",
             study_name="s",
-            project_name="p",
             backend_overrides={},
         )
         assert "#SBATCH --array=1-100\n" in script
@@ -95,13 +94,13 @@ class TestGenerateSweepScript:
         backend = _make_backend(
             remote_dir="~/projects/proj",
             cache_dir=None,
+            project_name="proj",
         )
         script = backend._generate_sweep_script(
             setup_command="setup",
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         assert "#SBATCH --output=$HOME/.cache/jernerics/proj/logs/%A_%a.out" in script
@@ -110,39 +109,37 @@ class TestGenerateSweepScript:
     def test_output_error_patterns_with_cache_dir(self):
         backend = _make_backend(
             cache_dir="~/cache/{project_name}",
+            project_name="proj",
         )
         script = backend._generate_sweep_script(
             setup_command="setup",
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         assert "#SBATCH --output=$HOME/cache/proj/logs/%A_%a.out" in script
         assert "#SBATCH --error=$HOME/cache/proj/logs/%A_%a.err" in script
 
     def test_output_error_patterns_custom(self):
-        backend = _make_backend()
+        backend = _make_backend(project_name="proj")
         script = backend._generate_sweep_script(
             setup_command="setup",
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={"output": "/custom/%j.out", "error": "/custom/%j.err"},
         )
         assert "#SBATCH --output=/custom/%j.out" in script
         assert "#SBATCH --error=/custom/%j.err" in script
 
     def test_tilde_expanded_in_sbatch_directives(self):
-        backend = _make_backend()
+        backend = _make_backend(project_name="proj")
         script = backend._generate_sweep_script(
             setup_command="setup",
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={"output": "~/logs/%j.out"},
         )
         assert "$HOME/logs/%j.out" in script
@@ -158,7 +155,6 @@ class TestGenerateSweepScript:
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         assert "cd $HOME/projects/proj" in script
@@ -173,7 +169,6 @@ class TestGenerateSweepScript:
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         assert len(wrap_calls) == 2
@@ -190,7 +185,6 @@ class TestGenerateSweepScript:
             trial_command="python -m jernerics.runner",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         assert wrap_calls[1][0] == "python -m jernerics.runner"
@@ -203,7 +197,6 @@ class TestGenerateSweepScript:
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         binds = wrap_calls[0][1]
@@ -212,39 +205,39 @@ class TestGenerateSweepScript:
         assert len(binds) == 2  # /work and /cache only
 
     def test_bind_args_with_cache_dir(self):
-        backend = _make_backend(cache_dir="~/cache/{project_name}")
+        backend = _make_backend(
+            cache_dir="~/cache/{project_name}",
+            project_name="proj",
+        )
         wrap_calls = _wrap_spy(backend)
         backend._generate_sweep_script(
             setup_command="setup",
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         binds = wrap_calls[0][1]
         assert any("$HOME/cache/proj:/cache" in b for b in binds)
 
     def test_tracking_directory_created(self):
-        backend = _make_backend()
+        backend = _make_backend(project_name="proj")
         script = backend._generate_sweep_script(
             setup_command="setup",
             trial_command="trial",
             array_spec="1-10",
             study_name="my_study",
-            project_name="proj",
             backend_overrides={},
         )
         assert "mkdir -p $HOME/.cache/jernerics/proj/tracking/my_study" in script
 
     def test_optuna_directory_created(self):
-        backend = _make_backend()
+        backend = _make_backend(project_name="proj")
         script = backend._generate_sweep_script(
             setup_command="setup",
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         assert "mkdir -p $HOME/.cache/jernerics/proj/optuna" in script
@@ -257,7 +250,6 @@ class TestGenerateSweepScript:
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         assert "flock" in script
@@ -273,7 +265,6 @@ class TestGenerateSweepScript:
             trial_command="trial",
             array_spec="1-10",
             study_name="study",
-            project_name="proj",
             backend_overrides={},
         )
         assert "#SBATCH --time=" not in script
@@ -456,6 +447,29 @@ class TestBuildCheckerScript:
             partition="p",
         )
         assert "#SBATCH --dependency" not in script
+
+    def test_no_pipe_to_bash(self):
+        backend = _make_backend()
+        script = backend._build_checker_script(
+            ctx_path="/cache/retry/ctx.json",
+            chain_depth=0,
+            cache_host="/cache",
+            partition="p",
+            study_name="mystudy",
+        )
+        assert "| bash" not in script
+
+    def test_writes_retry_script_to_file_then_executes(self):
+        backend = _make_backend()
+        script = backend._build_checker_script(
+            ctx_path="/cache/retry/ctx.json",
+            chain_depth=2,
+            cache_host="/cache",
+            partition="p",
+            study_name="mystudy",
+        )
+        assert "> /tmp/jernerics_mystudy_retry_d2.sh" in script
+        assert "bash /tmp/jernerics_mystudy_retry_d2.sh" in script
 
 
 class TestFromConfigWiresBuildDir:

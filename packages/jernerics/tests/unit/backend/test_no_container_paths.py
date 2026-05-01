@@ -27,6 +27,7 @@ class TestPueueNoContainerPaths:
             "max_retries": 3,
             "chain_depth_cap": 20,
             "build_dir": None,
+            "project_name": "",
         }
         defaults.update(overrides)
         return PueueBackend(**defaults)
@@ -36,8 +37,8 @@ class TestPueueNoContainerPaths:
         assert backend._paths.work_prefix == "/home/user/projects/myproject"
 
     def test_cache_prefix_uses_cache_dir(self):
-        backend = self._make_backend()
-        assert backend._paths.cache_prefix == "/home/user/.cache/jernerics"
+        backend = self._make_backend(project_name="proj")
+        assert backend._paths.cache_prefix == "/home/user/.cache/jernerics/proj"
 
     def test_work_prefix_with_container(self):
         container = MagicMock()
@@ -50,7 +51,7 @@ class TestPueueNoContainerPaths:
         assert backend._paths.cache_prefix == "/cache"
 
     def test_trial_command_uses_host_paths(self):
-        backend = self._make_backend()
+        backend = self._make_backend(project_name="proj")
         spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),
@@ -104,6 +105,7 @@ class TestSlurmNoContainerPaths:
             "max_retries": 3,
             "chain_depth_cap": 20,
             "build_dir": None,
+            "project_name": "",
         }
         defaults.update(overrides)
         return SlurmBackend(**defaults)
@@ -113,8 +115,8 @@ class TestSlurmNoContainerPaths:
         assert backend._paths.work_prefix == "/home/user/projects/proj"
 
     def test_cache_prefix_uses_cache_dir(self):
-        backend = self._make_backend()
-        assert backend._paths.cache_prefix == "/home/user/.cache/jernerics"
+        backend = self._make_backend(project_name="proj")
+        assert backend._paths.cache_prefix == "/home/user/.cache/jernerics/proj"
 
     def test_work_prefix_with_container(self):
         container = MagicMock()
@@ -127,7 +129,7 @@ class TestSlurmNoContainerPaths:
         assert backend._paths.cache_prefix == "/cache"
 
     def test_trial_command_uses_host_paths(self):
-        backend = self._make_backend()
+        backend = self._make_backend(project_name="proj")
         spec = SweepSubmission(
             dag_path=Path("dag.py"),
             config_path=Path("config.py"),

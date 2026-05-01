@@ -82,6 +82,7 @@ def _get_backend(backend_name: str) -> tuple[SlurmBackend | PueueBackend, str, P
         host=host,
         syncer=syncer,
         tracking_server=tracking_server,
+        project_name=project_name,
     )
 
     return backend, project_name, project_dir
@@ -197,7 +198,7 @@ def run_remote(
 
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     study_name = f"{project_name}_{config_path.stem}_{timestamp}"
-    storage_url = backend.storage_path(study_name, project_name)
+    storage_url = backend.storage_path(study_name)
 
     spec = SweepSubmission(
         dag_path=dag_path,

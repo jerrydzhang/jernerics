@@ -15,18 +15,27 @@ def make_backend(
     host,
     syncer=None,
     tracking_server: str | None = None,
+    project_name: str = "",
 ) -> SlurmBackend | PueueBackend:
     backend_type = config.shared.type
     if backend_type == "pueue":
         from .pueue_backend import PueueBackend
 
         return PueueBackend.from_config(
-            config, host=host, syncer=syncer, tracking_server=tracking_server
+            config,
+            host=host,
+            syncer=syncer,
+            tracking_server=tracking_server,
+            project_name=project_name,
         )
     elif backend_type == "slurm":
         from .slurm_backend import SlurmBackend
 
         return SlurmBackend.from_config(
-            config, host=host, syncer=syncer, tracking_server=tracking_server
+            config,
+            host=host,
+            syncer=syncer,
+            tracking_server=tracking_server,
+            project_name=project_name,
         )
     raise ValueError(f"Unknown backend type: {backend_type}")

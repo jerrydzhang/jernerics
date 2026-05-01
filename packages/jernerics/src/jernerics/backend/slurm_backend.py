@@ -92,6 +92,7 @@ class SlurmBackend:
         max_retries: int = 3,
         chain_depth_cap: int = 20,
         build_dir: str | None = None,
+        project_name: str = "",
     ):
         self.host = host
         self.container = container
@@ -118,6 +119,7 @@ class SlurmBackend:
             work_mount_source="${REMOTE_DIR}",
             quote_binds=True,
             build_dir=build_dir,
+            project_name=project_name,
         )
 
     capabilities = frozenset()
@@ -167,6 +169,7 @@ class SlurmBackend:
         host=None,
         syncer=None,
         tracking_server: str | None = None,
+        project_name: str = "",
     ) -> "SlurmBackend":
         """Construct from config.
 
@@ -210,10 +213,11 @@ class SlurmBackend:
             max_retries=backend_config.shared.max_retries,
             chain_depth_cap=backend_config.shared.chain_depth_cap,
             build_dir=build_dir,
+            project_name=project_name,
         )
 
-    def storage_path(self, study_name: str, project_name: str) -> str:
-        return self._paths.storage_path(study_name, project_name)
+    def storage_path(self, study_name: str) -> str:
+        return self._paths.storage_path(study_name)
 
     def _resolve_output_dir(self, output_path: str) -> str:
         if "%" in output_path:
@@ -244,7 +248,7 @@ class SlurmBackend:
         dag_relpath = spec.dag_relpath or str(spec.dag_path.name)
         config_relpath = spec.config_relpath or str(spec.config_path.name)
         project_name = spec.project_name or ""
-        cache_host = self._paths.resolve_cache(project_name)
+        cache_host = self._paths.resolve_cache()
         tracking_dir = self._paths.tracking_dir(spec.study_name)
 
         setup_command = build_setup_command(
@@ -274,7 +278,6 @@ class SlurmBackend:
             trial_command=trial_command,
             array_spec=array_spec,
             study_name=spec.study_name,
-            project_name=spec.project_name or "",
             backend_overrides=spec.backend_overrides,
         )
 
@@ -285,13 +288,15 @@ class SlurmBackend:
         cache_host: str,
         partition: str,
         dependency_job_id: str | None = None,
+        study_name: str = "",
     ) -> str:
         """Generate the SLURM checker job script."""
         checker_cmd = build_checker_command(ctx_path, chain_depth)
+        retry_script = f"/tmp/jernerics_{study_name}_retry_d{chain_depth}.sh"
         wrapped_checker = self.container.wrap(
-            f"{checker_cmd} 2>/dev/null", self._paths.bind_args(cache_host)
+            f"{checker_cmd} 2>/dev/null > {retry_script} && bash {retry_script}",
+            self._paths.bind_args(cache_host),
         )
-        wrapped_checker += " | bash"
 
         return _format_checker_script(
             cache_host=cache_host,
@@ -322,8 +327,7 @@ class SlurmBackend:
                 raise RuntimeError(f"Failed to submit job: {result.stderr.strip()}")
             return SubmitResult(job_id=result.stdout.strip())
 
-        project_name = spec.project_name or ""
-        cache_host = self._paths.resolve_cache(project_name)
+        cache_host = self._paths.resolve_cache()
         partition = spec.backend_overrides.get("partition", self.partition)
 
         checker_script = self._build_checker_script(
@@ -331,6 +335,7 @@ class SlurmBackend:
             chain_depth=retry_ctx.chain_depth,
             cache_host=cache_host,
             partition=partition,
+            study_name=spec.study_name,
         )
 
         combined = _compose_chain(array_script, checker_script)
@@ -417,7 +422,7 @@ class SlurmBackend:
             grid=spec.grid,
         )
 
-        cache_host = self._paths.resolve_cache(project_name)
+        cache_host = self._paths.resolve_cache()
         output_pattern = merged.get("output", f"{cache_host}/logs/%A_%a.out")
         error_pattern = merged.get("error", f"{cache_host}/logs/%A_%a.err")
 
@@ -453,7 +458,6 @@ class SlurmBackend:
                     array_spec=f"1-{spec.n_trials}"
                     + (f"%{max_parallel_val}" if max_parallel_val > 0 else ""),
                     study_name=spec.study_name,
-                    project_name=project_name,
                     backend_overrides=merged,
                 )
             )
@@ -548,7 +552,7 @@ class SlurmBackend:
     ) -> None:
         from jernerics.backend.orchestration import submit_build
 
-        cache_host = self._paths.resolve_cache(project_name)
+        cache_host = self._paths.resolve_cache()
         self.host.mkdir(f"{cache_host}/logs")
 
         job_id = submit_build(
@@ -633,7 +637,7 @@ class SlurmBackend:
             n_trials = 1
 
         if output_pattern is None or error_pattern is None:
-            cache_host = self._paths.resolve_cache("")
+            cache_host = self._paths.resolve_cache()
             output_pattern = f"{cache_host}/logs/%A_%a.out"
             error_pattern = f"{cache_host}/logs/%A_%a.err"
 
@@ -727,10 +731,9 @@ class SlurmBackend:
         trial_command: str,
         array_spec: str,
         study_name: str,
-        project_name: str,
         backend_overrides: dict[str, str],
     ) -> str:
-        cache_host = self._paths.resolve_cache(project_name)
+        cache_host = self._paths.resolve_cache()
         bind_args = self._paths.bind_args(cache_host)
         wrapped_setup = self.container.wrap(setup_command, bind_args)
         wrapped_trial = self.container.wrap(trial_command, bind_args)

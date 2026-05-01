@@ -165,7 +165,7 @@ Unified backend interface with a `Backend` protocol, `SweepSpec` dataclass, and 
 ### Remaining (Phase 5c)
 - [x] ~~Replace `FileSyncer` with rsync~~ — tar+scp is well-suited to WekaFS, code is now understood
 - [x] ~~Implement `LocalSyncBackend`~~ — already done as `LocalBackend`
-- [ ] Implement `LocalPueueBackend` and `BareBackend` (Pueue + Docker)
+- [x] Implement `PueueBackend` — composed from Host + ContainerRuntime. Verified: local/no-container, remote/Docker, Slurm/Apptainer.
 - [x] `clean` command overhaul — Two modes: cache-only (`clean --backend <name>`) and full (`clean --backend <name> --full`). Hard blocks on active jobs, unsynced `.pb` files, missing target directories. `sync` now deletes `.pb` files after successful replay, establishing the invariant: `.pb` files on remote ⟹ unsynced data. Dry run by default, `--force` to execute. `--full` preserves `saved/` directory.
 - [ ] Integration test all CLI commands against real SLURM cluster
 

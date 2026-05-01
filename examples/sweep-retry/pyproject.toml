@@ -18,7 +18,7 @@ packages = ["src/sweep_retry"]
 
 [tool.jernerics.backends.hpc]
 type = "slurm"
-host = "jez21005@hpc2.storrs.hpc.uconn.edu"
+host = "jez21005@login5.storrs.hpc.uconn.edu"
 remote_dir = "~/projects/jernerics-examples/sweep-retry"
 cache_dir = "/scratch/qiy18011/jez21005/jernerics"
 auto_retry = true
@@ -33,6 +33,20 @@ partition = "priority"
 time = "0:05:00"
 mem = "2G"
 cpus = 2
+
+[tool.jernerics.backends.pueue-remote]
+type = "pueue"
+host = "jez21005@scimlab.engr.uconn.edu"
+remote_dir = "~/projects/jernerics-examples/sweep-retry"
+cache_dir = "~/.cache/jernerics"
+parallel = 2
+container_type = "docker"
+auto_retry = true
+heartbeat_interval_s = 10
+stale_after_s = 20
+grace_period_s = 20
+max_retries = 3
+chain_depth_cap = 10
 
 [tool.jernerics.backends.pueue-local]
 type = "pueue"
