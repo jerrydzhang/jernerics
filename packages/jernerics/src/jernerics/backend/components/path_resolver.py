@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from jernerics.backend.components.container import NoContainer
 
 _PROJECT_NAME_TEMPLATE = "{project_name}"
@@ -50,28 +48,16 @@ class PathResolver:
         base = self.cache_prefix
         return f"{base}/tracking/{study_name}"
 
-    def retry_host_path(self, cache_host: str, study_name: str) -> str:
-        """Host-side path for the retry context file."""
-        if isinstance(self.container, NoContainer):
-            cache_host = cache_host.replace("$HOME", str(Path.home()))
-        return f"{cache_host}/retry/{study_name}_ctx.json"
-
-    def expand_path(self, path: str) -> str:
-        """Expand $HOME in path for NoContainer."""
-        if isinstance(self.container, NoContainer):
-            return path.replace("$HOME", str(Path.home()))
-        return path
-
     def resolve_cache(self, project_name: str = "") -> str:
         name = project_name or self._project_name
-        cache = self.cache_dir or "$HOME/.cache/jernerics"
+        cache = self.cache_dir or "/home/user/.cache/jernerics"
         if _PROJECT_NAME_TEMPLATE in cache:
             cache = cache.replace(_PROJECT_NAME_TEMPLATE, name)
         elif _PROJECT_NAME_HYPHEN_TEMPLATE in cache:
             cache = cache.replace(_PROJECT_NAME_HYPHEN_TEMPLATE, name)
         elif name:
             cache = f"{cache}/{name}"
-        return cache.replace("~", "$HOME")
+        return cache
 
     def bind_args(self, cache_host: str) -> list[str]:
         work_src = self._work_mount_source or self.remote_dir
@@ -89,4 +75,4 @@ class PathResolver:
             build_dir = build_dir.replace(_PROJECT_NAME_HYPHEN_TEMPLATE, project_name)
         elif project_name:
             build_dir = f"{build_dir}/{project_name}"
-        return build_dir.replace("~", "$HOME")
+        return build_dir

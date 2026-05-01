@@ -161,8 +161,12 @@ class PueueBackend:
         pueue = backend_config.backend
 
         shared = backend_config.shared
-        remote_dir = shared.remote_dir.replace("~", "$HOME")
-        cache_dir = shared.cache_dir or "$HOME/.cache/jernerics"
+        remote_dir = shared.remote_dir.replace("~", host.home)
+        cache_dir = (
+            shared.cache_dir.replace("~", host.home)
+            if shared.cache_dir
+            else f"{host.home}/.cache/jernerics"
+        )
 
         container_type = shared.container_type
         if container_type == "docker":
@@ -177,6 +181,8 @@ class PueueBackend:
         build_dir = None
         if isinstance(backend_config.container, ApptainerConfig):
             build_dir = backend_config.container.build_dir
+            if build_dir:
+                build_dir = build_dir.replace("~", host.home)
 
         return cls(
             host=host,

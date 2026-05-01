@@ -177,6 +177,8 @@ class SlurmBackend:
         a bash script for piping (e.g. retry checker inside a container).
         """
 
+        assert host is not None
+
         container_type = backend_config.shared.container_type
         if container_type == "apptainer":
             container = Apptainer()
@@ -193,18 +195,26 @@ class SlurmBackend:
         build_dir = None
         if isinstance(backend_config.container, ApptainerConfig):
             build_dir = backend_config.container.build_dir
+            if build_dir:
+                build_dir = build_dir.replace("~", host.home)
+
+        cache_dir = (
+            backend_config.shared.cache_dir.replace("~", host.home)
+            if backend_config.shared.cache_dir
+            else None
+        )
 
         return cls(
             host=host,
             container=container,
             syncer=syncer,
-            remote_dir=backend_config.shared.remote_dir.replace("~", "$HOME"),
+            remote_dir=backend_config.shared.remote_dir.replace("~", host.home),
             partition=slurm.partition,
             time=slurm.time,
             mem=slurm.mem,
             cpus=slurm.cpus,
             max_concurrent_jobs=slurm.max_concurrent_jobs,
-            cache_dir=backend_config.shared.cache_dir,
+            cache_dir=cache_dir,
             tracking_server=tracking_server,
             heartbeat_interval_s=backend_config.shared.heartbeat_interval_s,
             auto_retry=backend_config.shared.auto_retry,

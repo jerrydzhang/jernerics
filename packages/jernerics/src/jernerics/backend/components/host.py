@@ -5,6 +5,8 @@ from typing import Protocol
 
 
 class Host(Protocol):
+    home: str
+
     def run(self, command: Sequence[str], **kwargs) -> subprocess.CompletedProcess: ...
     def mkdir(self, remote_path: str) -> None: ...
     def file_exists(self, remote_path: str) -> bool: ...
@@ -14,6 +16,9 @@ class Host(Protocol):
 
 
 class LocalHost:
+    def __init__(self) -> None:
+        self.home = str(Path.home())
+
     def run(self, command: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
         return subprocess.run(command, **kwargs)
 
@@ -45,6 +50,9 @@ class StdoutHost:
     script is piped to bash on the login node via stdout.
     """
 
+    def __init__(self, home: str = "") -> None:
+        self.home = home
+
     def run(self, command: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
         input_text = kwargs.get("input", "")
         if input_text:
@@ -72,6 +80,18 @@ class StdoutHost:
 class SSHHost(Host):
     def __init__(self, host: str):
         self.host = host
+        result = subprocess.run(
+            ["ssh", "-o", "LogLevel=ERROR", host, "echo $HOME"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Failed to resolve remote home directory"
+                f" via SSH: {result.stderr.strip()}"
+            )
+        self.home = result.stdout.strip()
 
     def run(self, command: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
         return subprocess.run(

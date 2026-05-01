@@ -131,7 +131,9 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
     from jernerics.backend.components.host import StdoutHost
 
     backend = make_backend(
-        backend_config, host=StdoutHost(), project_name=ctx.project_name or ""
+        backend_config,
+        host=StdoutHost(home=ctx.host_home),
+        project_name=ctx.project_name or "",
     )
     backend.submit_sweep(retry_spec, direction=sweep.direction, retry_ctx=retry_ctx)
 

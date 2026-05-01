@@ -161,3 +161,68 @@ class TestCheckerScriptGeneration:
         )
         assert "/tmp/jernerics_mystudy_checker.sh" in script
         assert "/tmp/jernerics_mystudy_wait_and_check.sh" in script
+
+
+class TestPueueFromConfigExpandsTilde:
+    """PueueBackend.from_config expands ~ using host.home."""
+
+    @staticmethod
+    def _make_config(remote_dir="~/projects/proj", cache_dir=None, build_dir=None):
+        from jernerics.config import (
+            ApptainerConfig,
+            BackendConfig,
+            PueueConfig,
+            SharedConfig,
+        )
+
+        container = None
+        if build_dir is not None:
+            container = ApptainerConfig(build_dir=build_dir)
+
+        return BackendConfig(
+            shared=SharedConfig(
+                name="local-pueue",
+                type="pueue",
+                host=None,
+                remote_dir=remote_dir,
+                cache_dir=cache_dir,
+                container_type="docker",
+            ),
+            backend=PueueConfig(parallel=2),
+            container=container,
+        )
+
+    def test_remote_dir_tilde_expanded(self):
+        from jernerics.backend.components.host import LocalHost
+
+        config = self._make_config(remote_dir="~/projects/proj")
+        backend = PueueBackend.from_config(config, host=LocalHost(), syncer=MagicMock())
+        assert "~" not in backend.remote_dir
+        assert "$HOME" not in backend.remote_dir
+        assert backend.remote_dir == f"{LocalHost().home}/projects/proj"
+
+    def test_cache_dir_tilde_expanded(self):
+        from jernerics.backend.components.host import LocalHost
+
+        config = self._make_config(cache_dir="~/.cache/jernerics")
+        backend = PueueBackend.from_config(config, host=LocalHost(), syncer=MagicMock())
+        assert "~" not in backend.cache_dir
+        assert "$HOME" not in backend.cache_dir
+        assert backend.cache_dir == f"{LocalHost().home}/.cache/jernerics"
+
+    def test_cache_dir_none_becomes_home_absolute(self):
+        from jernerics.backend.components.host import LocalHost
+
+        config = self._make_config(cache_dir=None)
+        backend = PueueBackend.from_config(config, host=LocalHost(), syncer=MagicMock())
+        assert "~" not in backend.cache_dir
+        assert "$HOME" not in backend.cache_dir
+        assert backend.cache_dir.endswith("/.cache/jernerics")
+
+    def test_absolute_paths_unchanged(self):
+        from jernerics.backend.components.host import LocalHost
+
+        config = self._make_config(remote_dir="/tmp/proj", cache_dir="/tmp/cache")
+        backend = PueueBackend.from_config(config, host=LocalHost(), syncer=MagicMock())
+        assert backend.remote_dir == "/tmp/proj"
+        assert backend.cache_dir == "/tmp/cache"

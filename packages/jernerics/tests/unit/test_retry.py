@@ -520,3 +520,38 @@ class TestRetryContextProjectName:
         )
         restored = RetryContext.from_json(ctx.to_json())
         assert restored.project_name is None
+
+
+class TestRetryContextHostHome:
+    def test_host_home_survives_serialization_roundtrip(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+            host_home="/home/jez21005",
+        )
+        json_str = ctx.to_json()
+        assert '"host_home": "/home/jez21005"' in json_str
+        restored = RetryContext.from_json(json_str)
+        assert restored.host_home == "/home/jez21005"
+
+    def test_host_home_defaults_to_empty(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+        )
+        assert ctx.host_home == ""
+
+    def test_host_home_empty_survives_roundtrip(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+            host_home="",
+        )
+        restored = RetryContext.from_json(ctx.to_json())
+        assert restored.host_home == ""

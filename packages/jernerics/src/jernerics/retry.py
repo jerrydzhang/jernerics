@@ -39,6 +39,7 @@ class RetryContext:
     tracking_dir: str = ""
     project_dir: str = "/work"
     project_name: str | None = None
+    host_home: str = ""
 
     # Set at submission time, not serialized
     ctx_path: str = ""

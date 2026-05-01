@@ -4,7 +4,7 @@ from jernerics.backend.components.path_resolver import PathResolver
 
 def _resolver(**overrides):
     defaults = {
-        "remote_dir": "~/projects/proj",
+        "remote_dir": "/home/user/projects/proj",
         "cache_dir": None,
         "container": Apptainer(),
         "work_mount_source": None,
@@ -27,7 +27,7 @@ class TestCachePrefix:
 
     def test_no_container_default_cache_dir(self):
         r = _resolver(container=NoContainer(), project_name="proj")
-        assert r.cache_prefix == "$HOME/.cache/jernerics/proj"
+        assert r.cache_prefix == "/home/user/.cache/jernerics/proj"
 
     def test_no_container_no_project_name(self):
         r = _resolver(container=NoContainer(), cache_dir="/tmp/cache")
@@ -83,24 +83,6 @@ class TestStoragePath:
         assert r.storage_path("study") == "/cache/optuna/study.journal"
 
 
-class TestExpandPath:
-    def test_no_container_expands_home(self):
-        r = _resolver(container=NoContainer())
-        result = r.expand_path("$HOME/.cache/jernerics/proj/optuna/study.journal")
-        assert "$HOME" not in result
-        assert "/" in result
-
-    def test_apptainer_returns_unchanged(self):
-        r = _resolver(container=Apptainer())
-        path = "/cache/optuna/study.journal"
-        assert r.expand_path(path) == path
-
-    def test_no_home_literal_returns_unchanged(self):
-        r = _resolver(container=NoContainer())
-        path = "/tmp/cache/study.journal"
-        assert r.expand_path(path) == path
-
-
 class TestResolveBuildDir:
     def test_template_expansion(self):
         r = _resolver(build_dir="/dev/shm/build/{project_name}")
@@ -117,7 +99,3 @@ class TestResolveBuildDir:
     def test_none_returns_none(self):
         r = _resolver(build_dir=None)
         assert r.resolve_build_dir("my-project") is None
-
-    def test_tilde_replaced_with_home(self):
-        r = _resolver(build_dir="~/build/{project_name}")
-        assert r.resolve_build_dir("my-project") == "$HOME/build/my-project"

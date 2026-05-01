@@ -1,25 +1,25 @@
 lint:
-    uv run ruff check .
+    ruff check .
 
 lint-fix:
-    uv run ruff check --fix .
+    ruff check --fix .
 
 format:
-    uv run ruff format .
+    ruff format .
 
 format-check:
-    uv run ruff format --check .
+    ruff format --check .
 
 typecheck:
-    uv run ty check
+    ty check
 
 test:
-    uv run pytest
+    pytest
 
 test-unit:
-    uv run pytest tests/unit
+    pytest tests/unit
 
 proto:
-    cd packages/jernerics-proto && uv run python generate.py
+    cd packages/jernerics-proto && python generate.py
 
 check: lint format-check typecheck test

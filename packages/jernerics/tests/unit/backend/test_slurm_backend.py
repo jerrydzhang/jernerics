@@ -103,8 +103,10 @@ class TestGenerateSweepScript:
             study_name="study",
             backend_overrides={},
         )
-        assert "#SBATCH --output=$HOME/.cache/jernerics/proj/logs/%A_%a.out" in script
-        assert "#SBATCH --error=$HOME/.cache/jernerics/proj/logs/%A_%a.err" in script
+        output = "#SBATCH --output=/home/user/.cache/jernerics/proj/logs/%A_%a.out"
+        error = "#SBATCH --error=/home/user/.cache/jernerics/proj/logs/%A_%a.err"
+        assert output in script
+        assert error in script
 
     def test_output_error_patterns_with_cache_dir(self):
         backend = _make_backend(
@@ -206,7 +208,7 @@ class TestGenerateSweepScript:
 
     def test_bind_args_with_cache_dir(self):
         backend = _make_backend(
-            cache_dir="~/cache/{project_name}",
+            cache_dir="/home/user/cache/{project_name}",
             project_name="proj",
         )
         wrap_calls = _wrap_spy(backend)
@@ -218,7 +220,7 @@ class TestGenerateSweepScript:
             backend_overrides={},
         )
         binds = wrap_calls[0][1]
-        assert any("$HOME/cache/proj:/cache" in b for b in binds)
+        assert any("/home/user/cache/proj:/cache" in b for b in binds)
 
     def test_tracking_directory_created(self):
         backend = _make_backend(project_name="proj")
@@ -229,7 +231,7 @@ class TestGenerateSweepScript:
             study_name="my_study",
             backend_overrides={},
         )
-        assert "mkdir -p $HOME/.cache/jernerics/proj/tracking/my_study" in script
+        assert "mkdir -p /home/user/.cache/jernerics/proj/tracking/my_study" in script
 
     def test_optuna_directory_created(self):
         backend = _make_backend(project_name="proj")
@@ -240,7 +242,7 @@ class TestGenerateSweepScript:
             study_name="study",
             backend_overrides={},
         )
-        assert "mkdir -p $HOME/.cache/jernerics/proj/optuna" in script
+        assert "mkdir -p /home/user/.cache/jernerics/proj/optuna" in script
 
     def test_flock_guards_setup(self):
         backend = _make_backend()
@@ -596,6 +598,8 @@ class TestFromConfigSubmitWithRetryCtx:
         captured_input = {}
 
         class CapturingHost:
+            home = "/home/testuser"
+
             def run(self, command, **kwargs):
                 captured_input["command"] = command
                 captured_input["input"] = kwargs.get("input", "")
@@ -669,6 +673,8 @@ class TestFromConfigSubmitWithRetryCtx:
         config = self._make_config()
 
         class CapturingHost:
+            home = "/home/testuser"
+
             def run(self, command, **kwargs):
                 return subprocess.CompletedProcess(
                     args=list(command),
@@ -715,6 +721,8 @@ class TestTrackingDirIsContainerAware:
         captured = {}
 
         class CapturingHost:
+            home = "/home/testuser"
+
             def run(self, command, **kwargs):
                 captured["command"] = command
                 captured["input"] = kwargs.get("input", "")
@@ -783,7 +791,7 @@ class TestTrackingDirIsContainerAware:
         backend.submit_sweep(self._make_spec())
         script = captured["input"]
         assert "--tracking-dir" in script
-        assert "$HOME/.cache/jernerics/tracking/mystudy" in script
+        assert "/home/user/.cache/jernerics/tracking/mystudy" in script
 
 
 class TestComposeChainBashExecution:

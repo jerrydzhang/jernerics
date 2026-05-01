@@ -268,7 +268,7 @@ def prepare_and_submit(
     cache_host = paths.resolve_cache()
     retry_ctx = None
     if auto_retry and local_cache_dir is not None:
-        retry_dir_host = f"{cache_host}/retry".replace("$HOME", str(Path.home()))
+        retry_dir_host = f"{cache_host}/retry"
         host.mkdir(retry_dir_host)
         retry_ctx = RetryContext(
             study_name=spec.study_name,
@@ -276,14 +276,15 @@ def prepare_and_submit(
             dag_relpath=spec.dag_relpath,
             config_relpath=spec.config_relpath,
             cli_overrides=cli_overrides or {},
-            storage_path=paths.expand_path(spec.storage_url),
-            tracking_dir=paths.expand_path(paths.tracking_dir(spec.study_name)),
-            project_dir=paths.expand_path(paths.work_prefix),
-            ctx_path=paths.expand_path(paths.retry_ctx_path(spec.study_name)),
+            storage_path=spec.storage_url,
+            tracking_dir=paths.tracking_dir(spec.study_name),
+            project_dir=paths.work_prefix,
+            ctx_path=paths.retry_ctx_path(spec.study_name),
             chain_depth=0,
             project_name=project_name,
+            host_home=host.home,
         )
-        host_ctx_path = paths.retry_host_path(cache_host, spec.study_name)
+        host_ctx_path = f"{cache_host}/retry/{spec.study_name}_ctx.json"
         host.write_file(host_ctx_path, retry_ctx.to_json())
 
     if retry_ctx is not None:
