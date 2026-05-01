@@ -12,12 +12,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from .backend.components.host import LocalHost, SSHHost
-from .backend.components.project_sync import ProjectSync
+from .backend.backend import Backend
+from .backend.host import LocalHost, SSHHost
 from .backend.local_backend import LocalBackend
 from .backend.models import SweepSubmission
-from .backend.pueue_backend import PueueBackend
-from .backend.slurm_backend import SlurmBackend
+from .backend.project_sync import ProjectSync
 from .config import (
     ConfigNotFound,
     ExitCode,
@@ -49,7 +48,7 @@ def _validate_relpath(path: str, desc: str) -> str:
     return path
 
 
-def _get_backend(backend_name: str) -> tuple[SlurmBackend | PueueBackend, str, Path]:
+def _get_backend(backend_name: str) -> tuple[Backend, str, Path]:
     """Load a backend by name. Returns (backend, project_name, project_dir)."""
     from .backend.factory import make_backend
 
@@ -231,7 +230,8 @@ def run_remote(
 
     if result is not None:
         print("\nMonitor progress:")
-        print(f"  jernerics logs --backend {backend_name} {result.job_id} --follow")
+        job_id = result.submissions[0].job_id
+        print(f"  jernerics logs --backend {backend_name} {job_id} --follow")
 
 
 # ── build ────────────────────────────────────────────────────────────────────

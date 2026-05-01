@@ -6,9 +6,18 @@ import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 from optuna.trial import TrialState
 
-from jernerics.backend.factory import make_backend
-from jernerics.backend.models import SweepSubmission
+from jernerics.backend.adapter import SweepSubmissionParams
+from jernerics.backend.command_builders import build_sweep_commands
+from jernerics.backend.container import (
+    Apptainer,
+    Docker,
+    NoContainer,
+)
+from jernerics.backend.factory import make_adapter
+from jernerics.backend.host import StdoutHost
+from jernerics.backend.path_resolver import PathResolver
 from jernerics.config import (
+    ApptainerConfig,
     PueueConfig,
     SlurmConfig,
     load_backend_config,
@@ -20,6 +29,14 @@ from jernerics.retry import (
     read_ledger,
     write_ledger,
 )
+
+
+def _make_container(container_type: str):
+    if container_type == "docker":
+        return Docker()
+    elif container_type == "none":
+        return NoContainer()
+    return Apptainer()
 
 
 def run_checker(ctx_path: str, chain_depth: int) -> None:
@@ -67,7 +84,41 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
 
     write_ledger(ledger_path, plan.retry_counts)
 
+    # --- Build submission via adapter (not Backend) ---
+
+    host = StdoutHost(home=ctx.host_home)
+    adapter = make_adapter(backend_config, host=host)
+
+    shared = backend_config.shared
+    remote_dir = shared.remote_dir.replace("~", host.home)
+    cache_dir = (
+        shared.cache_dir.replace("~", host.home)
+        if shared.cache_dir
+        else f"{host.home}/.cache/jernerics"
+    )
+    container = _make_container(shared.container_type)
+
+    build_dir = None
+    if isinstance(backend_config.container, ApptainerConfig):
+        build_dir = backend_config.container.build_dir
+        if build_dir:
+            build_dir = build_dir.replace("~", host.home)
+
+    paths = PathResolver(
+        remote_dir=remote_dir,
+        cache_dir=cache_dir,
+        container=container,
+        build_dir=build_dir,
+        project_name=ctx.project_name or "",
+    )
+
+    # Merge overrides: defaults < experiment < CLI
     backend_specific = backend_config.backend
+    if isinstance(backend_specific, SlurmConfig):
+        defaults = backend_specific.defaults_dict()
+    else:
+        defaults = {}
+
     max_parallel = int(
         ctx.cli_overrides.get(
             "max_parallel",
@@ -81,11 +132,6 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
             ),
         )
     )
-
-    if isinstance(backend_specific, SlurmConfig):
-        defaults = backend_specific.defaults_dict()
-    else:
-        defaults = {}
 
     merged = {
         **defaults,
@@ -102,19 +148,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
     }
     merged = {k: v for k, v in merged.items() if v is not None}
 
-    retry_spec = SweepSubmission(
-        dag_path=Path(f"{ctx.project_dir}/{ctx.dag_relpath}"),
-        config_path=Path(f"{ctx.project_dir}/{ctx.config_relpath}"),
-        study_name=ctx.study_name,
-        storage_url=storage_path,
-        n_trials=plan.total_array_size,
-        dag_relpath=ctx.dag_relpath,
-        config_relpath=ctx.config_relpath,
-        project_name=ctx.project_name,
-        max_parallel=max_parallel if max_parallel > 0 else None,
-        backend_overrides=merged,
-    )
-
+    # Build retry context for the next chain level
     retry_ctx = RetryContext(
         study_name=ctx.study_name,
         backend_name=ctx.backend_name,
@@ -128,14 +162,54 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
         chain_depth=chain_depth + 1,
     )
 
-    from jernerics.backend.components.host import StdoutHost
+    # Write retry context to host
+    cache_host = paths.resolve_cache()
+    retry_dir_host = f"{cache_host}/retry"
+    host.mkdir(retry_dir_host)
+    host_ctx_path = f"{cache_host}/retry/{ctx.study_name}_ctx.json"
+    host.write_file(host_ctx_path, retry_ctx.to_json())
+    retry_ctx_path = paths.retry_ctx_path(ctx.study_name)
 
-    backend = make_backend(
-        backend_config,
-        host=StdoutHost(home=ctx.host_home),
-        project_name=ctx.project_name or "",
+    # Build SweepSubmissionParams directly
+    from jernerics.backend.models import SweepSubmission
+
+    retry_spec = SweepSubmission(
+        dag_path=Path(f"{ctx.project_dir}/{ctx.dag_relpath}"),
+        config_path=Path(f"{ctx.project_dir}/{ctx.config_relpath}"),
+        study_name=ctx.study_name,
+        storage_url=storage_path,
+        n_trials=plan.total_array_size,
+        dag_relpath=ctx.dag_relpath,
+        config_relpath=ctx.config_relpath,
+        project_name=ctx.project_name,
+        max_parallel=max_parallel if max_parallel > 0 else None,
+        backend_overrides=merged,
     )
-    backend.submit_sweep(retry_spec, direction=sweep.direction, retry_ctx=retry_ctx)
+
+    wrapped_setup, wrapped_trial, post_hook = build_sweep_commands(
+        retry_spec,
+        container,
+        paths,
+        direction=sweep.direction,
+        tracking_server=None,
+        heartbeat_interval_s=shared.heartbeat_interval_s,
+        retry_ctx_path=retry_ctx_path,
+        chain_depth=chain_depth + 1,
+        multiline=True,
+    )
+
+    params = SweepSubmissionParams(
+        setup_command=wrapped_setup,
+        trial_command=wrapped_trial,
+        post_hook_command=post_hook,
+        n_trials=plan.total_array_size,
+        study_name=ctx.study_name,
+        log_dir=f"{cache_host}/logs",
+        max_parallel=max_parallel if max_parallel > 0 else None,
+        overrides=merged,
+    )
+
+    adapter.submit_sweep(params)
 
 
 if __name__ == "__main__":

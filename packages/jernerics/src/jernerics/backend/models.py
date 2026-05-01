@@ -31,9 +31,16 @@ class JobSpec:
 
 
 @dataclass
-class SubmitResult:
+class JobSubmission:
     job_id: str
-    checker_job_id: str | None = None
+    output_pattern: str | None = None
+    error_pattern: str | None = None
+    n_trials: int = 0
+
+
+@dataclass
+class SubmitResult:
+    submissions: list[JobSubmission]
 
 
 @dataclass

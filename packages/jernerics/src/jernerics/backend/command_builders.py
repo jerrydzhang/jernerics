@@ -101,3 +101,58 @@ def build_checker_command(
         str(chain_depth),
     ]
     return " ".join(args)
+
+
+def build_sweep_commands(
+    spec,  # SweepSubmission
+    container,
+    paths,  # PathResolver
+    direction: str,
+    tracking_server: str | None = None,
+    heartbeat_interval_s: float = -1.0,
+    multiline: bool = False,
+    retry_ctx_path: str | None = None,
+    chain_depth: int = 0,
+) -> tuple[str, str, str | None]:
+    cache_host = paths.resolve_cache()
+    bind_args = paths.bind_args(cache_host)
+
+    dag_relpath = spec.dag_relpath or str(spec.dag_path.name)
+    config_relpath = spec.config_relpath or str(spec.config_path.name)
+
+    setup_cmd = build_setup_command(
+        study_name=spec.study_name,
+        storage_path=spec.storage_url,
+        direction=direction,
+        config_relpath=config_relpath,
+        grid=spec.grid,
+        work_prefix=paths.work_prefix,
+        cache_prefix=paths.cache_prefix,
+    )
+    wrapped_setup = container.wrap(setup_cmd, bind_args)
+
+    tracking_dir = paths.tracking_dir(spec.study_name)
+    trial_cmd = build_trial_command(
+        dag_relpath=dag_relpath,
+        config_relpath=config_relpath,
+        study_name=spec.study_name,
+        storage_path=spec.storage_url,
+        project_name=spec.project_name,
+        tracking_dir=tracking_dir,
+        tracking_server=tracking_server,
+        heartbeat_interval_s=heartbeat_interval_s,
+        work_prefix=paths.work_prefix,
+        multiline=multiline,
+    )
+    wrapped_trial = container.wrap(trial_cmd, bind_args)
+
+    post_hook_command = None
+    if retry_ctx_path is not None:
+        checker_cmd = build_checker_command(retry_ctx_path, chain_depth)
+        retry_script = f"/tmp/jernerics_{spec.study_name}_retry_d{chain_depth}.sh"
+        post_hook_command = container.wrap(
+            f"{checker_cmd} 2>/dev/null > {retry_script} && bash {retry_script}",
+            bind_args,
+        )
+
+    return wrapped_setup, wrapped_trial, post_hook_command

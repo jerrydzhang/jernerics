@@ -63,16 +63,22 @@ src/jernerics/
   paths.py               # cache_dir(), work(), is_hpc()
   dag/                   # DAG executor, task decorator
   backend/               # Multi-backend execution
-    slurm_backend.py     # SlurmBackend (sbatch + Apptainer)
-    pueue_backend.py      # PueueBackend (pueue + Docker/Apptainer/none)
-    local_backend.py      # LocalBackend (blocking, in-process)
-    factory.py            # make_backend() dispatches on config.shared.type
-    protocol.py           # Backend protocol (10 methods)
-    models.py             # SweepSpec, SubmitResult, JobInfo dataclasses
-    components/          # Composable primitives
-      host.py            # Host protocol, LocalHost, SSHHost, StdoutHost
-      container.py       # ContainerRuntime protocol, NoContainer, Docker, Apptainer
-      project_sync.py    # FileSyncer (tar/scp project sync)
+    adapter.py           # SchedulerAdapter protocol + SweepSubmissionParams
+    backend.py           # Backend class (orchestrator: host + container + adapter)
+    factory.py           # make_backend(), make_adapter()
+    models.py            # SweepSubmission, SubmitResult, JobSubmission, JobInfo
+    command_builders.py  # build_sweep_commands, build_setup/trial/checker_command
+    host.py              # Host protocol, LocalHost, SSHHost, StdoutHost
+    container.py         # ContainerRuntime protocol, Apptainer, Docker, NoContainer
+    path_resolver.py     # PathResolver
+    project_sync.py      # ProjectSync (tar/scp project sync)
+    job_meta.py          # save_job_meta
+    build_marker.py      # needs_rebuild, write_marker
+    local_backend.py     # LocalBackend (blocking, in-process)
+    slurm/               # Slurm scheduler adapter
+      adapter.py         # SlurmAdapter (sbatch + Apptainer)
+    pueue/               # Pueue scheduler adapter
+      adapter.py         # PueueAdapter (pueue + Docker/Apptainer/none)
   container/
     templates.py         # Container definition templates
   tracking/              # Protobuf tracker, wire format, gRPC sync client, replay

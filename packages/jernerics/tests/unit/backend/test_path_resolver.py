@@ -1,5 +1,5 @@
-from jernerics.backend.components.container import Apptainer, NoContainer
-from jernerics.backend.components.path_resolver import PathResolver
+from jernerics.backend.container import Apptainer, NoContainer
+from jernerics.backend.path_resolver import PathResolver
 
 
 def _resolver(**overrides):

@@ -1,4 +1,4 @@
-from jernerics.backend.components.container import NoContainer
+from jernerics.backend.container import NoContainer
 
 _PROJECT_NAME_TEMPLATE = "{project_name}"
 _PROJECT_NAME_HYPHEN_TEMPLATE = "{project-name}"

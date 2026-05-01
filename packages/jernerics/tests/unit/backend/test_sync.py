@@ -2,7 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import pathspec
 import pytest
-from jernerics.backend.components.project_sync import (
+from jernerics.backend.project_sync import (
     DEFAULT_EXCLUDES,
     ProjectSync,
     _collect_files,
@@ -121,9 +121,7 @@ class TestProjectSync:
         (tmp_path / "data" / "large.csv").write_text("data")
         (tmp_path / ".gitignore").write_text("data/\n*.csv\n")
 
-        with patch(
-            "jernerics.backend.components.project_sync.subprocess.run"
-        ) as mock_run:
+        with patch("jernerics.backend.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.sync_project(tmp_path, dry_run=True)
 
@@ -140,9 +138,7 @@ class TestProjectSync:
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")
 
-        with patch(
-            "jernerics.backend.components.project_sync.subprocess.run"
-        ) as mock_run:
+        with patch("jernerics.backend.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.sync_project(tmp_path, dry_run=True)
 
@@ -166,9 +162,7 @@ class TestProjectSync:
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")
 
-        with patch(
-            "jernerics.backend.components.project_sync.subprocess.run"
-        ) as mock_run:
+        with patch("jernerics.backend.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
             result = syncer.sync_project(tmp_path, dry_run=False)
 
@@ -187,9 +181,7 @@ class TestProjectSync:
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")
 
-        with patch(
-            "jernerics.backend.components.project_sync.subprocess.run"
-        ) as mock_run:
+        with patch("jernerics.backend.project_sync.subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0)
 
             with pytest.raises(RuntimeError, match="Failed to extract tar archive"):

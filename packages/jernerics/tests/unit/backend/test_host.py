@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from jernerics.backend.components.host import LocalHost, StdoutHost
+from jernerics.backend.host import LocalHost, StdoutHost
 
 
 class TestLocalHostHome:

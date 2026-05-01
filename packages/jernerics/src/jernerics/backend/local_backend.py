@@ -3,7 +3,11 @@ import itertools
 import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
-from jernerics.backend.models import SubmitResult, SweepSubmission
+from jernerics.backend.models import (
+    JobSubmission,
+    SubmitResult,
+    SweepSubmission,
+)
 from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
@@ -65,4 +69,6 @@ class LocalBackend:
         if any_failed:
             raise RuntimeError("One or more trials failed")
 
-        return SubmitResult(job_id="local")
+        return SubmitResult(
+            submissions=[JobSubmission(job_id="local", n_trials=spec.n_trials)]
+        )

@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from jernerics.backend.components.build_marker import needs_rebuild, write_marker
+from jernerics.backend.build_marker import needs_rebuild, write_marker
 
 
 class TestNeedsRebuild:
