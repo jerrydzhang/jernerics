@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import boto3
 import grpc
 import optuna
 from jernerics_proto import tracking_pb2_grpc
@@ -27,8 +28,6 @@ def _heartbeat_loop(path: Path, interval: float, stop: threading.Event) -> None:
 
 
 def _make_s3_upload_fn(bucket: str) -> Any:
-    import boto3  # ty: ignore[unresolved-import]
-
     s3 = boto3.client("s3")
 
     def upload_file(s3_key: str, local_path: str) -> None:
