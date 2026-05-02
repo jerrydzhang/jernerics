@@ -18,10 +18,15 @@ def main():
         default=50051,
         help="Port to listen on (default: 50051)",
     )
+    parser.add_argument(
+        "--host",
+        default="[::]",
+        help="Host/address to bind to (default: [::])",
+    )
     args = parser.parse_args()
 
-    server = serve(args.db, args.port)
-    print(f"Listening on [::]:{args.port}", file=sys.stderr)
+    server = serve(args.db, args.port, args.host)
+    print(f"Listening on {args.host}:{args.port}", file=sys.stderr)
     print(f"Database: {args.db}", file=sys.stderr)
 
     signal.signal(signal.SIGINT, lambda *_: (server.stop(grace=2), sys.exit(0)))

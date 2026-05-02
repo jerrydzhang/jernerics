@@ -22,6 +22,12 @@ in
         description = "gRPC port for the tracking server.";
       };
 
+      host = lib.mkOption {
+        type = lib.types.str;
+        default = "[::]";
+        description = "Host/address to bind the tracking server to.";
+      };
+
       dbPath = lib.mkOption {
         type = lib.types.path;
         default = "/var/lib/jernerics/db.duckdb";
@@ -81,7 +87,7 @@ in
       wantedBy = [ "multi-user.target" ];
 
       serviceConfig = {
-        ExecStart = "${cfg.tracking.package}/bin/python -m jernerics_server --db ${cfg.tracking.dbPath} --port ${toString cfg.tracking.port}";
+        ExecStart = "${cfg.tracking.package}/bin/python -m jernerics_server --db ${cfg.tracking.dbPath} --host ${cfg.tracking.host} --port ${toString cfg.tracking.port}";
         Type = "simple";
         Restart = "on-failure";
         RestartSec = 5;

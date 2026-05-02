@@ -19,11 +19,11 @@ class TrackingServicer(tracking_pb2_grpc.TrackingServiceServicer):
         return tracking_pb2.Ack()
 
 
-def serve(db_path: str | Path, port: int = 50051) -> grpc.Server:
+def serve(db_path: str | Path, port: int = 50051, host: str = "[::]") -> grpc.Server:
     store = DuckDBStore(db_path)
     servicer = TrackingServicer(store)
     server = grpc.server(ThreadPoolExecutor(max_workers=10))
     tracking_pb2_grpc.add_TrackingServiceServicer_to_server(servicer, server)
-    server.add_insecure_port(f"[::]:{port}")
+    server.add_insecure_port(f"{host}:{port}")
     server.start()
     return server
