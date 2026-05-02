@@ -83,6 +83,29 @@ class TestStoragePath:
         assert r.storage_path("study") == "/cache/optuna/study.journal"
 
 
+class TestSubdirectoryPaths:
+    def test_events_dir(self):
+        r = _resolver(container=Apptainer(), project_name="proj")
+        assert r.events_dir("study") == "/cache/tracking/study/events"
+
+    def test_artifacts_dir(self):
+        r = _resolver(container=Apptainer(), project_name="proj")
+        assert r.artifacts_dir("study") == "/cache/tracking/study/artifacts"
+
+    def test_heartbeats_dir(self):
+        r = _resolver(container=Apptainer(), project_name="proj")
+        assert r.heartbeats_dir("study") == "/cache/tracking/study/heartbeats"
+
+    def test_events_dir_no_container(self):
+        r = _resolver(
+            container=NoContainer(),
+            cache_dir="/home/user/.cache/jernerics",
+            project_name="proj",
+        )
+        expected = "/home/user/.cache/jernerics/proj/tracking/study/events"
+        assert r.events_dir("study") == expected
+
+
 class TestResolveBuildDir:
     def test_template_expansion(self):
         r = _resolver(build_dir="/dev/shm/build/{project_name}")

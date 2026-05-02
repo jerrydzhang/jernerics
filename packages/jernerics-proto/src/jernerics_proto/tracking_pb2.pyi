@@ -78,12 +78,10 @@ class ResultEvent(_message.Message):
     def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
 
 class ArtifactEvent(_message.Message):
-    __slots__ = ("key", "local_path")
+    __slots__ = ("key",)
     KEY_FIELD_NUMBER: _ClassVar[int]
-    LOCAL_PATH_FIELD_NUMBER: _ClassVar[int]
     key: str
-    local_path: str
-    def __init__(self, key: _Optional[str] = ..., local_path: _Optional[str] = ...) -> None: ...
+    def __init__(self, key: _Optional[str] = ...) -> None: ...
 
 class TrialEndEvent(_message.Message):
     __slots__ = ()

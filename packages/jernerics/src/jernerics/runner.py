@@ -1,3 +1,4 @@
+import os
 import sys
 import threading
 from pathlib import Path
@@ -11,6 +12,7 @@ from optuna.storages.journal import JournalFileBackend, JournalStorage
 from jernerics.config import load_config
 from jernerics.dag import DAG
 from jernerics.tracking import ProtobufTracker, Tracker
+from jernerics.tracking.artifact_uploader import ArtifactUploader
 from jernerics.tracking.sync_client import StreamClient
 
 
@@ -21,6 +23,17 @@ class _TaskFailure(Exception):
 def _heartbeat_loop(path: Path, interval: float, stop: threading.Event) -> None:
     while not stop.wait(interval):
         path.touch()
+
+
+def _make_s3_upload_fn(bucket: str) -> Any:
+    import boto3  # ty: ignore[unresolved-import]
+
+    s3 = boto3.client("s3")
+
+    def upload_file(s3_key: str, local_path: str) -> None:
+        s3.upload_file(local_path, bucket, s3_key)
+
+    return upload_file
 
 
 def run_trial(
@@ -47,23 +60,51 @@ def run_trial(
     def objective(trial: optuna.trial.Trial) -> float:
         tracker: Tracker | None = None
         sync_client: StreamClient | None = None
+        artifact_uploader: ArtifactUploader | None = None
         channel: grpc.Channel | None = None
         heartbeat_stop: threading.Event | None = None
 
+        manifest_path: Path | None = None
+
         if tracking_dir:
+            events_dir = Path(tracking_dir) / "events"
+            events_dir.mkdir(parents=True, exist_ok=True)
+
+            artifacts_dir = Path(tracking_dir) / "artifacts"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            manifest_path = artifacts_dir / f"{trial.number}.manifest"
+            cursor_path = artifacts_dir / f"{trial.number}.cursor"
+
             tracker = ProtobufTracker(
                 project_name or "",
                 study_name,
                 trial.number,
-                Path(tracking_dir) / f"{trial.number}.pb",
+                events_dir / f"{trial.number}.pb",
+                manifest_path=manifest_path,
             )
 
         if server_addr and tracker:
             assert tracking_dir is not None
             channel = grpc.insecure_channel(server_addr)
             stub = tracking_pb2_grpc.TrackingServiceStub(channel)
-            sync_client = StreamClient(stub, Path(tracking_dir) / f"{trial.number}.pb")
+            sync_client = StreamClient(
+                stub, Path(tracking_dir) / "events" / f"{trial.number}.pb"
+            )
             sync_client.start()
+
+        if tracking_dir and manifest_path:
+            bucket = os.environ.get("JERNERICS_ARTIFACT_BUCKET")
+            endpoint = os.environ.get("AWS_ENDPOINT_URL")
+            if bucket and endpoint:
+                artifact_uploader = ArtifactUploader(
+                    manifest_path=manifest_path,
+                    cursor_path=cursor_path,
+                    upload_fn=_make_s3_upload_fn(bucket),
+                    project=project_name or "",
+                    study=study_name,
+                    trial_id=trial.number,
+                )
+                artifact_uploader.start()
 
         if tracking_dir:
             hb_dir = Path(tracking_dir) / "heartbeats"
@@ -116,6 +157,8 @@ def run_trial(
         finally:
             if heartbeat_stop:
                 heartbeat_stop.set()
+            if artifact_uploader:
+                artifact_uploader.join()
             if tracker:
                 tracker.close()
             if sync_client:

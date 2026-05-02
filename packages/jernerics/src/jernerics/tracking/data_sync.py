@@ -71,7 +71,7 @@ def discover_pb_files(
     study: str | None = None,
 ) -> list[Path]:
     """Find all .pb files under tracking_dir, optionally scoped to one study."""
-    pattern = f"{study}/*.pb" if study else "*/*.pb"
+    pattern = f"{study}/events/*.pb" if study else "*/events/*.pb"
     return sorted(tracking_dir.glob(pattern))
 
 
@@ -156,3 +156,45 @@ def replay_tracking(
         )
 
     return aggregated
+
+
+def discover_manifest_files(
+    tracking_dir: Path,
+    study: str | None = None,
+) -> list[Path]:
+    """Find all .manifest files under tracking_dir."""
+    pattern = f"{study}/artifacts/*.manifest" if study else "*/artifacts/*.manifest"
+    return sorted(tracking_dir.glob(pattern))
+
+
+def sync_artifacts(
+    tracking_dir: Path,
+    upload_fn,
+    project: str,
+    study: str,
+    trial_id: int | None = None,
+) -> None:
+    """Upload artifacts from manifests to S3.
+
+    Reads manifest entries, uploads via upload_fn, advances cursor.
+    """
+    from jernerics.tracking.artifact_manifest import ArtifactManifest
+
+    manifest_files = discover_manifest_files(tracking_dir, study)
+
+    for manifest_path in manifest_files:
+        cursor_path = manifest_path.with_suffix(".cursor")
+        manifest = ArtifactManifest(manifest_path, cursor_path=cursor_path)
+        entries = manifest.read_from_cursor()
+
+        for entry in entries:
+            key = entry["key"]
+            local_path = entry["path"]
+            # Derive trial_id from manifest filename (e.g. "0.manifest" -> 0)
+            manifest_trial = int(manifest_path.stem)
+            s3_key = f"{project}/{study}/{manifest_trial}/{key}"
+            upload_fn(s3_key, local_path)
+
+        # Advance cursor to end of file after successful upload
+        if entries and manifest_path.exists():
+            manifest.advance_cursor(manifest_path.stat().st_size)

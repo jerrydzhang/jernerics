@@ -39,7 +39,7 @@ def _make_container(container_type: str):
     return Apptainer()
 
 
-def run_checker(ctx_path: str, chain_depth: int) -> None:
+def run_checker(ctx_path: str, chain_depth: int) -> bool:
     ctx = RetryContext.from_json(Path(ctx_path).read_text())
 
     project_dir = Path(ctx.project_dir)
@@ -70,10 +70,10 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
     )
 
     if plan.is_complete:
-        return
+        return False
 
     if chain_depth >= backend_config.shared.chain_depth_cap:
-        return
+        return False
 
     for trial_id in plan.stale_trial_ids:
         study.tell(trial_id, state=TrialState.FAIL)
@@ -211,6 +211,8 @@ def run_checker(ctx_path: str, chain_depth: int) -> None:
     )
 
     adapter.submit_sweep(params)
+
+    return True
 
 
 if __name__ == "__main__":

@@ -369,7 +369,10 @@ class Backend:
             raise RuntimeError("Active jobs prevent cleaning")
 
         result = self.host.run(
-            [f"find {cache_host}/tracking -name '*.pb' 2>/dev/null | head -n 1"],
+            [
+                f"find {cache_host}/tracking"
+                " -path '*/events/*.pb' 2>/dev/null | head -n 1"
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -377,6 +380,25 @@ class Backend:
         if result.stdout.strip():
             print("\nError: Unsynced tracking data found. Run sync first.")
             raise RuntimeError("Unsynced tracking data")
+
+        # Check for unsynced artifact manifests
+        result = self.host.run(
+            [
+                f"cd {cache_host}/tracking && "
+                "for m in $(find . -path '*/artifacts/*.manifest' 2>/dev/null); do "
+                'c="${m%.manifest}.cursor"; '
+                'ms=$(stat -c%s "$m" 2>/dev/null || echo 0); '
+                'cs=$(cat "$c" 2>/dev/null || echo 0); '
+                'if [ "$cs" -lt "$ms" ]; then echo "$m"; break; fi; '
+                "done"
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout.strip():
+            print("\nError: Unsynced artifact data found. Run sync first.")
+            raise RuntimeError("Unsynced artifact data")
 
         r = self.host.run(["test", "-d", cache_host], check=False, capture_output=True)
         if r.returncode != 0:

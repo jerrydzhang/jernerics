@@ -5,8 +5,10 @@ import grpc
 from jernerics.tracking.data_sync import (
     ReplayResult,
     _replay_file,
+    discover_manifest_files,
     discover_pb_files,
     replay_tracking,
+    sync_artifacts,
 )
 from jernerics.tracking.wire import TrackingWriter
 from jernerics_proto import (
@@ -68,11 +70,11 @@ def _write_events(path: Path, events: list[Envelope]) -> None:
 class TestDiscoverPbFiles:
     def test_finds_all_studies(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
-        (tracking / "study_a").mkdir(parents=True)
-        (tracking / "study_b").mkdir(parents=True)
-        (tracking / "study_a" / "0.pb").touch()
-        (tracking / "study_a" / "1.pb").touch()
-        (tracking / "study_b" / "0.pb").touch()
+        (tracking / "study_a" / "events").mkdir(parents=True)
+        (tracking / "study_b" / "events").mkdir(parents=True)
+        (tracking / "study_a" / "events" / "0.pb").touch()
+        (tracking / "study_a" / "events" / "1.pb").touch()
+        (tracking / "study_b" / "events" / "0.pb").touch()
 
         result = discover_pb_files(tracking)
 
@@ -81,15 +83,15 @@ class TestDiscoverPbFiles:
 
     def test_scopes_to_single_study(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
-        (tracking / "study_a").mkdir(parents=True)
-        (tracking / "study_b").mkdir(parents=True)
-        (tracking / "study_a" / "0.pb").touch()
-        (tracking / "study_b" / "0.pb").touch()
+        (tracking / "study_a" / "events").mkdir(parents=True)
+        (tracking / "study_b" / "events").mkdir(parents=True)
+        (tracking / "study_a" / "events" / "0.pb").touch()
+        (tracking / "study_b" / "events" / "0.pb").touch()
 
         result = discover_pb_files(tracking, study="study_b")
 
         assert len(result) == 1
-        assert result[0].parent.name == "study_b"
+        assert result[0].parent.name == "events"
 
     def test_returns_empty_for_no_files(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
@@ -101,9 +103,9 @@ class TestDiscoverPbFiles:
 
     def test_ignores_non_pb_files(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
-        (tracking / "study_a").mkdir(parents=True)
-        (tracking / "study_a" / "0.pb").touch()
-        (tracking / "study_a" / "0.db").touch()
+        (tracking / "study_a" / "events").mkdir(parents=True)
+        (tracking / "study_a" / "events" / "0.pb").touch()
+        (tracking / "study_a" / "events" / "0.db").touch()
 
         result = discover_pb_files(tracking)
 
@@ -180,27 +182,31 @@ class TestReplayTracking:
     def test_replays_all_files(self, tmp_path: Path) -> None:
         mock_stub = MagicMock()
         tracking = tmp_path / "tracking"
-        study_dir = tracking / "study_a"
-        study_dir.mkdir(parents=True)
+        events_dir = tracking / "study_a" / "events"
+        events_dir.mkdir(parents=True)
 
-        _write_events(study_dir / "0.pb", [_param_envelope(0, "lr", 0.01)])
-        _write_events(study_dir / "1.pb", [_metric_envelope(0, "loss", 0.5, 10)])
+        _write_events(events_dir / "0.pb", [_param_envelope(0, "lr", 0.01)])
+        _write_events(events_dir / "1.pb", [_metric_envelope(0, "loss", 0.5, 10)])
 
         result = replay_tracking(tracking, mock_stub, max_workers=2, max_retries=3)
 
         assert result.files_processed == 2
         assert result.events_sent == 2
         assert result.errors == []
-        assert not (study_dir / "0.pb").exists()
-        assert not (study_dir / "1.pb").exists()
+        assert not (events_dir / "0.pb").exists()
+        assert not (events_dir / "1.pb").exists()
 
     def test_scopes_to_study(self, tmp_path: Path) -> None:
         mock_stub = MagicMock()
         tracking = tmp_path / "tracking"
-        (tracking / "study_a").mkdir(parents=True)
-        (tracking / "study_b").mkdir(parents=True)
-        _write_events(tracking / "study_a" / "0.pb", [_param_envelope(0, "x", 1.0)])
-        _write_events(tracking / "study_b" / "0.pb", [_param_envelope(0, "y", 2.0)])
+        (tracking / "study_a" / "events").mkdir(parents=True)
+        (tracking / "study_b" / "events").mkdir(parents=True)
+        _write_events(
+            tracking / "study_a" / "events" / "0.pb", [_param_envelope(0, "x", 1.0)]
+        )
+        _write_events(
+            tracking / "study_b" / "events" / "0.pb", [_param_envelope(0, "y", 2.0)]
+        )
 
         result = replay_tracking(
             tracking, mock_stub, study="study_b", max_workers=2, max_retries=3
@@ -208,8 +214,8 @@ class TestReplayTracking:
 
         assert result.files_processed == 1
         assert result.events_sent == 1
-        assert not (tracking / "study_b" / "0.pb").exists()
-        assert (tracking / "study_a" / "0.pb").exists()
+        assert not (tracking / "study_b" / "events" / "0.pb").exists()
+        assert (tracking / "study_a" / "events" / "0.pb").exists()
 
     def test_returns_empty_result_for_no_files(self, tmp_path: Path) -> None:
         mock_stub = MagicMock()
@@ -223,12 +229,12 @@ class TestReplayTracking:
 
     def test_records_partial_failure(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
-        study_dir = tracking / "study_a"
-        study_dir.mkdir(parents=True)
+        events_dir = tracking / "study_a" / "events"
+        events_dir.mkdir(parents=True)
 
-        _write_events(study_dir / "0.pb", [_param_envelope(0, "lr", 0.01)])
+        _write_events(events_dir / "0.pb", [_param_envelope(0, "lr", 0.01)])
 
-        corrupt_file = study_dir / "1.pb"
+        corrupt_file = events_dir / "1.pb"
         corrupt_file.write_bytes(b"\xff\xff\xff")
 
         mock_stub = MagicMock()
@@ -238,5 +244,79 @@ class TestReplayTracking:
         assert result.files_processed == 2
         assert len(result.errors) == 1
         assert result.events_sent == 1
-        assert (study_dir / "0.pb").exists()
-        assert (study_dir / "1.pb").exists()
+        assert (events_dir / "0.pb").exists()
+        assert (events_dir / "1.pb").exists()
+
+
+class TestDiscoverManifestFiles:
+    def test_finds_all_studies(self, tmp_path: Path) -> None:
+        tracking = tmp_path / "tracking"
+        (tracking / "study_a" / "artifacts").mkdir(parents=True)
+        (tracking / "study_b" / "artifacts").mkdir(parents=True)
+        (tracking / "study_a" / "artifacts" / "0.manifest").touch()
+        (tracking / "study_b" / "artifacts" / "0.manifest").touch()
+
+        result = discover_manifest_files(tracking)
+
+        assert len(result) == 2
+
+    def test_scopes_to_single_study(self, tmp_path: Path) -> None:
+        tracking = tmp_path / "tracking"
+        (tracking / "study_a" / "artifacts").mkdir(parents=True)
+        (tracking / "study_b" / "artifacts").mkdir(parents=True)
+        (tracking / "study_a" / "artifacts" / "0.manifest").touch()
+        (tracking / "study_b" / "artifacts" / "0.manifest").touch()
+
+        result = discover_manifest_files(tracking, study="study_b")
+
+        assert len(result) == 1
+
+    def test_returns_empty_when_no_artifacts_dir(self, tmp_path: Path) -> None:
+        tracking = tmp_path / "tracking"
+        (tracking / "study_a" / "events").mkdir(parents=True)
+
+        result = discover_manifest_files(tracking)
+
+        assert result == []
+
+
+class TestSyncArtifacts:
+    def test_uploads_from_manifests(self, tmp_path: Path) -> None:
+        tracking = tmp_path / "tracking"
+        artifacts_dir = tracking / "study_a" / "artifacts"
+        artifacts_dir.mkdir(parents=True)
+
+        # Write a manifest with one entry
+        manifest = artifacts_dir / "0.manifest"
+        import json
+
+        manifest.write_text(
+            json.dumps({"key": "model.pt", "path": "/work/m.pt"}) + "\n"
+        )
+
+        mock_upload = MagicMock()
+        sync_artifacts(
+            tracking,
+            upload_fn=mock_upload,
+            project="proj",
+            study="study_a",
+            trial_id=0,
+        )
+
+        assert mock_upload.call_count == 1
+        assert mock_upload.call_args[0][0] == "proj/study_a/0/model.pt"
+
+    def test_noop_when_no_manifests(self, tmp_path: Path) -> None:
+        tracking = tmp_path / "tracking"
+        (tracking / "study_a" / "events").mkdir(parents=True)
+
+        mock_upload = MagicMock()
+        sync_artifacts(
+            tracking,
+            upload_fn=mock_upload,
+            project="proj",
+            study="study_a",
+            trial_id=0,
+        )
+
+        assert mock_upload.call_count == 0

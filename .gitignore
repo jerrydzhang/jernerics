@@ -28,3 +28,6 @@ results/
 # Nix/direnv
 .direnv/
 result
+
+# ai stuff
+.ralph

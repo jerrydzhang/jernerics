@@ -25,6 +25,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       pyproject-nix,
       uv2nix,
@@ -75,18 +76,17 @@
               pkgs.uv
               pkgs.just
               pkgs.pueue
-	      pkgs.docker
+              pkgs.docker
             ];
 
-            env =
-              {
-                UV_NO_SYNC = "1";
-                UV_PYTHON = pythonSet.python.interpreter;
-                UV_PYTHON_DOWNLOADS = "never";
-              }
-              // lib.optionalAttrs pkgs.stdenv.isLinux {
-                LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ];
-              };
+            env = {
+              UV_NO_SYNC = "1";
+              UV_PYTHON = pythonSet.python.interpreter;
+              UV_PYTHON_DOWNLOADS = "never";
+            }
+            // lib.optionalAttrs pkgs.stdenv.isLinux {
+              LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ];
+            };
 
             shellHook = ''
               unset PYTHONPATH
@@ -108,6 +108,20 @@
 
           jernerics-server = pythonSet.mkVirtualEnv "jernerics-server-env" {
             jernerics-server = [ ];
+          };
+        }
+      );
+
+      nixosModules.default = import ./nixos/module.nix;
+
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        lib.optionalAttrs pkgs.stdenv.isLinux {
+          nixos-module = import ./nixos/tests/module.nix {
+            inherit self system pkgs;
           };
         }
       );

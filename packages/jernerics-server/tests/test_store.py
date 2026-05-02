@@ -156,15 +156,11 @@ class TestInsertArtifact:
 
     def test_local_path(self, tmp_path):
         with DuckDBStore(tmp_path / "test.duckdb") as store:
-            env = _envelope(
-                "artifact", ArtifactEvent(key="model", local_path="/tmp/model.pt")
-            )
+            env = _envelope("artifact", ArtifactEvent(key="model"))
             store.insert_event(env)
 
-            rows = store._con.execute(
-                "SELECT project, key, local_path FROM artifacts"
-            ).fetchall()
-            assert rows == [("p", "model", "/tmp/model.pt")]
+            rows = store._con.execute("SELECT project, key FROM artifacts").fetchall()
+            assert rows == [("p", "model")]
 
 
 class TestInsertSweepMeta:

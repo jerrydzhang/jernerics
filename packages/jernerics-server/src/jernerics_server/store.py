@@ -55,7 +55,6 @@ CREATE TABLE IF NOT EXISTS artifacts (
     timestamp_ns BIGINT NOT NULL,
     seq INTEGER NOT NULL,
     key VARCHAR NOT NULL,
-    local_path VARCHAR NOT NULL,
     UNIQUE (project, study_name, trial_id, seq)
 )
 """
@@ -181,7 +180,7 @@ class DuckDBStore:
     def _insert_artifact(self, env: Envelope) -> None:
         a = env.artifact
         self._con.execute(
-            "INSERT OR IGNORE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO artifacts VALUES (?, ?, ?, ?, ?, ?)",
             [
                 env.project,
                 env.study_name,
@@ -189,7 +188,6 @@ class DuckDBStore:
                 env.timestamp_ns,
                 env.seq,
                 a.key,
-                a.local_path,
             ],
         )
 

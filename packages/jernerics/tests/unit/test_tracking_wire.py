@@ -74,7 +74,6 @@ def make_artifact_envelope(
     study_name: str = "test",
     trial_id: int = 1,
     key: str = "model",
-    local_path: str = "/work/model.pt",
     timestamp_ns: int = 4000,
 ) -> Envelope:
     env = Envelope(
@@ -84,7 +83,6 @@ def make_artifact_envelope(
         timestamp_ns=timestamp_ns,
     )
     env.artifact.key = key
-    env.artifact.local_path = local_path
     return env
 
 
@@ -217,7 +215,6 @@ class TestSingleEnvelope:
         [result] = read_all(p)
         assert result.WhichOneof("payload") == "artifact"
         assert result.artifact.key == "model"
-        assert result.artifact.local_path == "/work/model.pt"
 
     def test_sweep_meta(self, tmp_path: Path):
         p = tmp_path / "test.pb"
@@ -255,9 +252,7 @@ class TestMultipleEnvelopes:
         with TrackingWriter(p) as writer:
             writer.write_envelope(make_param_envelope(key="lr", value=0.01))
             writer.write_envelope(make_metric_envelope(key="loss", value=0.5, step=10))
-            writer.write_envelope(
-                make_artifact_envelope(key="model", local_path="/work/m.pt")
-            )
+            writer.write_envelope(make_artifact_envelope(key="model"))
             writer.write_envelope(make_result_envelope(key="pareto", value="[]"))
 
         results = read_all(p)

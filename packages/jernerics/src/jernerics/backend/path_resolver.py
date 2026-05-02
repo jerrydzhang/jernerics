@@ -48,6 +48,15 @@ class PathResolver:
         base = self.cache_prefix
         return f"{base}/tracking/{study_name}"
 
+    def events_dir(self, study_name: str) -> str:
+        return f"{self.tracking_dir(study_name)}/events"
+
+    def artifacts_dir(self, study_name: str) -> str:
+        return f"{self.tracking_dir(study_name)}/artifacts"
+
+    def heartbeats_dir(self, study_name: str) -> str:
+        return f"{self.tracking_dir(study_name)}/heartbeats"
+
     def resolve_cache(self, project_name: str = "") -> str:
         name = project_name or self._project_name
         cache = self.cache_dir or "/home/user/.cache/jernerics"

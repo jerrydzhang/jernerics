@@ -153,7 +153,7 @@ class TestBuildSweepCommandsWithPostHook:
             chain_depth=2,
         )
         assert post_hook is not None
-        assert "python -m jernerics.retry_checker" in post_hook
+        assert "python -m jernerics.post_hook" in post_hook
         assert "--context /cache/retry/ctx.json" in post_hook
         assert "--chain-depth 2" in post_hook
 
@@ -206,7 +206,7 @@ class TestBuildSweepCommandsMatchesSlurmOutput:
     def test_wrapped_setup_matches_slurm(self):
         spec = _make_spec()
         container = MagicMock()
-        container.wrap = lambda cmd, binds: f"wrapped({cmd})"
+        container.wrap = lambda cmd, binds, **kw: f"wrapped({cmd})"
         paths = _make_paths(container=container)
 
         setup, _, _ = build_sweep_commands(
@@ -224,7 +224,7 @@ class TestBuildSweepCommandsMatchesSlurmOutput:
     def test_wrapped_trial_matches_slurm(self):
         spec = _make_spec()
         container = MagicMock()
-        container.wrap = lambda cmd, binds: f"wrapped({cmd})"
+        container.wrap = lambda cmd, binds, **kw: f"wrapped({cmd})"
         paths = _make_paths(container=container)
 
         _, trial, _ = build_sweep_commands(
@@ -250,3 +250,46 @@ class TestBuildSweepCommandsMatchesSlurmOutput:
             multiline=True,
         )
         assert " \\\n        " in trial
+
+
+class TestBuildSweepCommandsEnvPassthrough:
+    def test_passes_artifact_env_to_container_wrap(self):
+        spec = _make_spec()
+        container = MagicMock()
+        container.wrap = MagicMock(return_value="wrapped")
+        paths = _make_paths(container=container)
+
+        build_sweep_commands(
+            spec=spec,
+            container=container,
+            paths=paths,
+            direction="minimize",
+            artifact_env={
+                "AWS_ENDPOINT_URL": "http://minio:9000",
+                "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+            },
+        )
+
+        # Trial command should be wrapped with env vars
+        trial_call = container.wrap.call_args_list[1]
+        assert trial_call[1]["env"] == {
+            "AWS_ENDPOINT_URL": "http://minio:9000",
+            "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+        }
+
+    def test_no_env_when_not_provided(self):
+        spec = _make_spec()
+        container = MagicMock()
+        container.wrap = MagicMock(return_value="wrapped")
+        paths = _make_paths(container=container)
+
+        build_sweep_commands(
+            spec=spec,
+            container=container,
+            paths=paths,
+            direction="minimize",
+        )
+
+        # env is None when not provided
+        for call in container.wrap.call_args_list:
+            assert call[1].get("env") is None

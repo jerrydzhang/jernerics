@@ -135,7 +135,20 @@ class TestLogArtifact:
 
         [env] = read_events(p)
         assert env.artifact.key == "model"
-        assert env.artifact.local_path == "/work/model.pt"
+
+    def test_writes_to_manifest(self, tmp_path: Path) -> None:
+        p = tmp_path / "test.pb"
+        manifest_path = tmp_path / "1.manifest"
+        with ProtobufTracker(
+            "project", "study", 1, p, manifest_path=manifest_path
+        ) as t:
+            t.log_artifact("model", "/work/model.pt")
+
+        lines = manifest_path.read_text().strip().split("\n")
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["key"] == "model"
+        assert entry["path"] == "/work/model.pt"
 
 
 class TestSeq:

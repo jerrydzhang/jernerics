@@ -87,18 +87,24 @@ def build_trial_command(
     return " ".join(args)
 
 
-def build_checker_command(
+def build_post_hook_command(
     ctx_path: str,
     chain_depth: int,
+    tracking_dir: str,
+    storage_path: str,
 ) -> str:
     args = [
         "python",
         "-m",
-        "jernerics.retry_checker",
+        "jernerics.post_hook",
         "--context",
         ctx_path,
         "--chain-depth",
         str(chain_depth),
+        "--tracking-dir",
+        tracking_dir,
+        "--storage-path",
+        storage_path,
     ]
     return " ".join(args)
 
@@ -113,6 +119,7 @@ def build_sweep_commands(
     multiline: bool = False,
     retry_ctx_path: str | None = None,
     chain_depth: int = 0,
+    artifact_env: dict[str, str] | None = None,
 ) -> tuple[str, str, str | None]:
     cache_host = paths.resolve_cache()
     bind_args = paths.bind_args(cache_host)
@@ -144,11 +151,13 @@ def build_sweep_commands(
         work_prefix=paths.work_prefix,
         multiline=multiline,
     )
-    wrapped_trial = container.wrap(trial_cmd, bind_args)
+    wrapped_trial = container.wrap(trial_cmd, bind_args, env=artifact_env)
 
     post_hook_command = None
     if retry_ctx_path is not None:
-        checker_cmd = build_checker_command(retry_ctx_path, chain_depth)
+        checker_cmd = build_post_hook_command(
+            retry_ctx_path, chain_depth, tracking_dir, spec.storage_url
+        )
         retry_script = f"/tmp/jernerics_{spec.study_name}_retry_d{chain_depth}.sh"
         post_hook_command = container.wrap(
             f"{checker_cmd} 2>/dev/null > {retry_script} && bash {retry_script}",

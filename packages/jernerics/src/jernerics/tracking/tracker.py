@@ -5,6 +5,7 @@ from typing import Any, Protocol, Self
 
 from jernerics_proto import Envelope
 
+from .artifact_manifest import ArtifactManifest
 from .wire import TrackingWriter
 
 
@@ -20,13 +21,20 @@ class Tracker(Protocol):
 
 class ProtobufTracker:
     def __init__(
-        self, project: str, study_name: str, trial_id: int, path: Path
+        self,
+        project: str,
+        study_name: str,
+        trial_id: int,
+        path: Path,
+        *,
+        manifest_path: Path | None = None,
     ) -> None:
         self.project = project
         self.study_name = study_name
         self.trial_id = trial_id
         self._seq = 0
         self.writer = TrackingWriter(path)
+        self._manifest = ArtifactManifest(manifest_path) if manifest_path else None
 
     def __enter__(self) -> Self:
         return self
@@ -82,9 +90,11 @@ class ProtobufTracker:
     def log_artifact(self, key: str, local_path: str) -> None:
         env = self._make_envelope()
         env.artifact.key = key
-        env.artifact.local_path = local_path
 
         self.writer.write_envelope(env)
+
+        if self._manifest:
+            self._manifest.append(key, local_path)
 
     def close(self) -> None:
         env = self._make_envelope()

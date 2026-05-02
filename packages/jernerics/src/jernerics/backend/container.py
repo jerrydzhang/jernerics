@@ -3,14 +3,27 @@ from typing import Protocol
 
 
 class ContainerRuntime(Protocol):
-    def wrap(self, command: str, binds: Sequence[str]) -> str: ...
+    def wrap(
+        self,
+        command: str,
+        binds: Sequence[str],
+        *,
+        env: dict[str, str] | None = None,
+    ) -> str: ...
+
     def build_command(self, project_dir: str) -> list[str]: ...
     def exists_command(self, project_dir: str) -> list[str]: ...
 
 
 class NoContainer:
-    def wrap(self, command: str, binds: Sequence[str]) -> str:
-        _ = binds
+    def wrap(
+        self,
+        command: str,
+        binds: Sequence[str],
+        *,
+        env: dict[str, str] | None = None,
+    ) -> str:
+        _ = binds, env
         return command
 
     def build_command(self, project_dir: str) -> list[str]:
@@ -28,6 +41,7 @@ class Apptainer:
         command: str,
         binds: Sequence[str],
         *,
+        env: dict[str, str] | None = None,
         fakeroot: bool = True,
         gpu: bool = True,
         contain: bool = True,
@@ -39,6 +53,8 @@ class Apptainer:
             flags.append("--contain")
         if gpu:
             flags.append("--nv")
+        if env:
+            flags.extend(f"--env {k}={v}" for k, v in env.items())
         flags.append("--pwd /work")
 
         bind_str = " \\\n    --bind ".join(binds)
@@ -69,6 +85,7 @@ class Docker:
         command: str,
         binds: Sequence[str],
         *,
+        env: dict[str, str] | None = None,
         gpu: bool = False,
     ) -> str:
         bind_args = []
@@ -78,6 +95,8 @@ class Docker:
         flags = ["--rm"]
         if gpu:
             flags.append("--gpus all")
+        if env:
+            flags.extend(f"-e {k}={v}" for k, v in env.items())
         flags.extend(["-w", "/work"])
 
         return (
