@@ -245,7 +245,8 @@ type = "pueue"
 
 
 class TestLoadTrackingServer:
-    def test_tracking_server_from_config(self, tmp_path):
+    def test_tracking_server_from_config(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JERNERICS_TRACKING_SERVER", raising=False)
         project_dir = tmp_path / "tracked"
         project_dir.mkdir()
         (project_dir / "pyproject.toml").write_text("""
@@ -273,7 +274,8 @@ version = "0.1.0"
         monkeypatch.setenv("JERNERICS_TRACKING_SERVER", "envhost:50051")
         assert load_tracking_server(project_dir) == "envhost:50051"
 
-    def test_tracking_server_none(self, tmp_path):
+    def test_tracking_server_none(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JERNERICS_TRACKING_SERVER", raising=False)
         project_dir = tmp_path / "untracked"
         project_dir.mkdir()
         (project_dir / "pyproject.toml").write_text("""

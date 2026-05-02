@@ -11,10 +11,10 @@ import argparse
 import os
 import sys
 
-import grpc
 from jernerics_proto import tracking_pb2_grpc
 
 from jernerics.tracking.data_sync import replay_tracking, sync_artifacts
+from jernerics.tracking.grpc_channel import grpc_channel
 
 
 def _make_s3_upload_fn(bucket: str):
@@ -40,7 +40,7 @@ def main() -> None:
     parser.add_argument("--max-workers", type=int, default=16, help="Thread pool size")
     args = parser.parse_args()
 
-    channel = grpc.insecure_channel(args.server_addr)
+    channel = grpc_channel(args.server_addr)
     stub = tracking_pb2_grpc.TrackingServiceStub(channel)
 
     try:

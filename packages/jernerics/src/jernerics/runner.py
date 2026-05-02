@@ -13,6 +13,7 @@ from jernerics.config import load_config
 from jernerics.dag import DAG
 from jernerics.tracking import ProtobufTracker, Tracker
 from jernerics.tracking.artifact_uploader import ArtifactUploader
+from jernerics.tracking.grpc_channel import grpc_channel
 from jernerics.tracking.sync_client import StreamClient
 
 
@@ -85,7 +86,7 @@ def run_trial(
 
         if server_addr and tracker:
             assert tracking_dir is not None
-            channel = grpc.insecure_channel(server_addr)
+            channel = grpc_channel(server_addr)
             stub = tracking_pb2_grpc.TrackingServiceStub(channel)
             sync_client = StreamClient(
                 stub, Path(tracking_dir) / "events" / f"{trial.number}.pb"

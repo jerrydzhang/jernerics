@@ -1,0 +1,48 @@
+[project]
+name = "sweep-artifacts"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "jernerics",
+]
+
+[tool.uv.sources.jernerics]
+git = "https://github.com/jerrydzhang/jernerics.git"
+branch = "human-ownership"
+subdirectory = "packages/jernerics"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sweep_artifacts"]
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "jez21005@hpc2.storrs.hpc.uconn.edu"
+remote_dir = "~/projects/jernerics-examples/sweep-artifacts"
+cache_dir = "/scratch/qiy18011/jez21005/jernerics"
+
+[tool.jernerics.backends.hpc.slurm]
+partition = "priority"
+time = "0:10:00"
+mem = "4G"
+cpus = 4
+
+[tool.jernerics.backends.hpc.apptainer]
+build_dir = "/dev/shm/build/{project_name}"
+
+[tool.jernerics.backends.pueue-remote]
+type = "pueue"
+host = "jez21005@scimlab.engr.uconn.edu"
+remote_dir = "~/projects/jernerics-examples/sweep-artifacts"
+cache_dir = "~/.cache/jernerics"
+parallel = 2
+container_type = "docker"
+
+[tool.jernerics.backends.pueue-local]
+type = "pueue"
+parallel = 2
+container_type = "none"
+remote_dir = "."
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
