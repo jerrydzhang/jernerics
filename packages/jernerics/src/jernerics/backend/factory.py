@@ -8,11 +8,11 @@ from jernerics.backend.path_resolver import PathResolver
 from jernerics.config import ApptainerConfig, BackendConfig
 
 
-def _make_container(container_type: str):
+def _make_container(container_type: str, project_name: str = ""):
     if container_type == "apptainer":
         return Apptainer()
     elif container_type == "docker":
-        return Docker()
+        return Docker(image_name=project_name or "container.sif")
     elif container_type == "none":
         return NoContainer()
     return Apptainer()
@@ -39,7 +39,7 @@ def make_backend(
     tracking_server: str | None = None,
     project_name: str = "",
 ) -> Backend:
-    container = _make_container(config.shared.container_type)
+    container = _make_container(config.shared.container_type, project_name=project_name)
     adapter = make_adapter(config, host=host)
 
     shared = config.shared
@@ -75,7 +75,6 @@ def make_backend(
         project_name=project_name,
         tracking_server=tracking_server,
         heartbeat_interval_s=shared.heartbeat_interval_s,
-        auto_retry=shared.auto_retry,
         stale_after_s=shared.stale_after_s,
         grace_period_s=shared.grace_period_s,
         max_retries=shared.max_retries,

@@ -39,8 +39,8 @@ def _make_spec(
     )
 
 
-class TestBuildSweepCommandsNoPostHook:
-    def test_returns_two_commands_and_none(self):
+class TestBuildSweepCommandsBasics:
+    def test_returns_three_commands(self):
         spec = _make_spec()
         paths = _make_paths()
         setup, trial, post_hook = build_sweep_commands(
@@ -51,7 +51,7 @@ class TestBuildSweepCommandsNoPostHook:
         )
         assert setup is not None
         assert trial is not None
-        assert post_hook is None
+        assert post_hook is not None
 
     def test_setup_command_contains_optuna_create_study(self):
         spec = _make_spec()
@@ -140,6 +140,35 @@ class TestBuildSweepCommandsNoPostHook:
         assert "--heartbeat-interval 30.0" in trial
 
 
+class TestBuildSweepCommandsAlwaysPostHook:
+    """build_sweep_commands always returns a post-hook command."""
+
+    def test_returns_post_hook_without_retry_ctx(self):
+        spec = _make_spec()
+        paths = _make_paths()
+        _, _, post_hook = build_sweep_commands(
+            spec=spec,
+            container=NoContainer(),
+            paths=paths,
+            direction="minimize",
+        )
+        assert post_hook is not None
+        assert "python -m jernerics.post_hook" in post_hook
+
+    def test_post_hook_writes_to_temp_file_without_retry_ctx(self):
+        spec = _make_spec()
+        paths = _make_paths()
+        _, _, post_hook = build_sweep_commands(
+            spec=spec,
+            container=NoContainer(),
+            paths=paths,
+            direction="minimize",
+        )
+        assert post_hook is not None
+        assert "> /tmp/jernerics_mystudy_retry_d0.sh" in post_hook
+        assert "bash /tmp/jernerics_mystudy_retry_d0.sh" in post_hook
+
+
 class TestBuildSweepCommandsWithPostHook:
     def test_returns_post_hook_when_retry_ctx_path_provided(self):
         spec = _make_spec()
@@ -187,7 +216,7 @@ class TestBuildSweepCommandsWithPostHook:
         assert post_hook is not None
         assert "apptainer exec" in post_hook
 
-    def test_post_hook_is_none_without_retry_ctx(self):
+    def test_post_hook_always_present(self):
         spec = _make_spec()
         paths = _make_paths()
         _, _, post_hook = build_sweep_commands(
@@ -196,7 +225,8 @@ class TestBuildSweepCommandsWithPostHook:
             paths=paths,
             direction="minimize",
         )
-        assert post_hook is None
+        assert post_hook is not None
+        assert "python -m jernerics.post_hook" in post_hook
 
 
 class TestBuildSweepCommandsMatchesSlurmOutput:

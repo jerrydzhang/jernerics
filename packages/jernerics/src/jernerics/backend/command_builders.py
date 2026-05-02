@@ -156,20 +156,19 @@ def build_sweep_commands(
     )
     wrapped_trial = container.wrap(trial_cmd, bind_args, env=artifact_env)
 
-    post_hook_command = None
-    if retry_ctx_path is not None:
-        checker_cmd = build_post_hook_command(
-            retry_ctx_path,
-            chain_depth,
-            tracking_dir,
-            spec.storage_url,
-            tracking_server=tracking_server,
-        )
-        retry_script = f"/tmp/jernerics_{spec.study_name}_retry_d{chain_depth}.sh"
-        post_hook_command = container.wrap(
-            f"{checker_cmd} 2>/dev/null > {retry_script} && bash {retry_script}",
-            bind_args,
-            env=artifact_env,
-        )
+    ctx_path = retry_ctx_path or paths.retry_ctx_path(spec.study_name)
+    checker_cmd = build_post_hook_command(
+        ctx_path,
+        chain_depth,
+        tracking_dir,
+        spec.storage_url,
+        tracking_server=tracking_server,
+    )
+    retry_script = f"/tmp/jernerics_{spec.study_name}_retry_d{chain_depth}.sh"
+    post_hook_command = container.wrap(
+        f"{checker_cmd} 2>/dev/null > {retry_script} && bash {retry_script}",
+        bind_args,
+        env=artifact_env,
+    )
 
     return wrapped_setup, wrapped_trial, post_hook_command

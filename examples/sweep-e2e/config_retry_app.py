@@ -1,11 +1,9 @@
 import optuna
 
-# Type 2 failure: simulated node death on specific trial numbers.
-# os._exit(9) kills process immediately — Optuna trial stays RUNNING,
-# heartbeat file goes stale. Checker detects stale, marks FAIL,
-# enqueues same params, increments ledger.
-# Retries get new trial numbers → succeed.
-base = {"seed": 42, "crash_node_on": [1, 4]}
+# Grid sweep + app crash on specific trials.
+# Tests: app-level failure handling.
+
+base = {"seed": 42, "crash_app_on": [1, 4]}
 
 grid = {
     "lr": [1e-3, 1e-2, 1e-1],
@@ -33,4 +31,3 @@ backend_overrides = {
         "max_parallel": 4,
     },
 }
-

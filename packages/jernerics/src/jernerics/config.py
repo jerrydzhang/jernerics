@@ -74,8 +74,7 @@ class SharedConfig:
     # Pueue (future)
     parallel: int = 1
 
-    # Auto-retry
-    auto_retry: bool = False
+    # Retry
     heartbeat_interval_s: int = 60
     stale_after_s: int = 120
     grace_period_s: int = 120
@@ -163,7 +162,6 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
         cache_dir=bc.get("cache_dir"),
         parallel=bc.get("parallel", 1),
         container_type=bc.get("container_type", "apptainer"),
-        auto_retry=bc.get("auto_retry", False),
         heartbeat_interval_s=bc.get("heartbeat_interval_s", 60),
         stale_after_s=bc.get("stale_after_s", 120),
         grace_period_s=bc.get("grace_period_s", 120),

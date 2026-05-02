@@ -1,9 +1,9 @@
 import optuna
 
-# Type 1 failure: app-level crash on specific trial numbers.
-# Optuna records FAIL. Checker submits fresh trials (new params).
-# Retries get new trial numbers → succeed.
-base = {"seed": 42, "crash_app_on": [1, 4]}
+# Grid sweep + node death on specific trials.
+# Tests: heartbeat staleness detection, retry resubmission.
+
+base = {"seed": 42, "crash_node_on": [1, 4]}
 
 grid = {
     "lr": [1e-3, 1e-2, 1e-1],
@@ -31,4 +31,3 @@ backend_overrides = {
         "max_parallel": 4,
     },
 }
-

@@ -1,0 +1,15 @@
+Bootstrap: docker
+From: python:3.12-slim
+
+%post
+    pip install uv
+    cp -r /work /opt/work
+    cd /opt/work
+    uv sync --no-dev --no-editable
+
+%runscript
+    cd /work
+    exec python "$@"
+
+%environment
+    export PYTHONPATH=/opt/work/src:$PYTHONPATH

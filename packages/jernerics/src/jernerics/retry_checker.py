@@ -1,4 +1,5 @@
 import argparse
+import os
 import time
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from jernerics.backend.factory import make_adapter
 from jernerics.backend.host import StdoutHost
 from jernerics.backend.path_resolver import PathResolver
 from jernerics.config import (
+    ARTIFACT_ENV_VARS,
     ApptainerConfig,
     PueueConfig,
     SlurmConfig,
@@ -186,6 +188,8 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         backend_overrides=merged,
     )
 
+    artifact_env = {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}
+
     wrapped_setup, wrapped_trial, post_hook = build_sweep_commands(
         retry_spec,
         container,
@@ -196,6 +200,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         retry_ctx_path=retry_ctx_path,
         chain_depth=chain_depth + 1,
         multiline=True,
+        artifact_env=artifact_env or None,
     )
 
     params = SweepSubmissionParams(

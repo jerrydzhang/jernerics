@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import grpc
 from jernerics.tracking.sync_client import StreamClient
@@ -14,6 +14,114 @@ from jernerics_proto import (
     tracking_pb2,
     tracking_pb2_grpc,
 )
+
+
+class TestGrpcChannelKeepalive:
+    @patch("jernerics.tracking.grpc_channel.grpc.insecure_channel")
+    def test_insecure_channel_has_keepalive_options(self, mock_insecure):
+        from jernerics.tracking.grpc_channel import grpc_channel
+
+        grpc_channel("localhost:50051")
+        kwargs = mock_insecure.call_args[1]
+        options = kwargs.get("options")
+        assert options is not None
+        opt_dict = {k: v for k, v in options}
+        assert "grpc.keepalive_time_ms" in opt_dict
+
+    @patch("jernerics.tracking.grpc_channel.grpc.secure_channel")
+    def test_secure_channel_has_keepalive_options(self, mock_secure):
+        from jernerics.tracking.grpc_channel import grpc_channel
+
+        grpc_channel("server.example.com:443")
+        kwargs = mock_secure.call_args[1]
+        options = kwargs.get("options")
+        assert options is not None
+        opt_dict = {k: v for k, v in options}
+        assert "grpc.keepalive_time_ms" in opt_dict
+
+
+class TestSendEventDeadline:
+    def test_send_event_called_with_deadline(self, tmp_path: Path) -> None:
+        mock_stub = MagicMock()
+        mock_stub.SendEvent.return_value = tracking_pb2.Ack()
+
+        pb_file = tmp_path / "0.pb"
+        with TrackingWriter(pb_file) as writer:
+            writer.write_envelope(_param_envelope(0, "lr", 0.01))
+            writer.write_envelope(_trial_end_envelope(1))
+
+        client = StreamClient(mock_stub, pb_file, poll_interval=0.01, flush_timeout=5.0)
+        client.start()
+        client.join()
+
+        # Every SendEvent call should have a timeout/deadline argument
+        for call in mock_stub.SendEvent.call_args_list:
+            assert (
+                call.kwargs.get("timeout") is not None
+                or call[1].get("timeout") is not None
+            )
+
+    def test_deadline_exceeded_retried(self, tmp_path: Path) -> None:
+        mock_stub = MagicMock()
+        call_count = 0
+
+        class DeadlineExceededError(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.DEADLINE_EXCEEDED
+
+            def details(self):
+                return "deadline exceeded"
+
+        def send_side_effect(event, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 2:
+                raise DeadlineExceededError()
+            return tracking_pb2.Ack()
+
+        mock_stub.SendEvent.side_effect = send_side_effect
+
+        pb_file = tmp_path / "0.pb"
+        with TrackingWriter(pb_file) as writer:
+            writer.write_envelope(_param_envelope(0, "lr", 0.01))
+            writer.write_envelope(_trial_end_envelope(1))
+
+        client = StreamClient(mock_stub, pb_file, poll_interval=0.01, flush_timeout=5.0)
+        client.start()
+        client.join()
+
+        assert mock_stub.SendEvent.call_count >= 3
+
+    def test_total_retry_budget_exceeded_stops(self, tmp_path: Path) -> None:
+        mock_stub = MagicMock()
+
+        class DeadlineExceededError(grpc.RpcError):
+            def code(self):
+                return grpc.StatusCode.DEADLINE_EXCEEDED
+
+            def details(self):
+                return "deadline exceeded"
+
+        mock_stub.SendEvent.side_effect = DeadlineExceededError()
+
+        pb_file = tmp_path / "0.pb"
+        with TrackingWriter(pb_file) as writer:
+            writer.write_envelope(_param_envelope(0, "lr", 0.01))
+            writer.write_envelope(_trial_end_envelope(1))
+
+        client = StreamClient(
+            mock_stub,
+            pb_file,
+            poll_interval=0.01,
+            flush_timeout=5.0,
+            max_retry_time=0.5,
+        )
+        client.start()
+        client.join()
+
+        # Should have stopped retrying after budget exceeded
+        # Not infinite calls
+        assert mock_stub.SendEvent.call_count < 100
 
 
 class FakeRpcError(grpc.RpcError):
@@ -125,7 +233,7 @@ class TestRetryOnFailure:
         mock_stub = MagicMock()
         call_count = 0
 
-        def send_side_effect(event):
+        def send_side_effect(event, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:

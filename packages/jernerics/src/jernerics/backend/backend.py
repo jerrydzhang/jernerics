@@ -26,7 +26,6 @@ class Backend:
         project_name: str,
         tracking_server: str | None = None,
         heartbeat_interval_s: float = 60.0,
-        auto_retry: bool = False,
         stale_after_s: int = 120,
         grace_period_s: int = 120,
         max_retries: int = 3,
@@ -42,7 +41,6 @@ class Backend:
         self.project_name = project_name
         self.tracking_server = tracking_server
         self.heartbeat_interval_s = heartbeat_interval_s
-        self.auto_retry = auto_retry
         self.stale_after_s = stale_after_s
         self.grace_period_s = grace_period_s
         self.max_retries = max_retries
@@ -192,9 +190,9 @@ class Backend:
 
         # Retry context
         retry_ctx_path = None
-        retry_ctx = None
         chain_depth = 0
-        if self.auto_retry and local_cache_dir is not None:
+        if local_cache_dir is not None:
+            cache_host = self.paths.resolve_cache()
             retry_dir_host = f"{cache_host}/retry"
             self.host.mkdir(retry_dir_host)
             retry_ctx = RetryContext(

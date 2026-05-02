@@ -42,6 +42,110 @@ def _write_heartbeat(tracking_dir: Path, trial_number: int, age: float, now: flo
     os.utime(hb_path, (mtime, mtime))
 
 
+class TestRetryCheckerArtifactEnv:
+    @patch("jernerics.retry_checker.make_adapter")
+    @patch("jernerics.retry_checker.load_config")
+    @patch("jernerics.retry_checker.load_backend_config")
+    def test_forwards_artifact_env_to_build_sweep_commands(
+        self, mock_load_backend, mock_load_config, mock_make_adapter, tmp_path
+    ):
+        from jernerics.retry_checker import run_checker
+
+        study = MagicMock()
+        study.trials = _make_trials_list(
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(5, TrialState.RUNNING, {"lr": 0.01}),
+        )
+
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+        _write_heartbeat(tracking_dir, 5, age=200, now=1000.0)
+
+        storage_path = str(tmp_path / "optuna" / "mystudy.journal")
+        Path(storage_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(storage_path).touch()
+
+        ctx = RetryContext(
+            study_name="mystudy",
+            backend_name="hpc",
+            dag_relpath="dag.py",
+            config_relpath="config.py",
+            cli_overrides={},
+            storage_path=storage_path,
+            tracking_dir=str(tracking_dir),
+            project_dir=str(tmp_path),
+            project_name="proj",
+            host_home="/home/user",
+        )
+        ctx_path = _write_ctx(tmp_path, ctx)
+
+        from jernerics.config import SharedConfig, SlurmConfig
+
+        shared = SharedConfig(
+            name="hpc",
+            type="slurm",
+            remote_dir="/scratch/proj",
+            container_type="apptainer",
+            grace_period_s=0,
+            stale_after_s=120,
+            max_retries=3,
+            chain_depth_cap=20,
+        )
+        backend_config = MagicMock()
+        backend_config.shared = shared
+        backend_config.backend = SlurmConfig()
+        backend_config.container = MagicMock()
+        mock_load_backend.return_value = backend_config
+
+        sweep = MagicMock()
+        sweep.n_trials = 6
+        sweep.direction = "minimize"
+        sweep.backend_overrides = {}
+        sweep.sampler = None
+        mock_load_config.return_value = sweep
+
+        adapter = MagicMock()
+        from jernerics.backend.models import JobSubmission, SubmitResult
+
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="123", n_trials=4)]
+        )
+        mock_make_adapter.return_value = adapter
+
+        env_vars = {
+            "AWS_ENDPOINT_URL": "http://minio:9000",
+            "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+        }
+
+        with (
+            patch("jernerics.retry_checker.optuna") as mock_optuna,
+            patch("jernerics.retry_checker.time") as mock_time,
+            patch("jernerics.retry_checker.read_ledger", return_value={}),
+            patch("jernerics.retry_checker.write_ledger"),
+            patch.dict(os.environ, env_vars, clear=False),
+        ):
+            mock_time.time.return_value = 1000.0
+            mock_time.sleep = MagicMock()
+            mock_optuna.load_study.return_value = study
+            mock_optuna.trial.TrialState = TrialState
+            mock_optuna.storages.journal.JournalFileBackend.return_value = MagicMock()
+            mock_optuna.storages.journal.JournalStorage.return_value = MagicMock()
+
+            run_checker(ctx_path=ctx_path, chain_depth=0)
+
+        # Verify build_sweep_commands was called with artifact_env
+
+        # The retry_checker builds commands via build_sweep_commands.
+        # We need to check the post_hook_command in the submitted params
+        # contains env vars. Easiest: check the wrapped command includes --env flags.
+        params = adapter.submit_sweep.call_args[0][0]
+        assert params.post_hook_command is not None
+        assert "--env AWS_ENDPOINT_URL=http://minio:9000" in params.post_hook_command
+        assert "--env JERNERICS_ARTIFACT_BUCKET=jernerics" in params.post_hook_command
+
+        # Trial command should also have env vars
+        assert "--env AWS_ENDPOINT_URL=http://minio:9000" in params.trial_command
+
+
 class TestRetryCheckerUsesAdapter:
     """Verify retry_checker calls make_adapter + adapter.submit_sweep."""
 

@@ -80,6 +80,9 @@ class Apptainer:
 
 
 class Docker:
+    def __init__(self, image_name: str = "container.sif"):
+        self.image_name = image_name
+
     def wrap(
         self,
         command: str,
@@ -101,12 +104,12 @@ class Docker:
 
         return (
             f"docker run {' '.join(flags)} {' '.join(bind_args)}"
-            f" container.sif {command}"
+            f" {self.image_name} {command}"
         )
 
     def build_command(self, project_dir: str) -> list[str]:
-        return ["docker", "build", "-t", "container.sif", project_dir]
+        return ["docker", "build", "-t", self.image_name, project_dir]
 
     def exists_command(self, project_dir: str) -> list[str]:
         _ = project_dir
-        return ["docker", "image", "inspect", "container.sif"]
+        return ["docker", "image", "inspect", self.image_name]

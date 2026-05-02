@@ -30,7 +30,6 @@ def _make_backend(host=None, container=None, adapter=None, syncer=None, **overri
         "project_name": "proj",
         "tracking_server": None,
         "heartbeat_interval_s": 60.0,
-        "auto_retry": False,
     }
     defaults.update(overrides)
     paths = PathResolver(
@@ -50,7 +49,6 @@ def _make_backend(host=None, container=None, adapter=None, syncer=None, **overri
         project_name=defaults["project_name"],
         tracking_server=defaults["tracking_server"],
         heartbeat_interval_s=defaults["heartbeat_interval_s"],
-        auto_retry=defaults["auto_retry"],
     )
 
 
@@ -182,7 +180,6 @@ class TestPrepareAndSubmit:
         backend = _make_backend(
             host=host,
             adapter=adapter,
-            auto_retry=True,
         )
         spec = _make_spec()
 
@@ -199,6 +196,64 @@ class TestPrepareAndSubmit:
         params = adapter.submit_sweep.call_args[0][0]
         assert params.post_hook_command is not None
         assert len(result.submissions) == 2
+
+    def test_always_writes_retry_context_to_host(self, tmp_path):
+        host = MagicMock()
+        host.home = "/home/user"
+        host.run.return_value = MagicMock(returncode=0, stdout="")
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="100", n_trials=5)]
+        )
+        backend = _make_backend(host=host, adapter=adapter)
+        spec = _make_spec()
+
+        backend.prepare_and_submit(
+            spec,
+            project_dir=Path("/home/user/proj"),
+            project_name="proj",
+            direction="minimize",
+            backend_name="hpc",
+            local_cache_dir=tmp_path,
+        )
+
+        # Verify retry context was written to host (host.write_file called)
+        write_calls = [
+            c for c in host.write_file.call_args_list if "_ctx.json" in str(c)
+        ]
+        assert len(write_calls) == 1
+
+        # Verify ctx file contains valid JSON with study_name
+        import json
+
+        ctx_content = write_calls[0][0][1]
+        ctx = json.loads(ctx_content)
+        assert ctx["study_name"] == "mystudy"
+
+        # Verify post_hook_command is present
+        params = adapter.submit_sweep.call_args[0][0]
+        assert params.post_hook_command is not None
+
+    def test_always_constructs_post_hook(self, tmp_path):
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="100", n_trials=5)]
+        )
+        backend = _make_backend(adapter=adapter)
+        spec = _make_spec()
+
+        backend.prepare_and_submit(
+            spec,
+            project_dir=Path("/home/user/proj"),
+            project_name="proj",
+            direction="minimize",
+            backend_name="hpc",
+            local_cache_dir=tmp_path,
+        )
+
+        params = adapter.submit_sweep.call_args[0][0]
+        assert params.post_hook_command is not None
+        assert "python -m jernerics.post_hook" in params.post_hook_command
 
 
 class TestBuild:

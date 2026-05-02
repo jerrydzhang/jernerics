@@ -1,5 +1,8 @@
 import optuna
 
+# Basic sweep: TPE sampler, no crashes.
+# Tests: DAG execution, optuna, tracking stream, artifact logging.
+
 base = {"seed": 42}
 
 
@@ -10,7 +13,7 @@ def search_space(trial):
     }
 
 
-n_trials = 10
+n_trials = 5
 sampler = optuna.samplers.TPESampler(seed=42)
 objective = lambda results: results["evaluate"]["loss"]
 direction = "minimize"
@@ -23,4 +26,3 @@ backend_overrides = {
         "max_parallel": 10,
     },
 }
-
