@@ -1,3 +1,4 @@
+import os
 import shlex
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,7 @@ from jernerics.backend.build_marker import needs_rebuild
 from jernerics.backend.command_builders import build_sweep_commands
 from jernerics.backend.job_meta import save_job_meta
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
-from jernerics.config import _normalize_time
+from jernerics.config import ARTIFACT_ENV_VARS, _normalize_time
 from jernerics.retry import RetryContext
 
 
@@ -76,6 +77,10 @@ class Backend:
         chain_depth: int = 0,
         multiline: bool = False,
     ) -> SweepSubmissionParams:
+        cache_host = self.paths.resolve_cache()
+
+        artifact_env = {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}
+
         wrapped_setup, wrapped_trial, post_hook = build_sweep_commands(
             spec,
             self.container,
@@ -86,6 +91,7 @@ class Backend:
             multiline=multiline,
             retry_ctx_path=retry_ctx_path,
             chain_depth=chain_depth,
+            artifact_env=artifact_env or None,
         )
         cache_host = self.paths.resolve_cache()
         return SweepSubmissionParams(

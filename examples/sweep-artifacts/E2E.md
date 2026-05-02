@@ -36,9 +36,10 @@ Quick connectivity check:
 curl -s -o /dev/null -w "%{http_code}" $AWS_ENDPOINT_URL/minio/health/live
 # Should return 200
 
-# Tracking server — install grpcurl if needed
-grpcurl $JERNERICS_TRACKING_SERVER list
-# Should return tracking.TrackingService (or empty if no reflection)
+# Tracking server — use grpcurl with proto file (no reflection)
+nix-shell -p grpcurl --run "grpcurl -import-path packages/jernerics-proto/proto -proto tracking.proto $JERNERICS_TRACKING_SERVER list"
+# Should return: jernerics.tracking.TrackingService
+# Requires running from repo root for the proto import path
 ```
 
 If any prerequisite fails, **stop and report the failure**.
@@ -53,7 +54,7 @@ Tests the in-process path: manifest writes + tracking events + artifact uploads,
 
 ```bash
 cd examples/sweep-artifacts
-jernerics local config.py dag.py
+jernerics local dag.py config.py
 ```
 
 **Pass:** Prints "Trial 1 completed", "Trial 2 completed", "Trial 3 completed", exits 0.
@@ -64,26 +65,31 @@ jernerics local config.py dag.py
 
 ### 1b. Inspect tracking server
 
+Query DuckDB on the tracking server host. The server holds a read-write connection, so open a second regular (read-write) connection — do not use `read_only=True` (DuckDB rejects mixed access modes).
+
 ```bash
-grpcurl -plaintext localhost:50051 tracking.TrackingService/SendEvent
-# Or check the DuckDB directly:
-# Path depends on deployment, e.g.:
-sqlite3 /var/lib/jernerics/db.duckdb "SELECT * FROM artifacts"
+ssh root@atlas.local "nix-shell -p duckdb --run 'duckdb /var/lib/jernerics/db.duckdb \"SELECT * FROM artifacts\"'"
 ```
 
 **Verify:** 3 artifact events (one per trial), 3 trial_end events.
 
+Alternatively, using the server's own Python:
+
+```bash
+ssh root@atlas.local "/nix/store/x3sfccix7fysnsmj3d8bh01arsa106fc-jernerics-server-env/bin/python -c \"import duckdb; con = duckdb.connect('/var/lib/jernerics/db.duckdb'); print(con.execute('SELECT * FROM artifacts').fetchall()); print(con.execute('SELECT * FROM trial_end').fetchall())\""
+```
+
 ### 1c. Inspect MinIO
 
 ```bash
-mc alias set local $AWS_ENDPOINT_URL $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY
-mc ls local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/sweep-artifacts/
+nix-shell -p minio-client --run "mc alias set local $AWS_ENDPOINT_URL $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY"
+nix-shell -p minio-client --run "mc ls --recursive local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/"
 ```
 
-**Verify:** 3 directories (trial 0, 1, 2), each containing `summary-{i}.txt`.
+**Verify:** 3 files: `{study_name}/0/summary-0.txt`, `{study_name}/1/summary-1.txt`, `{study_name}/2/summary-2.txt`.
 
 ```bash
-mc cat local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/sweep-artifacts/0/summary-0.txt
+nix-shell -p minio-client --run "mc cat local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/{study_name}/0/summary-0.txt"
 ```
 
 **Verify:** Content is "Trial 0, seed=42".
@@ -172,10 +178,10 @@ jernerics logs --backend pueue-remote <task_id>
 ### 2e. Inspect MinIO
 
 ```bash
-mc ls local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/sweep-artifacts/
+nix-shell -p minio-client --run "mc ls --recursive local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/"
 ```
 
-**Verify:** 6 directories total now (trials 0-2 from local, trials 0-2 from remote).
+**Verify:** 6 files total now (trials 0-2 from local, trials 0-2 from remote).
 
 ---
 
@@ -241,10 +247,10 @@ jernerics logs --backend hpc <id> --array-index 1
 ### 3e. Inspect MinIO
 
 ```bash
-mc ls local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/sweep-artifacts/
+nix-shell -p minio-client --run "mc ls --recursive local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/"
 ```
 
-**Verify:** 9 directories total (trials from all three backends).
+**Verify:** 9 files total (trials from all three backends).
 
 ---
 
@@ -261,7 +267,7 @@ ssh jez21005@scimlab.engr.uconn.edu pueue clean
 jernerics clean --backend hpc
 
 # Optionally remove artifacts from MinIO
-# mc rm --recursive local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/
+# nix-shell -p minio-client --run "mc rm --recursive local/$JERNERICS_ARTIFACT_BUCKET/sweep-artifacts/"
 ```
 
 ## Reporting

@@ -14,6 +14,13 @@ from optuna.samplers import BaseSampler
 
 from .dag import Runner
 
+ARTIFACT_ENV_VARS = [
+    "AWS_ENDPOINT_URL",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "JERNERICS_ARTIFACT_BUCKET",
+]
+
 
 class ExitCode(IntEnum):
     SUCCESS = 0

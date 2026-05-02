@@ -18,7 +18,7 @@ from jernerics.tracking.grpc_channel import grpc_channel
 
 
 def _make_s3_upload_fn(bucket: str):
-    import boto3  # ty: ignore[unresolved-import]
+    import boto3
 
     s3 = boto3.client("s3")
 

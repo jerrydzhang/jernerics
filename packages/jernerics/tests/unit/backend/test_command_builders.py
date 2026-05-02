@@ -293,3 +293,69 @@ class TestBuildSweepCommandsEnvPassthrough:
         # env is None when not provided
         for call in container.wrap.call_args_list:
             assert call[1].get("env") is None
+
+    def test_post_hook_wrap_receives_artifact_env(self):
+        spec = _make_spec()
+        container = MagicMock()
+        container.wrap = MagicMock(return_value="wrapped")
+        paths = _make_paths(container=container)
+
+        build_sweep_commands(
+            spec=spec,
+            container=container,
+            paths=paths,
+            direction="minimize",
+            retry_ctx_path="/cache/retry/ctx.json",
+            chain_depth=0,
+            artifact_env={
+                "AWS_ENDPOINT_URL": "http://minio:9000",
+                "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+            },
+        )
+
+        # Post-hook wrap (3rd call) should have same env vars as trial
+        post_hook_call = container.wrap.call_args_list[2]
+        assert post_hook_call[1]["env"] == {
+            "AWS_ENDPOINT_URL": "http://minio:9000",
+            "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+        }
+
+
+class TestBuildPostHookTrackingServer:
+    def test_includes_server_addr_when_provided(self):
+        from jernerics.backend.command_builders import build_post_hook_command
+
+        cmd = build_post_hook_command(
+            ctx_path="/cache/ctx.json",
+            chain_depth=0,
+            tracking_dir="/cache/tracking/study",
+            storage_path="/cache/optuna/study.journal",
+            tracking_server="grpc://server:8080",
+        )
+        assert "--server-addr grpc://server:8080" in cmd
+
+    def test_omits_server_addr_when_not_provided(self):
+        from jernerics.backend.command_builders import build_post_hook_command
+
+        cmd = build_post_hook_command(
+            ctx_path="/cache/ctx.json",
+            chain_depth=0,
+            tracking_dir="/cache/tracking/study",
+            storage_path="/cache/optuna/study.journal",
+        )
+        assert "--server-addr" not in cmd
+
+    def test_post_hook_in_sweep_receives_tracking_server(self):
+        spec = _make_spec()
+        paths = _make_paths()
+        _, _, post_hook = build_sweep_commands(
+            spec=spec,
+            container=NoContainer(),
+            paths=paths,
+            direction="minimize",
+            tracking_server="grpc://server:8080",
+            retry_ctx_path="/cache/retry/ctx.json",
+            chain_depth=0,
+        )
+        assert post_hook is not None
+        assert "--server-addr grpc://server:8080" in post_hook
