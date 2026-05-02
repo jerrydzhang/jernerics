@@ -95,7 +95,7 @@ class Docker:
         for bind in binds:
             bind_args.extend(["-v", bind])
 
-        flags = ["--rm"]
+        flags = ["--rm", "--network=host"]
         if gpu:
             flags.append("--gpus all")
         if env:

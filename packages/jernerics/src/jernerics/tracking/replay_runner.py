@@ -10,6 +10,7 @@ Usage:
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from jernerics_proto import tracking_pb2_grpc
 
@@ -46,7 +47,7 @@ def main() -> None:
     try:
         # Step 1: Replay tracking events
         result = replay_tracking(
-            tracking_dir=args.tracking_dir,
+            tracking_dir=Path(args.tracking_dir),
             stub=stub,
             study=args.study,
             max_workers=args.max_workers,
@@ -64,8 +65,6 @@ def main() -> None:
     if bucket and endpoint:
         print("Syncing artifacts...", file=sys.stderr)
         upload_fn = _make_s3_upload_fn(bucket)
-        from pathlib import Path
-
         sync_artifacts(
             Path(args.tracking_dir),
             upload_fn=upload_fn,

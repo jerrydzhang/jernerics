@@ -374,8 +374,10 @@ class Backend:
 
         result = self.host.run(
             [
+                "sh",
+                "-c",
                 f"find {cache_host}/tracking"
-                " -path '*/events/*.pb' 2>/dev/null | head -n 1"
+                " -path '*/events/*.pb' 2>/dev/null | head -n 1",
             ],
             check=False,
             capture_output=True,
@@ -388,13 +390,15 @@ class Backend:
         # Check for unsynced artifact manifests
         result = self.host.run(
             [
+                "sh",
+                "-c",
                 f"cd {cache_host}/tracking && "
                 "for m in $(find . -path '*/artifacts/*.manifest' 2>/dev/null); do "
                 'c="${m%.manifest}.cursor"; '
                 'ms=$(stat -c%s "$m" 2>/dev/null || echo 0); '
                 'cs=$(cat "$c" 2>/dev/null || echo 0); '
                 'if [ "$cs" -lt "$ms" ]; then echo "$m"; break; fi; '
-                "done"
+                "done",
             ],
             check=False,
             capture_output=True,
@@ -470,7 +474,12 @@ class Backend:
 
         host_desc = getattr(self.host, "host", "local")
         print(f"Syncing tracking data from {host_desc}...")
-        result = self.host.run([cmd], check=False, capture_output=True, text=True)
+        result = self.host.run(
+            ["sh", "-c", cmd],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
         print(result.stdout)
         if result.returncode != 0:
             print(f"Sync failed: {result.stderr}")
