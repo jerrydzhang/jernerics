@@ -178,7 +178,7 @@ wheels = [
 [[package]]
 name = "jernerics"
 version = "1.1.0"
-source = { git = "https://github.com/jerrydzhang/jernerics.git?subdirectory=packages%2Fjernerics&branch=human-ownership#114113f9a0822ddce2cdff43bd08cd88330e5783" }
+source = { git = "https://github.com/jerrydzhang/jernerics.git?subdirectory=packages%2Fjernerics&branch=human-ownership#fe54b091f3a4cd26303c368c0d5aec661f297196" }
 dependencies = [
     { name = "boto3" },
     { name = "cloudpickle" },
@@ -197,7 +197,7 @@ dependencies = [
 [[package]]
 name = "jernerics-proto"
 version = "0.1.0"
-source = { git = "https://github.com/jerrydzhang/jernerics.git?subdirectory=packages%2Fjernerics-proto&branch=human-ownership#114113f9a0822ddce2cdff43bd08cd88330e5783" }
+source = { git = "https://github.com/jerrydzhang/jernerics.git?subdirectory=packages%2Fjernerics-proto&branch=human-ownership#fe54b091f3a4cd26303c368c0d5aec661f297196" }
 dependencies = [
     { name = "protobuf" },
 ]
