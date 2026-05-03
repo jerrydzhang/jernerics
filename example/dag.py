@@ -11,15 +11,21 @@ with DAG() as dag:
 
     @task
     def detect_gpu(tracker: Tracker):
-        import torch
+        try:
+            import torch
+        except ImportError:
+            tracker.log_metric("cuda_available", 0.0)
+            return {"cuda_available": False, "device": "torch-not-installed"}
 
         cuda = torch.cuda.is_available()
         device = torch.cuda.get_device_name(0) if cuda else "cpu-only"
-        tracker.log_metrics({"cuda_available": float(cuda)})
+        tracker.log_metric("cuda_available", float(cuda))
         return {"cuda_available": cuda, "device": device}
 
     @task
-    def generate_data(config):
+    def generate_data(config, tracker: Tracker):
+        tracker.log_param("seed", config["seed"])
+        tracker.log_param("n_samples", 1000)
         trial_number = config.get("config_index", 0)
 
         crash_node(
@@ -53,5 +59,14 @@ with DAG() as dag:
             f"accuracy={accuracy:.4f}\n"
         )
         tracker.log_artifact(f"summary-{trial_idx}.txt", str(summary_file))
+        tracker.log_result(
+            "summary",
+            {
+                "loss": train["loss"],
+                "accuracy": accuracy,
+                "lr": train["lr"],
+                "dropout": train["dropout"],
+            },
+        )
 
         return {"loss": train["loss"], "accuracy": accuracy}

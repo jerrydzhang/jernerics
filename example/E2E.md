@@ -46,6 +46,7 @@ ssh jez21005@scimlab.engr.uconn.edu docker ps
 ```bash
 # Env vars must be set in the current shell
 echo $JERNERICS_TRACKING_SERVER
+echo $JERNERICS_API_KEY
 echo $AWS_ENDPOINT_URL
 echo $AWS_ACCESS_KEY_ID
 echo $AWS_SECRET_ACCESS_KEY
@@ -53,6 +54,11 @@ echo $JERNERICS_ARTIFACT_BUCKET
 
 # Connectivity checks
 curl -sk -o /dev/null -w "%{http_code}" $AWS_ENDPOINT_URL/minio/health/live
+# → 200
+curl -sk -o /dev/null -w "%{http_code}" -X POST http://atlas.local:8081/query \
+  -H "Authorization: Bearer $JERNERICS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT 1"}'
 # → 200
 ```
 
@@ -85,10 +91,13 @@ containing trial results.
 ### 1c. Verify tracking data streamed to server
 
 ```bash
-ssh root@atlas.local "duckdb /var/lib/jernerics/db.duckdb \"SELECT COUNT(*) FROM trial_end\""
+curl -s -X POST http://atlas.local:8081/query \
+  -H "Authorization: Bearer $JERNERICS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM trial_end"}'
 ```
 
-**Pass:** Count > 0 (cumulative across all tests).
+**Pass:** Returns JSON with `"rows": [[N]]` where N > 0 (cumulative across all tests).
 
 ### 1d. Verify artifacts uploaded to MinIO
 
@@ -172,10 +181,13 @@ evaluate). No gRPC connection errors.
 ### 2e. Verify tracking data on server
 
 ```bash
-ssh root@atlas.local "duckdb /var/lib/jernerics/db.duckdb \"SELECT COUNT(*) FROM params\""
+curl -s -X POST http://atlas.local:8081/query \
+  -H "Authorization: Bearer $JERNERICS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM params"}'
 ```
 
-**Pass:** Count has increased from test 1 (cumulative).
+**Pass:** Returns JSON with count increased from test 1 (cumulative).
 
 ### 2f. Verify artifacts in MinIO
 
@@ -465,7 +477,10 @@ complete." No errors.
 ### 6c. Verify tracking data after sync
 
 ```bash
-ssh root@atlas.local "duckdb /var/lib/jernerics/db.duckdb \"SELECT COUNT(*) FROM params\""
+curl -s -X POST http://atlas.local:8081/query \
+  -H "Authorization: Bearer $JERNERICS_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT COUNT(*) FROM params"}'
 ```
 
 **Pass:** Count has increased.

@@ -80,8 +80,9 @@ class Apptainer:
 
 
 class Docker:
-    def __init__(self, image_name: str = "container.sif"):
+    def __init__(self, image_name: str = "container.sif", *, gpu: bool = False):
         self.image_name = image_name
+        self.gpu = gpu
 
     def wrap(
         self,
@@ -89,14 +90,13 @@ class Docker:
         binds: Sequence[str],
         *,
         env: dict[str, str] | None = None,
-        gpu: bool = False,
     ) -> str:
         bind_args = []
         for bind in binds:
             bind_args.extend(["-v", bind])
 
-        flags = ["--rm", "--network=host"]
-        if gpu:
+        flags = ["--rm", "--network=host", "-u", "$(id -u):$(id -g)"]
+        if self.gpu:
             flags.append("--gpus all")
         if env:
             flags.extend(f"-e {k}={v}" for k, v in env.items())

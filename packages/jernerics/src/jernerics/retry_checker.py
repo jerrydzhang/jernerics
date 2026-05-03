@@ -1,5 +1,4 @@
 import argparse
-import os
 import time
 from pathlib import Path
 
@@ -7,40 +6,24 @@ import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 from optuna.trial import TrialState
 
-from jernerics.backend.adapter import SweepSubmissionParams
-from jernerics.backend.command_builders import build_sweep_commands
-from jernerics.backend.container import (
-    Apptainer,
-    Docker,
-    NoContainer,
-)
-from jernerics.backend.factory import make_adapter
 from jernerics.backend.host import StdoutHost
-from jernerics.backend.path_resolver import PathResolver
+from jernerics.backend.models import SweepSubmission
+from jernerics.backend.submission import assemble_infrastructure, submit_sweep
 from jernerics.config import (
-    ARTIFACT_ENV_VARS,
-    ApptainerConfig,
-    _normalize_time,
     load_backend_config,
     load_config,
+    load_tracking_server,
 )
 from jernerics.retry import (
-    RetryContext,
     plan_retry,
     read_ledger,
     write_ledger,
 )
 
 
-def _make_container(container_type: str):
-    if container_type == "docker":
-        return Docker()
-    elif container_type == "none":
-        return NoContainer()
-    return Apptainer()
-
-
 def run_checker(ctx_path: str, chain_depth: int) -> bool:
+    from jernerics.retry import RetryContext
+
     ctx = RetryContext.from_json(Path(ctx_path).read_text())
 
     project_dir = Path(ctx.project_dir)
@@ -85,79 +68,26 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
 
     write_ledger(ledger_path, plan.retry_counts)
 
-    # --- Build submission via adapter (not Backend) ---
+    # --- Submit via shared submission module ---
 
     host = StdoutHost(home=ctx.host_home)
-    adapter = make_adapter(backend_config, host=host)
-
-    shared = backend_config.shared
-    remote_dir = shared.remote_dir.replace("~", host.home)
-    cache_dir = (
-        shared.cache_dir.replace("~", host.home)
-        if shared.cache_dir
-        else f"{host.home}/.cache/jernerics"
-    )
-    container = _make_container(shared.container_type)
-
-    build_dir = None
-    if isinstance(backend_config.container, ApptainerConfig):
-        build_dir = backend_config.container.build_dir
-        if build_dir:
-            build_dir = build_dir.replace("~", host.home)
-
-    paths = PathResolver(
-        remote_dir=remote_dir,
-        cache_dir=cache_dir,
-        container=container,
-        build_dir=build_dir,
-        project_name=ctx.project_name or "",
+    infra = assemble_infrastructure(
+        backend_config, host=host, project_name=ctx.project_name or ""
     )
 
-    # Merge overrides: experiment < CLI (adapters handle defaults internally)
-    max_parallel_raw = ctx.cli_overrides.get(
-        "max_parallel",
-        sweep.backend_overrides.get(ctx.backend_name, {}).get("max_parallel"),
-    )
-    max_parallel = int(max_parallel_raw) if max_parallel_raw else None
+    tracking_server = load_tracking_server(project_dir)
 
-    merged = {
-        **{
-            k: _normalize_time(v) if k == "time" else v
-            for k, v in sweep.backend_overrides.get(ctx.backend_name, {}).items()
-            if k not in ("max_parallel", "output", "error")
-        },
-        **{
-            k: _normalize_time(v) if k == "time" else v
-            for k, v in ctx.cli_overrides.items()
-            if k not in ("max_parallel", "output", "error")
-        },
+    # Prepare overrides: experiment from sweep config, CLI from retry context
+    experiment_overrides = {
+        k: v
+        for k, v in sweep.backend_overrides.get(ctx.backend_name, {}).items()
+        if k not in ("max_parallel", "output", "error")
     }
-    merged = {k: v for k, v in merged.items() if v is not None}
-
-    # Build retry context for the next chain level
-    retry_ctx = RetryContext(
-        study_name=ctx.study_name,
-        backend_name=ctx.backend_name,
-        dag_relpath=ctx.dag_relpath,
-        config_relpath=ctx.config_relpath,
-        cli_overrides=ctx.cli_overrides,
-        storage_path=ctx.storage_path,
-        tracking_dir=ctx.tracking_dir,
-        project_dir=ctx.project_dir,
-        ctx_path=ctx_path,
-        chain_depth=chain_depth + 1,
-    )
-
-    # Write retry context to host
-    cache_host = paths.resolve_cache()
-    retry_dir_host = f"{cache_host}/retry"
-    host.mkdir(retry_dir_host)
-    host_ctx_path = f"{cache_host}/retry/{ctx.study_name}_ctx.json"
-    host.write_file(host_ctx_path, retry_ctx.to_json())
-    retry_ctx_path = paths.retry_ctx_path(ctx.study_name)
-
-    # Build SweepSubmissionParams directly
-    from jernerics.backend.models import SweepSubmission
+    cli_overrides = {
+        k: v
+        for k, v in ctx.cli_overrides.items()
+        if k not in ("max_parallel", "output", "error")
+    }
 
     retry_spec = SweepSubmission(
         dag_path=Path(f"{ctx.project_dir}/{ctx.dag_relpath}"),
@@ -168,38 +98,22 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         dag_relpath=ctx.dag_relpath,
         config_relpath=ctx.config_relpath,
         project_name=ctx.project_name,
-        max_parallel=max_parallel,
-        backend_overrides=merged,
     )
 
-    artifact_env = {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}
-
-    wrapped_setup, wrapped_trial, post_hook = build_sweep_commands(
+    submit_sweep(
         retry_spec,
-        container,
-        paths,
+        infra,
+        host=host,
+        project_dir=ctx.project_dir,
+        project_name=ctx.project_name or "",
+        backend_name=ctx.backend_name,
         direction=sweep.direction,
-        tracking_server=None,
-        heartbeat_interval_s=shared.heartbeat_interval_s,
-        retry_ctx_path=retry_ctx_path,
+        tracking_server=tracking_server,
+        cli_overrides=cli_overrides or None,
+        experiment_overrides=experiment_overrides or None,
+        heartbeat_interval_s=backend_config.shared.heartbeat_interval_s,
         chain_depth=chain_depth + 1,
-        multiline=True,
-        artifact_env=artifact_env or None,
     )
-
-    params = SweepSubmissionParams(
-        setup_command=wrapped_setup,
-        trial_command=wrapped_trial,
-        post_hook_command=post_hook,
-        n_trials=plan.total_array_size,
-        study_name=ctx.study_name,
-        log_dir=f"{cache_host}/logs",
-        cache_dir=cache_host,
-        max_parallel=max_parallel,
-        overrides=merged,
-    )
-
-    adapter.submit_sweep(params)
 
     return True
 

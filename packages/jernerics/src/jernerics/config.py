@@ -20,6 +20,7 @@ ARTIFACT_ENV_VARS = [
     "AWS_SECRET_ACCESS_KEY",
     "JERNERICS_ARTIFACT_BUCKET",
     "JERNERICS_API_KEY",
+    "JERNERICS_TRACKING_SERVER",
 ]
 
 
@@ -110,10 +111,15 @@ class ApptainerConfig:
 
 
 @dataclass
+class DockerConfig:
+    gpu: bool = False
+
+
+@dataclass
 class BackendConfig:
     shared: SharedConfig
     backend: SlurmConfig | PueueConfig | None = None  # None for LocalBackend
-    container: ApptainerConfig | None = None
+    container: ApptainerConfig | DockerConfig | None = None
 
 
 def _load_tool_config(project_dir: str | Path) -> dict:
@@ -185,11 +191,16 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
             parallel=bc.get("parallel", 1),
         )
 
-    container_config: ApptainerConfig | None = None
-    if bc.get("container_type", "apptainer") == "apptainer":
+    container_config: ApptainerConfig | DockerConfig | None = None
+    if shared.container_type == "apptainer":
         apptainer = bc.get("apptainer", {})
         container_config = ApptainerConfig(
             build_dir=apptainer.get("build_dir"),
+        )
+    elif shared.container_type == "docker":
+        docker = bc.get("docker", {})
+        container_config = DockerConfig(
+            gpu=docker.get("gpu", False),
         )
 
     return BackendConfig(

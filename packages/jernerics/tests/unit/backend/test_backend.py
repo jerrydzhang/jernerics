@@ -1,5 +1,3 @@
-"""Tests for the new Backend class."""
-
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -10,6 +8,7 @@ from jernerics.backend.backend import Backend
 from jernerics.backend.container import NoContainer
 from jernerics.backend.models import JobSubmission, SubmitResult, SweepSubmission
 from jernerics.backend.path_resolver import PathResolver
+from jernerics.backend.submission import SweepInfrastructure
 
 
 def _make_backend(host=None, container=None, adapter=None, syncer=None, **overrides):
@@ -36,12 +35,11 @@ def _make_backend(host=None, container=None, adapter=None, syncer=None, **overri
         container=container,
         project_name=defaults["project_name"],
     )
+    infra = SweepInfrastructure(adapter=adapter, container=container, paths=paths)
     return Backend(
         host=host,
-        container=container,
-        adapter=adapter,
+        infra=infra,
         syncer=syncer,
-        paths=paths,
         project_name=defaults["project_name"],
         tracking_server=defaults["tracking_server"],
         heartbeat_interval_s=defaults["heartbeat_interval_s"],

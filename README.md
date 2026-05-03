@@ -163,11 +163,14 @@ remote_dir = "."
 
 ```bash
 JERNERICS_TRACKING_SERVER   # gRPC tracking server (host:port)
+JERNERICS_API_KEY           # Optional API key for gRPC auth (must match on server and client)
 AWS_ENDPOINT_URL            # S3-compatible endpoint for artifact storage
 AWS_ACCESS_KEY_ID           # S3 credentials
 AWS_SECRET_ACCESS_KEY
 JERNERICS_ARTIFACT_BUCKET   # Bucket name (default: "jernerics")
 ```
+
+When `JERNERICS_API_KEY` is set in the server's environment, all gRPC calls must include a matching `x-api-key` header. Set the same value on the client side (it gets forwarded to remote backends automatically). If unset on the server, auth is disabled and all connections are accepted.
 
 ## Container starters
 

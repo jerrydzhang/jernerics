@@ -3,23 +3,20 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.build_marker import needs_rebuild
-from jernerics.backend.command_builders import build_sweep_commands
+from jernerics.backend.host import SSHHost
 from jernerics.backend.job_meta import save_job_meta
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
-from jernerics.config import ARTIFACT_ENV_VARS, _normalize_time
-from jernerics.retry import RetryContext
+from jernerics.backend.submission import SweepInfrastructure, submit_sweep
+from jernerics.config import ARTIFACT_ENV_VARS
 
 
 class Backend:
     def __init__(
         self,
         host,
-        container,
-        adapter,
+        infra: SweepInfrastructure,
         syncer,
-        paths,
         *,
         project_name: str,
         tracking_server: str | None = None,
@@ -30,10 +27,8 @@ class Backend:
         chain_depth_cap: int = 20,
     ):
         self.host = host
-        self.container = container
-        self.adapter = adapter
+        self.infra = infra
         self.syncer = syncer
-        self.paths = paths
         self.project_name = project_name
         self.tracking_server = tracking_server
         self.heartbeat_interval_s = heartbeat_interval_s
@@ -42,63 +37,17 @@ class Backend:
         self.max_retries = max_retries
         self.chain_depth_cap = chain_depth_cap
 
-    def _merge_overrides(
-        self,
-        *,
-        experiment_overrides: dict[str, Any] | None,
-        cli_overrides: dict[str, str] | None,
-    ) -> dict[str, str]:
-        merged = {
-            **{
-                k: _normalize_time(v) if k == "time" else v
-                for k, v in (experiment_overrides or {}).items()
-            },
-            **{
-                k: _normalize_time(v) if k == "time" else v
-                for k, v in (cli_overrides or {}).items()
-            },
-        }
-        return {k: v for k, v in merged.items() if v is not None}
+    @property
+    def container(self):
+        return self.infra.container
 
-    def _build_params(
-        self,
-        spec: SweepSubmission,
-        *,
-        direction: str,
-        max_parallel: int | None = None,
-        overrides: dict[str, str] | None = None,
-        retry_ctx_path: str | None = None,
-        chain_depth: int = 0,
-        multiline: bool = False,
-    ) -> SweepSubmissionParams:
-        cache_host = self.paths.resolve_cache()
+    @property
+    def adapter(self):
+        return self.infra.adapter
 
-        artifact_env = {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}
-
-        wrapped_setup, wrapped_trial, post_hook = build_sweep_commands(
-            spec,
-            self.container,
-            self.paths,
-            direction=direction,
-            tracking_server=self.tracking_server,
-            heartbeat_interval_s=self.heartbeat_interval_s,
-            multiline=multiline,
-            retry_ctx_path=retry_ctx_path,
-            chain_depth=chain_depth,
-            artifact_env=artifact_env or None,
-        )
-        cache_host = self.paths.resolve_cache()
-        return SweepSubmissionParams(
-            setup_command=wrapped_setup,
-            trial_command=wrapped_trial,
-            post_hook_command=post_hook,
-            n_trials=spec.n_trials,
-            study_name=spec.study_name,
-            log_dir=f"{cache_host}/logs",
-            cache_dir=cache_host,
-            max_parallel=max_parallel,
-            overrides=overrides or {},
-        )
+    @property
+    def paths(self):
+        return self.infra.paths
 
     def prepare_and_submit(
         self,
@@ -113,46 +62,41 @@ class Backend:
         cli_overrides: dict[str, str] | None = None,
         local_cache_dir: Path | None = None,
     ) -> SubmitResult | None:
-        overrides = self._merge_overrides(
-            experiment_overrides=experiment_overrides,
-            cli_overrides=cli_overrides,
-        )
+        # Pop output/error before merging — they go into job meta, not the script
+        all_overrides = {
+            **(experiment_overrides or {}),
+            **(cli_overrides or {}),
+        }
+        output_pattern = all_overrides.get("output")
+        error_pattern = all_overrides.get("error")
 
-        max_parallel_raw = overrides.pop("max_parallel", None)
-        try:
-            max_parallel = int(max_parallel_raw) if max_parallel_raw else None
-        except (ValueError, TypeError) as e:
-            raise ValueError(
-                f"max_parallel must be an integer, got: {max_parallel_raw!r}"
-            ) from e
-
-        # Pop output/error from overrides — they go into job meta, not the script
-        cache_host = self.paths.resolve_cache()
-        output_pattern = overrides.pop("output", None)
-        error_pattern = overrides.pop("error", None)
-
-        updated_spec = SweepSubmission(
-            dag_path=spec.dag_path,
-            config_path=spec.config_path,
-            study_name=spec.study_name,
-            storage_url=spec.storage_url,
-            n_trials=spec.n_trials,
-            dag_relpath=spec.dag_relpath,
-            config_relpath=spec.config_relpath,
-            project_name=spec.project_name,
-            server_addr=spec.server_addr,
-            max_parallel=max_parallel,
-            backend_overrides=overrides,
-            grid=spec.grid,
-        )
+        # Build cleaned overrides for submit_sweep (exclude output/error)
+        clean_experiment = {
+            k: v
+            for k, v in (experiment_overrides or {}).items()
+            if k not in ("output", "error")
+        }
+        clean_cli = {
+            k: v
+            for k, v in (cli_overrides or {}).items()
+            if k not in ("output", "error")
+        }
 
         if dry_run:
-            params = self._build_params(
-                updated_spec,
+            script = submit_sweep(
+                spec,
+                self.infra,
+                host=self.host,
+                project_dir=project_dir,
+                project_name=project_name,
+                backend_name=backend_name,
                 direction=direction,
-                overrides=overrides,
+                tracking_server=self.tracking_server,
+                cli_overrides=clean_cli or None,
+                experiment_overrides=clean_experiment or None,
+                heartbeat_interval_s=self.heartbeat_interval_s,
+                dry_run=True,
             )
-            script = self.adapter.render_sweep(params)
             print("=== DRY RUN ===")
             print(f"Backend: {backend_name}")
             print(f"Host: {getattr(self.host, 'host', 'local')}")
@@ -184,45 +128,23 @@ class Backend:
                 )
                 raise RuntimeError("container not found on remote")
 
-        # Retry context
-        retry_ctx_path = None
-        chain_depth = 0
-        if local_cache_dir is not None:
-            cache_host = self.paths.resolve_cache()
-            retry_dir_host = f"{cache_host}/retry"
-            self.host.mkdir(retry_dir_host)
-            retry_ctx = RetryContext(
-                study_name=spec.study_name,
-                backend_name=backend_name,
-                dag_relpath=spec.dag_relpath,
-                config_relpath=spec.config_relpath,
-                cli_overrides=cli_overrides or {},
-                storage_path=spec.storage_url,
-                tracking_dir=self.paths.tracking_dir(spec.study_name),
-                project_dir=self.paths.work_prefix,
-                ctx_path=self.paths.retry_ctx_path(spec.study_name),
-                chain_depth=0,
-                project_name=project_name,
-                host_home=self.host.home,
-            )
-            host_ctx_path = f"{cache_host}/retry/{spec.study_name}_ctx.json"
-            self.host.write_file(host_ctx_path, retry_ctx.to_json())
-            retry_ctx_path = self.paths.retry_ctx_path(spec.study_name)
-
-        # Build params and submit
-        params = self._build_params(
-            updated_spec,
+        # Submit via shared submission module
+        result = submit_sweep(
+            spec,
+            self.infra,
+            host=self.host,
+            project_dir=project_dir,
+            project_name=project_name,
+            backend_name=backend_name,
             direction=direction,
-            max_parallel=max_parallel,
-            overrides=overrides,
-            retry_ctx_path=retry_ctx_path,
-            chain_depth=chain_depth,
-            multiline=True,
+            tracking_server=self.tracking_server,
+            cli_overrides=clean_cli or None,
+            experiment_overrides=clean_experiment or None,
+            heartbeat_interval_s=self.heartbeat_interval_s,
         )
-        result = self.adapter.submit_sweep(params)
 
         # Save meta
-        if local_cache_dir is not None:
+        if local_cache_dir is not None and result is not None:
             effective_output = output_pattern or f"{cache_host}/logs/%A_%a.out"
             effective_error = error_pattern or f"{cache_host}/logs/%A_%a.err"
             for sub in result.submissions:
@@ -369,12 +291,19 @@ class Backend:
             raise RuntimeError("Active jobs prevent cleaning")
 
         result = self.host.run(
-            [
-                "sh",
-                "-c",
-                f"find {cache_host}/tracking"
-                " -path '*/events/*.pb' 2>/dev/null | head -n 1",
-            ],
+            (
+                [
+                    f"find {cache_host}/tracking"
+                    " -path '*/events/*.pb' 2>/dev/null | head -n 1"
+                ]
+                if isinstance(self.host, SSHHost)
+                else [
+                    "sh",
+                    "-c",
+                    f"find {cache_host}/tracking"
+                    " -path '*/events/*.pb' 2>/dev/null | head -n 1",
+                ]
+            ),
             check=False,
             capture_output=True,
             text=True,
@@ -383,19 +312,21 @@ class Backend:
             print("\nError: Unsynced tracking data found. Run sync first.")
             raise RuntimeError("Unsynced tracking data")
 
-        # Check for unsynced artifact manifests
+        artifact_check_cmd = (
+            f"cd {cache_host}/tracking && "
+            "for m in $(find . -path '*/artifacts/*.manifest' 2>/dev/null); do "
+            'c="${m%.manifest}.cursor"; '
+            'ms=$(stat -c%s "$m" 2>/dev/null || echo 0); '
+            'cs=$(cat "$c" 2>/dev/null || echo 0); '
+            'if [ "$cs" -lt "$ms" ]; then echo "$m"; break; fi; '
+            "done"
+        )
         result = self.host.run(
-            [
-                "sh",
-                "-c",
-                f"cd {cache_host}/tracking && "
-                "for m in $(find . -path '*/artifacts/*.manifest' 2>/dev/null); do "
-                'c="${m%.manifest}.cursor"; '
-                'ms=$(stat -c%s "$m" 2>/dev/null || echo 0); '
-                'cs=$(cat "$c" 2>/dev/null || echo 0); '
-                'if [ "$cs" -lt "$ms" ]; then echo "$m"; break; fi; '
-                "done",
-            ],
+            (
+                [artifact_check_cmd]
+                if isinstance(self.host, SSHHost)
+                else ["sh", "-c", artifact_check_cmd]
+            ),
             check=False,
             capture_output=True,
             text=True,
@@ -458,6 +389,9 @@ class Backend:
 
         cache_host = self.paths.resolve_cache()
         bind_args = self.paths.bind_args(cache_host)
+        artifact_env = {
+            k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))
+        } or None
 
         inner_cmd = (
             "python -m jernerics.tracking.replay_runner"
@@ -467,13 +401,19 @@ class Backend:
         if study:
             inner_cmd += f" --study {shlex.quote(study)}"
 
-        wrapped = self.container.wrap(inner_cmd, bind_args)
+        wrapped = self.container.wrap(inner_cmd, bind_args, env=artifact_env)
         cmd = f"cd {self.paths.remote_dir} && {wrapped}"
 
         host_desc = getattr(self.host, "host", "local")
         print(f"Syncing tracking data from {host_desc}...")
+        # FIXME: brittle — assumes only SSHHost and LocalHost exist.
+        # SSHHost.run prepends "ssh host" to argv, which joins args with
+        # spaces on the remote. So ["sh", "-c", cmd] arrives as
+        # `sh -c cd /foo && bar` — sh only sees "cd". Pass compound
+        # commands as a single string for SSH, sh -c for local.
+        run_args = [cmd] if isinstance(self.host, SSHHost) else ["sh", "-c", cmd]
         result = self.host.run(
-            ["sh", "-c", cmd],
+            run_args,
             check=False,
             capture_output=True,
             text=True,

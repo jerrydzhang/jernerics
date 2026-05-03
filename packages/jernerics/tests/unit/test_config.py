@@ -4,6 +4,7 @@ from jernerics.config import (
     ApptainerConfig,
     BackendConfig,
     ConfigNotFound,
+    DockerConfig,
     ExitCode,
     PueueConfig,
     SharedConfig,
@@ -219,7 +220,8 @@ container_type = "docker"
 """)
         config = load_backend_config("hpc", project_dir)
 
-        assert config.container is None
+        assert isinstance(config.container, DockerConfig)
+        assert config.container.gpu is False
 
     def test_load_backend_config_apptainer_no_section_gives_default(self, tmp_path):
         project_dir = tmp_path / "apptainer-default"
