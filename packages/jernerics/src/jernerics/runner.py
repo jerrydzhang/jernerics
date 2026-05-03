@@ -1,28 +1,17 @@
-import os
 import sys
-import threading
 from pathlib import Path
 from typing import Any
 
-import grpc
 import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.config import load_config
 from jernerics.dag import DAG
-from jernerics.tracking import ProtobufTracker, Tracker
-from jernerics.tracking.artifact_uploader import ArtifactUploader
-from jernerics.tracking.infra import resolve_artifact_storage, resolve_streaming
-from jernerics.tracking.stream_client import StreamClient
+from jernerics.tracking.trial_environment import TrialEnvironment
 
 
 class _TaskFailure(Exception):
     pass
-
-
-def _heartbeat_loop(path: Path, interval: float, stop: threading.Event) -> None:
-    while not stop.wait(interval):
-        path.touch()
 
 
 def run_trial(
@@ -47,84 +36,31 @@ def run_trial(
     )
 
     def objective(trial: optuna.trial.Trial) -> float:
-        tracker: Tracker | None = None
-        sync_client: StreamClient | None = None
-        artifact_uploader: ArtifactUploader | None = None
-        channel: grpc.Channel | None = None
-        heartbeat_stop: threading.Event | None = None
-
-        manifest_path: Path | None = None
-
-        if tracking_dir:
-            events_dir = Path(tracking_dir) / "events"
-            events_dir.mkdir(parents=True, exist_ok=True)
-
-            artifacts_dir = Path(tracking_dir) / "artifacts"
-            artifacts_dir.mkdir(parents=True, exist_ok=True)
-            manifest_path = artifacts_dir / f"{trial.number}.manifest"
-            cursor_path = artifacts_dir / f"{trial.number}.cursor"
-
-            tracker = ProtobufTracker(
-                project_name or "",
-                study_name,
-                trial.number,
-                events_dir / f"{trial.number}.pb",
-                manifest_path=manifest_path,
+        with TrialEnvironment(
+            tracking_dir=tracking_dir or "",
+            project_name=project_name or "",
+            study_name=study_name,
+            trial_number=trial.number,
+            server_addr=server_addr,
+            heartbeat_interval_s=heartbeat_interval_s,
+        ) as env:
+            params: dict[str, Any] = (
+                sweep.search_space(trial) if sweep.search_space else {}
             )
 
-        if server_addr and tracker:
-            assert tracking_dir is not None
-            streaming = resolve_streaming(server_addr)
-            if streaming:
-                channel, stub = streaming
-                sync_client = StreamClient(
-                    stub,
-                    Path(tracking_dir) / "events" / f"{trial.number}.pb",
-                    api_key=os.environ.get("JERNERICS_API_KEY"),
+            if params and set(sweep.base) & set(params):
+                overlap = sorted(set(sweep.base) & set(params))
+                raise ValueError(
+                    f"Config keys defined in both base and search_space: {overlap}. "
+                    "Please remove the overlapping keys from either 'base' or "
+                    "'search_space' in the config file."
                 )
-                sync_client.start()
 
-        if tracking_dir and manifest_path:
-            upload_fn = resolve_artifact_storage()
-            if upload_fn:
-                artifact_uploader = ArtifactUploader(
-                    manifest_path=manifest_path,
-                    cursor_path=cursor_path,
-                    upload_fn=upload_fn,
-                    project=project_name or "",
-                    study=study_name,
-                    trial_id=trial.number,
-                )
-                artifact_uploader.start()
+            config = {**sweep.base, **params, "config_index": trial.number}
 
-        if tracking_dir:
-            hb_dir = Path(tracking_dir) / "heartbeats"
-            hb_dir.mkdir(parents=True, exist_ok=True)
-            hb_path = hb_dir / f"{trial.number}.heartbeat"
-            hb_path.touch()
-            heartbeat_stop = threading.Event()
-            threading.Thread(
-                target=_heartbeat_loop,
-                args=(hb_path, heartbeat_interval_s, heartbeat_stop),
-                daemon=True,
-            ).start()
-
-        params: dict[str, Any] = sweep.search_space(trial) if sweep.search_space else {}
-
-        if params and set(sweep.base) & set(params):
-            overlap = sorted(set(sweep.base) & set(params))
-            raise ValueError(
-                f"Config keys defined in both base and search_space: {overlap}. "
-                "Please remove the overlapping keys from either 'base' or "
-                "'search_space' in the config file."
-            )
-
-        config = {**sweep.base, **params, "config_index": trial.number}
-
-        try:
             results = dag.run(
                 config,
-                tracker=tracker,
+                tracker=env.tracker,
                 runner=sweep.runner,
             )
 
@@ -145,17 +81,6 @@ def run_trial(
             if sweep.objective:
                 return sweep.objective(results)
             return 0.0
-        finally:
-            if heartbeat_stop:
-                heartbeat_stop.set()
-            if artifact_uploader:
-                artifact_uploader.join()
-            if tracker:
-                tracker.close()
-            if sync_client:
-                sync_client.join()
-            if channel:
-                channel.close()
 
     try:
         study.optimize(objective, n_trials=1)
