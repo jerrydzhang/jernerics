@@ -20,8 +20,7 @@ from jernerics.backend.path_resolver import PathResolver
 from jernerics.config import (
     ARTIFACT_ENV_VARS,
     ApptainerConfig,
-    PueueConfig,
-    SlurmConfig,
+    _normalize_time,
     load_backend_config,
     load_config,
 )
@@ -114,36 +113,21 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         project_name=ctx.project_name or "",
     )
 
-    # Merge overrides: defaults < experiment < CLI
-    backend_specific = backend_config.backend
-    if isinstance(backend_specific, SlurmConfig):
-        defaults = backend_specific.defaults_dict()
-    else:
-        defaults = {}
-
-    max_parallel = int(
-        ctx.cli_overrides.get(
-            "max_parallel",
-            sweep.backend_overrides.get(ctx.backend_name, {}).get(
-                "max_parallel",
-                backend_specific.max_concurrent_jobs
-                if isinstance(backend_specific, SlurmConfig)
-                else backend_specific.parallel
-                if isinstance(backend_specific, PueueConfig)
-                else 1,
-            ),
-        )
+    # Merge overrides: experiment < CLI (adapters handle defaults internally)
+    max_parallel_raw = ctx.cli_overrides.get(
+        "max_parallel",
+        sweep.backend_overrides.get(ctx.backend_name, {}).get("max_parallel"),
     )
+    max_parallel = int(max_parallel_raw) if max_parallel_raw else None
 
     merged = {
-        **defaults,
         **{
-            k: v
+            k: _normalize_time(v) if k == "time" else v
             for k, v in sweep.backend_overrides.get(ctx.backend_name, {}).items()
             if k not in ("max_parallel", "output", "error")
         },
         **{
-            k: v
+            k: _normalize_time(v) if k == "time" else v
             for k, v in ctx.cli_overrides.items()
             if k not in ("max_parallel", "output", "error")
         },
@@ -184,7 +168,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         dag_relpath=ctx.dag_relpath,
         config_relpath=ctx.config_relpath,
         project_name=ctx.project_name,
-        max_parallel=max_parallel if max_parallel > 0 else None,
+        max_parallel=max_parallel,
         backend_overrides=merged,
     )
 
@@ -211,7 +195,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         study_name=ctx.study_name,
         log_dir=f"{cache_host}/logs",
         cache_dir=cache_host,
-        max_parallel=max_parallel if max_parallel > 0 else None,
+        max_parallel=max_parallel,
         overrides=merged,
     )
 
