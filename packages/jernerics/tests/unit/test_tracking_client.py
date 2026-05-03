@@ -40,6 +40,58 @@ class TestGrpcChannelKeepalive:
         assert "grpc.keepalive_time_ms" in opt_dict
 
 
+class TestApiKeyAuth:
+    def test_stream_client_authenticates_with_server(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        api_key = "test-key"
+        server = _start_server(tmp_path / "test.duckdb", api_key=api_key)
+        stub = _make_stub()
+        pb_file = tmp_path / "0.pb"
+
+        with TrackingWriter(pb_file) as writer:
+            writer.write_envelope(_param_envelope(0, "lr", 0.01))
+            writer.write_envelope(_trial_end_envelope(1))
+
+        client = StreamClient(
+            stub, pb_file, poll_interval=0.05, flush_timeout=5.0, api_key=api_key
+        )
+        client.start()
+        client.join()
+        server.stop(grace=0)
+
+        import duckdb
+
+        con = duckdb.connect(str(tmp_path / "test.duckdb"))
+        assert _count(con, "params") == 1
+        con.close()
+
+    def test_stream_client_without_key_against_auth_server_fails(
+        self, tmp_path: Path
+    ) -> None:
+        api_key = "test-key"
+        server = _start_server(tmp_path / "test.duckdb", api_key=api_key)
+        stub = _make_stub()
+        pb_file = tmp_path / "0.pb"
+
+        with TrackingWriter(pb_file) as writer:
+            writer.write_envelope(_param_envelope(0, "lr", 0.01))
+            writer.write_envelope(_trial_end_envelope(1))
+
+        client = StreamClient(
+            stub, pb_file, poll_interval=0.01, flush_timeout=2.0, max_retry_time=0.5
+        )
+        client.start()
+        client.join()
+        server.stop(grace=0)
+
+        import duckdb
+
+        con = duckdb.connect(str(tmp_path / "test.duckdb"))
+        assert _count(con, "params") == 0
+        con.close()
+
+
 class TestSendEventDeadline:
     def test_send_event_called_with_deadline(self, tmp_path: Path) -> None:
         mock_stub = MagicMock()
@@ -310,10 +362,10 @@ def _count(con, table: str) -> int:
     return row[0]
 
 
-def _start_server(db_path: Path) -> grpc.Server:
+def _start_server(db_path: Path, api_key: str | None = None) -> grpc.Server:
     from jernerics_server.server import serve
 
-    return serve(db_path, port=50053)
+    return serve(db_path, port=50053, api_key=api_key)
 
 
 def _make_stub() -> tracking_pb2_grpc.TrackingServiceStub:

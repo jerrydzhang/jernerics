@@ -56,11 +56,14 @@ def run_pipeline(
         upload_fn(s3_key, storage_path)
 
     if stub is not None:
+        api_key = os.environ.get("JERNERICS_API_KEY")
+        metadata = [("x-api-key", api_key)] if api_key else None
         tracking_dir_path = Path(tracking_dir)
         replay_tracking(
             tracking_dir=tracking_dir_path.parent,
             stub=stub,
             study=ctx.study_name,
+            metadata=metadata,
         )
         sync_artifacts(
             tracking_dir=tracking_dir_path.parent,

@@ -28,6 +28,21 @@ class TestExitCode:
         assert ExitCode.CONTAINER_ERROR == 5
 
 
+class TestArtifactEnvVars:
+    def test_includes_api_key(self):
+        from jernerics.config import ARTIFACT_ENV_VARS
+
+        assert "JERNERICS_API_KEY" in ARTIFACT_ENV_VARS
+
+    def test_includes_s3_vars(self):
+        from jernerics.config import ARTIFACT_ENV_VARS
+
+        assert "AWS_ENDPOINT_URL" in ARTIFACT_ENV_VARS
+        assert "AWS_ACCESS_KEY_ID" in ARTIFACT_ENV_VARS
+        assert "AWS_SECRET_ACCESS_KEY" in ARTIFACT_ENV_VARS
+        assert "JERNERICS_ARTIFACT_BUCKET" in ARTIFACT_ENV_VARS
+
+
 class TestIsTty:
     def test_is_tty_returns_bool(self):
         result = is_tty()

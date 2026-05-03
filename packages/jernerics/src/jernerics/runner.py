@@ -88,7 +88,9 @@ def run_trial(
             channel = grpc_channel(server_addr)
             stub = tracking_pb2_grpc.TrackingServiceStub(channel)
             sync_client = StreamClient(
-                stub, Path(tracking_dir) / "events" / f"{trial.number}.pb"
+                stub,
+                Path(tracking_dir) / "events" / f"{trial.number}.pb",
+                api_key=os.environ.get("JERNERICS_API_KEY"),
             )
             sync_client.start()
 

@@ -20,6 +20,7 @@ class StreamClient:
         flush_timeout: float = 60.0,
         send_deadline: float = 30.0,
         max_retry_time: float = 300.0,
+        api_key: str | None = None,
     ):
         self.stub: tracking_pb2_grpc.TrackingServiceStub = stub
         self.path: Path = path
@@ -27,6 +28,9 @@ class StreamClient:
         self.flush_timeout: float = flush_timeout
         self.send_deadline: float = send_deadline
         self.max_retry_time: float = max_retry_time
+        self._metadata: list[tuple[str, str]] | None = (
+            [("x-api-key", api_key)] if api_key else None
+        )
         self.producer_thread = Thread(target=self._read_file_buffer, daemon=True)
         self.consumer = Thread(target=self._consume_buffer, daemon=True)
         self.buffer: Queue[Envelope] = Queue(maxsize=10000)
@@ -82,7 +86,11 @@ class StreamClient:
                     return
 
                 try:
-                    self.stub.SendEvent(event, timeout=self.send_deadline)
+                    self.stub.SendEvent(
+                        event,
+                        timeout=self.send_deadline,
+                        metadata=self._metadata,
+                    )
                     retry_count = 0
                     retry_start = time.monotonic()
                     sent = True

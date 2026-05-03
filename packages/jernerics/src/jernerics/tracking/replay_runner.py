@@ -41,6 +41,9 @@ def main() -> None:
     parser.add_argument("--max-workers", type=int, default=16, help="Thread pool size")
     args = parser.parse_args()
 
+    api_key = os.environ.get("JERNERICS_API_KEY")
+    metadata = [("x-api-key", api_key)] if api_key else None
+
     channel = grpc_channel(args.server_addr)
     stub = tracking_pb2_grpc.TrackingServiceStub(channel)
 
@@ -51,6 +54,7 @@ def main() -> None:
             stub=stub,
             study=args.study,
             max_workers=args.max_workers,
+            metadata=metadata,
         )
     finally:
         channel.close()

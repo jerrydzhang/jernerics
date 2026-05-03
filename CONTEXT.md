@@ -69,6 +69,18 @@ _Avoid_: sync (ambiguous with the CLI command / replay path)
 **Replay**:
 The batch path: after trials finish, orphaned `.pb` files on the remote are replayed to the gRPC server via SSH. Triggered by the `sync` CLI command.
 
+**Query endpoint**:
+An HTTP endpoint on the tracking server that accepts SQL and returns JSON rows. The thin interface between analytical clients (dashboard, notebooks) and the DuckDB store. Transport is swappable (future: Arrow Flight) as long as the interface stays stateless.
+
+**Dashboard**:
+A React SPA served as static files by the tracking server. Renders wandb-style sweep comparison views using Plotly.js. Shares chart themes with Python notebooks via a shared JSON template. Shows artifact previews inline (images, tables) with download links for other types. Artifacts are displayed in trial/sweep context — not a separate browser.
+
+**Tracking server**:
+A single process running gRPC ingestion, HTTP query endpoint, and static file serving for the dashboard. Owns the DuckDB file exclusively — all reads go through the HTTP query endpoint. Authenticated via API key in gRPC metadata / HTTP header. Proxies artifact downloads from MinIO — single URL, single auth point.
+
+**Funnel vs tailnet**:
+All gRPC traffic (ingestion from HPC, replay from post-hook, streaming from local runs) goes through the Tailscale funnel URL with TLS. The dashboard, HTTP query endpoint, and artifact proxy listen on a separate port not exposed via funnel — tailnet-only, accessible only from personal devices. API key auth applies everywhere regardless.
+
 **Heartbeat**:
 A file touched periodically by a running trial. Used to detect stale (presumably dead) trials. Exists under `heartbeats/<trial_number>.heartbeat`.
 

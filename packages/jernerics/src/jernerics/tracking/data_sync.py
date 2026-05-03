@@ -36,6 +36,7 @@ def _replay_file(
     path: Path,
     stub: tracking_pb2_grpc.TrackingServiceStub,
     max_retries: int = 10,
+    metadata: list[tuple[str, str]] | None = None,
 ) -> FileResult:
     result = FileResult(path=path)
 
@@ -48,7 +49,7 @@ def _replay_file(
             retry_count = 0
             while True:
                 try:
-                    stub.SendEvent(event)
+                    stub.SendEvent(event, metadata=metadata)
                     break
                 except grpc.RpcError:
                     retry_count += 1
@@ -81,6 +82,7 @@ def replay_tracking(
     study: str | None = None,
     max_workers: int = 16,
     max_retries: int = 10,
+    metadata: list[tuple[str, str]] | None = None,
 ) -> ReplayResult:
     """
     Replay .pb tracking files to the gRPC server.
@@ -112,7 +114,7 @@ def replay_tracking(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_replay_file, path, stub, max_retries): path
+            executor.submit(_replay_file, path, stub, max_retries, metadata): path
             for path in pb_files
         }
 

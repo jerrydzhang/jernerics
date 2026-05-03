@@ -91,10 +91,14 @@ class LocalBackend:
         channel = grpc_channel(self.tracking_server or "")
         stub = tracking_pb2_grpc.TrackingServiceStub(channel)
 
+        api_key = os.environ.get("JERNERICS_API_KEY")
+        metadata = [("x-api-key", api_key)] if api_key else None
+
         replay_tracking(
             tracking_dir=tracking_dir,
             stub=stub,
             study=spec.study_name,
+            metadata=metadata,
         )
 
         artifact_env = {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}

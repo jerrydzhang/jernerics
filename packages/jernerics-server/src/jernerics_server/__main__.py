@@ -1,4 +1,5 @@
 import argparse
+import os
 import signal
 import sys
 
@@ -25,9 +26,12 @@ def main():
     )
     args = parser.parse_args()
 
-    server = serve(args.db, args.port, args.host)
+    api_key = os.environ.get("JERNERICS_API_KEY")
+    server = serve(args.db, args.port, args.host, api_key=api_key)
     print(f"Listening on {args.host}:{args.port}", file=sys.stderr)
     print(f"Database: {args.db}", file=sys.stderr)
+    if api_key:
+        print("API key authentication enabled", file=sys.stderr)
 
     signal.signal(signal.SIGINT, lambda *_: (server.stop(grace=2), sys.exit(0)))
     signal.signal(signal.SIGTERM, lambda *_: (server.stop(grace=2), sys.exit(0)))

@@ -67,6 +67,29 @@ def _write_events(path: Path, events: list[Envelope]) -> None:
             writer.write_envelope(event)
 
 
+class TestReplayFileWithAuth:
+    def test_passes_metadata_to_send_event(self, tmp_path: Path) -> None:
+        mock_stub = MagicMock()
+        pb_file = tmp_path / "0.pb"
+        _write_events(pb_file, [_param_envelope(0, "lr", 0.01)])
+
+        metadata = [("x-api-key", "secret")]
+        _replay_file(pb_file, mock_stub, max_retries=3, metadata=metadata)
+
+        call_kwargs = mock_stub.SendEvent.call_args
+        assert call_kwargs.kwargs.get("metadata") == metadata
+
+    def test_no_metadata_when_none(self, tmp_path: Path) -> None:
+        mock_stub = MagicMock()
+        pb_file = tmp_path / "0.pb"
+        _write_events(pb_file, [_param_envelope(0, "lr", 0.01)])
+
+        _replay_file(pb_file, mock_stub, max_retries=3, metadata=None)
+
+        call_kwargs = mock_stub.SendEvent.call_args
+        assert call_kwargs.kwargs.get("metadata") is None
+
+
 class TestDiscoverPbFiles:
     def test_finds_all_studies(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
@@ -134,7 +157,7 @@ class TestReplayFile:
         mock_stub = MagicMock()
         call_count = 0
 
-        def send_side_effect(_event):
+        def send_side_effect(_event, **_kwargs):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
