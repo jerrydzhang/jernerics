@@ -189,7 +189,9 @@ def _run_task(
         )
 
     tracker = tracker or NullTracker()
-    kwargs = {**inputs, "config": config}
+    kwargs = {**inputs}
+    if "config" in sig.parameters:
+        kwargs["config"] = config
     if "tracker" in sig.parameters:
         kwargs["tracker"] = tracker
 
