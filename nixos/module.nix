@@ -36,13 +36,13 @@ in
 
       httpPort = lib.mkOption {
         type = lib.types.nullOr lib.types.port;
-        default = lib.mkDefault null;
+        default = null;
         description = "HTTP port for query and artifact endpoints. null disables HTTP.";
       };
 
       httpHost = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
-        default = lib.mkDefault null;
+        default = null;
         description = "HTTP host to bind to. null uses the same as host.";
       };
 
