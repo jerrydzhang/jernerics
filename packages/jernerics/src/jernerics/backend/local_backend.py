@@ -10,10 +10,11 @@ from jernerics.backend.models import (
     SubmitResult,
     SweepSubmission,
 )
-from jernerics.config import ARTIFACT_ENV_VARS, load_config
+from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
+from jernerics.tracking.infra import resolve_artifact_storage, resolve_streaming
 
 
 class LocalBackend:
@@ -84,12 +85,11 @@ class LocalBackend:
         )
 
     def _run_post_hook(self, tracking_dir, spec: SweepSubmission) -> None:
-        from jernerics_proto import tracking_pb2_grpc
+        streaming = resolve_streaming(self.tracking_server or "")
+        if not streaming:
+            return
 
-        from jernerics.tracking.grpc_channel import grpc_channel
-
-        channel = grpc_channel(self.tracking_server or "")
-        stub = tracking_pb2_grpc.TrackingServiceStub(channel)
+        channel, stub = streaming
 
         api_key = os.environ.get("JERNERICS_API_KEY")
         metadata = [("x-api-key", api_key)] if api_key else None
@@ -101,21 +101,12 @@ class LocalBackend:
             metadata=metadata,
         )
 
-        artifact_env = {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}
-        if artifact_env.get("AWS_ENDPOINT_URL") and artifact_env.get(
-            "JERNERICS_ARTIFACT_BUCKET"
-        ):
-            import boto3
-
-            s3 = boto3.client("s3")
-            bucket = artifact_env["JERNERICS_ARTIFACT_BUCKET"]
-
-            def upload_fn(s3_key: str, local_path: str) -> None:
-                s3.upload_file(local_path, bucket, s3_key)
-
+        upload_fn = resolve_artifact_storage()
+        if upload_fn:
             sync_artifacts(
                 tracking_dir=tracking_dir,
                 upload_fn=upload_fn,
                 project=spec.project_name or "",
                 study=spec.study_name,
             )
+        channel.close()

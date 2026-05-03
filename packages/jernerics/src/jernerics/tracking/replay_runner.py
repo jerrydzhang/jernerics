@@ -12,21 +12,8 @@ import os
 import sys
 from pathlib import Path
 
-from jernerics_proto import tracking_pb2_grpc
-
 from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
-from jernerics.tracking.grpc_channel import grpc_channel
-
-
-def _make_s3_upload_fn(bucket: str):
-    import boto3
-
-    s3 = boto3.client("s3")
-
-    def upload_file(s3_key: str, local_path: str) -> None:
-        s3.upload_file(local_path, bucket, s3_key)
-
-    return upload_file
+from jernerics.tracking.infra import resolve_artifact_storage, resolve_streaming
 
 
 def main() -> None:
@@ -41,14 +28,16 @@ def main() -> None:
     parser.add_argument("--max-workers", type=int, default=16, help="Thread pool size")
     args = parser.parse_args()
 
+    streaming = resolve_streaming(args.server_addr)
+    if not streaming:
+        print("Error: failed to connect to tracking server", file=sys.stderr)
+        sys.exit(1)
+
+    channel, stub = streaming
     api_key = os.environ.get("JERNERICS_API_KEY")
     metadata = [("x-api-key", api_key)] if api_key else None
 
-    channel = grpc_channel(args.server_addr)
-    stub = tracking_pb2_grpc.TrackingServiceStub(channel)
-
     try:
-        # Step 1: Replay tracking events
         result = replay_tracking(
             tracking_dir=Path(args.tracking_dir),
             stub=stub,
@@ -63,12 +52,9 @@ def main() -> None:
         sys.exit(1)
 
     # Step 2: Sync artifacts (graceful skip if env vars absent)
-    bucket = os.environ.get("JERNERICS_ARTIFACT_BUCKET")
-    endpoint = os.environ.get("AWS_ENDPOINT_URL")
-
-    if bucket and endpoint:
+    upload_fn = resolve_artifact_storage()
+    if upload_fn:
         print("Syncing artifacts...", file=sys.stderr)
-        upload_fn = _make_s3_upload_fn(bucket)
         sync_artifacts(
             Path(args.tracking_dir),
             upload_fn=upload_fn,

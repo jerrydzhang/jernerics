@@ -4,17 +4,15 @@ import threading
 from pathlib import Path
 from typing import Any
 
-import boto3
 import grpc
 import optuna
-from jernerics_proto import tracking_pb2_grpc
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.config import load_config
 from jernerics.dag import DAG
 from jernerics.tracking import ProtobufTracker, Tracker
 from jernerics.tracking.artifact_uploader import ArtifactUploader
-from jernerics.tracking.grpc_channel import grpc_channel
+from jernerics.tracking.infra import resolve_artifact_storage, resolve_streaming
 from jernerics.tracking.stream_client import StreamClient
 
 
@@ -25,15 +23,6 @@ class _TaskFailure(Exception):
 def _heartbeat_loop(path: Path, interval: float, stop: threading.Event) -> None:
     while not stop.wait(interval):
         path.touch()
-
-
-def _make_s3_upload_fn(bucket: str) -> Any:
-    s3 = boto3.client("s3")
-
-    def upload_file(s3_key: str, local_path: str) -> None:
-        s3.upload_file(local_path, bucket, s3_key)
-
-    return upload_file
 
 
 def run_trial(
@@ -85,23 +74,23 @@ def run_trial(
 
         if server_addr and tracker:
             assert tracking_dir is not None
-            channel = grpc_channel(server_addr)
-            stub = tracking_pb2_grpc.TrackingServiceStub(channel)
-            sync_client = StreamClient(
-                stub,
-                Path(tracking_dir) / "events" / f"{trial.number}.pb",
-                api_key=os.environ.get("JERNERICS_API_KEY"),
-            )
-            sync_client.start()
+            streaming = resolve_streaming(server_addr)
+            if streaming:
+                channel, stub = streaming
+                sync_client = StreamClient(
+                    stub,
+                    Path(tracking_dir) / "events" / f"{trial.number}.pb",
+                    api_key=os.environ.get("JERNERICS_API_KEY"),
+                )
+                sync_client.start()
 
         if tracking_dir and manifest_path:
-            bucket = os.environ.get("JERNERICS_ARTIFACT_BUCKET")
-            endpoint = os.environ.get("AWS_ENDPOINT_URL")
-            if bucket and endpoint:
+            upload_fn = resolve_artifact_storage()
+            if upload_fn:
                 artifact_uploader = ArtifactUploader(
                     manifest_path=manifest_path,
                     cursor_path=cursor_path,
-                    upload_fn=_make_s3_upload_fn(bucket),
+                    upload_fn=upload_fn,
                     project=project_name or "",
                     study=study_name,
                     trial_id=trial.number,
