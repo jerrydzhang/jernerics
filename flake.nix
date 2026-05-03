@@ -112,7 +112,7 @@
         }
       );
 
-      nixosModules.default = import ./nixos/module.nix;
+      nixosModules.default = import ./nix/module.nix;
 
       checks = forAllSystems (
         system:
@@ -120,7 +120,7 @@
           pkgs = nixpkgs.legacyPackages.${system};
         in
         lib.optionalAttrs pkgs.stdenv.isLinux {
-          nixos-module = import ./nixos/tests/module.nix {
+          nixos-module = import ./nix/tests/module.nix {
             inherit self system pkgs;
           };
         }
