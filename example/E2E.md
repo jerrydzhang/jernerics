@@ -1,10 +1,10 @@
-# E2E Test Guide: sweep-e2e
+# E2E Test Guide
 
 Automated verification of the full jernerics pipeline across three
 backend+container combinations, exercising DAG execution, Optuna sweeps,
-tracking streams, artifact storage, and retry logic.
+tracking streams, artifact storage, GPU detection, and retry logic.
 
-Run all commands from `examples/sweep-e2e/`.
+Run all commands from `example/`.
 
 ## Three backends
 
@@ -45,11 +45,11 @@ ssh jez21005@scimlab.engr.uconn.edu docker ps
 
 ```bash
 # Env vars must be set in the current shell
-echo $JERNERICS_TRACKING_SERVER    # atlas.taile454b.ts.net:443
-echo $AWS_ENDPOINT_URL              # https://atlas.taile454b.ts.net:8443
-echo $AWS_ACCESS_KEY_ID             # (set)
-echo $AWS_SECRET_ACCESS_KEY         # (set)
-echo $JERNERICS_ARTIFACT_BUCKET     # jernerics
+echo $JERNERICS_TRACKING_SERVER
+echo $AWS_ENDPOINT_URL
+echo $AWS_ACCESS_KEY_ID
+echo $AWS_SECRET_ACCESS_KEY
+echo $JERNERICS_ARTIFACT_BUCKET
 
 # Connectivity checks
 curl -sk -o /dev/null -w "%{http_code}" $AWS_ENDPOINT_URL/minio/health/live
@@ -309,7 +309,106 @@ pueue clean
 
 ---
 
-## Test 5: Clean guards unsynced data
+## Test 5: GPU detection
+
+Tests the `detect_gpu` task on HPC with GPU partition. Uses
+`config_gpu.py` — 1 trial, `priority-gpu` partition, `gres: gpu:1`.
+On pueue-remote the workstation always has GPU access.
+
+### 5a. Local GPU check
+
+```bash
+jernerics local dag.py config_gpu.py
+```
+
+**Pass:** Exits 0. Trial output includes `detect_gpu` result showing
+`cuda_available` (true or false depending on local hardware). No crash
+regardless of CUDA availability.
+
+### 5b. HPC with GPU
+
+```bash
+jernerics run --backend hpc dag.py config_gpu.py
+```
+
+**Pass:** Job submitted to `priority-gpu` partition. Trial output
+should show `cuda_available: True` and a GPU device name.
+
+### 5c. pueue-remote (always has GPU)
+
+```bash
+jernerics run --backend pueue-remote dag.py config_gpu.py
+```
+
+**Pass:** Trial output shows `cuda_available: True`.
+
+---
+
+## Test 6: Retry — app crash
+
+Tests app-level failure handling with `config_retry_app.py`.
+6-trial grid sweep; trials 1 and 4 raise `RuntimeError`.
+Failed trials should be reported in the sweep summary; successful
+trials complete normally.
+
+### 6a. Run locally
+
+```bash
+jernerics local dag.py config_retry_app.py
+```
+
+**Pass:** Exits 0. Trials 1 and 4 show RuntimeError in output.
+Other 4 trials complete normally with loss values.
+
+### 6b. Run on HPC
+
+```bash
+jernerics run --backend hpc dag.py config_retry_app.py
+```
+
+**Pass:** Array job with 6 tasks. Failed trials visible in logs.
+Post-hook runs after array completes.
+
+---
+
+## Test 7: Retry — node death
+
+Tests heartbeat staleness detection with `config_retry_node.py`.
+6-trial grid sweep; trials 1 and 4 call `os._exit(9)`, simulating
+node death. Requires retry infrastructure (heartbeat + checker) to
+resubmit dead trials.
+
+### 7a. Run on HPC
+
+```bash
+jernerics run --backend hpc dag.py config_retry_node.py
+```
+
+**Pass:** Array job submitted. Dead trials (1, 4) are detected by
+heartbeat checker and resubmitted. Final sweep summary includes all
+6 trials completed or retried.
+
+---
+
+## Test 8: Retry — persistent failure
+
+Tests max-retries exhaustion with `config_retry_persistent.py`.
+2 trials; any trial with `lr < 5e-4` (i.e., `lr=1e-4`) dies via
+`os._exit(9)` every time. Retried trials get the same params and
+die again until max_retries is exhausted.
+
+### 8a. Run locally
+
+```bash
+jernerics local dag.py config_retry_persistent.py
+```
+
+**Pass:** Trial with `lr=1e-4` exhausts retries and is marked failed.
+Trial with `lr=1e-3` completes normally.
+
+---
+
+## Test 9: Clean guards unsynced data
 
 Verifies the clean command refuses when unsynced data exists.
 
@@ -344,7 +443,7 @@ rm ~/.cache/jernerics/sweep-e2e/tracking/$STUDY/events/99.pb
 
 ---
 
-## Test 6: Sync command
+## Test 10: Sync command
 
 Verifies the sync command replays tracking data from remote to server.
 

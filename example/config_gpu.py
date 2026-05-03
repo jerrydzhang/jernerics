@@ -1,8 +1,5 @@
 import optuna
 
-# Sweep with artifact logging: multiple artifacts per trial.
-# Tests byte offset tracking in manifest (cursor advances correctly).
-
 base = {"seed": 42}
 
 
@@ -13,16 +10,16 @@ def search_space(trial):
     }
 
 
-n_trials = 3
+n_trials = 1
 sampler = optuna.samplers.TPESampler(seed=42)
 objective = lambda results: results["evaluate"]["loss"]
 direction = "minimize"
 
 backend_overrides = {
     "hpc": {
-        "partition": "priority",
+        "partition": "priority-gpu",
         "time": "0:10:00",
         "mem": "4G",
-        "max_parallel": 10,
+        "gres": "gpu:1",
     },
 }

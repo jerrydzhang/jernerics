@@ -23,3 +23,7 @@ proto:
     cd packages/jernerics-proto && python generate.py
 
 check: lint format-check typecheck test
+
+install-skills:
+    mkdir -p ~/.pi/agent/skills
+    ln -sfn {{justfile_directory()}}/skills/jernerics ~/.pi/agent/skills/jernerics

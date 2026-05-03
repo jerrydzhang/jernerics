@@ -10,16 +10,24 @@ from sweep_e2e import crash_app, crash_node, fake_loss
 with DAG() as dag:
 
     @task
+    def detect_gpu(tracker: Tracker):
+        import torch
+
+        cuda = torch.cuda.is_available()
+        device = torch.cuda.get_device_name(0) if cuda else "cpu-only"
+        tracker.log_metrics({"cuda_available": float(cuda)})
+        return {"cuda_available": cuda, "device": device}
+
+    @task
     def generate_data(config):
         trial_number = config.get("config_index", 0)
 
-        if crash_node(
+        crash_node(
             trial_number,
             config.get("crash_node_on", []),
             lr=config.get("lr", 0),
             lr_fatal=config.get("lr_fatal", -1),
-        ):
-            pass
+        )
 
         if crash_app(trial_number, config.get("crash_app_on", [])):
             raise RuntimeError(f"App crash: trial {trial_number}")

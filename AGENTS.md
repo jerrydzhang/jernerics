@@ -61,6 +61,9 @@ src/jernerics/
   config.py              # BackendConfig, SweepConfig, config loading
   runner.py              # Trial runner invoked via python -m jernerics.runner
   paths.py               # cache_dir(), work(), is_hpc()
+  post_hook.py           # Post-sweep hook (replay tracking, sync to server)
+  retry.py               # Retry orchestration logic
+  retry_checker.py       # Heartbeat staleness detection
   dag/                   # DAG executor, task decorator
   backend/               # Multi-backend execution
     adapter.py           # SchedulerAdapter protocol + SweepSubmissionParams
@@ -80,8 +83,9 @@ src/jernerics/
     pueue/               # Pueue scheduler adapter
       adapter.py         # PueueAdapter (pueue + Docker/Apptainer/none)
   container/
-    templates.py         # Container definition templates
+    templates.py         # Container definition templates (.def and Dockerfile)
   tracking/              # Protobuf tracker, wire format, gRPC sync client, replay
+                         # Also: artifact_manifest, artifact_uploader, infra, trial_environment
 tests/
   unit/                  # Mirrors src/ structure
 ```

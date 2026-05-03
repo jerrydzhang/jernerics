@@ -26,7 +26,7 @@ from .config import (
     load_config,
     load_tracking_server,
 )
-from .container.templates import generate_container_def, list_starters
+from .container.templates import get_starter, list_starters
 from .paths import cache_dir
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
@@ -439,6 +439,19 @@ def sync(
     backend.sync(project_name, study=study)
 
 
+def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:
+    target = project_path / filename
+    if target.exists():
+        print(f"Skipped: {filename} (already exists)")
+        return
+    try:
+        content = get_starter(starter, ext=ext)
+        target.write_text(content)
+        print(f"Created: {filename}")
+    except ValueError:
+        pass
+
+
 # ── init ─────────────────────────────────────────────────────────────────────
 
 
@@ -507,12 +520,8 @@ def init(
 
     print("Updated: pyproject.toml")
 
-    container_def_path = project_path / "container.def"
-    if not container_def_path.exists():
-        container_def_path.write_text(generate_container_def(starter))
-        print("Created: container.def")
-    else:
-        print("Skipped: container.def (already exists)")
+    _copy_starter(project_path, starter, ".def", "container.def")
+    _copy_starter(project_path, starter, ".Dockerfile", "Dockerfile")
 
     src_dir = project_path / "src"
     if not src_dir.exists():

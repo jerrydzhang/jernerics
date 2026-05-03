@@ -1,5 +1,3 @@
-import optuna
-
 # Grid sweep + param-driven persistent failure.
 # Any trial with lr < lr_fatal (5e-4) gets os._exit(9).
 # Retried trials get same params → also die → max_retries exhausted.

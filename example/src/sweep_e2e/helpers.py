@@ -1,5 +1,4 @@
 import os
-from pathlib import Path
 
 
 def fake_loss(lr: float, dropout: float, seed: int) -> float:
