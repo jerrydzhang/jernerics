@@ -89,7 +89,7 @@ def create_app(
                 raise HTTPException(status_code=404, detail="Artifact not found")
 
             filename = row[0]
-            s3_key = f"{project}/{study}/{trial_id}/{key}/{filename}"
+            s3_key = f"{project}/{study}/{trial_id}/{key}"
             try:
                 body, _ = s3_fetch("", s3_key)
             except FileNotFoundError:

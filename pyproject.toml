@@ -74,3 +74,9 @@ extra-paths = [
 
 [tool.ty.rules]
 possibly-missing-submodule = "ignore"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:websockets",
+    "ignore::DeprecationWarning:uvicorn",
+]

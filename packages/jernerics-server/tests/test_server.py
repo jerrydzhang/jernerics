@@ -1,3 +1,5 @@
+import socket
+
 import duckdb
 import grpc
 import httpx
@@ -6,9 +8,15 @@ from jernerics_proto import ParamEvent, Value, tracking_pb2, tracking_pb2_grpc
 from jernerics_server.server import serve
 
 
+def _random_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 @pytest.fixture
 def server_and_stub(tmp_path):
-    port = 50052
+    port = _random_port()
     server = serve(tmp_path / "test.duckdb", port=port)
     channel = grpc.insecure_channel(f"localhost:{port}")
     stub = tracking_pb2_grpc.TrackingServiceStub(channel)
@@ -20,7 +28,7 @@ def server_and_stub(tmp_path):
 class TestApiKeyInterceptor:
     def test_valid_key_passes(self, tmp_path):
         api_key = "test-secret"
-        port = 50053
+        port = _random_port()
         server = serve(tmp_path / "test.duckdb", port=port, api_key=api_key)
         channel = grpc.insecure_channel(f"localhost:{port}")
         stub = tracking_pb2_grpc.TrackingServiceStub(channel)
@@ -41,7 +49,7 @@ class TestApiKeyInterceptor:
 
     def test_missing_key_rejected(self, tmp_path):
         api_key = "test-secret"
-        port = 50053
+        port = _random_port()
         server = serve(tmp_path / "test.duckdb", port=port, api_key=api_key)
         channel = grpc.insecure_channel(f"localhost:{port}")
         stub = tracking_pb2_grpc.TrackingServiceStub(channel)
@@ -63,7 +71,7 @@ class TestApiKeyInterceptor:
 
     def test_invalid_key_rejected(self, tmp_path):
         api_key = "test-secret"
-        port = 50053
+        port = _random_port()
         server = serve(tmp_path / "test.duckdb", port=port, api_key=api_key)
         channel = grpc.insecure_channel(f"localhost:{port}")
         stub = tracking_pb2_grpc.TrackingServiceStub(channel)
@@ -129,8 +137,8 @@ class TestGrpcHttpRoundTrip:
         import time
 
         api_key = "test-secret"
-        grpc_port = 50054
-        http_port = 8084
+        grpc_port = _random_port()
+        http_port = _random_port()
         server = serve(
             tmp_path / "test.duckdb",
             port=grpc_port,
