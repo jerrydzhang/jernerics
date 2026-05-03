@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import grpc
-from jernerics.tracking.data_sync import (
+from jernerics.tracking.batch_sync import (
     ReplayResult,
     _replay_file,
     discover_manifest_files,
@@ -10,7 +10,7 @@ from jernerics.tracking.data_sync import (
     replay_tracking,
     sync_artifacts,
 )
-from jernerics.tracking.wire import TrackingWriter
+from jernerics.tracking.pb_io import TrackingWriter
 from jernerics_proto import (
     Envelope,
     MetricEvent,
@@ -168,7 +168,7 @@ class TestReplayFile:
         pb_file = tmp_path / "0.pb"
         _write_events(pb_file, [_param_envelope(0, "lr", 0.01)])
 
-        with patch("jernerics.tracking.data_sync._RETRY_BASE_INTERVAL", 0.01):
+        with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
             result = _replay_file(pb_file, mock_stub, max_retries=5)
 
         assert result.events_sent == 1
@@ -184,7 +184,7 @@ class TestReplayFile:
             [_param_envelope(0, "lr", 0.01), _metric_envelope(1, "loss", 0.5, 10)],
         )
 
-        with patch("jernerics.tracking.data_sync._RETRY_BASE_INTERVAL", 0.01):
+        with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
             result = _replay_file(pb_file, mock_stub, max_retries=2)
 
         assert result.events_sent == 0

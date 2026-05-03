@@ -11,7 +11,7 @@ from pathlib import Path
 
 from jernerics.retry import RetryContext
 from jernerics.retry_checker import run_checker
-from jernerics.tracking.data_sync import replay_tracking, sync_artifacts
+from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
 
 
 class PipelineResult(enum.Enum):

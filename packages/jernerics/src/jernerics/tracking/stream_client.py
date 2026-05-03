@@ -8,7 +8,7 @@ import grpc
 from jernerics_proto import tracking_pb2_grpc
 from jernerics_proto.tracking_pb2 import Envelope
 
-from .wire import TrackingReader
+from .pb_io import TrackingReader
 
 
 class StreamClient:

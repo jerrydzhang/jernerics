@@ -9,7 +9,7 @@ from pathlib import Path
 import grpc
 from jernerics_proto import tracking_pb2_grpc
 
-from .wire import TrackingReader
+from .pb_io import TrackingReader
 
 # Default retry settings (matches StreamClient).
 _RETRY_BASE_INTERVAL = 0.5

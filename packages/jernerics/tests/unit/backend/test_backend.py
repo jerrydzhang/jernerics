@@ -25,16 +25,14 @@ def _make_backend(host=None, container=None, adapter=None, syncer=None, **overri
             submissions=[JobSubmission(job_id="123", n_trials=5)]
         )
     defaults = {
-        "remote_dir": "/scratch/user/proj",
-        "cache_dir": "/scratch/cache",
         "project_name": "proj",
         "tracking_server": None,
         "heartbeat_interval_s": 60.0,
     }
     defaults.update(overrides)
     paths = PathResolver(
-        remote_dir=defaults["remote_dir"],
-        cache_dir=defaults["cache_dir"],
+        remote_dir="/scratch/user/proj",
+        cache_dir="/scratch/cache",
         container=container,
         project_name=defaults["project_name"],
     )
@@ -44,8 +42,6 @@ def _make_backend(host=None, container=None, adapter=None, syncer=None, **overri
         adapter=adapter,
         syncer=syncer,
         paths=paths,
-        remote_dir=defaults["remote_dir"],
-        cache_dir=defaults["cache_dir"],
         project_name=defaults["project_name"],
         tracking_server=defaults["tracking_server"],
         heartbeat_interval_s=defaults["heartbeat_interval_s"],

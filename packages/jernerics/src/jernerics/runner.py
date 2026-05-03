@@ -15,7 +15,7 @@ from jernerics.dag import DAG
 from jernerics.tracking import ProtobufTracker, Tracker
 from jernerics.tracking.artifact_uploader import ArtifactUploader
 from jernerics.tracking.grpc_channel import grpc_channel
-from jernerics.tracking.sync_client import StreamClient
+from jernerics.tracking.stream_client import StreamClient
 
 
 class _TaskFailure(Exception):

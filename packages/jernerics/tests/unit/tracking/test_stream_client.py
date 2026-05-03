@@ -3,8 +3,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import grpc
-from jernerics.tracking.sync_client import StreamClient
-from jernerics.tracking.wire import TrackingWriter
+from jernerics.tracking.pb_io import TrackingWriter
+from jernerics.tracking.stream_client import StreamClient
 from jernerics_proto import (
     Envelope,
     MetricEvent,
@@ -334,7 +334,7 @@ class TestPartialEvent:
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
-        from jernerics.tracking.wire import encode_varint
+        from jernerics.tracking.pb_io import encode_varint
 
         with TrackingWriter(pb_file) as writer:
             writer.write_envelope(_param_envelope(0, "lr", 0.01))

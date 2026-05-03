@@ -21,8 +21,6 @@ class Backend:
         syncer,
         paths,
         *,
-        remote_dir: str,
-        cache_dir: str,
         project_name: str,
         tracking_server: str | None = None,
         heartbeat_interval_s: float = 60.0,
@@ -36,8 +34,6 @@ class Backend:
         self.adapter = adapter
         self.syncer = syncer
         self.paths = paths
-        self.remote_dir = remote_dir
-        self.cache_dir = cache_dir
         self.project_name = project_name
         self.tracking_server = tracking_server
         self.heartbeat_interval_s = heartbeat_interval_s
@@ -160,7 +156,7 @@ class Backend:
             print("=== DRY RUN ===")
             print(f"Backend: {backend_name}")
             print(f"Host: {getattr(self.host, 'host', 'local')}")
-            print(f"Remote dir: {self.remote_dir}")
+            print(f"Remote dir: {self.paths.remote_dir}")
             print()
             print("=== SCRIPT ===")
             print(script)
@@ -169,7 +165,7 @@ class Backend:
         # Sync
         if self.syncer is not None:
             host_label = getattr(self.host, "host", "local")
-            print(f"Syncing project to {host_label}:{self.remote_dir}...")
+            print(f"Syncing project to {host_label}:{self.paths.remote_dir}...")
             self.syncer.sync_project(project_dir)
 
         # Readiness check
@@ -177,7 +173,7 @@ class Backend:
         self.host.mkdir(f"{cache_host}/optuna")
         if self.syncer is not None:
             result = self.host.run(
-                self.container.exists_command(self.remote_dir),
+                self.container.exists_command(self.paths.remote_dir),
                 check=False,
                 capture_output=True,
             )
@@ -234,7 +230,7 @@ class Backend:
                     job_id=sub.job_id,
                     output_pattern=str(sub.output_pattern or effective_output),
                     error_pattern=str(sub.error_pattern or effective_error),
-                    remote_dir=self.remote_dir,
+                    remote_dir=self.paths.remote_dir,
                     n_trials=sub.n_trials,
                     local_cache_dir=local_cache_dir,
                 )
@@ -259,7 +255,7 @@ class Backend:
         has_build_file = container_def_path.exists() or dockerfile_path.exists()
 
         if not has_build_file:
-            from jernerics.container.starters import generate_container_def
+            from jernerics.container.templates import generate_container_def
 
             container_def_path.write_text(generate_container_def("python"))
             print("Created: container.def")
@@ -279,7 +275,7 @@ class Backend:
         if dry_run:
             print("=== DRY RUN ===")
             print(f"Project dir: {project_dir}")
-            print(f"Remote dir: {self.remote_dir}")
+            print(f"Remote dir: {self.paths.remote_dir}")
             if host_label:
                 print(f"Host: {host_label}")
             print()
@@ -290,11 +286,11 @@ class Backend:
 
         if self.syncer is not None:
             label = host_label or "local"
-            print(f"Syncing project to {label}:{self.remote_dir}...")
+            print(f"Syncing project to {label}:{self.paths.remote_dir}...")
             self.syncer.sync_project(project_dir)
 
         # Compose build script
-        build_cmd = self.container.build_command(self.remote_dir)
+        build_cmd = self.container.build_command(self.paths.remote_dir)
         cmd_str = " ".join(shlex.quote(c) for c in build_cmd)
         build_dir = self.paths.resolve_build_dir(project_name)
 
@@ -303,7 +299,7 @@ class Backend:
                 f"set -e\n"
                 f"mkdir -p {build_dir}\n"
                 f"export APPTAINER_TMPDIR={build_dir}\n"
-                f"cd {self.remote_dir}\n"
+                f"cd {self.paths.remote_dir}\n"
                 f"{cmd_str}\n"
                 f"rm -rf {build_dir}\n"
                 f"mkdir -p {Path(marker_path).parent}\n"
@@ -312,7 +308,7 @@ class Backend:
         else:
             build_script = (
                 f"set -e\n"
-                f"cd {self.remote_dir}\n"
+                f"cd {self.paths.remote_dir}\n"
                 f"{cmd_str}\n"
                 f"mkdir -p {Path(marker_path).parent}\n"
                 f"touch {marker_path}\n"
@@ -327,7 +323,7 @@ class Backend:
                 job_id=job_id,
                 output_pattern=f"{cache_host}/logs/build_%j.out",
                 error_pattern=f"{cache_host}/logs/build_%j.err",
-                remote_dir=self.remote_dir,
+                remote_dir=self.paths.remote_dir,
                 n_trials=1,
                 local_cache_dir=local_cache_dir,
             )
@@ -351,7 +347,7 @@ class Backend:
             print(f"Target: {target_desc}")
         print(f"  cache:   {cache_host}")
         if full:
-            print(f"  project: {self.remote_dir}")
+            print(f"  project: {self.paths.remote_dir}")
 
         active = [
             j
@@ -415,12 +411,14 @@ class Backend:
 
         if full:
             r = self.host.run(
-                ["test", "-d", self.remote_dir], check=False, capture_output=True
+                ["test", "-d", self.paths.remote_dir], check=False, capture_output=True
             )
             if r.returncode != 0:
-                print(f"\nError: project directory '{self.remote_dir}' not found.")
+                print(
+                    f"\nError: project directory '{self.paths.remote_dir}' not found."
+                )
                 raise FileNotFoundError(
-                    f"Project directory not found: {self.remote_dir}"
+                    f"Project directory not found: {self.paths.remote_dir}"
                 )
 
         if not force:
@@ -439,15 +437,15 @@ class Backend:
 
         if full:
             r = self.host.run(
-                ["rm", "-rf", self.remote_dir],
+                ["rm", "-rf", self.paths.remote_dir],
                 check=False,
                 capture_output=True,
                 text=True,
             )
             if r.returncode != 0:
-                print(f"Failed to delete {self.remote_dir}: {r.stderr}")
-                raise RuntimeError(f"Failed to delete {self.remote_dir}")
-            print(f"Deleted: {self.remote_dir}")
+                print(f"Failed to delete {self.paths.remote_dir}: {r.stderr}")
+                raise RuntimeError(f"Failed to delete {self.paths.remote_dir}")
+            print(f"Deleted: {self.paths.remote_dir}")
 
     def sync(
         self,
@@ -470,7 +468,7 @@ class Backend:
             inner_cmd += f" --study {shlex.quote(study)}"
 
         wrapped = self.container.wrap(inner_cmd, bind_args)
-        cmd = f"cd {self.remote_dir} && {wrapped}"
+        cmd = f"cd {self.paths.remote_dir} && {wrapped}"
 
         host_desc = getattr(self.host, "host", "local")
         print(f"Syncing tracking data from {host_desc}...")

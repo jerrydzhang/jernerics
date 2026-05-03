@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import pytest
-from jernerics.tracking.wire import (
+from jernerics.tracking.pb_io import (
     TrackingReader,
     TrackingWriter,
     decode_varint,

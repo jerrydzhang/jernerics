@@ -14,7 +14,7 @@ from pathlib import Path
 
 from jernerics_proto import tracking_pb2_grpc
 
-from jernerics.tracking.data_sync import replay_tracking, sync_artifacts
+from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
 from jernerics.tracking.grpc_channel import grpc_channel
 
 

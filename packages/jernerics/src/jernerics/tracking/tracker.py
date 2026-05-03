@@ -6,7 +6,7 @@ from typing import Any, Protocol, Self
 from jernerics_proto import Envelope
 
 from .artifact_manifest import ArtifactManifest
-from .wire import TrackingWriter
+from .pb_io import TrackingWriter
 
 
 class Tracker(Protocol):

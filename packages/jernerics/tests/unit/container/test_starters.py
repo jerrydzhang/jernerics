@@ -1,5 +1,5 @@
 import pytest
-from jernerics.container.starters import get_starter, list_starters
+from jernerics.container.templates import get_starter, list_starters
 
 
 class TestStarters:

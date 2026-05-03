@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 
 import pytest
+from jernerics.tracking.pb_io import TrackingReader
 from jernerics.tracking.tracker import ProtobufTracker
-from jernerics.tracking.wire import TrackingReader
 
 
 def read_all(path: Path) -> list:

@@ -1,5 +1,5 @@
+from jernerics.tracking.pb_io import TrackingReader, TrackingWriter
 from jernerics.tracking.tracker import NullTracker, ProtobufTracker, Tracker
-from jernerics.tracking.wire import TrackingReader, TrackingWriter
 
 __all__ = [
     "NullTracker",

@@ -26,7 +26,7 @@ from .config import (
     load_config,
     load_tracking_server,
 )
-from .container.starters import generate_container_def, list_starters
+from .container.templates import generate_container_def, list_starters
 from .paths import cache_dir
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")

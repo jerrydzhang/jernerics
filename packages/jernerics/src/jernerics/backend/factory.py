@@ -70,8 +70,6 @@ def make_backend(
         adapter=adapter,
         syncer=syncer,
         paths=paths,
-        remote_dir=remote_dir,
-        cache_dir=cache_dir,
         project_name=project_name,
         tracking_server=tracking_server,
         heartbeat_interval_s=shared.heartbeat_interval_s,

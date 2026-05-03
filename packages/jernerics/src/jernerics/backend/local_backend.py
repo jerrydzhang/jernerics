@@ -13,7 +13,7 @@ from jernerics.backend.models import (
 from jernerics.config import ARTIFACT_ENV_VARS, load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
-from jernerics.tracking.data_sync import replay_tracking, sync_artifacts
+from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
 
 
 class LocalBackend:
