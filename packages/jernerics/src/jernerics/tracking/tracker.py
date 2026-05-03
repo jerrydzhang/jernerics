@@ -90,6 +90,7 @@ class ProtobufTracker:
     def log_artifact(self, key: str, local_path: str) -> None:
         env = self._make_envelope()
         env.artifact.key = key
+        env.artifact.filename = Path(local_path).name
 
         self.writer.write_envelope(env)
 

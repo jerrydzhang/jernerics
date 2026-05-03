@@ -18,39 +18,60 @@ in
 
       port = lib.mkOption {
         type = lib.types.port;
-        default = 50051;
+        default = lib.mkDefault 50051;
         description = "gRPC port for the tracking server.";
       };
 
       host = lib.mkOption {
         type = lib.types.str;
-        default = "[::]";
+        default = lib.mkDefault "[::]";
         description = "Host/address to bind the tracking server to.";
       };
 
       dbPath = lib.mkOption {
         type = lib.types.path;
-        default = "/var/lib/jernerics/db.duckdb";
+        default = lib.mkDefault "/var/lib/jernerics/db.duckdb";
         description = "Path to the DuckDB database file.";
+      };
+
+      httpPort = lib.mkOption {
+        type = lib.types.nullOr lib.types.port;
+        default = lib.mkDefault null;
+        description = "HTTP port for query and artifact endpoints. null disables HTTP.";
+      };
+
+      httpHost = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = lib.mkDefault null;
+        description = "HTTP host to bind to. null uses the same as host.";
+      };
+
+      apiKeyFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = lib.mkDefault null;
+        description = ''
+          File containing JERNERICS_API_KEY.
+          Compatible with sops-nix EnvironmentFile format.
+        '';
       };
     };
 
     minio = {
       port = lib.mkOption {
         type = lib.types.port;
-        default = 9000;
+        default = lib.mkDefault 9000;
         description = "Port for the minIO S3 API.";
       };
 
       consolePort = lib.mkOption {
         type = lib.types.port;
-        default = 9001;
+        default = lib.mkDefault 9001;
         description = "Port for the minIO web console.";
       };
 
       bucket = lib.mkOption {
         type = lib.types.str;
-        default = "jernerics";
+        default = lib.mkDefault "jernerics";
         description = "Bucket name to auto-provision on first start.";
       };
 
@@ -81,30 +102,39 @@ in
 
     # --- tracking server ---
     systemd.services.jernerics-tracking = {
-      description = "Jernerics gRPC tracking server";
+      description = "Jernerics gRPC + HTTP tracking server";
       wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
 
-      serviceConfig = {
-        ExecStart = "${cfg.tracking.package}/bin/python -m jernerics_server --db ${cfg.tracking.dbPath} --host ${cfg.tracking.host} --port ${toString cfg.tracking.port}";
-        Type = "simple";
-        Restart = "on-failure";
-        RestartSec = 5;
+      serviceConfig =
+        let
+          httpFlag = lib.optionalString (
+            cfg.tracking.httpPort != null
+          ) " --http-port ${toString cfg.tracking.httpPort}${lib.optionalString (cfg.tracking.httpHost != null) " --http-host ${cfg.tracking.httpHost}"}";
+        in
+        {
+          ExecStart = "${cfg.tracking.package}/bin/python -m jernerics_server --db ${cfg.tracking.dbPath} --host ${cfg.tracking.host} --port ${toString cfg.tracking.port}${httpFlag}";
+          Type = "simple";
+          Restart = "on-failure";
+          RestartSec = 5;
 
-        DynamicUser = true;
-        StateDirectory = "jernerics";
-        ProtectHome = true;
-        NoNewPrivileges = true;
-        PrivateDevices = true;
-        PrivateTmp = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
-        RestrictNamespaces = true;
-        MemoryDenyWriteExecute = false;
-        LockPersonality = true;
-      };
+          DynamicUser = true;
+          StateDirectory = "jernerics";
+          ProtectHome = true;
+          NoNewPrivileges = true;
+          PrivateDevices = true;
+          PrivateTmp = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectControlGroups = true;
+          RestrictNamespaces = true;
+          MemoryDenyWriteExecute = false;
+          LockPersonality = true;
+        }
+        // lib.optionalAttrs (cfg.tracking.apiKeyFile != null) {
+          EnvironmentFile = cfg.tracking.apiKeyFile;
+        };
     };
 
     # --- bucket auto-provisioning ---

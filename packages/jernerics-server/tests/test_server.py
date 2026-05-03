@@ -1,5 +1,6 @@
 import duckdb
 import grpc
+import httpx
 import pytest
 from jernerics_proto import ParamEvent, Value, tracking_pb2, tracking_pb2_grpc
 from jernerics_server.server import serve
@@ -121,3 +122,46 @@ class TestSendEvent:
         count = rows[0]
         con.close()
         assert count == 1
+
+
+class TestGrpcHttpRoundTrip:
+    def test_write_grpc_read_http(self, tmp_path):
+        import time
+
+        api_key = "test-secret"
+        grpc_port = 50054
+        http_port = 8084
+        server = serve(
+            tmp_path / "test.duckdb",
+            port=grpc_port,
+            http_port=http_port,
+            http_host="127.0.0.1",
+            api_key=api_key,
+        )
+        try:
+            channel = grpc.insecure_channel(f"localhost:{grpc_port}")
+            stub = tracking_pb2_grpc.TrackingServiceStub(channel)
+
+            env = tracking_pb2.Envelope(
+                project="p",
+                study_name="s",
+                trial_id=0,
+                timestamp_ns=1000,
+                seq=0,
+                param=ParamEvent(key="lr", value=Value(float_val=0.01)),
+            )
+            stub.SendEvent(env, metadata=[("x-api-key", api_key)])
+            channel.close()
+
+            time.sleep(0.5)
+            resp = httpx.post(
+                f"http://127.0.0.1:{http_port}/query",
+                json={"sql": "SELECT key, float_val FROM params"},
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["columns"] == ["key", "float_val"]
+            assert body["rows"] == [["lr", 0.01]]
+        finally:
+            server.stop(grace=0)

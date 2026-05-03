@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0etracking.proto\x12\x12jernerics.tracking\"\xaf\x03\n\x08\x45nvelope\x12\x0f\n\x07project\x18\x01 \x01(\t\x12\x12\n\nstudy_name\x18\x02 \x01(\t\x12\x10\n\x08trial_id\x18\x03 \x01(\x05\x12\x14\n\x0ctimestamp_ns\x18\x04 \x01(\x03\x12\x0b\n\x03seq\x18\x05 \x01(\x05\x12\x38\n\nsweep_meta\x18\t \x01(\x0b\x32\".jernerics.tracking.SweepMetaEventH\x00\x12/\n\x05param\x18\n \x01(\x0b\x32\x1e.jernerics.tracking.ParamEventH\x00\x12\x31\n\x06metric\x18\x0b \x01(\x0b\x32\x1f.jernerics.tracking.MetricEventH\x00\x12\x31\n\x06result\x18\x0c \x01(\x0b\x32\x1f.jernerics.tracking.ResultEventH\x00\x12\x35\n\x08\x61rtifact\x18\r \x01(\x0b\x32!.jernerics.tracking.ArtifactEventH\x00\x12\x36\n\ttrial_end\x18\x0e \x01(\x0b\x32!.jernerics.tracking.TrialEndEventH\x00\x42\t\n\x07payload\"2\n\x0eSweepMetaEvent\x12\x10\n\x08git_hash\x18\x01 \x01(\t\x12\x0e\n\x06\x63onfig\x18\x02 \x01(\t\"b\n\x05Value\x12\x13\n\tfloat_val\x18\x01 \x01(\x01H\x00\x12\x11\n\x07int_val\x18\x02 \x01(\x03H\x00\x12\x14\n\nstring_val\x18\x03 \x01(\tH\x00\x12\x12\n\x08\x62ool_val\x18\x04 \x01(\x08H\x00\x42\x07\n\x05value\"C\n\nParamEvent\x12\x0b\n\x03key\x18\x01 \x01(\t\x12(\n\x05value\x18\x02 \x01(\x0b\x32\x19.jernerics.tracking.Value\"7\n\x0bMetricEvent\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x01\x12\x0c\n\x04step\x18\x03 \x01(\x03\")\n\x0bResultEvent\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\"\x1c\n\rArtifactEvent\x12\x0b\n\x03key\x18\x01 \x01(\t\"\x0f\n\rTrialEndEvent\"\x05\n\x03\x41\x63k2U\n\x0fTrackingService\x12\x42\n\tSendEvent\x12\x1c.jernerics.tracking.Envelope\x1a\x17.jernerics.tracking.Ackb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0etracking.proto\x12\x12jernerics.tracking\"\xaf\x03\n\x08\x45nvelope\x12\x0f\n\x07project\x18\x01 \x01(\t\x12\x12\n\nstudy_name\x18\x02 \x01(\t\x12\x10\n\x08trial_id\x18\x03 \x01(\x05\x12\x14\n\x0ctimestamp_ns\x18\x04 \x01(\x03\x12\x0b\n\x03seq\x18\x05 \x01(\x05\x12\x38\n\nsweep_meta\x18\t \x01(\x0b\x32\".jernerics.tracking.SweepMetaEventH\x00\x12/\n\x05param\x18\n \x01(\x0b\x32\x1e.jernerics.tracking.ParamEventH\x00\x12\x31\n\x06metric\x18\x0b \x01(\x0b\x32\x1f.jernerics.tracking.MetricEventH\x00\x12\x31\n\x06result\x18\x0c \x01(\x0b\x32\x1f.jernerics.tracking.ResultEventH\x00\x12\x35\n\x08\x61rtifact\x18\r \x01(\x0b\x32!.jernerics.tracking.ArtifactEventH\x00\x12\x36\n\ttrial_end\x18\x0e \x01(\x0b\x32!.jernerics.tracking.TrialEndEventH\x00\x42\t\n\x07payload\"2\n\x0eSweepMetaEvent\x12\x10\n\x08git_hash\x18\x01 \x01(\t\x12\x0e\n\x06\x63onfig\x18\x02 \x01(\t\"b\n\x05Value\x12\x13\n\tfloat_val\x18\x01 \x01(\x01H\x00\x12\x11\n\x07int_val\x18\x02 \x01(\x03H\x00\x12\x14\n\nstring_val\x18\x03 \x01(\tH\x00\x12\x12\n\x08\x62ool_val\x18\x04 \x01(\x08H\x00\x42\x07\n\x05value\"C\n\nParamEvent\x12\x0b\n\x03key\x18\x01 \x01(\t\x12(\n\x05value\x18\x02 \x01(\x0b\x32\x19.jernerics.tracking.Value\"7\n\x0bMetricEvent\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x01\x12\x0c\n\x04step\x18\x03 \x01(\x03\")\n\x0bResultEvent\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t\".\n\rArtifactEvent\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\"\x0f\n\rTrialEndEvent\"\x05\n\x03\x41\x63k2U\n\x0fTrackingService\x12\x42\n\tSendEvent\x12\x1c.jernerics.tracking.Envelope\x1a\x17.jernerics.tracking.Ackb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -44,11 +44,11 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_RESULTEVENT']._serialized_start=750
   _globals['_RESULTEVENT']._serialized_end=791
   _globals['_ARTIFACTEVENT']._serialized_start=793
-  _globals['_ARTIFACTEVENT']._serialized_end=821
-  _globals['_TRIALENDEVENT']._serialized_start=823
-  _globals['_TRIALENDEVENT']._serialized_end=838
-  _globals['_ACK']._serialized_start=840
-  _globals['_ACK']._serialized_end=845
-  _globals['_TRACKINGSERVICE']._serialized_start=847
-  _globals['_TRACKINGSERVICE']._serialized_end=932
+  _globals['_ARTIFACTEVENT']._serialized_end=839
+  _globals['_TRIALENDEVENT']._serialized_start=841
+  _globals['_TRIALENDEVENT']._serialized_end=856
+  _globals['_ACK']._serialized_start=858
+  _globals['_ACK']._serialized_end=863
+  _globals['_TRACKINGSERVICE']._serialized_start=865
+  _globals['_TRACKINGSERVICE']._serialized_end=950
 # @@protoc_insertion_point(module_scope)

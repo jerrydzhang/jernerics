@@ -162,6 +162,23 @@ class TestInsertArtifact:
             rows = store._con.execute("SELECT project, key FROM artifacts").fetchall()
             assert rows == [("p", "model")]
 
+    def test_filename_stored(self, tmp_path):
+        with DuckDBStore(tmp_path / "test.duckdb") as store:
+            env = _envelope("artifact", ArtifactEvent(key="model", filename="model.pt"))
+            store.insert_event(env)
+
+            row = store._con.execute("SELECT key, filename FROM artifacts").fetchone()
+            assert row == ("model", "model.pt")
+
+    def test_filename_defaults_to_empty_string(self, tmp_path):
+        with DuckDBStore(tmp_path / "test.duckdb") as store:
+            env = _envelope("artifact", ArtifactEvent(key="model"))
+            store.insert_event(env)
+
+            row = store._con.execute("SELECT filename FROM artifacts").fetchone()
+            assert row is not None
+            assert row[0] == ""
+
 
 class TestInsertSweepMeta:
     def setup_method(self):

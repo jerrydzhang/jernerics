@@ -136,6 +136,22 @@ class TestLogArtifact:
         [env] = read_events(p)
         assert env.artifact.key == "model"
 
+    def test_filename_is_basename(self, tmp_path: Path) -> None:
+        p = tmp_path / "test.pb"
+        with ProtobufTracker("project", "study", 1, p) as t:
+            t.log_artifact("model", "/work/checkpoints/model.pt")
+
+        [env] = read_events(p)
+        assert env.artifact.filename == "model.pt"
+
+    def test_filename_from_bare_name(self, tmp_path: Path) -> None:
+        p = tmp_path / "test.pb"
+        with ProtobufTracker("project", "study", 1, p) as t:
+            t.log_artifact("model", "model.pt")
+
+        [env] = read_events(p)
+        assert env.artifact.filename == "model.pt"
+
     def test_writes_to_manifest(self, tmp_path: Path) -> None:
         p = tmp_path / "test.pb"
         manifest_path = tmp_path / "1.manifest"

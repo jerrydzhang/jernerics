@@ -29,9 +29,9 @@ class TestArtifactUploader:
 
         assert mock_uploader.call_count == 2
         calls = mock_uploader.call_args_list
-        assert calls[0][0][0] == "myproj/mystudy/0/model.pt"
+        assert calls[0][0][0] == "myproj/mystudy/0/model.pt/model.pt"
         assert calls[0][0][1] == "/work/model.pt"
-        assert calls[1][0][0] == "myproj/mystudy/0/plot.png"
+        assert calls[1][0][0] == "myproj/mystudy/0/plot.png/plot.png"
 
     def test_cursor_advances_after_upload(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"
@@ -100,4 +100,4 @@ class TestArtifactUploader:
         uploader.join(timeout=5)
 
         s3_key = mock_uploader.call_args[0][0]
-        assert s3_key == "my-proj/my-study/42/ckpt"
+        assert s3_key == "my-proj/my-study/42/ckpt/ckpt"

@@ -59,6 +59,7 @@ message ResultEvent {
 // A file produced by a task (e.g. model checkpoint, plot).
 message ArtifactEvent {
   string key = 1;
+  string filename = 2;
 }
 
 // Sentinel. Written once when the tracker closes, signals end of trial.

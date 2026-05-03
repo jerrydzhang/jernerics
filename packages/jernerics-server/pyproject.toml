@@ -7,6 +7,9 @@ dependencies = [
     "jernerics-proto",
     "grpcio>=1.80.0",
     "duckdb>=1.5.2",
+    "boto3>=1.43.2",
+    "fastapi>=0.136.1",
+    "uvicorn[standard]>=0.46.0",
 ]
 
 [tool.uv.sources]
@@ -14,6 +17,7 @@ jernerics-proto = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=8.4.2",
 ]
 

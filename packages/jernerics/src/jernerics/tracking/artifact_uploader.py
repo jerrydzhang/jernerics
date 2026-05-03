@@ -75,7 +75,10 @@ class ArtifactUploader:
                 continue
 
             entry = entries[lines_consumed]
-            s3_key = f"{self.project}/{self.study}/{self.trial_id}/{entry['key']}"
+            filename = Path(entry["path"]).name
+            s3_key = (
+                f"{self.project}/{self.study}/{self.trial_id}/{entry['key']}/{filename}"
+            )
             self.upload_fn(s3_key, entry["path"])
 
             new_offset = start + len(line) + 1
