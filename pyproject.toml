@@ -1,61 +1,18 @@
-[project]
-name = "jernerics"
-version = "1.1.0"
-description = "Opinionated utilities for ml projects"
-readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "typer>=0.24.1",
-    "pyyaml>=6.0.2",
-    "typing-extensions>=4.12.0",
-    "cloudpickle>=3.0.0",
-    "numpy>=2.3.3",
-    "tomli-w>=1.0.0",
-    "pathspec>=0.12.1",
-    "rich>=13.0.0",
-    "mlflow>=3.11.1",
-    "optuna>=4.8.0",
-]
-
-[project.optional-dependencies]
-mlflow = [
-    "mlflow-export-import",
-]
-
-[project.scripts]
-jernerics = "jernerics.cli:main"
-
-[dependency-groups]
-dev = [
-    "hypothesis>=6.151.9",
-    "ruff>=0.13.1",
-    "pytest>=8.4.2",
-    "pytest-cov>=7.0.0",
-    "ty>=0.0.21",
-    "pre-commit>=4.5.1",
-]
-
-[build-system]
-requires = [
-    "hatchling",
-]
-build-backend = "hatchling.build"
-
-[tool.uv.sources]
-mlflow-export-import = { git = "https://github.com/mlflow/mlflow-export-import.git" }
-
-[tool.hatch.build.targets.wheel]
-packages = [
-    "src/jernerics",
-]
-include = [
-    "src/jernerics/scripts/*.sh",
-    "src/jernerics/scripts/*.job",
-    "src/jernerics/templates/*.def",
+[tool.uv.workspace]
+members = [
+    "packages/jernerics-proto",
+    "packages/jernerics",
+    "packages/jernerics-server",
 ]
 
 [tool.ruff]
 line-length = 88
+extend-exclude = [
+    "*_pb2.py",
+    "*_pb2.pyi",
+    "*_pb2_grpc.py",
+    "*_pb2_grpc.pyi",
+]
 exclude = [
     ".eggs",
     ".git",
@@ -71,6 +28,7 @@ exclude = [
     "asv_benchmarks/html",
     "asv_benchmarks/results",
     "asv_benchmarks/benchmarks/cache",
+    "examples",
 ]
 
 [tool.ruff.lint]
@@ -97,9 +55,28 @@ ignore = [
     "RUF012",
     "RUF015",
     "RUF021",
+    "BLE001",
+    "PLW1510",
 ]
 
 [tool.ty.src]
 include = [
-    "src",
+    "packages/*/src",
+    "packages/*/tests",
+]
+
+[tool.ty.environment]
+extra-paths = [
+    "packages/jernerics-proto/src",
+    "packages/jernerics/src",
+    "packages/jernerics-server/src",
+]
+
+[tool.ty.rules]
+possibly-missing-submodule = "ignore"
+
+[tool.pytest.ini_options]
+filterwarnings = [
+    "ignore::DeprecationWarning:websockets",
+    "ignore::DeprecationWarning:uvicorn",
 ]

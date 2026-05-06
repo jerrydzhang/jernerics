@@ -1,0 +1,56 @@
+[project]
+name = "sweep-e2e"
+version = "0.1.0"
+description = "Unified e2e example for jernerics"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "optuna",
+    "torch",
+    "jernerics",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+
+[tool.uv.sources.jernerics]
+git = "https://github.com/jerrydzhang/jernerics.git"
+branch = "human-ownership"
+subdirectory = "packages/jernerics"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "jez21005@hpc2.storrs.hpc.uconn.edu"
+remote_dir = "~/projects/jernerics-examples/sweep-e2e"
+cache_dir = "/scratch/qiy18011/jez21005/jernerics"
+
+[tool.jernerics.backends.hpc.slurm]
+partition = "priority"
+time = "0:10:00"
+mem = "16G"
+cpus = 4
+
+[tool.jernerics.backends.hpc.apptainer]
+build_dir = "/dev/shm/build/{project_name}"
+
+[tool.jernerics.backends.pueue-remote]
+type = "pueue"
+host = "jez21005@scimlab.engr.uconn.edu"
+remote_dir = "~/projects/jernerics-examples/sweep-e2e"
+cache_dir = "~/.cache/jernerics"
+parallel = 2
+container_type = "docker"
+
+[tool.jernerics.backends.pueue-remote.docker]
+gpu = true
+
+[tool.jernerics.backends.pueue-local]
+type = "pueue"
+parallel = 2
+container_type = "none"
+remote_dir = "."

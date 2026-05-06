@@ -1,58 +1,129 @@
 {
-  description = "Develop Python on Nix with uv";
+  description = "Jernerics - ML experiment toolkit for HPC";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+
+    pyproject-nix = {
+      url = "github:pyproject-nix/pyproject.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    uv2nix = {
+      url = "github:pyproject-nix/uv2nix";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    pyproject-build-systems = {
+      url = "github:pyproject-nix/build-system-pkgs";
+      inputs.pyproject-nix.follows = "pyproject-nix";
+      inputs.uv2nix.follows = "uv2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { nixpkgs, ... }:
+    {
+      self,
+      nixpkgs,
+      pyproject-nix,
+      uv2nix,
+      pyproject-build-systems,
+      ...
+    }:
     let
       inherit (nixpkgs) lib;
       forAllSystems = lib.genAttrs lib.systems.flakeExposed;
 
-      mkMlflowWithUI = pkgs:
+      workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
+
+      pyprojectOverlay = workspace.mkPyprojectOverlay {
+        sourcePreference = "wheel";
+      };
+
+      editableOverlay = workspace.mkEditablePyprojectOverlay {
+        root = "$REPO_ROOT";
+      };
+
+      pythonSets = forAllSystems (
+        system:
         let
-          mlflowVersion = pkgs.python3.pkgs.mlflow.version;
-          mlflowWheel = pkgs.fetchurl {
-            url = "https://files.pythonhosted.org/packages/py3/m/mlflow/mlflow-${mlflowVersion}-py3-none-any.whl";
-            hash = "sha256-QvJrUkOP22FViOFQQHxlFtD2TUF0Nt/HVZnFJaRk8hA=";
-          };
+          pkgs = nixpkgs.legacyPackages.${system};
+          python = pkgs.python312;
         in
-        pkgs.python3.pkgs.mlflow.overridePythonAttrs (old: {
-          nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ pkgs.unzip ];
-          postInstall = (old.postInstall or "") + ''
-            ${pkgs.unzip}/bin/unzip ${mlflowWheel} "mlflow/server/js/*" -d "$out/${pkgs.python3.sitePackages}"
-          '';
-        });
+        (pkgs.callPackage pyproject-nix.build.packages { inherit python; }).overrideScope (
+          lib.composeManyExtensions [
+            pyproject-build-systems.overlays.wheel
+            pyprojectOverlay
+          ]
+        )
+      );
+
     in
     {
-      devShells = forAllSystems (system: {
-        default = (import nixpkgs { inherit system; }).callPackage ./shell.nix { };
-      });
-
-      apps = forAllSystems (system:
+      devShells = forAllSystems (
+        system:
         let
-          pkgs = import nixpkgs { inherit system; };
-          mlflowWithUI = mkMlflowWithUI pkgs;
+          pkgs = nixpkgs.legacyPackages.${system};
+          pythonSet = pythonSets.${system}.overrideScope editableOverlay;
+          virtualenv = pythonSet.mkVirtualEnv "jernerics-dev-env" workspace.deps.all;
         in
         {
-          mlflow = {
-            type = "app";
-            program = "${pkgs.python3.withPackages (ps: [ mlflowWithUI ps.flask-wtf ])}/bin/mlflow";
+          default = pkgs.mkShell {
+            packages = [
+              virtualenv
+              pkgs.uv
+              pkgs.just
+              pkgs.pueue
+              pkgs.docker
+            ];
+
+            env = {
+              UV_NO_SYNC = "1";
+              UV_PYTHON = pythonSet.python.interpreter;
+              UV_PYTHON_DOWNLOADS = "never";
+            }
+            // lib.optionalAttrs pkgs.stdenv.isLinux {
+              LD_LIBRARY_PATH = lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ];
+            };
+
+            shellHook = ''
+              unset PYTHONPATH
+              export REPO_ROOT=$(git rev-parse --show-toplevel)
+              export VIRTUAL_ENV=${virtualenv}
+            '';
           };
-        });
+        }
+      );
 
-
-      packages = forAllSystems (system:
+      packages = forAllSystems (
+        system:
         let
-          pkgs = import nixpkgs { inherit system; };
-          mlflowWithUI = mkMlflowWithUI pkgs;
+          pkgs = nixpkgs.legacyPackages.${system};
+          pythonSet = pythonSets.${system};
         in
         {
-          mlflow = pkgs.python3.withPackages (ps: [ mlflowWithUI ps.flask-wtf ]);
-        });
+          default = pythonSet.mkVirtualEnv "jernerics-env" workspace.deps.default;
 
-      nixosModules.mlflow = import ./nix/modules/mlflow.nix;
+          jernerics-server = pythonSet.mkVirtualEnv "jernerics-server-env" {
+            jernerics-server = [ ];
+          };
+        }
+      );
+
+      nixosModules.default = import ./nix/module.nix;
+
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        lib.optionalAttrs pkgs.stdenv.isLinux {
+          nixos-module = import ./nix/tests/module.nix {
+            inherit self system pkgs;
+          };
+        }
+      );
     };
 }

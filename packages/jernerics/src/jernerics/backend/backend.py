@@ -1,0 +1,465 @@
+import os
+import shlex
+from pathlib import Path
+from typing import Any
+
+from jernerics.backend.build_marker import needs_rebuild
+from jernerics.backend.host import SSHHost
+from jernerics.backend.job_meta import save_job_meta
+from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
+from jernerics.backend.submission import SweepInfrastructure, submit_sweep
+from jernerics.config import ARTIFACT_ENV_VARS
+
+
+class Backend:
+    def __init__(
+        self,
+        host,
+        infra: SweepInfrastructure,
+        syncer,
+        *,
+        project_name: str,
+        tracking_server: str | None = None,
+        heartbeat_interval_s: float = 60.0,
+        stale_after_s: int = 120,
+        grace_period_s: int = 120,
+        max_retries: int = 3,
+        chain_depth_cap: int = 20,
+    ):
+        self.host = host
+        self.infra = infra
+        self.syncer = syncer
+        self.project_name = project_name
+        self.tracking_server = tracking_server
+        self.heartbeat_interval_s = heartbeat_interval_s
+        self.stale_after_s = stale_after_s
+        self.grace_period_s = grace_period_s
+        self.max_retries = max_retries
+        self.chain_depth_cap = chain_depth_cap
+
+    @property
+    def container(self):
+        return self.infra.container
+
+    @property
+    def adapter(self):
+        return self.infra.adapter
+
+    @property
+    def paths(self):
+        return self.infra.paths
+
+    def prepare_and_submit(
+        self,
+        spec: SweepSubmission,
+        *,
+        project_dir: Path,
+        project_name: str,
+        direction: str,
+        dry_run: bool = False,
+        backend_name: str = "",
+        experiment_overrides: dict[str, Any] | None = None,
+        cli_overrides: dict[str, str] | None = None,
+        local_cache_dir: Path | None = None,
+    ) -> SubmitResult | None:
+        # Pop output/error before merging — they go into job meta, not the script
+        all_overrides = {
+            **(experiment_overrides or {}),
+            **(cli_overrides or {}),
+        }
+        output_pattern = all_overrides.get("output")
+        error_pattern = all_overrides.get("error")
+
+        # Build cleaned overrides for submit_sweep (exclude output/error)
+        clean_experiment = {
+            k: v
+            for k, v in (experiment_overrides or {}).items()
+            if k not in ("output", "error")
+        }
+        clean_cli = {
+            k: v
+            for k, v in (cli_overrides or {}).items()
+            if k not in ("output", "error")
+        }
+
+        if dry_run:
+            script = submit_sweep(
+                spec,
+                self.infra,
+                host=self.host,
+                project_dir=project_dir,
+                project_name=project_name,
+                backend_name=backend_name,
+                direction=direction,
+                tracking_server=self.tracking_server,
+                cli_overrides=clean_cli or None,
+                experiment_overrides=clean_experiment or None,
+                heartbeat_interval_s=self.heartbeat_interval_s,
+                dry_run=True,
+            )
+            print("=== DRY RUN ===")
+            print(f"Backend: {backend_name}")
+            print(f"Host: {getattr(self.host, 'host', 'local')}")
+            print(f"Remote dir: {self.paths.remote_dir}")
+            print()
+            print("=== SCRIPT ===")
+            print(script)
+            return None
+
+        # Sync
+        if self.syncer is not None:
+            host_label = getattr(self.host, "host", "local")
+            print(f"Syncing project to {host_label}:{self.paths.remote_dir}...")
+            self.syncer.sync_project(project_dir)
+
+        # Readiness check
+        cache_host = self.paths.resolve_cache()
+        self.host.mkdir(f"{cache_host}/optuna")
+        if self.syncer is not None:
+            result = self.host.run(
+                self.container.exists_command(self.paths.remote_dir),
+                check=False,
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                print(
+                    "Error: container not found on remote.\n"
+                    "  Run 'jernerics build --backend <name>' first."
+                )
+                raise RuntimeError("container not found on remote")
+
+        # Submit via shared submission module
+        result = submit_sweep(
+            spec,
+            self.infra,
+            host=self.host,
+            project_dir=project_dir,
+            project_name=project_name,
+            backend_name=backend_name,
+            direction=direction,
+            tracking_server=self.tracking_server,
+            cli_overrides=clean_cli or None,
+            experiment_overrides=clean_experiment or None,
+            heartbeat_interval_s=self.heartbeat_interval_s,
+        )
+
+        # Save meta
+        if local_cache_dir is not None and result is not None:
+            effective_output = output_pattern or f"{cache_host}/logs/%A_%a.out"
+            effective_error = error_pattern or f"{cache_host}/logs/%A_%a.err"
+            for sub in result.submissions:
+                save_job_meta(
+                    job_id=sub.job_id,
+                    output_pattern=str(sub.output_pattern or effective_output),
+                    error_pattern=str(sub.error_pattern or effective_error),
+                    remote_dir=self.paths.remote_dir,
+                    n_trials=sub.n_trials,
+                    local_cache_dir=local_cache_dir,
+                )
+
+        return result
+
+    def build(
+        self,
+        project_dir: Path,
+        *,
+        project_name: str,
+        force: bool = False,
+        dry_run: bool = False,
+        local_cache_dir: Path | None = None,
+    ) -> None:
+        lock_path = project_dir / "uv.lock"
+        if not lock_path.exists():
+            raise FileNotFoundError("uv.lock not found. Run 'uv lock' first.")
+
+        container_def_path = project_dir / "container.def"
+        dockerfile_path = project_dir / "Dockerfile"
+        has_build_file = container_def_path.exists() or dockerfile_path.exists()
+
+        if not has_build_file:
+            from jernerics.container.templates import generate_container_def
+
+            container_def_path.write_text(generate_container_def("python"))
+            print("Created: container.def")
+
+        cache_host = self.paths.resolve_cache()
+        marker_path = f"{cache_host}/.build_marker"
+
+        if (
+            not dry_run
+            and not force
+            and not needs_rebuild(self.host, marker_path, lock_path)
+        ):
+            print("Container is up to date. Use --force to rebuild.")
+            return
+
+        host_label = getattr(self.host, "host", None)
+        if dry_run:
+            print("=== DRY RUN ===")
+            print(f"Project dir: {project_dir}")
+            print(f"Remote dir: {self.paths.remote_dir}")
+            if host_label:
+                print(f"Host: {host_label}")
+            print()
+            print("Would sync files and submit build job.")
+            return
+
+        self.host.mkdir(f"{cache_host}/logs")
+
+        if self.syncer is not None:
+            label = host_label or "local"
+            print(f"Syncing project to {label}:{self.paths.remote_dir}...")
+            self.syncer.sync_project(project_dir)
+
+        # Compose build script
+        build_cmd = self.container.build_command(self.paths.remote_dir)
+        cmd_str = " ".join(shlex.quote(c) for c in build_cmd)
+        build_dir = self.paths.resolve_build_dir(project_name)
+
+        if build_dir is not None:
+            build_script = (
+                f"set -e\n"
+                f"mkdir -p {build_dir}\n"
+                f"export APPTAINER_TMPDIR={build_dir}\n"
+                f"cd {self.paths.remote_dir}\n"
+                f"{cmd_str}\n"
+                f"rm -rf {build_dir}\n"
+                f"mkdir -p {Path(marker_path).parent}\n"
+                f"touch {marker_path}\n"
+            )
+        else:
+            build_script = (
+                f"set -e\n"
+                f"cd {self.paths.remote_dir}\n"
+                f"{cmd_str}\n"
+                f"mkdir -p {Path(marker_path).parent}\n"
+                f"touch {marker_path}\n"
+            )
+
+        job_id = self.adapter.submit_job(
+            build_script, name="container-build", log_dir=f"{cache_host}/logs"
+        )
+
+        if job_id and local_cache_dir is not None:
+            save_job_meta(
+                job_id=job_id,
+                output_pattern=f"{cache_host}/logs/build_%j.out",
+                error_pattern=f"{cache_host}/logs/build_%j.err",
+                remote_dir=self.paths.remote_dir,
+                n_trials=1,
+                local_cache_dir=local_cache_dir,
+            )
+
+        print(f"Build job submitted: {job_id}")
+
+    def clean(
+        self,
+        project_name: str,
+        *,
+        full: bool = False,
+        force: bool = False,
+    ) -> None:
+        cache_host = self.paths.resolve_cache()
+
+        target_desc = "cache + project directory" if full else "cache directory"
+        host_label = getattr(self.host, "host", None)
+        if host_label:
+            print(f"Target: {target_desc} on {host_label}")
+        else:
+            print(f"Target: {target_desc}")
+        print(f"  cache:   {cache_host}")
+        if full:
+            print(f"  project: {self.paths.remote_dir}")
+
+        active = [
+            j
+            for j in self.list_jobs()
+            if j.status
+            not in (
+                "COMPLETED",
+                "FAILED",
+                "CANCELLED",
+                "TIMEOUT",
+                "STASHED",
+                "LOCKED",
+            )
+        ]
+        if active:
+            print(f"\nError: {len(active)} active job(s) found. Cancel them first.")
+            for j in active:
+                print(f"  {j.job_id}  {j.name}  {j.status}")
+            raise RuntimeError("Active jobs prevent cleaning")
+
+        result = self.host.run(
+            (
+                [
+                    f"find {cache_host}/tracking"
+                    " -path '*/events/*.pb' 2>/dev/null | head -n 1"
+                ]
+                if isinstance(self.host, SSHHost)
+                else [
+                    "sh",
+                    "-c",
+                    f"find {cache_host}/tracking"
+                    " -path '*/events/*.pb' 2>/dev/null | head -n 1",
+                ]
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout.strip():
+            print("\nError: Unsynced tracking data found. Run sync first.")
+            raise RuntimeError("Unsynced tracking data")
+
+        artifact_check_cmd = (
+            f"cd {cache_host}/tracking && "
+            "for m in $(find . -path '*/artifacts/*.manifest' 2>/dev/null); do "
+            'c="${m%.manifest}.cursor"; '
+            'ms=$(stat -c%s "$m" 2>/dev/null || echo 0); '
+            'cs=$(cat "$c" 2>/dev/null || echo 0); '
+            'if [ "$cs" -lt "$ms" ]; then echo "$m"; break; fi; '
+            "done"
+        )
+        result = self.host.run(
+            (
+                [artifact_check_cmd]
+                if isinstance(self.host, SSHHost)
+                else ["sh", "-c", artifact_check_cmd]
+            ),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.stdout.strip():
+            print("\nError: Unsynced artifact data found. Run sync first.")
+            raise RuntimeError("Unsynced artifact data")
+
+        r = self.host.run(["test", "-d", cache_host], check=False, capture_output=True)
+        if r.returncode != 0:
+            print(f"\nError: cache directory '{cache_host}' not found.")
+            raise FileNotFoundError(f"Cache directory not found: {cache_host}")
+
+        if full:
+            r = self.host.run(
+                ["test", "-d", self.paths.remote_dir], check=False, capture_output=True
+            )
+            if r.returncode != 0:
+                print(
+                    f"\nError: project directory '{self.paths.remote_dir}' not found."
+                )
+                raise FileNotFoundError(
+                    f"Project directory not found: {self.paths.remote_dir}"
+                )
+
+        if not force:
+            print("\nDry run. Use --force to execute.")
+            return
+
+        self.adapter.cleanup()
+
+        r = self.host.run(
+            ["rm", "-rf", cache_host], check=False, capture_output=True, text=True
+        )
+        if r.returncode != 0:
+            print(f"Failed to delete {cache_host}: {r.stderr}")
+            raise RuntimeError(f"Failed to delete {cache_host}")
+        print(f"Deleted: {cache_host}")
+
+        if full:
+            r = self.host.run(
+                ["rm", "-rf", self.paths.remote_dir],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if r.returncode != 0:
+                print(f"Failed to delete {self.paths.remote_dir}: {r.stderr}")
+                raise RuntimeError(f"Failed to delete {self.paths.remote_dir}")
+            print(f"Deleted: {self.paths.remote_dir}")
+
+    def sync(
+        self,
+        project_name: str,
+        *,
+        study: str | None = None,
+    ) -> None:
+        if not self.tracking_server:
+            raise RuntimeError("No tracking server configured")
+
+        cache_host = self.paths.resolve_cache()
+        bind_args = self.paths.bind_args(cache_host)
+        artifact_env = {
+            k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))
+        } or None
+
+        inner_cmd = (
+            "python -m jernerics.tracking.replay_runner"
+            " --tracking-dir /cache/tracking"
+            f" --server-addr {self.tracking_server}"
+        )
+        if study:
+            inner_cmd += f" --study {shlex.quote(study)}"
+
+        wrapped = self.container.wrap(inner_cmd, bind_args, env=artifact_env)
+        cmd = f"cd {self.paths.remote_dir} && {wrapped}"
+
+        host_desc = getattr(self.host, "host", "local")
+        print(f"Syncing tracking data from {host_desc}...")
+        # FIXME: brittle — assumes only SSHHost and LocalHost exist.
+        # SSHHost.run prepends "ssh host" to argv, which joins args with
+        # spaces on the remote. So ["sh", "-c", cmd] arrives as
+        # `sh -c cd /foo && bar` — sh only sees "cd". Pass compound
+        # commands as a single string for SSH, sh -c for local.
+        run_args = [cmd] if isinstance(self.host, SSHHost) else ["sh", "-c", cmd]
+        result = self.host.run(
+            run_args,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        print(result.stdout)
+        if result.returncode != 0:
+            print(f"Sync failed: {result.stderr}")
+            raise RuntimeError(f"Sync failed: {result.stderr}")
+        print("Sync complete.")
+
+    def get_logs(
+        self,
+        job_id: str,
+        *,
+        follow: bool = False,
+        stderr: bool = False,
+        local_cache_dir: Path | None = None,
+    ) -> None:
+        self.adapter.get_logs(
+            job_id,
+            follow=follow,
+            stderr=stderr,
+            meta={"local_cache_dir": local_cache_dir, "host": self.host},
+        )
+
+    # Delegated to adapter
+
+    def list_jobs(self, include_completed: bool = False) -> list[JobInfo]:
+        return self.adapter.list_jobs(include_completed=include_completed)
+
+    def cancel(self, job_id: str) -> bool:
+        return self.adapter.cancel(job_id)
+
+    def cancel_all(self) -> bool:
+        return self.adapter.cancel_all()
+
+    def get_status(self, job_id: str) -> str | None:
+        return self.adapter.get_status(job_id)
+
+    def wait_for_completion(
+        self, job_id: str, poll_interval: float = 30, timeout: float | None = None
+    ) -> bool:
+        return self.adapter.wait_for_completion(job_id, poll_interval, timeout)
+
+    def storage_path(self, study_name: str) -> str:
+        return self.paths.storage_path(study_name)
+
+    def cleanup(self) -> None:
+        self.adapter.cleanup()

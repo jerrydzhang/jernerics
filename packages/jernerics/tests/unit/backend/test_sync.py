@@ -1,0 +1,188 @@
+from unittest.mock import MagicMock, patch
+
+import pathspec
+import pytest
+from jernerics.backend.project_sync import (
+    DEFAULT_EXCLUDES,
+    ProjectSync,
+    _collect_files,
+    _load_gitignore,
+    _should_include,
+)
+
+
+class TestLoadGitignore:
+    def test_loads_existing_gitignore(self, tmp_path):
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("*.pyc\n__pycache__/\n")
+
+        spec = _load_gitignore(tmp_path)
+
+        assert spec is not None
+        assert spec.match_file("test.pyc")
+        assert spec.match_file("__pycache__/module.pyc")
+
+    def test_returns_none_when_no_gitignore(self, tmp_path):
+        spec = _load_gitignore(tmp_path)
+        assert spec is None
+
+
+class TestShouldInclude:
+    def test_includes_normal_file(self):
+        default_spec = pathspec.PathSpec.from_lines("gitignore", DEFAULT_EXCLUDES)
+        result = _should_include("src/main.py", None, default_spec)
+        assert result is True
+
+    def test_excludes_by_default_spec(self):
+        default_spec = pathspec.PathSpec.from_lines("gitignore", DEFAULT_EXCLUDES)
+        result = _should_include("results/output.json", None, default_spec)
+        assert result is False
+
+    def test_excludes_by_gitignore(self, tmp_path):
+        gitignore_spec = pathspec.PathSpec.from_lines("gitignore", ["*.log"])
+        default_spec = pathspec.PathSpec.from_lines("gitignore", DEFAULT_EXCLUDES)
+        result = _should_include("debug.log", gitignore_spec, default_spec)
+        assert result is False
+
+    def test_gitignore_overrides_default(self, tmp_path):
+        gitignore_spec = pathspec.PathSpec.from_lines("gitignore", ["custom.log"])
+        default_spec = pathspec.PathSpec.from_lines("gitignore", DEFAULT_EXCLUDES)
+        result = _should_include("custom.log", gitignore_spec, default_spec)
+        assert result is False
+
+
+class TestCollectFiles:
+    def test_collects_project_files(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("main")
+        (tmp_path / "src" / "utils.py").write_text("utils")
+
+        default_spec = pathspec.PathSpec.from_lines("gitignore", DEFAULT_EXCLUDES)
+        files = _collect_files(tmp_path, None, default_spec)
+
+        assert len(files) == 2
+        names = [f.name for f in files]
+        assert "main.py" in names
+        assert "utils.py" in names
+
+    def test_respects_default_excludes(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("main")
+        (tmp_path / ".venv").mkdir()
+        (tmp_path / ".venv" / "lib.py").write_text("lib")
+
+        default_spec = pathspec.PathSpec.from_lines("gitignore", DEFAULT_EXCLUDES)
+        files = _collect_files(tmp_path, None, default_spec)
+
+        names = [f.name for f in files]
+        assert "main.py" in names
+        assert "lib.py" not in names
+
+
+class TestProjectSync:
+    def test_init_sets_attributes(self):
+        mock_ssh = MagicMock()
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
+        assert syncer.host is mock_ssh
+        assert syncer.remote_dir == "~/projects/test"
+
+    def test_init_strips_trailing_slash(self):
+        mock_ssh = MagicMock()
+        syncer = ProjectSync(mock_ssh, "~/projects/test/")
+        assert syncer.remote_dir == "~/projects/test"
+
+    def test_container_exists_true(self):
+        mock_ssh = MagicMock()
+        mock_ssh.file_exists.return_value = True
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
+
+        result = syncer.container_exists()
+
+        assert result is True
+        mock_ssh.file_exists.assert_called_once_with("~/projects/test/container.sif")
+
+    def test_container_exists_false(self):
+        mock_ssh = MagicMock()
+        mock_ssh.file_exists.return_value = False
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
+
+        result = syncer.container_exists()
+
+        assert result is False
+
+    def test_sync_project_respects_gitignore(self, tmp_path):
+        mock_ssh = MagicMock()
+        mock_ssh.host = "user@host.example.edu"
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
+
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("content")
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "large.csv").write_text("data")
+        (tmp_path / ".gitignore").write_text("data/\n*.csv\n")
+
+        with patch("jernerics.backend.project_sync.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = syncer.sync_project(tmp_path, dry_run=True)
+
+            assert result is True
+
+    def test_sync_project_includes_all_by_default(self, tmp_path):
+        mock_ssh = MagicMock()
+        mock_ssh.host = "user@host.example.edu"
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
+
+        (tmp_path / "experiments").mkdir()
+        (tmp_path / "experiments" / "dag.py").write_text("dag")
+        (tmp_path / "experiments" / "config.py").write_text("config")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("main")
+
+        with patch("jernerics.backend.project_sync.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = syncer.sync_project(tmp_path, dry_run=True)
+
+            assert result is True
+
+    def test_sync_project_empty_project(self, tmp_path):
+        mock_ssh = MagicMock()
+        mock_ssh.host = "user@host.example.edu"
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
+
+        result = syncer.sync_project(tmp_path, dry_run=True)
+
+        assert result is True
+
+    def test_sync_project_actual_sync(self, tmp_path):
+        mock_ssh = MagicMock()
+        mock_ssh.host = "user@host.example.edu"
+        mock_ssh.run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
+
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("main")
+
+        with patch("jernerics.backend.project_sync.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            result = syncer.sync_project(tmp_path, dry_run=False)
+
+            assert result is True
+            mock_ssh.mkdir.assert_called_once()
+            mock_run.assert_called()
+
+    def test_sync_project_tar_failure(self, tmp_path):
+        mock_ssh = MagicMock()
+        mock_ssh.host = "user@host.example.edu"
+        mock_ssh.run.return_value = MagicMock(
+            returncode=1, stderr="tar error", stdout=""
+        )
+        syncer = ProjectSync(mock_ssh, "~/projects/test")
+
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("main")
+
+        with patch("jernerics.backend.project_sync.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+
+            with pytest.raises(RuntimeError, match="Failed to extract tar archive"):
+                syncer.sync_project(tmp_path, dry_run=False)
