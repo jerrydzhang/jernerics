@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from jernerics.config import SweepConfig
 
@@ -6,10 +6,19 @@ from jernerics.config import SweepConfig
 class TestLocalBackendPostHook:
     @patch("jernerics.backend.local_backend.sync_artifacts")
     @patch("jernerics.backend.local_backend.replay_tracking")
+    @patch("jernerics.backend.local_backend.resolve_artifact_storage")
+    @patch("jernerics.backend.local_backend.resolve_streaming")
     @patch("jernerics.backend.local_backend.run_trial")
     @patch("jernerics.backend.local_backend.cache_dir")
     def test_calls_sync_after_trials(
-        self, mock_cache_dir, mock_run_trial, mock_replay, mock_sync_artifacts, tmp_path
+        self,
+        mock_cache_dir,
+        mock_run_trial,
+        mock_resolve_streaming,
+        mock_resolve_artifacts,
+        mock_replay,
+        mock_sync_artifacts,
+        tmp_path,
     ):
         from jernerics.backend.local_backend import LocalBackend
         from jernerics.backend.models import SweepSubmission
@@ -20,6 +29,12 @@ class TestLocalBackendPostHook:
         (tmp_path / "tracking" / "mystudy" / "events").mkdir(parents=True)
         (tmp_path / "tracking" / "mystudy" / "artifacts").mkdir(parents=True)
         (tmp_path / "tracking" / "mystudy" / "heartbeats").mkdir(parents=True)
+
+        mock_resolve_streaming.return_value = (
+            MagicMock(),
+            MagicMock(),
+        )  # (channel, stub)
+        mock_resolve_artifacts.return_value = lambda *a: None  # truthy upload_fn
 
         backend = LocalBackend(tracking_server="localhost:50051")
         storage_path = str(tmp_path / "optuna" / "mystudy.journal")
