@@ -1,93 +1,97 @@
+import sqlite3
+import threading
 from pathlib import Path
 from typing import Self
 
-import duckdb
 from jernerics_proto import Envelope
 
 _CREATE_PARAMS = """
 CREATE TABLE IF NOT EXISTS params (
-    project VARCHAR NOT NULL,
-    study_name VARCHAR NOT NULL,
+    project TEXT NOT NULL,
+    study_name TEXT NOT NULL,
     trial_id INTEGER NOT NULL,
-    timestamp_ns BIGINT NOT NULL,
+    timestamp_ns INTEGER NOT NULL,
     seq INTEGER NOT NULL,
-    key VARCHAR NOT NULL,
-    float_val DOUBLE,
-    int_val BIGINT,
-    string_val VARCHAR,
-    bool_val BOOLEAN,
+    key TEXT NOT NULL,
+    float_val REAL,
+    int_val INTEGER,
+    string_val TEXT,
+    bool_val INTEGER,
     UNIQUE (project, study_name, trial_id, seq)
-)
+) STRICT
 """
 
 _CREATE_METRICS = """
 CREATE TABLE IF NOT EXISTS metrics (
-    project VARCHAR NOT NULL,
-    study_name VARCHAR NOT NULL,
+    project TEXT NOT NULL,
+    study_name TEXT NOT NULL,
     trial_id INTEGER NOT NULL,
-    timestamp_ns BIGINT NOT NULL,
+    timestamp_ns INTEGER NOT NULL,
     seq INTEGER NOT NULL,
-    key VARCHAR NOT NULL,
-    value DOUBLE NOT NULL,
-    step BIGINT,
+    key TEXT NOT NULL,
+    value REAL NOT NULL,
+    step INTEGER,
     UNIQUE (project, study_name, trial_id, seq)
-)
+) STRICT
 """
 
 _CREATE_RESULTS = """
 CREATE TABLE IF NOT EXISTS results (
-    project VARCHAR NOT NULL,
-    study_name VARCHAR NOT NULL,
+    project TEXT NOT NULL,
+    study_name TEXT NOT NULL,
     trial_id INTEGER NOT NULL,
-    timestamp_ns BIGINT NOT NULL,
+    timestamp_ns INTEGER NOT NULL,
     seq INTEGER NOT NULL,
-    key VARCHAR NOT NULL,
-    value VARCHAR NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
     UNIQUE (project, study_name, trial_id, seq)
-)
+) STRICT
 """
 
 _CREATE_ARTIFACTS = """
 CREATE TABLE IF NOT EXISTS artifacts (
-    project VARCHAR NOT NULL,
-    study_name VARCHAR NOT NULL,
+    project TEXT NOT NULL,
+    study_name TEXT NOT NULL,
     trial_id INTEGER NOT NULL,
-    timestamp_ns BIGINT NOT NULL,
+    timestamp_ns INTEGER NOT NULL,
     seq INTEGER NOT NULL,
-    key VARCHAR NOT NULL,
-    filename VARCHAR NOT NULL DEFAULT '',
+    key TEXT NOT NULL,
+    filename TEXT NOT NULL DEFAULT '',
     UNIQUE (project, study_name, trial_id, seq)
-)
+) STRICT
 """
 
 _CREATE_SWEEP_META = """
 CREATE TABLE IF NOT EXISTS sweep_meta (
-    project VARCHAR NOT NULL,
-    study_name VARCHAR NOT NULL,
+    project TEXT NOT NULL,
+    study_name TEXT NOT NULL,
     trial_id INTEGER NOT NULL,
-    timestamp_ns BIGINT NOT NULL,
+    timestamp_ns INTEGER NOT NULL,
     seq INTEGER NOT NULL,
-    git_hash VARCHAR,
-    config VARCHAR,
+    git_hash TEXT,
+    config TEXT,
     UNIQUE (project, study_name, trial_id, seq)
-)
+) STRICT
 """
 
 _CREATE_TRIAL_END = """
 CREATE TABLE IF NOT EXISTS trial_end (
-    project VARCHAR NOT NULL,
-    study_name VARCHAR NOT NULL,
+    project TEXT NOT NULL,
+    study_name TEXT NOT NULL,
     trial_id INTEGER NOT NULL,
-    timestamp_ns BIGINT NOT NULL,
+    timestamp_ns INTEGER NOT NULL,
     seq INTEGER NOT NULL,
     UNIQUE (project, study_name, trial_id, seq)
-)
+) STRICT
 """
 
 
-class DuckDBStore:
+class Store:
     def __init__(self, path: str | Path) -> None:
-        self._con = duckdb.connect(str(path))
+        self._path = Path(path)
+        self._lock = threading.Lock()
+        self._con = sqlite3.connect(str(self._path), check_same_thread=False)
+        self._con.execute("PRAGMA journal_mode=WAL")
         for stmt in (
             _CREATE_PARAMS,
             _CREATE_METRICS,
@@ -97,6 +101,7 @@ class DuckDBStore:
             _CREATE_TRIAL_END,
         ):
             self._con.execute(stmt)
+        self._con.commit()
 
     def __enter__(self) -> Self:
         return self
@@ -109,18 +114,32 @@ class DuckDBStore:
 
     def insert_event(self, envelope: Envelope) -> None:
         payload = envelope.WhichOneof("payload")
-        if payload == "param":
-            self._insert_param(envelope)
-        elif payload == "metric":
-            self._insert_metric(envelope)
-        elif payload == "result":
-            self._insert_result(envelope)
-        elif payload == "artifact":
-            self._insert_artifact(envelope)
-        elif payload == "sweep_meta":
-            self._insert_sweep_meta(envelope)
-        elif payload == "trial_end":
-            self._insert_trial_end(envelope)
+        with self._lock:
+            if payload == "param":
+                self._insert_param(envelope)
+            elif payload == "metric":
+                self._insert_metric(envelope)
+            elif payload == "result":
+                self._insert_result(envelope)
+            elif payload == "artifact":
+                self._insert_artifact(envelope)
+            elif payload == "sweep_meta":
+                self._insert_sweep_meta(envelope)
+            elif payload == "trial_end":
+                self._insert_trial_end(envelope)
+            self._con.commit()
+
+    def query(
+        self, sql: str, params: list | None = None
+    ) -> tuple[list[str], list[tuple]]:
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, params or [])
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            return columns, rows
+        finally:
+            con.close()
 
     def _insert_param(self, env: Envelope) -> None:
         p = env.param

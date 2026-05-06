@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 from jernerics_proto import ArtifactEvent, Envelope
 from jernerics_server.http import create_app
-from jernerics_server.store import DuckDBStore
+from jernerics_server.store import Store
 
 
 def _fake_s3_fetch(bucket: str, key: str) -> tuple[BytesIO, str]:
@@ -13,7 +13,7 @@ def _fake_s3_fetch(bucket: str, key: str) -> tuple[BytesIO, str]:
 
 @pytest.fixture
 def client(tmp_path):
-    store = DuckDBStore(tmp_path / "test.duckdb")
+    store = Store(tmp_path / "test.sqlite")
     app = create_app(store, s3_fetch=_fake_s3_fetch)
     app.state.store = store
     return TestClient(app)
@@ -21,7 +21,7 @@ def client(tmp_path):
 
 @pytest.fixture
 def auth_client(tmp_path):
-    store = DuckDBStore(tmp_path / "test.duckdb")
+    store = Store(tmp_path / "test.sqlite")
     app = create_app(store, api_key="secret123", s3_fetch=_fake_s3_fetch)
     app.state.store = store
     return TestClient(app)
@@ -75,7 +75,14 @@ class TestQueryEndpoint:
 
     def test_row_limit_enforced(self, client):
         response = client.post(
-            "/query", json={"sql": "SELECT * FROM generate_series(1, 11000)"}
+            "/query",
+            json={
+                "sql": (
+                    "WITH RECURSIVE cnt(x) AS ("
+                    "SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 11000) "
+                    "SELECT * FROM cnt"
+                ),
+            },
         )
         assert response.status_code == 400
         body = response.json()
@@ -145,7 +152,7 @@ class TestArtifactProxy:
         assert response.status_code == 200
         assert response.headers["content-type"] == "image/png"
 
-    def test_404_for_missing_key_in_duckdb(self, client):
+    def test_404_for_missing_key(self, client):
         response = client.get("/artifact/nope/nope/0/nope")
         assert response.status_code == 404
 
@@ -153,7 +160,7 @@ class TestArtifactProxy:
         def raise_not_found(bucket, key):
             raise FileNotFoundError("not found")
 
-        store = DuckDBStore(tmp_path / "test.duckdb")
+        store = Store(tmp_path / "test.sqlite")
         app = create_app(store, s3_fetch=raise_not_found)
         app.state.store = store
         c = TestClient(app)
@@ -198,7 +205,7 @@ class TestArtifactProxy:
         def mock_fetch(bucket, key):
             return body, key
 
-        store = DuckDBStore(tmp_path / "test.duckdb")
+        store = Store(tmp_path / "test.sqlite")
         app = create_app(store, s3_fetch=mock_fetch)
         app.state.store = store
         c = TestClient(app)

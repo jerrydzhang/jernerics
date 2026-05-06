@@ -8,7 +8,7 @@ from jernerics_proto import (
     TrialEndEvent,
     Value,
 )
-from jernerics_server.store import DuckDBStore
+from jernerics_server.store import Store
 
 
 def _ts(n: int = 0) -> int:
@@ -52,59 +52,49 @@ class TestInsertParam:
         _reset_seq()
 
     def test_float(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("param", ParamEvent(key="lr", value=Value(float_val=0.001)))
             store.insert_event(env)
 
-            rows = store._con.execute(
-                "SELECT project, key, float_val, seq FROM params"
-            ).fetchall()
+            _, rows = store.query("SELECT project, key, float_val, seq FROM params")
             assert rows == [("p", "lr", 0.001, 0)]
 
     def test_int(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("param", ParamEvent(key="batch", value=Value(int_val=32)))
             store.insert_event(env)
 
-            rows = store._con.execute(
-                "SELECT project, key, int_val FROM params"
-            ).fetchall()
+            _, rows = store.query("SELECT project, key, int_val FROM params")
             assert rows == [("p", "batch", 32)]
 
     def test_string(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope(
                 "param", ParamEvent(key="name", value=Value(string_val="adam"))
             )
             store.insert_event(env)
 
-            rows = store._con.execute(
-                "SELECT project, key, string_val FROM params"
-            ).fetchall()
+            _, rows = store.query("SELECT project, key, string_val FROM params")
             assert rows == [("p", "name", "adam")]
 
     def test_bool(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope(
                 "param", ParamEvent(key="augment", value=Value(bool_val=True))
             )
             store.insert_event(env)
 
-            rows = store._con.execute(
-                "SELECT project, key, bool_val FROM params"
-            ).fetchall()
-            assert rows == [("p", "augment", True)]
+            _, rows = store.query("SELECT project, key, bool_val FROM params")
+            assert rows == [("p", "augment", 1)]
 
     def test_non_active_columns_are_null(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("param", ParamEvent(key="lr", value=Value(float_val=0.01)))
             store.insert_event(env)
 
-            row = store._con.execute(
-                "SELECT int_val, string_val, bool_val FROM params"
-            ).fetchone()
-            assert row is not None
-            int_val, string_val, bool_val = row
+            _, rows = store.query("SELECT int_val, string_val, bool_val FROM params")
+            assert len(rows) == 1
+            int_val, string_val, bool_val = rows[0]
             assert int_val is None
             assert string_val is None
             assert bool_val is None
@@ -115,24 +105,21 @@ class TestInsertMetric:
         _reset_seq()
 
     def test_with_step(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("metric", MetricEvent(key="loss", value=0.5, step=100))
             store.insert_event(env)
 
-            rows = store._con.execute(
-                "SELECT project, key, value, step FROM metrics"
-            ).fetchall()
+            _, rows = store.query("SELECT project, key, value, step FROM metrics")
             assert rows == [("p", "loss", 0.5, 100)]
 
     def test_without_step_stores_null(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("metric", MetricEvent(key="loss", value=0.5, step=-1))
             store.insert_event(env)
 
-            row = store._con.execute("SELECT step FROM metrics").fetchone()
-            assert row is not None
-            step = row[0]
-            assert step is None
+            _, rows = store.query("SELECT step FROM metrics")
+            assert len(rows) == 1
+            assert rows[0][0] is None
 
 
 class TestInsertResult:
@@ -140,13 +127,11 @@ class TestInsertResult:
         _reset_seq()
 
     def test_json_string(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("result", ResultEvent(key="confusion", value='{"tp": 90}'))
             store.insert_event(env)
 
-            rows = store._con.execute(
-                "SELECT project, key, value FROM results"
-            ).fetchall()
+            _, rows = store.query("SELECT project, key, value FROM results")
             assert rows == [("p", "confusion", '{"tp": 90}')]
 
 
@@ -155,29 +140,29 @@ class TestInsertArtifact:
         _reset_seq()
 
     def test_local_path(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("artifact", ArtifactEvent(key="model"))
             store.insert_event(env)
 
-            rows = store._con.execute("SELECT project, key FROM artifacts").fetchall()
+            _, rows = store.query("SELECT project, key FROM artifacts")
             assert rows == [("p", "model")]
 
     def test_filename_stored(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("artifact", ArtifactEvent(key="model", filename="model.pt"))
             store.insert_event(env)
 
-            row = store._con.execute("SELECT key, filename FROM artifacts").fetchone()
-            assert row == ("model", "model.pt")
+            _, rows = store.query("SELECT key, filename FROM artifacts")
+            assert rows == [("model", "model.pt")]
 
     def test_filename_defaults_to_empty_string(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("artifact", ArtifactEvent(key="model"))
             store.insert_event(env)
 
-            row = store._con.execute("SELECT filename FROM artifacts").fetchone()
-            assert row is not None
-            assert row[0] == ""
+            _, rows = store.query("SELECT filename FROM artifacts")
+            assert len(rows) == 1
+            assert rows[0][0] == ""
 
 
 class TestInsertSweepMeta:
@@ -185,16 +170,14 @@ class TestInsertSweepMeta:
         _reset_seq()
 
     def test_git_hash_and_config(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope(
                 "sweep_meta",
                 SweepMetaEvent(git_hash="abc123", config="base = {}"),
             )
             store.insert_event(env)
 
-            rows = store._con.execute(
-                "SELECT project, git_hash, config FROM sweep_meta"
-            ).fetchall()
+            _, rows = store.query("SELECT project, git_hash, config FROM sweep_meta")
             assert rows == [("p", "abc123", "base = {}")]
 
 
@@ -203,13 +186,13 @@ class TestInsertTrialEnd:
         _reset_seq()
 
     def test_inserts_marker(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("trial_end", TrialEndEvent())
             store.insert_event(env)
 
-            rows = store._con.execute(
+            _, rows = store.query(
                 "SELECT project, study_name, trial_id, seq FROM trial_end"
-            ).fetchall()
+            )
             assert rows == [("p", "s", 0, 0)]
 
 
@@ -218,25 +201,22 @@ class TestIdempotency:
         _reset_seq()
 
     def test_duplicate_seq_ignored(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env = _envelope("param", ParamEvent(key="lr", value=Value(float_val=0.01)))
             store.insert_event(env)
             store.insert_event(env)
 
-            row = store._con.execute("SELECT COUNT(*) FROM params").fetchone()
-            assert row is not None
-            assert row[0] == 1
+            _, rows = store.query("SELECT COUNT(*) FROM params")
+            assert rows[0][0] == 1
 
     def test_different_seq_accepted(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             env0 = _envelope("param", ParamEvent(key="lr", value=Value(float_val=0.01)))
             env1 = _envelope("param", ParamEvent(key="lr", value=Value(float_val=0.1)))
             store.insert_event(env0)
             store.insert_event(env1)
 
-            rows = store._con.execute(
-                "SELECT seq, float_val FROM params ORDER BY seq"
-            ).fetchall()
+            _, rows = store.query("SELECT seq, float_val FROM params ORDER BY seq")
             assert rows == [(0, 0.01), (1, 0.1)]
 
 
@@ -245,7 +225,7 @@ class TestInsertMultiple:
         _reset_seq()
 
     def test_common_fields_correct(self, tmp_path):
-        with DuckDBStore(tmp_path / "test.duckdb") as store:
+        with Store(tmp_path / "test.sqlite") as store:
             store.insert_event(
                 _envelope(
                     "param",
@@ -277,17 +257,13 @@ class TestInsertMultiple:
                 )
             )
 
-            param_row = store._con.execute("SELECT COUNT(*) FROM params").fetchone()
-            assert param_row is not None
-            param_count = param_row[0]
-            metric_row = store._con.execute("SELECT COUNT(*) FROM metrics").fetchone()
-            assert metric_row is not None
-            metric_count = metric_row[0]
-            assert param_count == 2
-            assert metric_count == 1
+            _, rows = store.query("SELECT COUNT(*) FROM params")
+            assert rows[0][0] == 2
+            _, rows = store.query("SELECT COUNT(*) FROM metrics")
+            assert rows[0][0] == 1
 
-            lr_values = store._con.execute(
+            _, rows = store.query(
                 "SELECT trial_id, float_val FROM params"
                 " WHERE key = 'lr' ORDER BY trial_id"
-            ).fetchall()
-            assert lr_values == [(0, 0.01), (1, 0.1)]
+            )
+            assert rows == [(0, 0.01), (1, 0.1)]

@@ -4,14 +4,15 @@ from pathlib import Path
 import grpc
 import uvicorn
 from jernerics_proto import tracking_pb2, tracking_pb2_grpc
+from starlette.staticfiles import StaticFiles
 
 from .auth import ApiKeyInterceptor
 from .http import create_app
-from .store import DuckDBStore
+from .store import Store
 
 
 class TrackingServicer(tracking_pb2_grpc.TrackingServiceServicer):
-    def __init__(self, store: DuckDBStore) -> None:
+    def __init__(self, store: Store) -> None:
         self._store = store
 
     def SendEvent(
@@ -29,8 +30,9 @@ def serve(
     api_key: str | None = None,
     http_port: int | None = None,
     http_host: str | None = None,
+    dashboard_dir: str | None = None,
 ) -> grpc.Server:
-    store = DuckDBStore(db_path)
+    store = Store(db_path)
     servicer = TrackingServicer(store)
     interceptors = [ApiKeyInterceptor(api_key)] if api_key else []
     server = grpc.server(ThreadPoolExecutor(max_workers=10), interceptors=interceptors)
@@ -40,6 +42,9 @@ def serve(
 
     if http_port is not None:
         app = create_app(store, api_key=api_key)
+
+        if dashboard_dir is not None:
+            app.mount("/", StaticFiles(directory=dashboard_dir, html=True))
         bind_host = http_host or host
         config = uvicorn.Config(app, host=bind_host, port=http_port, log_level="error")
         uvicorn_server = uvicorn.Server(config)

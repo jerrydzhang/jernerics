@@ -6,7 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from .store import DuckDBStore
+from .store import Store
 
 _READ_ONLY_KEYWORDS = {"SELECT", "WITH", "VALUES", "EXPLAIN", "SHOW", "DESCRIBE"}
 MAX_ROWS = 10_000
@@ -39,7 +39,7 @@ def _file_chunks(body, chunk_size: int = 65_536):
 
 
 def create_app(
-    store: DuckDBStore,
+    store: Store,
     *,
     api_key: str | None = None,
     s3_fetch: Callable[[str, str], tuple[BytesIO, str]] | None = None,
@@ -55,14 +55,12 @@ def create_app(
                 content={"error": "Only SELECT queries are allowed"},
             )
         try:
-            result = store._con.execute(req.sql)
+            columns, rows = store.query(req.sql)
         except Exception as e:
             return JSONResponse(
                 status_code=400,
                 content={"error": str(e)},
             )
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchmany(MAX_ROWS + 1)
         if len(rows) > MAX_ROWS:
             return JSONResponse(
                 status_code=400,
@@ -80,15 +78,15 @@ def create_app(
             dependencies=deps,
         )
         def artifact(project: str, study: str, trial_id: int, key: str) -> Response:
-            row = store._con.execute(
+            _, rows = store.query(
                 "SELECT filename FROM artifacts WHERE "
                 "project = ? AND study_name = ? AND trial_id = ? AND key = ?",
                 [project, study, trial_id, key],
-            ).fetchone()
-            if row is None:
+            )
+            if not rows:
                 raise HTTPException(status_code=404, detail="Artifact not found")
 
-            filename = row[0]
+            filename = rows[0][0]
             s3_key = f"{project}/{study}/{trial_id}/{key}"
             try:
                 body, _ = s3_fetch("", s3_key)

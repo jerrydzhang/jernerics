@@ -1,3 +1,4 @@
+import sqlite3
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -45,7 +46,7 @@ class TestApiKeyAuth:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         api_key = "test-key"
-        server = _start_server(tmp_path / "test.duckdb", api_key=api_key)
+        server = _start_server(tmp_path / "test.sqlite", api_key=api_key)
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
@@ -60,9 +61,7 @@ class TestApiKeyAuth:
         client.join()
         server.stop(grace=0)
 
-        import duckdb
-
-        con = duckdb.connect(str(tmp_path / "test.duckdb"))
+        con = sqlite3.connect(str(tmp_path / "test.sqlite"))
         assert _count(con, "params") == 1
         con.close()
 
@@ -70,7 +69,7 @@ class TestApiKeyAuth:
         self, tmp_path: Path
     ) -> None:
         api_key = "test-key"
-        server = _start_server(tmp_path / "test.duckdb", api_key=api_key)
+        server = _start_server(tmp_path / "test.sqlite", api_key=api_key)
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
@@ -85,9 +84,7 @@ class TestApiKeyAuth:
         client.join()
         server.stop(grace=0)
 
-        import duckdb
-
-        con = duckdb.connect(str(tmp_path / "test.duckdb"))
+        con = sqlite3.connect(str(tmp_path / "test.sqlite"))
         assert _count(con, "params") == 0
         con.close()
 
@@ -219,7 +216,7 @@ def _trial_end_envelope(seq: int) -> Envelope:
 
 class TestHappyPath:
     def test_sends_events_to_server(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.duckdb")
+        server = _start_server(tmp_path / "test.sqlite")
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
@@ -237,9 +234,7 @@ class TestHappyPath:
         client.join()
         server.stop(grace=0)
 
-        import duckdb
-
-        con = duckdb.connect(str(tmp_path / "test.duckdb"))
+        con = sqlite3.connect(str(tmp_path / "test.sqlite"))
         assert _count(con, "params") == 1
         assert _count(con, "metrics") == 1
         assert _count(con, "trial_end") == 1
@@ -248,7 +243,7 @@ class TestHappyPath:
 
 class TestShutdown:
     def test_join_returns_after_trial_end(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.duckdb")
+        server = _start_server(tmp_path / "test.sqlite")
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
@@ -265,7 +260,7 @@ class TestShutdown:
         assert not client.consumer.is_alive()
 
     def test_join_timeout_without_trial_end(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.duckdb")
+        server = _start_server(tmp_path / "test.sqlite")
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
@@ -308,7 +303,7 @@ class TestRetryOnFailure:
 
 class TestDeferredFileCreation:
     def test_waits_for_file_to_exist(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.duckdb")
+        server = _start_server(tmp_path / "test.sqlite")
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
@@ -330,7 +325,7 @@ class TestDeferredFileCreation:
 
 class TestPartialEvent:
     def test_truncated_event_does_not_crash_producer(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.duckdb")
+        server = _start_server(tmp_path / "test.sqlite")
         stub = _make_stub()
         pb_file = tmp_path / "0.pb"
 
@@ -348,9 +343,7 @@ class TestPartialEvent:
         client.join()
         server.stop(grace=0)
 
-        import duckdb
-
-        con = duckdb.connect(str(tmp_path / "test.duckdb"))
+        con = sqlite3.connect(str(tmp_path / "test.sqlite"))
         assert _count(con, "params") == 1
         assert _count(con, "trial_end") == 1
         con.close()

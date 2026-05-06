@@ -1,6 +1,6 @@
 import socket
+import sqlite3
 
-import duckdb
 import grpc
 import httpx
 import pytest
@@ -17,10 +17,10 @@ def _random_port() -> int:
 @pytest.fixture
 def server_and_stub(tmp_path):
     port = _random_port()
-    server = serve(tmp_path / "test.duckdb", port=port)
+    server = serve(tmp_path / "test.sqlite", port=port)
     channel = grpc.insecure_channel(f"localhost:{port}")
     stub = tracking_pb2_grpc.TrackingServiceStub(channel)
-    yield stub, tmp_path / "test.duckdb"
+    yield stub, tmp_path / "test.sqlite"
     channel.close()
     server.stop(grace=0)
 
@@ -29,7 +29,7 @@ class TestApiKeyInterceptor:
     def test_valid_key_passes(self, tmp_path):
         api_key = "test-secret"
         port = _random_port()
-        server = serve(tmp_path / "test.duckdb", port=port, api_key=api_key)
+        server = serve(tmp_path / "test.sqlite", port=port, api_key=api_key)
         channel = grpc.insecure_channel(f"localhost:{port}")
         stub = tracking_pb2_grpc.TrackingServiceStub(channel)
 
@@ -50,7 +50,7 @@ class TestApiKeyInterceptor:
     def test_missing_key_rejected(self, tmp_path):
         api_key = "test-secret"
         port = _random_port()
-        server = serve(tmp_path / "test.duckdb", port=port, api_key=api_key)
+        server = serve(tmp_path / "test.sqlite", port=port, api_key=api_key)
         channel = grpc.insecure_channel(f"localhost:{port}")
         stub = tracking_pb2_grpc.TrackingServiceStub(channel)
 
@@ -72,7 +72,7 @@ class TestApiKeyInterceptor:
     def test_invalid_key_rejected(self, tmp_path):
         api_key = "test-secret"
         port = _random_port()
-        server = serve(tmp_path / "test.duckdb", port=port, api_key=api_key)
+        server = serve(tmp_path / "test.sqlite", port=port, api_key=api_key)
         channel = grpc.insecure_channel(f"localhost:{port}")
         stub = tracking_pb2_grpc.TrackingServiceStub(channel)
 
@@ -106,7 +106,7 @@ class TestSendEvent:
         ack = stub.SendEvent(env)
         assert isinstance(ack, tracking_pb2.Ack)
 
-        con = duckdb.connect(str(db_path))
+        con = sqlite3.connect(str(db_path))
         rows = con.execute("SELECT key, float_val FROM params").fetchall()
         con.close()
         assert rows == [("lr", 0.01)]
@@ -124,7 +124,7 @@ class TestSendEvent:
         stub.SendEvent(env)
         stub.SendEvent(env)
 
-        con = duckdb.connect(str(db_path))
+        con = sqlite3.connect(str(db_path))
         rows = con.execute("SELECT COUNT(*) FROM params").fetchone()
         assert rows
         count = rows[0]
@@ -140,7 +140,7 @@ class TestGrpcHttpRoundTrip:
         grpc_port = _random_port()
         http_port = _random_port()
         server = serve(
-            tmp_path / "test.duckdb",
+            tmp_path / "test.sqlite",
             port=grpc_port,
             http_port=http_port,
             http_host="127.0.0.1",
