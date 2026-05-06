@@ -1,4 +1,5 @@
-import duckdb
+import sqlite3
+
 import optuna
 import pytest
 from jernerics.backend.local_backend import LocalBackend
@@ -133,7 +134,7 @@ class TestArtifactRoundTrip:
 
 
 class TestTrackingReplayRoundTrip:
-    def test_replay_sends_all_event_types_to_duckdb(self, tmp_path, grpc_server):
+    def test_replay_sends_all_event_types_to_sqlite(self, tmp_path, grpc_server):
         stub, db_path, _ = grpc_server
 
         dag_file = tmp_path / "dag.py"
@@ -158,8 +159,8 @@ class TestTrackingReplayRoundTrip:
         tracking_parent = (tmp_path / "tracking" / STUDY_NAME).parent
         replay_tracking(tracking_dir=tracking_parent, stub=stub, study=STUDY_NAME)
 
-        # Verify all event types in DuckDB
-        con = duckdb.connect(str(db_path))
+        # Verify all event types in SQLite
+        con = sqlite3.connect(str(db_path))
         assert con.execute("SELECT COUNT(*) FROM params").fetchone()[0] == 2
         assert con.execute("SELECT COUNT(*) FROM metrics").fetchone()[0] == 2
         assert con.execute("SELECT COUNT(*) FROM results").fetchone()[0] == 2
