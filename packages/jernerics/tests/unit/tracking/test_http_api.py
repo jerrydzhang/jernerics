@@ -27,7 +27,7 @@ class MockHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/sweeps?")
             or self.path.startswith("/api/trials")
             or self.path.startswith("/api/compare-sweeps")
-            or self.path.startswith("/api/metrics/history")
+            or self.path.startswith("/api/metrics")
             or self.path.startswith("/api/artifacts")
             or self.path.startswith("/api/results")
             or self.path == "/api/health"
@@ -899,6 +899,18 @@ class TestGetMetricHistory:
 
         assert "Accept" in MockHandler.received_headers
         assert MockHandler.received_headers["Accept"] == "application/json"
+
+    def test_get_metric_history_uses_correct_endpoint_and_params(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert MockHandler.received_path.startswith("/api/metrics?")
+        assert "project=my-project" in MockHandler.received_path
+        assert "study_name=study-1" in MockHandler.received_path
+        assert "key=accuracy" in MockHandler.received_path
 
     def test_get_metric_history_url_encodes_spaces(self, mock_server):
         MockHandler.response_data = []

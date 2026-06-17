@@ -1167,7 +1167,7 @@ class MockMetricHistoryHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path.startswith("/api/metrics/history"):
+        if self.path.startswith("/api/metrics"):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

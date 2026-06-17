@@ -151,7 +151,7 @@ def get_metric_history(
             returns invalid JSON.
     """
     query_params = {"project": project, "study_name": study_name, "key": key}
-    url = f"{base_url.rstrip('/')}/api/metrics/history?{urlencode(query_params)}"
+    url = f"{base_url.rstrip('/')}/api/metrics?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, list):
         raise TypeError("Expected list of metric history entries from server")

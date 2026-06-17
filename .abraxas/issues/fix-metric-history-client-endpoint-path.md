@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/fix-metric-history-client-endpoint-path
+completed_at: '2026-06-17T02:46:01.698992'
 created: '2026-06-17T02:28:00.014397'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Fix metric-history client endpoint path
 ---
 
