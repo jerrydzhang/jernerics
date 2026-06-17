@@ -386,6 +386,8 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
 
     response_data: ClassVar[list[dict] | dict] = []
     received_path: ClassVar[str] = ""
+    response_status: ClassVar[int] = 200
+    response_body: ClassVar[bytes] = b""
 
     def log_message(self, format: str, *args):
         pass
@@ -394,14 +396,20 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
         if (
             self.path.startswith("/api/trials")
             or self.path.startswith("/api/compare-sweeps")
+            or self.path.startswith("/api/sweep-summary")
             or self.path.startswith("/api/artifacts")
             or self.path.startswith("/api/results")
             or self.path.startswith("/api/params")
         ):
             MockTrialsHandler.received_path = self.path
-            self.send_response(200)
+            self.send_response(MockTrialsHandler.response_status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
+
+            if MockTrialsHandler.response_status != 200:
+                self.wfile.write(MockTrialsHandler.response_body)
+                return
+
             response_data = MockTrialsHandler.response_data
 
             if self.path.startswith("/api/trials"):
@@ -916,6 +924,151 @@ class TestCompareSweepsCommand:
         )
 
         assert "metrics=accuracy%2Closs" in MockTrialsHandler.received_path
+
+
+class TestSweepSummaryCommand:
+    def test_sweep_summary_success(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "trial_count": 10,
+            "completed_count": 5,
+            "param_keys": ["lr", "batch_size"],
+            "final_metric_keys": ["accuracy", "loss"],
+            "artifact_keys": ["model.pkl", "plot.png"],
+        }
+
+        from jernerics.cli import sweep_summary
+
+        sweep_summary(sweep="study-1", project="my-project", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "study-1" in captured.out
+        assert "my-project" in captured.out
+        assert "10" in captured.out
+        assert "5" in captured.out
+        assert "Parameter Keys" in captured.out
+        assert "Final Metric Keys" in captured.out
+        assert "Artifact Keys" in captured.out
+        assert "lr" in captured.out
+        assert "batch_size" in captured.out
+        assert "accuracy" in captured.out
+        assert "loss" in captured.out
+        assert "model.pkl" in captured.out
+        assert "plot.png" in captured.out
+
+    def test_sweep_summary_json_output(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "trial_count": 10,
+            "completed_count": 5,
+            "param_keys": ["lr"],
+            "final_metric_keys": ["accuracy"],
+            "artifact_keys": [],
+        }
+
+        from jernerics.cli import sweep_summary
+
+        sweep_summary(
+            sweep="study-1",
+            project="my-project",
+            server=mock_trials_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        import json
+
+        data = json.loads(captured.out)
+        assert data["project"] == "my-project"
+        assert data["study_name"] == "study-1"
+        assert data["trial_count"] == 10
+        assert data["completed_count"] == 5
+        assert data["param_keys"] == ["lr"]
+        assert data["final_metric_keys"] == ["accuracy"]
+        assert data["artifact_keys"] == []
+
+    def test_sweep_summary_empty_lists(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "trial_count": 0,
+            "completed_count": 0,
+            "param_keys": [],
+            "final_metric_keys": [],
+            "artifact_keys": [],
+        }
+
+        from jernerics.cli import sweep_summary
+
+        sweep_summary(sweep="study-1", project="my-project", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "study-1" in captured.out
+        assert "0 (0 completed)" in captured.out
+        assert "Parameter Keys" not in captured.out
+        assert "Final Metric Keys" not in captured.out
+        assert "Artifact Keys" not in captured.out
+
+    def test_sweep_summary_with_api_key(self, mock_trials_server, capsys, monkeypatch):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "trial_count": 1,
+            "completed_count": 0,
+            "param_keys": [],
+            "final_metric_keys": [],
+            "artifact_keys": [],
+        }
+
+        monkeypatch.setenv("JERNERICS_API_KEY", "test-key-123")
+
+        from jernerics.cli import sweep_summary
+
+        sweep_summary(sweep="study-1", project="my-project", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "study-1" in captured.out
+        monkeypatch.delenv("JERNERICS_API_KEY")
+
+    def test_sweep_summary_sends_correct_path(self, mock_trials_server):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "trial_count": 1,
+            "completed_count": 0,
+            "param_keys": [],
+            "final_metric_keys": [],
+            "artifact_keys": [],
+        }
+
+        from jernerics.cli import sweep_summary
+
+        sweep_summary(sweep="study-1", project="my-project", server=mock_trials_server)
+
+        assert "/api/sweep-summary" in MockTrialsHandler.received_path
+        assert "project=my-project" in MockTrialsHandler.received_path
+        assert "study_name=study-1" in MockTrialsHandler.received_path
+
+    def test_sweep_summary_server_error(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {}
+        MockTrialsHandler.response_status = 404
+        MockTrialsHandler.response_body = b'{"detail": "Study not found"}'
+
+        from jernerics.cli import sweep_summary
+
+        with pytest.raises(SystemExit):
+            sweep_summary(
+                sweep="study-1",
+                project="my-project",
+                server=mock_trials_server,
+            )
+
+        captured = capsys.readouterr()
+        assert "Error:" in captured.out
+        MockTrialsHandler.response_status = 200
+        MockTrialsHandler.response_body = b""
 
 
 class TestTrialsCommandOptionalProject:

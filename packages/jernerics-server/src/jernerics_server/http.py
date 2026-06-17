@@ -153,6 +153,25 @@ def create_app(
         params = store.list_params(project, study_name, trial_id, key)
         return JSONResponse(content=params)
 
+    @app.get("/api/sweep-summary", response_model=None, dependencies=deps)
+    def sweep_summary(project: str, study_name: str) -> JSONResponse:
+        summary = store.get_study_summary(project, study_name)
+        if summary is None:
+            raise HTTPException(
+                status_code=404, detail=f"Study '{study_name}' not found"
+            )
+        return JSONResponse(
+            content={
+                "project": project,
+                "study_name": study_name,
+                "trial_count": summary["trial_count"],
+                "completed_count": summary["completed_count"],
+                "param_keys": summary["param_keys"],
+                "final_metric_keys": summary["final_metric_keys"],
+                "artifact_keys": summary["artifact_keys"],
+            }
+        )
+
     @app.get("/api/compare-sweeps", response_model=None, dependencies=deps)
     def compare_sweeps(
         project: str, left: str, right: str, metrics: str | None = None

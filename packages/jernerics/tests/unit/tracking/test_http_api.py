@@ -27,6 +27,7 @@ class MockHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/sweeps?")
             or self.path.startswith("/api/trials")
             or self.path.startswith("/api/compare-sweeps")
+            or self.path.startswith("/api/sweep-summary")
             or self.path.startswith("/api/metrics")
             or self.path.startswith("/api/artifacts")
             or self.path.startswith("/api/results")
@@ -716,6 +717,140 @@ class TestCompareSweeps:
         )
 
         assert "metrics=accuracy%2Closs" in MockHandler.received_path
+
+
+class TestGetSweepSummary:
+    def test_get_sweep_summary_success(self, mock_server):
+        MockHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "trial_count": 10,
+            "completed_count": 5,
+            "param_keys": ["lr", "batch_size"],
+            "final_metric_keys": ["accuracy", "loss"],
+            "artifact_keys": ["model.pkl"],
+        }
+
+        from jernerics.tracking.http_api import get_sweep_summary
+
+        result = get_sweep_summary(mock_server, "my-project", "study-1")
+
+        assert result["project"] == "my-project"
+        assert result["study_name"] == "study-1"
+        assert result["trial_count"] == 10
+        assert result["completed_count"] == 5
+        assert result["param_keys"] == ["lr", "batch_size"]
+        assert result["final_metric_keys"] == ["accuracy", "loss"]
+        assert result["artifact_keys"] == ["model.pkl"]
+
+    def test_get_sweep_summary_with_api_key(self, mock_server):
+        MockHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "trial_count": 0,
+            "completed_count": 0,
+            "param_keys": [],
+            "final_metric_keys": [],
+            "artifact_keys": [],
+        }
+
+        os.environ["JERNERICS_API_KEY"] = "test-key-123"
+        try:
+            from jernerics.tracking.http_api import get_sweep_summary
+
+            get_sweep_summary(mock_server, "my-project", "study-1")
+        finally:
+            os.environ.pop("JERNERICS_API_KEY", None)
+
+        assert "Authorization" in MockHandler.received_headers
+        assert MockHandler.received_headers["Authorization"] == "Bearer test-key-123"
+
+    def test_get_sweep_summary_without_api_key(self, mock_server):
+        MockHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "trial_count": 0,
+            "completed_count": 0,
+            "param_keys": [],
+            "final_metric_keys": [],
+            "artifact_keys": [],
+        }
+
+        api_key = os.environ.pop("JERNERICS_API_KEY", None)
+        try:
+            from jernerics.tracking.http_api import get_sweep_summary
+
+            get_sweep_summary(mock_server, "my-project", "study-1")
+        finally:
+            if api_key:
+                os.environ["JERNERICS_API_KEY"] = api_key
+
+        assert "Authorization" not in MockHandler.received_headers
+
+    def test_get_sweep_summary_http_error(self, mock_server):
+        MockHandler.response_status = 404
+        MockHandler.response_data = {}
+
+        from jernerics.tracking.http_api import get_sweep_summary
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_sweep_summary(mock_server, "my-project", "study-1")
+
+        assert "404" in str(exc_info.value)
+        MockHandler.response_status = 200
+
+    def test_get_sweep_summary_unreachable_server(self):
+        from jernerics.tracking.http_api import get_sweep_summary
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_sweep_summary("http://localhost:9999", "my-project", "study-1")
+
+        assert "http://localhost:9999" in str(exc_info.value)
+
+    def test_get_sweep_summary_invalid_json(self, mock_server):
+        MockHandler.response_data = {}
+        MockHandler.response_status = 200
+        MockHandler.return_invalid_json = True
+
+        from jernerics.tracking.http_api import get_sweep_summary
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            get_sweep_summary(mock_server, "my-project", "study-1")
+
+        MockHandler.return_invalid_json = False
+
+    def test_get_sweep_summary_url_encodes_parameters(self, mock_server):
+        MockHandler.response_data = {
+            "project": "my project",
+            "study_name": "study one",
+            "trial_count": 0,
+            "completed_count": 0,
+            "param_keys": [],
+            "final_metric_keys": [],
+            "artifact_keys": [],
+        }
+
+        from jernerics.tracking.http_api import get_sweep_summary
+
+        result = get_sweep_summary(mock_server, "my project", "study one")
+
+        assert result["project"] == "my project"
+        assert result["study_name"] == "study one"
+        assert "project=my+project" in MockHandler.received_path
+        assert "study_name=study+one" in MockHandler.received_path
+
+    def test_get_sweep_summary_wrong_shape(self, mock_server):
+        """Test that get_sweep_summary raises RuntimeError
+        when server returns non-dict.
+        """
+        MockHandler.response_data = [{"error": "not a dict"}]
+
+        from jernerics.tracking.http_api import get_sweep_summary
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_sweep_summary(mock_server, "my-project", "study-1")
+
+        assert "Expected sweep summary dict from server" in str(exc_info.value)
 
 
 class TestGetHealth:

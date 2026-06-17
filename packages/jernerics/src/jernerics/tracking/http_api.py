@@ -75,6 +75,30 @@ def list_sweeps(base_url: str, project: str | None = None) -> list[dict]:
     return result
 
 
+def get_sweep_summary(base_url: str, project: str, study_name: str) -> dict:
+    """Get sweep summary from the tracking HTTP server.
+
+    Args:
+        base_url: Base URL of the tracking server (e.g., "http://localhost:8000").
+        project: Project name.
+        study_name: Study/sweep name.
+
+    Returns:
+        Sweep summary dictionary with trial_count, completed_count,
+            param_keys, final_metric_keys, artifact_keys.
+
+    Raises:
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
+    """
+    query_params = {"project": project, "study_name": study_name}
+    url = f"{base_url.rstrip('/')}/api/sweep-summary?{urlencode(query_params)}"
+    result = _request(url)
+    if not isinstance(result, dict):
+        raise RuntimeError("Expected sweep summary dict from server")  # noqa: TRY004
+    return result
+
+
 def list_trials(
     base_url: str,
     project: str,

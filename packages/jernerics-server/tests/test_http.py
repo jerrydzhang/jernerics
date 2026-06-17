@@ -605,6 +605,221 @@ class TestSweepsEndpoint:
         assert body[0]["project"] == "my project"
 
 
+class TestSweepSummaryEndpoint:
+    def test_returns_summary_for_existing_sweep(self, client):
+        db = client.app.state.store
+
+        # Insert params for trial 0
+        env_param0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param0)
+
+        # Insert params for trial 1
+        env_param1 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.01)),
+        )
+        db.insert_event(env_param1)
+
+        # Insert metrics for trial 0
+        env_metric0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=3000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric0)
+
+        # Insert artifact for trial 0
+        env_artifact0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=4000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact0)
+
+        # Insert trial end for trial 0
+        env_trial_end0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=5000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_trial_end0)
+
+        response = client.get("/api/sweep-summary?project=myproj&study_name=mystudy")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["project"] == "myproj"
+        assert body["study_name"] == "mystudy"
+        assert body["trial_count"] == 2
+        assert body["completed_count"] == 1
+        assert body["param_keys"] == ["lr"]
+        assert body["final_metric_keys"] == ["loss"]
+        assert body["artifact_keys"] == ["model"]
+
+    def test_returns_404_for_nonexistent_sweep(self, client):
+        response = client.get("/api/sweep-summary?project=proj&study_name=nonexistent")
+        assert response.status_code == 404
+        body = response.json()
+        assert "nonexistent" in body["detail"]
+
+    def test_returns_404_for_nonexistent_project(self, client):
+        response = client.get("/api/sweep-summary?project=nonexistent&study_name=study")
+        assert response.status_code == 404
+
+    def test_includes_all_param_keys(self, client):
+        db = client.app.state.store
+
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param1)
+
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=0,
+            param=ParamEvent(key="batch_size", value=Value(int_val=32)),
+        )
+        db.insert_event(env_param2)
+
+        response = client.get("/api/sweep-summary?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert sorted(body["param_keys"]) == ["batch_size", "lr"]
+
+    def test_includes_all_final_metric_keys(self, client):
+        db = client.app.state.store
+
+        env_metric1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric1)
+
+        env_metric2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            metric=MetricEvent(key="accuracy", value=0.95, step=-1),
+        )
+        db.insert_event(env_metric2)
+
+        response = client.get("/api/sweep-summary?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert sorted(body["final_metric_keys"]) == ["accuracy", "loss"]
+
+    def test_includes_all_artifact_keys(self, client):
+        db = client.app.state.store
+
+        env_artifact1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact1)
+
+        env_artifact2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            artifact=ArtifactEvent(key="plot", filename="plot.png"),
+        )
+        db.insert_event(env_artifact2)
+
+        response = client.get("/api/sweep-summary?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert sorted(body["artifact_keys"]) == ["model", "plot"]
+
+    def test_excludes_intermediate_metrics(self, client):
+        db = client.app.state.store
+
+        env_metric_intermediate = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.8, step=1),
+        )
+        db.insert_event(env_metric_intermediate)
+
+        env_metric_final = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric_final)
+
+        response = client.get("/api/sweep-summary?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["final_metric_keys"] == ["loss"]
+
+    def test_requires_bearer_auth(self, auth_client):
+        db = auth_client.app.state.store
+
+        env = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env)
+
+        response = auth_client.get("/api/sweep-summary?project=p&study_name=s")
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/sweep-summary?project=p&study_name=s",
+            headers={"Authorization": "Bearer secret123"},
+        )
+        assert response.status_code == 200
+
+
 class TestTrialsEndpoint:
     def test_valid_request(self, client):
         db = client.app.state.store

@@ -841,6 +841,73 @@ def compare_sweeps(
         console.print()
 
 
+# ── sweep-summary ────────────────────────────────────────────────────────────────
+
+
+@app.command("sweep-summary")
+def sweep_summary(
+    sweep: Annotated[str, typer.Option(help="Sweep/study name")],
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Project name (default: from pyproject.toml)"),
+    ] = None,
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Tracking HTTP server URL"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+):
+    """Get a factual summary of a sweep from the tracking HTTP server."""
+    from .tracking.http_api import get_sweep_summary
+
+    project = _resolve_project_name(project)
+    base_url = _resolve_tracking_server_url(server)
+
+    try:
+        summary_data = get_sweep_summary(base_url, project, sweep)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(summary_data, indent=2))
+        return
+
+    console = Console()
+
+    console.print()
+    console.print(f"[bold]Sweep Summary:[/bold] {summary_data['study_name']}")
+    console.print()
+
+    console.print(f"  Project: {summary_data['project']}")
+    console.print(
+        f"  Trials: {summary_data['trial_count']} "
+        f"({summary_data['completed_count']} completed)"
+    )
+    console.print()
+
+    if summary_data["param_keys"]:
+        console.print("[bold]Parameter Keys:[/bold]")
+        for key in summary_data["param_keys"]:
+            console.print(f"  - {key}")
+        console.print()
+
+    if summary_data["final_metric_keys"]:
+        console.print("[bold]Final Metric Keys:[/bold]")
+        for key in summary_data["final_metric_keys"]:
+            console.print(f"  - {key}")
+        console.print()
+
+    if summary_data["artifact_keys"]:
+        console.print("[bold]Artifact Keys:[/bold]")
+        for key in summary_data["artifact_keys"]:
+            console.print(f"  - {key}")
+        console.print()
+
+
 # ── metric-history ───────────────────────────────────────────────────────────────
 
 
