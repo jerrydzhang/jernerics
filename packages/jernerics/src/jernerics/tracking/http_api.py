@@ -176,3 +176,34 @@ def get_health(base_url: str) -> dict:
     if not isinstance(result, dict):
         raise TypeError("Expected health dict from server")
     return result
+
+
+def list_artifacts(
+    base_url: str,
+    project: str,
+    study_name: str,
+    trial_id: int | None = None,
+) -> list[dict]:
+    """List artifacts from the tracking HTTP server.
+
+    Args:
+        base_url: Base URL of the tracking server (e.g., "http://localhost:8000").
+        project: Project name.
+        study_name: Study/sweep name.
+        trial_id: Optional trial ID to filter artifacts by.
+
+    Returns:
+        List of artifact dictionaries with trial_id, key, filename, timestamp_ns.
+
+    Raises:
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
+    """
+    query_params = {"project": project, "study_name": study_name}
+    if trial_id is not None:
+        query_params["trial_id"] = str(trial_id)
+    url = f"{base_url.rstrip('/')}/api/artifacts?{urlencode(query_params)}"
+    result = _request(url)
+    if not isinstance(result, list):
+        raise TypeError("Expected list of artifacts from server")
+    return result

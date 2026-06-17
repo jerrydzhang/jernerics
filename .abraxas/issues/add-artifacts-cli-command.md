@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/add-artifacts-cli-command
+completed_at: '2026-06-17T02:04:12.399055'
 created: '2026-06-17T01:14:56.861843'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Add artifacts CLI command
 ---
 

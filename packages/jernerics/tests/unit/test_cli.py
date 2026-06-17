@@ -390,8 +390,10 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path.startswith("/api/trials") or self.path.startswith(
-            "/api/compare-sweeps"
+        if (
+            self.path.startswith("/api/trials")
+            or self.path.startswith("/api/compare-sweeps")
+            or self.path.startswith("/api/artifacts")
         ):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -1416,3 +1418,224 @@ class TestMetricHistoryCommand:
 
         captured = capsys.readouterr()
         assert "1" in captured.out
+
+
+class TestArtifactsCommand:
+    def test_artifacts_with_server_option(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "model",
+                "filename": "model.pkl",
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 2,
+                "key": "log",
+                "filename": "log.txt",
+                "timestamp_ns": 1705325405000000000,
+            },
+        ]
+
+        from jernerics.cli import artifacts
+
+        artifacts(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "2" in captured.out
+        assert "model" in captured.out
+        assert "log" in captured.out
+        assert "model.pkl" in captured.out
+        assert "log.txt" in captured.out
+        assert "TRIAL_ID" in captured.out
+        assert "KEY" in captured.out
+        assert "FILENAME" in captured.out
+        assert "TIMESTAMP_NS" in captured.out
+
+    def test_artifacts_with_trial_id(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "model",
+                "filename": "model.pkl",
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import artifacts
+
+        artifacts(
+            project="my-project", sweep="study-1", trial_id=1, server=mock_trials_server
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "model" in captured.out
+
+    def test_artifacts_with_json_flag(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "model",
+                "filename": "model.pkl",
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import artifacts
+
+        artifacts(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "trial_id" in captured.out
+        assert "key" in captured.out
+        assert "filename" in captured.out
+        assert "timestamp_ns" in captured.out
+
+    def test_artifacts_with_empty_response(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import artifacts
+
+        artifacts(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "No artifacts found" in captured.out
+
+    def test_artifacts_server_url_priority(
+        self, mock_trials_server, capsys, monkeypatch
+    ):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import artifacts
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", "http://wrong-url:9999")
+        artifacts(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "No artifacts found" in captured.out
+
+    def test_artifacts_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import artifacts
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            artifacts(project="my-project", sweep="study-1", server=None)
+
+        assert exc_info.value.code == 3
+
+    def test_artifacts_displays_rich_table(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "model",
+                "filename": "model.pkl",
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "log",
+                "filename": "log.txt",
+                "timestamp_ns": 1705325401000000000,
+            },
+            {
+                "trial_id": 2,
+                "key": "model",
+                "filename": "model.pkl",
+                "timestamp_ns": 1705325402000000000,
+            },
+        ]
+
+        from jernerics.cli import artifacts
+
+        artifacts(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "model" in captured.out
+        assert "log" in captured.out
+        assert "model.pkl" in captured.out
+        assert "log.txt" in captured.out
+        assert "TRIAL_ID" in captured.out
+        assert "KEY" in captured.out
+        assert "FILENAME" in captured.out
+        assert "TIMESTAMP_NS" in captured.out
+
+    def test_artifacts_uses_pyproject_project_name(
+        self, mock_trials_server, capsys, tmp_path
+    ):
+        """artifacts uses project name from pyproject.toml when --project omitted."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "model",
+                "filename": "model.pkl",
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "test-project-from-toml"\n'
+        )
+
+        from jernerics.cli import artifacts
+
+        artifacts(project=None, sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "model" in captured.out
+
+    def test_artifacts_config_error_without_pyproject(
+        self, mock_trials_server, capsys, monkeypatch
+    ):
+        """artifacts exits CONFIG_ERROR when no pyproject.toml."""
+        from jernerics.cli import artifacts
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            artifacts(project=None, sweep="study-1", server=mock_trials_server)
+
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert "No pyproject.toml found" in captured.out or "--project" in captured.out
+
+    def test_artifacts_explicit_project_overrides_pyproject(
+        self, mock_trials_server, capsys, tmp_path
+    ):
+        """artifacts uses --project value even when pyproject.toml exists."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "model",
+                "filename": "model.pkl",
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "different-project"\n'
+        )
+
+        from jernerics.cli import artifacts
+
+        artifacts(
+            project="explicit-project", sweep="study-1", server=mock_trials_server
+        )
+
+        captured = capsys.readouterr()
+        assert "model" in captured.out
