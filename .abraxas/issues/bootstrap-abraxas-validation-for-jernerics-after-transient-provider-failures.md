@@ -1,12 +1,12 @@
 ---
-base_branch: null
+base_branch: main
 branch: null
 created: '2026-06-16T22:38:42.811341'
 merge_commit_sha: null
 order: 0
 parent_id: null
 retry_count: 0
-status: open
+status: failed
 title: Bootstrap Abraxas validation for Jernerics after transient provider failures
 ---
 
