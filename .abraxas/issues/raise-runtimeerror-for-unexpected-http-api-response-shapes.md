@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/raise-runtimeerror-for-unexpected-http-api-response-shapes
+completed_at: '2026-06-17T03:01:05.811760'
 created: '2026-06-17T02:28:02.078164'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Raise RuntimeError for unexpected HTTP API response shapes
 ---
 

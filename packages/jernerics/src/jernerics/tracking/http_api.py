@@ -69,7 +69,7 @@ def list_sweeps(base_url: str, project: str | None = None) -> list[dict]:
         url += f"?{query_params}"
     result = _request(url)
     if not isinstance(result, list):
-        raise TypeError("Expected list of sweeps from server")
+        raise RuntimeError("Expected list of sweeps from server")  # noqa: TRY004
     return result
 
 
@@ -102,7 +102,7 @@ def list_trials(
     url = f"{base_url.rstrip('/')}/api/trials?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, list):
-        raise TypeError("Expected list of trials from server")
+        raise RuntimeError("Expected list of trials from server")  # noqa: TRY004
     if limit:
         result = result[:limit]
     return result
@@ -128,7 +128,7 @@ def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
     url = f"{base_url.rstrip('/')}/api/compare-sweeps?{query_params}"
     result = _request(url)
     if not isinstance(result, dict):
-        raise TypeError("Expected comparison dict from server")
+        raise RuntimeError("Expected comparison dict from server")  # noqa: TRY004
     return result
 
 
@@ -154,7 +154,7 @@ def get_metric_history(
     url = f"{base_url.rstrip('/')}/api/metrics?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, list):
-        raise TypeError("Expected list of metric history entries from server")
+        raise RuntimeError("Expected list of metric history entries from server")  # noqa: TRY004
     return result
 
 
@@ -174,7 +174,7 @@ def get_health(base_url: str) -> dict:
     url = f"{base_url.rstrip('/')}/api/health"
     result = _request(url)
     if not isinstance(result, dict):
-        raise TypeError("Expected health dict from server")
+        raise RuntimeError("Expected health dict from server")  # noqa: TRY004
     return result
 
 
@@ -205,7 +205,7 @@ def list_artifacts(
     url = f"{base_url.rstrip('/')}/api/artifacts?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, list):
-        raise TypeError("Expected list of artifacts from server")
+        raise RuntimeError("Expected list of artifacts from server")  # noqa: TRY004
     return result
 
 
@@ -240,5 +240,5 @@ def list_results(
     url = f"{base_url.rstrip('/')}/api/results?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, list):
-        raise TypeError("Expected list of results from server")
+        raise RuntimeError("Expected list of results from server")  # noqa: TRY004
     return result

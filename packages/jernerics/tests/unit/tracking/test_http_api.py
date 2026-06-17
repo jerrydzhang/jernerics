@@ -259,6 +259,15 @@ class TestListSweeps:
         assert result == []
         assert "project=project%26a" in MockHandler.received_path
 
+    def test_list_sweeps_wrong_shape(self, mock_server):
+        """Test that list_sweeps raises RuntimeError when server returns non-list."""
+        MockHandler.response_data = {"error": "not a list"}
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_sweeps(mock_server)
+
+        assert "Expected list of sweeps from server" in str(exc_info.value)
+
 
 class TestListTrials:
     def test_list_trials_success(self, mock_server):
@@ -651,6 +660,15 @@ class TestCompareSweeps:
         assert "project=project%26a" in MockHandler.received_path
         assert "left=study%26a" in MockHandler.received_path
         assert "right=study%26b" in MockHandler.received_path
+
+    def test_compare_sweeps_wrong_shape(self, mock_server):
+        """Test that compare_sweeps raises RuntimeError when server returns non-dict."""
+        MockHandler.response_data = [{"error": "not a dict"}]
+
+        with pytest.raises(RuntimeError) as exc_info:
+            compare_sweeps(mock_server, "my-project", "study-1", "study-2")
+
+        assert "Expected comparison dict from server" in str(exc_info.value)
 
 
 class TestGetHealth:
