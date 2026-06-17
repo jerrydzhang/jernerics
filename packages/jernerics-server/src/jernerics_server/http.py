@@ -178,6 +178,21 @@ def create_app(
             }
         )
 
+    @app.get("/api/metric-keys", response_model=None, dependencies=deps)
+    def metric_keys(project: str, study_name: str) -> JSONResponse:
+        summary = store.get_study_summary(project, study_name)
+        if summary is None:
+            raise HTTPException(
+                status_code=404, detail=f"Study '{study_name}' not found"
+            )
+        return JSONResponse(
+            content={
+                "project": project,
+                "study_name": study_name,
+                "final_metric_keys": summary["final_metric_keys"],
+            }
+        )
+
     @app.get("/api/compare-sweeps", response_model=None, dependencies=deps)
     def compare_sweeps(
         project: str, left: str, right: str, metrics: str | None = None

@@ -32,6 +32,7 @@ class MockHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/artifacts")
             or self.path.startswith("/api/results")
             or self.path.startswith("/api/params")
+            or self.path.startswith("/api/metric-keys")
             or self.path == "/api/health"
         ):
             MockHandler.received_headers = dict(self.headers)
@@ -2117,6 +2118,216 @@ class TestListParams:
         assert len(result) == 2
         assert result[0]["value"] == "adam"
         assert result[1]["value"] == "resnet50"
+
+
+class TestListMetricKeys:
+    def test_list_metric_keys_success(self, mock_server):
+        MockHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": ["loss", "accuracy", "f1_score"],
+        }
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        result = list_metric_keys(mock_server, "my-project", "study-1")
+
+        assert result["project"] == "my-project"
+        assert result["study_name"] == "study-1"
+        assert set(result["final_metric_keys"]) == {"loss", "accuracy", "f1_score"}
+        assert "/api/metric-keys" in MockHandler.received_path
+
+    def test_list_metric_keys_empty_list(self, mock_server):
+        MockHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": [],
+        }
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        result = list_metric_keys(mock_server, "my-project", "study-1")
+
+        assert result["final_metric_keys"] == []
+
+    def test_list_metric_keys_with_api_key(self, mock_server):
+        MockHandler.response_data = {
+            "project": "p",
+            "study_name": "s",
+            "final_metric_keys": ["loss"],
+        }
+
+        os.environ["JERNERICS_API_KEY"] = "test-key-123"
+        try:
+            from jernerics.tracking.http_api import list_metric_keys
+
+            list_metric_keys(mock_server, "p", "s")
+        finally:
+            os.environ.pop("JERNERICS_API_KEY", None)
+
+        assert "Authorization" in MockHandler.received_headers
+        assert MockHandler.received_headers["Authorization"] == "Bearer test-key-123"
+
+    def test_list_metric_keys_without_api_key(self, mock_server):
+        MockHandler.response_data = {
+            "project": "p",
+            "study_name": "s",
+            "final_metric_keys": [],
+        }
+
+        api_key = os.environ.pop("JERNERICS_API_KEY", None)
+        try:
+            from jernerics.tracking.http_api import list_metric_keys
+
+            list_metric_keys(mock_server, "p", "s")
+        finally:
+            if api_key:
+                os.environ["JERNERICS_API_KEY"] = api_key
+
+        assert "Authorization" not in MockHandler.received_headers
+
+    def test_list_metric_keys_http_error(self, mock_server):
+        MockHandler.response_status = 404
+        MockHandler.response_data = {}
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_metric_keys(mock_server, "my-project", "study-1")
+
+        assert "404" in str(exc_info.value)
+        MockHandler.response_status = 200
+
+    def test_list_metric_keys_unreachable_server(self):
+        from jernerics.tracking.http_api import list_metric_keys
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_metric_keys("http://localhost:9999", "my-project", "study-1")
+
+        assert "http://localhost:9999" in str(exc_info.value)
+
+    def test_list_metric_keys_invalid_json(self, mock_server):
+        MockHandler.response_data = {}
+        MockHandler.response_status = 200
+        MockHandler.return_invalid_json = True
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            list_metric_keys(mock_server, "my-project", "study-1")
+
+        MockHandler.return_invalid_json = False
+
+    def test_list_metric_keys_sends_accept_header(self, mock_server):
+        MockHandler.response_data = {
+            "project": "p",
+            "study_name": "s",
+            "final_metric_keys": [],
+        }
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        list_metric_keys(mock_server, "p", "s")
+
+        assert "Accept" in MockHandler.received_headers
+        assert MockHandler.received_headers["Accept"] == "application/json"
+
+    def test_list_metric_keys_url_encodes_spaces(self, mock_server):
+        MockHandler.response_data = {
+            "project": "my project",
+            "study_name": "study one",
+            "final_metric_keys": [],
+        }
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        list_metric_keys(mock_server, "my project", "study one")
+
+        assert "project=my+project" in MockHandler.received_path
+        assert "study_name=study+one" in MockHandler.received_path
+
+    def test_list_metric_keys_url_encodes_special_chars(self, mock_server):
+        MockHandler.response_data = {
+            "project": "project&a",
+            "study_name": "study&b",
+            "final_metric_keys": [],
+        }
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        list_metric_keys(mock_server, "project&a", "study&b")
+
+        assert "project=project%26a" in MockHandler.received_path
+        assert "study_name=study%26b" in MockHandler.received_path
+
+    def test_list_metric_keys_accepts_trailing_slash(self, mock_server):
+        MockHandler.response_data = {
+            "project": "p",
+            "study_name": "s",
+            "final_metric_keys": [],
+        }
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        result = list_metric_keys(mock_server + "/", "p", "s")
+
+        assert result["final_metric_keys"] == []
+
+    def test_list_metric_keys_http_error_with_detail(self, mock_server):
+        MockHandler.response_status = 404
+        body = json.dumps({"detail": "Study not found"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_metric_keys(mock_server, "my-project", "study-1")
+
+        assert "404" in str(exc_info.value)
+        assert "Study not found" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_list_metric_keys_http_error_with_error_field(self, mock_server):
+        MockHandler.response_status = 500
+        body = json.dumps({"error": "Internal server error"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_metric_keys(mock_server, "my-project", "study-1")
+
+        assert "500" in str(exc_info.value)
+        assert "Internal server error" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_list_metric_keys_http_error_no_body(self, mock_server):
+        MockHandler.response_status = 503
+        MockHandler.response_body = b""
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_metric_keys(mock_server, "my-project", "study-1")
+
+        assert "503" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+
+    def test_list_metric_keys_wrong_shape(self, mock_server):
+        """Test that list_metric_keys raises RuntimeError for non-dict."""
+        MockHandler.response_data = [{"error": "not a dict"}]
+
+        from jernerics.tracking.http_api import list_metric_keys
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_metric_keys(mock_server, "my-project", "study-1")
+
+        assert "Expected metric keys dict from server" in str(exc_info.value)
 
 
 class TestTimeout:

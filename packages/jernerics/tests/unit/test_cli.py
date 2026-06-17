@@ -400,6 +400,7 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/artifacts")
             or self.path.startswith("/api/results")
             or self.path.startswith("/api/params")
+            or self.path.startswith("/api/metric-keys")
         ):
             MockTrialsHandler.received_path = self.path
             self.send_response(MockTrialsHandler.response_status)
@@ -2467,3 +2468,196 @@ class TestParamsCommand:
         assert "model" in captured.out
         assert "adam" in captured.out
         assert "resnet50" in captured.out
+
+
+class TestMetricKeysCommand:
+    def test_metric_keys_with_server_option(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": ["loss", "accuracy", "f1_score"],
+        }
+
+        from jernerics.cli import metric_keys
+
+        metric_keys(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "loss" in captured.out
+        assert "accuracy" in captured.out
+        assert "f1_score" in captured.out
+
+    def test_metric_keys_with_env_var(self, mock_trials_server, capsys, monkeypatch):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": [],
+        }
+
+        from jernerics.cli import metric_keys
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", mock_trials_server)
+        metric_keys(project="my-project", sweep="study-1", server=None)
+
+        captured = capsys.readouterr()
+        assert captured.out.strip() == ""
+
+    def test_metric_keys_with_json_flag(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": ["loss", "accuracy"],
+        }
+
+        from jernerics.cli import metric_keys
+
+        metric_keys(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "my-project" in captured.out
+        assert "study-1" in captured.out
+        assert "loss" in captured.out
+        assert "accuracy" in captured.out
+
+    def test_metric_keys_with_empty_list(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": [],
+        }
+
+        from jernerics.cli import metric_keys
+
+        metric_keys(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert captured.out.strip() == ""
+
+    def test_metric_keys_server_url_priority(
+        self, mock_trials_server, capsys, monkeypatch
+    ):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": ["loss"],
+        }
+
+        from jernerics.cli import metric_keys
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", "http://wrong-url:9999")
+        metric_keys(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "loss" in captured.out
+
+    def test_metric_keys_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import metric_keys
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            metric_keys(project="my-project", sweep="study-1", server=None)
+
+        assert exc_info.value.code == 3
+
+    def test_metric_keys_outputs_one_per_line(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": ["loss", "accuracy", "f1_score"],
+        }
+
+        from jernerics.cli import metric_keys
+
+        metric_keys(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        lines = [line for line in captured.out.split("\n") if line.strip()]
+        assert len(lines) == 3
+        assert "loss" in lines[0]
+        assert "accuracy" in lines[1]
+        assert "f1_score" in lines[2]
+
+    def test_metric_keys_with_project_flag(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": ["precision", "recall"],
+        }
+
+        from jernerics.cli import metric_keys
+
+        metric_keys(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "precision" in captured.out
+        assert "recall" in captured.out
+
+    def test_metric_keys_with_project_flag_url_encodes(
+        self, mock_trials_server, capsys
+    ):
+        MockTrialsHandler.response_data = {
+            "project": "my project",
+            "study_name": "study-1",
+            "final_metric_keys": ["loss"],
+        }
+
+        from jernerics.cli import metric_keys
+
+        metric_keys(project="my project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "loss" in captured.out
+
+    def test_metric_keys_handles_error(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_status = 404
+        body = json.dumps({"detail": "Study not found"})
+        MockTrialsHandler.response_body = body.encode("utf-8")
+
+        from jernerics.cli import metric_keys
+
+        with pytest.raises(SystemExit):
+            metric_keys(
+                project="my-project",
+                sweep="study-1",
+                server=mock_trials_server,
+            )
+
+        captured = capsys.readouterr()
+        assert "Error" in captured.out
+        MockTrialsHandler.response_status = 200
+        MockTrialsHandler.response_body = b""
+
+    def test_metric_keys_json_includes_all_fields(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "project": "my-project",
+            "study_name": "study-1",
+            "final_metric_keys": ["loss", "accuracy"],
+        }
+
+        from jernerics.cli import metric_keys
+
+        metric_keys(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        import json
+
+        result = json.loads(captured.out)
+        assert result["project"] == "my-project"
+        assert result["study_name"] == "study-1"
+        assert result["final_metric_keys"] == ["loss", "accuracy"]

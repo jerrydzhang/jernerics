@@ -316,3 +316,26 @@ def list_params(
     if not isinstance(result, list):
         raise RuntimeError("Expected list of params from server")  # noqa: TRY004
     return result
+
+
+def list_metric_keys(base_url: str, project: str, study_name: str) -> dict:
+    """List final metric keys from the tracking HTTP server.
+
+    Args:
+        base_url: Base URL of the tracking server (e.g., "http://localhost:8000").
+        project: Project name.
+        study_name: Study/sweep name.
+
+    Returns:
+        Dictionary with project, study_name, and final_metric_keys.
+
+    Raises:
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
+    """
+    query_params = {"project": project, "study_name": study_name}
+    url = f"{base_url.rstrip('/')}/api/metric-keys?{urlencode(query_params)}"
+    result = _request(url)
+    if not isinstance(result, dict):
+        raise RuntimeError("Expected metric keys dict from server")  # noqa: TRY004
+    return result

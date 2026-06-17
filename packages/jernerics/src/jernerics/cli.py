@@ -1195,6 +1195,45 @@ def params(
     Console().print(table)
 
 
+# ── metric-keys ─────────────────────────────────────────────────────────────────
+
+
+@app.command("metric-keys")
+def metric_keys(
+    sweep: Annotated[str, typer.Option(help="Sweep/study name")],
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Project name (default: from pyproject.toml)"),
+    ] = None,
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Tracking HTTP server URL"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+):
+    """List final metric keys from the tracking HTTP server."""
+    from .tracking.http_api import list_metric_keys
+
+    project = _resolve_project_name(project)
+    base_url = _resolve_tracking_server_url(server)
+
+    try:
+        metric_keys_data = list_metric_keys(base_url, project, sweep)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(metric_keys_data, indent=2))
+        return
+
+    for key in metric_keys_data.get("final_metric_keys", []):
+        print(key)
+
+
 def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:
     target = project_path / filename
     if target.exists():
