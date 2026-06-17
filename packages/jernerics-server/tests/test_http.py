@@ -1755,3 +1755,198 @@ class TestMetricsEndpoint:
 
         response = client.get("/api/metrics?project=p&study_name=s")
         assert response.status_code == 422
+
+
+class TestArtifactsEndpoint:
+    def test_basic_listing_returns_all_artifacts(self, client):
+        db = client.app.state.store
+
+        env_artifact1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact1)
+
+        env_artifact2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            artifact=ArtifactEvent(key="plot", filename="loss.png"),
+        )
+        db.insert_event(env_artifact2)
+
+        env_artifact3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact3)
+
+        response = client.get("/api/artifacts?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 3
+
+        # Sorted by trial_id, then key
+        assert body[0] == {
+            "trial_id": 0,
+            "key": "model",
+            "filename": "model.bin",
+            "timestamp_ns": 1000,
+        }
+        assert body[1] == {
+            "trial_id": 0,
+            "key": "plot",
+            "filename": "loss.png",
+            "timestamp_ns": 2000,
+        }
+        assert body[2] == {
+            "trial_id": 1,
+            "key": "model",
+            "filename": "model.bin",
+            "timestamp_ns": 3000,
+        }
+
+    def test_filter_by_trial_id(self, client):
+        db = client.app.state.store
+
+        env_artifact1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact1)
+
+        env_artifact2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact2)
+
+        response = client.get("/api/artifacts?project=p&study_name=s&trial_id=0")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 0
+        assert body[0]["key"] == "model"
+        assert body[0]["filename"] == "model.bin"
+        assert body[0]["timestamp_ns"] == 1000
+
+    def test_requires_bearer_auth(self, auth_client):
+        response = auth_client.get("/api/artifacts?project=p&study_name=s")
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/artifacts?project=p&study_name=s",
+            headers={"Authorization": "Bearer secret123"},
+        )
+        assert response.status_code == 200
+
+    def test_empty_results_for_no_artifacts(self, client):
+        response = client.get("/api/artifacts?project=p&study_name=s")
+        assert response.status_code == 200
+        assert response.json() == []
+
+        # Test with existing project/study but no artifacts
+        db = client.app.state.store
+        env_param = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param)
+
+        response = client.get("/api/artifacts?project=p&study_name=s")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_sorting_by_trial_id_and_key(self, client):
+        db = client.app.state.store
+
+        # Insert artifacts in non-sorted order to test sorting
+        env_artifact1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=5000,
+            seq=0,
+            artifact=ArtifactEvent(key="z_model", filename="z.bin"),
+        )
+        db.insert_event(env_artifact1)
+
+        env_artifact2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            artifact=ArtifactEvent(key="a_plot", filename="a.png"),
+        )
+        db.insert_event(env_artifact2)
+
+        env_artifact3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=1,
+            artifact=ArtifactEvent(key="z_model", filename="z.bin"),
+        )
+        db.insert_event(env_artifact3)
+
+        env_artifact4 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            artifact=ArtifactEvent(key="m_data", filename="m.csv"),
+        )
+        db.insert_event(env_artifact4)
+
+        response = client.get("/api/artifacts?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 4
+
+        # Sorted by trial_id ASC, then key ASC
+        assert body[0]["trial_id"] == 0
+        assert body[0]["key"] == "m_data"
+
+        assert body[1]["trial_id"] == 1
+        assert body[1]["key"] == "a_plot"
+
+        assert body[2]["trial_id"] == 1
+        assert body[2]["key"] == "z_model"
+
+        assert body[3]["trial_id"] == 2
+        assert body[3]["key"] == "z_model"
+
+    def test_missing_params_returns_422(self, client):
+        response = client.get("/api/artifacts")
+        assert response.status_code == 422
+
+        response = client.get("/api/artifacts?project=p")
+        assert response.status_code == 422
+
+        response = client.get("/api/artifacts?project=p&study_name=s")
+        assert response.status_code == 200  # trial_id is optional

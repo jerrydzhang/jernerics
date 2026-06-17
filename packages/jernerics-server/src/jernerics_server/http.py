@@ -118,6 +118,13 @@ def create_app(
                 trial["final_metrics"] = filtered_metrics
         return JSONResponse(content=trials)
 
+    @app.get("/api/artifacts", response_model=None, dependencies=deps)
+    def list_artifacts(
+        project: str, study_name: str, trial_id: int | None = None
+    ) -> JSONResponse:
+        artifacts = store.list_artifacts(project, study_name, trial_id)
+        return JSONResponse(content=artifacts)
+
     @app.get("/api/compare-sweeps", response_model=None, dependencies=deps)
     def compare_sweeps(project: str, left: str, right: str) -> JSONResponse:
         left_summary = store.get_study_summary(project, left)

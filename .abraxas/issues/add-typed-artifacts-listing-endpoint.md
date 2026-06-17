@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/add-typed-artifacts-listing-endpoint
+completed_at: '2026-06-17T01:53:07.911291'
 created: '2026-06-17T01:14:54.809566'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Add typed artifacts listing endpoint
 ---
 

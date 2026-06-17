@@ -521,3 +521,31 @@ class Store:
             return [dict(zip(columns, row, strict=True)) for row in rows]
         finally:
             con.close()
+
+    def list_artifacts(
+        self, project: str, study_name: str, trial_id: int | None = None
+    ) -> list[dict]:
+        if trial_id is not None:
+            sql = """
+            SELECT trial_id, key, filename, timestamp_ns
+            FROM artifacts
+            WHERE project = ? AND study_name = ? AND trial_id = ?
+            ORDER BY trial_id, key
+            """
+            params = [project, study_name, trial_id]
+        else:
+            sql = """
+            SELECT trial_id, key, filename, timestamp_ns
+            FROM artifacts
+            WHERE project = ? AND study_name = ?
+            ORDER BY trial_id, key
+            """
+            params = [project, study_name]
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, params)
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            return [dict(zip(columns, row, strict=True)) for row in rows]
+        finally:
+            con.close()
