@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-typed-sweep-summary-endpoint-and-cli-command
+branch: null
 completed_at: '2026-06-17T05:00:04.584306'
 created: '2026-06-17T04:25:36.319433'
-merge_commit_sha: null
+merge_commit_sha: 97b96cbd315ee2c637f5597ac9346af40b9299b5
 parent_id: null
 retry_count: 0
 status: closed
