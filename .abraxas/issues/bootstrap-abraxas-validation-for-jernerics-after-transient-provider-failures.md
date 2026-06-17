@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/bootstrap-abraxas-validation-for-jernerics-after-transient-provider-failures
+branch: null
 completed_at: '2026-06-16T22:56:38.217716'
 created: '2026-06-16T22:38:42.811341'
-merge_commit_sha: null
+merge_commit_sha: facdb35971b3e06e954e37084c3ae94dbe30cde3
 order: 0
 parent_id: null
 retry_count: 1
