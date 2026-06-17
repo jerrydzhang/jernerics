@@ -369,7 +369,28 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            response_body = json.dumps(MockTrialsHandler.response_data).encode("utf-8")
+            response_data = MockTrialsHandler.response_data
+
+            if self.path.startswith("/api/trials"):
+                from urllib.parse import parse_qs, urlparse
+
+                parsed = urlparse(self.path)
+                query_params = parse_qs(parsed.query)
+                if "metric_keys" in query_params:
+                    metric_keys = [
+                        k.strip() for k in query_params["metric_keys"][0].split(",")
+                    ]
+                    if isinstance(response_data, list):
+                        for trial in response_data:
+                            if "final_metrics" in trial:
+                                filtered_metrics = {
+                                    k: v
+                                    for k, v in trial["final_metrics"].items()
+                                    if k in metric_keys
+                                }
+                                trial["final_metrics"] = filtered_metrics
+
+            response_body = json.dumps(response_data).encode("utf-8")
             self.wfile.write(response_body)
         else:
             self.send_error(404, "Not Found")
@@ -934,3 +955,78 @@ class TestTrialsCommandOptionalProject:
         captured = capsys.readouterr()
         assert "1" in captured.out
         assert "complete" in captured.out
+
+    def test_trials_with_metrics_filter(self, mock_trials_server, capsys):
+        """trials with --metrics shows only selected metric columns."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {"accuracy": 0.95, "loss": 0.05, "f1": 0.87},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            metrics="accuracy,loss",
+        )
+
+        captured = capsys.readouterr()
+        assert "ACCURACY" in captured.out
+        assert "LOSS" in captured.out
+        assert "F1" not in captured.out
+        assert "0.95" in captured.out
+        assert "0.05" in captured.out
+
+    def test_trials_with_metrics_json_output(self, mock_trials_server, capsys):
+        """trials with --metrics and --json includes filtered data from endpoint."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            metrics="accuracy",
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "trial_id" in captured.out
+        assert "final_metrics" in captured.out
+        assert "accuracy" in captured.out
+
+    def test_trials_without_metrics_shows_all(self, mock_trials_server, capsys):
+        """trials without --metrics shows all metric columns."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {"accuracy": 0.95, "loss": 0.05},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "ACCURACY" in captured.out
+        assert "LOSS" in captured.out

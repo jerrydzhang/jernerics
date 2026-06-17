@@ -416,6 +416,61 @@ class TestListTrials:
         assert "project=project%26a" in MockHandler.received_path
         assert "study_name=study%26b" in MockHandler.received_path
 
+    def test_list_trials_with_metric_keys(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(
+            mock_server, "my-project", "study-1", metric_keys="accuracy"
+        )
+
+        assert len(result) == 1
+        assert result[0]["final_metrics"] == {"accuracy": 0.95}
+        assert "metric_keys=accuracy" in MockHandler.received_path
+
+    def test_list_trials_without_metric_keys(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {"accuracy": 0.95, "loss": 0.05},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1")
+
+        assert len(result) == 1
+        assert result[0]["final_metrics"] == {"accuracy": 0.95, "loss": 0.05}
+        assert "metric_keys" not in MockHandler.received_path
+
+    def test_list_trials_with_multiple_metric_keys(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {"accuracy": 0.95, "loss": 0.05},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(
+            mock_server, "my-project", "study-1", metric_keys="accuracy,loss"
+        )
+
+        assert len(result) == 1
+        assert result[0]["final_metrics"] == {"accuracy": 0.95, "loss": 0.05}
+        assert "metric_keys=accuracy%2Closs" in MockHandler.received_path
+
 
 class TestCompareSweeps:
     def test_compare_sweeps_success(self, mock_server):

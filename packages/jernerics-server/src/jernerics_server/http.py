@@ -96,8 +96,17 @@ def create_app(
         return JSONResponse(content=sweeps)
 
     @app.get("/api/trials", response_model=None, dependencies=deps)
-    def list_trials(project: str, study_name: str) -> JSONResponse:
+    def list_trials(
+        project: str, study_name: str, metric_keys: str | None = None
+    ) -> JSONResponse:
         trials = store.list_trials(project, study_name)
+        if metric_keys:
+            keys = [k.strip() for k in metric_keys.split(",") if k.strip()]
+            for trial in trials:
+                filtered_metrics = {
+                    k: v for k, v in trial.get("final_metrics", {}).items() if k in keys
+                }
+                trial["final_metrics"] = filtered_metrics
         return JSONResponse(content=trials)
 
     @app.get("/api/compare-sweeps", response_model=None, dependencies=deps)

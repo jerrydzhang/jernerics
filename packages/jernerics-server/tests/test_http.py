@@ -976,6 +976,171 @@ class TestTrialsEndpoint:
         trial_ids = [t["trial_id"] for t in body]
         assert trial_ids == [0, 1, 2, 3]
 
+    def test_metric_keys_filter_single_key(self, client):
+        db = client.app.state.store
+
+        env_metric1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric1)
+
+        env_metric2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            metric=MetricEvent(key="accuracy", value=0.95, step=-1),
+        )
+        db.insert_event(env_metric2)
+
+        response = client.get("/api/trials?project=p&study_name=s&metric_keys=loss")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["final_metrics"] == {"loss": 0.5}
+
+    def test_metric_keys_filter_multiple_keys(self, client):
+        db = client.app.state.store
+
+        env_metric1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric1)
+
+        env_metric2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            metric=MetricEvent(key="accuracy", value=0.95, step=-1),
+        )
+        db.insert_event(env_metric2)
+
+        env_metric3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=3000,
+            seq=2,
+            metric=MetricEvent(key="f1", value=0.87, step=-1),
+        )
+        db.insert_event(env_metric3)
+
+        response = client.get(
+            "/api/trials?project=p&study_name=s&metric_keys=loss,accuracy"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["final_metrics"] == {"loss": 0.5, "accuracy": 0.95}
+        assert "f1" not in body[0]["final_metrics"]
+
+    def test_metric_keys_filter_invalid_keys_omitted(self, client):
+        db = client.app.state.store
+
+        env_metric = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric)
+
+        response = client.get(
+            "/api/trials?project=p&study_name=s&metric_keys=loss,nonexistent"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["final_metrics"] == {"loss": 0.5}
+
+    def test_metric_keys_all_invalid_returns_empty_metrics(self, client):
+        db = client.app.state.store
+
+        env_metric = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric)
+
+        response = client.get(
+            "/api/trials?project=p&study_name=s&metric_keys=invalid1,invalid2"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["final_metrics"] == {}
+
+    def test_metric_keys_multiple_trials(self, client):
+        db = client.app.state.store
+
+        # Trial 0
+        env_metric0_1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric0_1)
+
+        env_metric0_2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            metric=MetricEvent(key="accuracy", value=0.95, step=-1),
+        )
+        db.insert_event(env_metric0_2)
+
+        # Trial 1
+        env_metric1_1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.3, step=-1),
+        )
+        db.insert_event(env_metric1_1)
+
+        env_metric1_2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=4000,
+            seq=1,
+            metric=MetricEvent(key="accuracy", value=0.97, step=-1),
+        )
+        db.insert_event(env_metric1_2)
+
+        response = client.get("/api/trials?project=p&study_name=s&metric_keys=loss")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+        assert body[0]["final_metrics"] == {"loss": 0.5}
+        assert body[1]["final_metrics"] == {"loss": 0.3}
+
 
 class TestCompareSweepsEndpoint:
     def test_valid_request_returns_comparison(self, client):

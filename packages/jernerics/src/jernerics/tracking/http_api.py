@@ -74,7 +74,11 @@ def list_sweeps(base_url: str, project: str | None = None) -> list[dict]:
 
 
 def list_trials(
-    base_url: str, project: str, study_name: str, limit: int = 100
+    base_url: str,
+    project: str,
+    study_name: str,
+    limit: int = 100,
+    metric_keys: str | None = None,
 ) -> list[dict]:
     """List trials from the tracking HTTP server.
 
@@ -83,6 +87,7 @@ def list_trials(
         project: Project name.
         study_name: Study/sweep name.
         limit: Maximum number of trials to return.
+        metric_keys: Optional comma-separated list of metric keys to filter by.
 
     Returns:
         List of trial dictionaries.
@@ -91,8 +96,10 @@ def list_trials(
         RuntimeError: If the server is unreachable, returns an error, or
             returns invalid JSON.
     """
-    query_params = urlencode({"project": project, "study_name": study_name})
-    url = f"{base_url.rstrip('/')}/api/trials?{query_params}"
+    query_params = {"project": project, "study_name": study_name}
+    if metric_keys:
+        query_params["metric_keys"] = metric_keys
+    url = f"{base_url.rstrip('/')}/api/trials?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, list):
         raise TypeError("Expected list of trials from server")

@@ -533,6 +533,10 @@ def trials(
         str | None,
         typer.Option("--columns", help="Comma-separated column projection"),
     ] = None,
+    metrics: Annotated[
+        str | None,
+        typer.Option("--metrics", help="Comma-separated metric keys to filter"),
+    ] = None,
     limit: Annotated[
         int,
         typer.Option("--limit", help="Maximum trials to show (default 100)"),
@@ -572,7 +576,9 @@ def trials(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        trials_data = list_trials(base_url, project, sweep, limit=limit)
+        trials_data = list_trials(
+            base_url, project, sweep, limit=limit, metric_keys=metrics
+        )
     except RuntimeError as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.GENERAL_ERROR) from None
