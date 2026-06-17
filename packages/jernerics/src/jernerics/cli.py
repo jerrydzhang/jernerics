@@ -503,9 +503,9 @@ def sweeps(
         table.add_row(
             sweep.get("project", ""),
             sweep.get("study_name", ""),
-            str(sweep.get("trials", 0)),
-            str(sweep.get("completed", 0)),
-            sweep.get("last_event", ""),
+            str(sweep.get("trial_count", 0)),
+            str(sweep.get("completed_count", 0)),
+            sweep.get("last_event_timestamp_ns", ""),
         )
 
     Console().print(table)

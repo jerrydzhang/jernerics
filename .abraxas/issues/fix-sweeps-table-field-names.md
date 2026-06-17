@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/fix-sweeps-table-field-names
+completed_at: '2026-06-17T01:23:03.692508'
 created: '2026-06-17T01:14:48.612302'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Fix sweeps table field names
 ---
 

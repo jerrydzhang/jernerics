@@ -200,9 +200,9 @@ class TestSweepsCommand:
             {
                 "project": "my-project",
                 "study_name": "study-1",
-                "trials": 10,
-                "completed": 5,
-                "last_event": "2024-01-15T10:30:00Z",
+                "trial_count": 10,
+                "completed_count": 5,
+                "last_event_timestamp_ns": "2024-01-15T10:30:00Z",
             }
         ]
 
@@ -232,9 +232,9 @@ class TestSweepsCommand:
             {
                 "project": "my-project",
                 "study_name": "study-1",
-                "trials": 10,
-                "completed": 5,
-                "last_event": "2024-01-15T10:30:00Z",
+                "trial_count": 10,
+                "completed_count": 5,
+                "last_event_timestamp_ns": "2024-01-15T10:30:00Z",
             }
         ]
 
@@ -287,16 +287,16 @@ class TestSweepsCommand:
             {
                 "project": "project-a",
                 "study_name": "study-1",
-                "trials": 5,
-                "completed": 2,
-                "last_event": "2024-01-15T10:30:00Z",
+                "trial_count": 5,
+                "completed_count": 2,
+                "last_event_timestamp_ns": "2024-01-15T10:30:00Z",
             },
             {
                 "project": "project-b",
                 "study_name": "study-2",
-                "trials": 20,
-                "completed": 20,
-                "last_event": "2024-01-15T11:00:00Z",
+                "trial_count": 20,
+                "completed_count": 20,
+                "last_event_timestamp_ns": "2024-01-15T11:00:00Z",
             },
         ]
 
@@ -320,9 +320,9 @@ class TestSweepsCommand:
             {
                 "project": "my-project",
                 "study_name": "study-1",
-                "trials": 10,
-                "completed": 5,
-                "last_event": "2024-01-15T10:30:00Z",
+                "trial_count": 10,
+                "completed_count": 5,
+                "last_event_timestamp_ns": "2024-01-15T10:30:00Z",
             }
         ]
 
@@ -339,9 +339,9 @@ class TestSweepsCommand:
             {
                 "project": "my project",
                 "study_name": "study-1",
-                "trials": 10,
-                "completed": 5,
-                "last_event": "2024-01-15T10:30:00Z",
+                "trial_count": 10,
+                "completed_count": 5,
+                "last_event_timestamp_ns": "2024-01-15T10:30:00Z",
             }
         ]
 
@@ -352,6 +352,33 @@ class TestSweepsCommand:
         captured = capsys.readouterr()
         assert "my project" in captured.out
         assert "study-1" in captured.out
+
+    def test_sweeps_uses_correct_field_names(self, mock_sweeps_server, capsys):
+        """Test that the CLI uses the correct field names from the server response.
+
+        This test would fail if the CLI used the old field names
+        (trials, completed, last_event) instead of the correct ones
+        (trial_count, completed_count, last_event_timestamp_ns).
+        """
+        MockSweepsHandler.response_data = [
+            {
+                "project": "my-project",
+                "study_name": "study-1",
+                "trial_count": 15,
+                "completed_count": 7,
+                "last_event_timestamp_ns": "2024-01-15T10:30:00Z",
+            }
+        ]
+
+        from jernerics.cli import sweeps
+
+        sweeps(server=mock_sweeps_server)
+
+        captured = capsys.readouterr()
+        # Verify correct values (would be 0/0/blank if wrong field names)
+        assert "15" in captured.out
+        assert "7" in captured.out
+        assert "2024-01-15T10:30:00Z" in captured.out
 
 
 class MockTrialsHandler(BaseHTTPRequestHandler):
