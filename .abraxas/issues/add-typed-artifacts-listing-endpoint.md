@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-typed-artifacts-listing-endpoint
+branch: null
 completed_at: '2026-06-17T01:53:07.911291'
 created: '2026-06-17T01:14:54.809566'
-merge_commit_sha: null
+merge_commit_sha: 9e29bbdc95d40b819ad9d4d72502076c028f9662
 parent_id: null
 retry_count: 0
 status: closed
