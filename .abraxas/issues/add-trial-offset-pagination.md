@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-trial-offset-pagination
+branch: null
 completed_at: '2026-06-17T06:36:28.861269'
 created: '2026-06-17T04:25:44.586664'
-merge_commit_sha: null
+merge_commit_sha: efaae9cb00be6edc22491f6a8e949a5928b0bd9f
 parent_id: null
 retry_count: 0
 status: closed
