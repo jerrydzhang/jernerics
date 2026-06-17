@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-typed-metric-history-endpoint
+branch: null
 completed_at: '2026-06-17T01:31:56.876765'
 created: '2026-06-17T01:14:50.663997'
-merge_commit_sha: null
+merge_commit_sha: e152ef42bb543a66b798572dbe0b3d5e2ccddf8c
 parent_id: null
 retry_count: 0
 status: closed
