@@ -106,9 +106,17 @@ def create_app(
 
     @app.get("/api/trials", response_model=None, dependencies=deps)
     def list_trials(
-        project: str, study_name: str, metric_keys: str | None = None
+        project: str,
+        study_name: str,
+        metric_keys: str | None = None,
+        limit: int | None = None,
     ) -> JSONResponse:
-        trials = store.list_trials(project, study_name)
+        if limit is not None and limit < 0:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "limit must be non-negative"},
+            )
+        trials = store.list_trials(project, study_name, limit=limit)
         if metric_keys:
             keys = [k.strip() for k in metric_keys.split(",") if k.strip()]
             for trial in trials:

@@ -354,7 +354,7 @@ class TestListTrials:
                 "final_metrics": {},
                 "artifact_keys": [],
             }
-            for i in range(1, 11)
+            for i in range(1, 6)
         ]
 
         result = list_trials(mock_server, "my-project", "study-1", limit=5)
@@ -362,8 +362,9 @@ class TestListTrials:
         assert len(result) == 5
         assert result[0]["trial_id"] == 1
         assert result[4]["trial_id"] == 5
+        assert "limit=5" in MockHandler.received_path
 
-    def test_list_trials_limit_default(self, mock_server):
+    def test_list_trials_no_limit(self, mock_server):
         MockHandler.response_data = [
             {
                 "trial_id": i,
@@ -372,12 +373,13 @@ class TestListTrials:
                 "final_metrics": {},
                 "artifact_keys": [],
             }
-            for i in range(1, 201)
+            for i in range(1, 11)
         ]
 
-        result = list_trials(mock_server, "my-project", "study-1")
+        result = list_trials(mock_server, "my-project", "study-1", limit=None)
 
-        assert len(result) == 100
+        assert len(result) == 10
+        assert "limit" not in MockHandler.received_path
 
     def test_list_trials_http_error(self, mock_server):
         MockHandler.response_status = 500

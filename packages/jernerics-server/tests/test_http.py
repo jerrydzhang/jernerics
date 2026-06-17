@@ -1141,6 +1141,95 @@ class TestTrialsEndpoint:
         assert body[0]["final_metrics"] == {"loss": 0.5}
         assert body[1]["final_metrics"] == {"loss": 0.3}
 
+    def test_limit_omitted_returns_all_trials(self, client):
+        db = client.app.state.store
+
+        # Insert 5 trials
+        for i in range(5):
+            env = Envelope(
+                project="p",
+                study_name="s",
+                trial_id=i,
+                timestamp_ns=1000 + i,
+                seq=0,
+                param=ParamEvent(key="x", value=Value(int_val=i)),
+            )
+            db.insert_event(env)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 5
+
+    def test_limit_returns_at_most_n_trials(self, client):
+        db = client.app.state.store
+
+        # Insert 5 trials
+        for i in range(5):
+            env = Envelope(
+                project="p",
+                study_name="s",
+                trial_id=i,
+                timestamp_ns=1000 + i,
+                seq=0,
+                param=ParamEvent(key="x", value=Value(int_val=i)),
+            )
+            db.insert_event(env)
+
+        response = client.get("/api/trials?project=p&study_name=s&limit=3")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 3
+        assert body[0]["trial_id"] == 0
+        assert body[1]["trial_id"] == 1
+        assert body[2]["trial_id"] == 2
+
+    def test_limit_greater_than_available_returns_all(self, client):
+        db = client.app.state.store
+
+        # Insert 2 trials
+        for i in range(2):
+            env = Envelope(
+                project="p",
+                study_name="s",
+                trial_id=i,
+                timestamp_ns=1000 + i,
+                seq=0,
+                param=ParamEvent(key="x", value=Value(int_val=i)),
+            )
+            db.insert_event(env)
+
+        response = client.get("/api/trials?project=p&study_name=s&limit=10")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+
+    def test_limit_zero_returns_empty_list(self, client):
+        db = client.app.state.store
+
+        env = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env)
+
+        response = client.get("/api/trials?project=p&study_name=s&limit=0")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 0
+
+    def test_limit_negative_returns_400(self, client):
+        response = client.get("/api/trials?project=p&study_name=s&limit=-1")
+        assert response.status_code == 400
+
+    def test_limit_non_integer_returns_422(self, client):
+        response = client.get("/api/trials?project=p&study_name=s&limit=abc")
+        assert response.status_code == 422
+
 
 class TestCompareSweepsEndpoint:
     def test_valid_request_returns_comparison(self, client):

@@ -406,12 +406,17 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
 
                 parsed = urlparse(self.path)
                 query_params = parse_qs(parsed.query)
+                trials_to_return = response_data
+                if "limit" in query_params:
+                    limit = int(query_params["limit"][0])
+                    if isinstance(response_data, list):
+                        trials_to_return = response_data[:limit]
                 if "metric_keys" in query_params:
                     metric_keys = [
                         k.strip() for k in query_params["metric_keys"][0].split(",")
                     ]
-                    if isinstance(response_data, list):
-                        for trial in response_data:
+                    if isinstance(trials_to_return, list):
+                        for trial in trials_to_return:
                             if "final_metrics" in trial:
                                 filtered_metrics = {
                                     k: v
@@ -419,6 +424,10 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
                                     if k in metric_keys
                                 }
                                 trial["final_metrics"] = filtered_metrics
+
+                response_body = json.dumps(trials_to_return).encode("utf-8")
+                self.wfile.write(response_body)
+                return
 
             response_body = json.dumps(response_data).encode("utf-8")
             self.wfile.write(response_body)

@@ -77,7 +77,7 @@ def list_trials(
     base_url: str,
     project: str,
     study_name: str,
-    limit: int = 100,
+    limit: int | None = None,
     metric_keys: str | None = None,
 ) -> list[dict]:
     """List trials from the tracking HTTP server.
@@ -97,14 +97,14 @@ def list_trials(
             returns invalid JSON.
     """
     query_params = {"project": project, "study_name": study_name}
+    if limit is not None:
+        query_params["limit"] = str(limit)
     if metric_keys:
         query_params["metric_keys"] = metric_keys
     url = f"{base_url.rstrip('/')}/api/trials?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, list):
         raise RuntimeError("Expected list of trials from server")  # noqa: TRY004
-    if limit:
-        result = result[:limit]
     return result
 
 

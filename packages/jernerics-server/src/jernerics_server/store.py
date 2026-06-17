@@ -221,7 +221,9 @@ class Store:
         finally:
             con.close()
 
-    def list_trials(self, project: str, study_name: str) -> list[dict]:
+    def list_trials(
+        self, project: str, study_name: str, limit: int | None = None
+    ) -> list[dict]:
         sql = """
         SELECT
             t.trial_id,
@@ -250,7 +252,11 @@ class Store:
             AND te.project = ? AND te.study_name = ?
         ORDER BY t.trial_id
         """
-        params = [project, study_name] * 7
+        if limit is not None:
+            sql += " LIMIT ?"
+        params: list[str | int] = [project, study_name] * 7
+        if limit is not None:
+            params.append(limit)
         con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
         try:
             cursor = con.execute(sql, params)
