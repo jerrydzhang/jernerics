@@ -1,11 +1,11 @@
 ---
-base_branch: null
+base_branch: main
 branch: null
 created: '2026-06-17T04:25:42.513009'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: failed
 title: Add human timestamp formatting option to observability tables
 ---
 
