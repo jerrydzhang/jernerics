@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-consistent-http-api-error-messages
+branch: null
 completed_at: '2026-06-17T00:18:20.672211'
 created: '2026-06-17T00:03:49.244152'
-merge_commit_sha: null
+merge_commit_sha: 08a67fd7237f8f8b1a618dc0485315e2ba747079
 parent_id: null
 retry_count: 0
 status: closed
