@@ -1445,6 +1445,192 @@ class TestTrialsEndpoint:
         response = client.get("/api/trials?project=p&study_name=s&limit=abc")
         assert response.status_code == 422
 
+    def test_status_complete_filters_completed_trials(self, client):
+        db = client.app.state.store
+
+        # Trial 0: complete
+        env_param0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=0)),
+        )
+        db.insert_event(env_param0)
+        env_end0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_end0)
+
+        # Trial 1: incomplete
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env_param1)
+
+        # Trial 2: complete
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=4000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=2)),
+        )
+        db.insert_event(env_param2)
+        env_end2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=5000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_end2)
+
+        response = client.get("/api/trials?project=p&study_name=s&status=complete")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+        trial_ids = [t["trial_id"] for t in body]
+        assert trial_ids == [0, 2]
+        assert all(t["status"] == "complete" for t in body)
+
+    def test_status_incomplete_filters_incomplete_trials(self, client):
+        db = client.app.state.store
+
+        # Trial 0: complete
+        env_param0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=0)),
+        )
+        db.insert_event(env_param0)
+        env_end0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_end0)
+
+        # Trial 1: incomplete
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env_param1)
+
+        response = client.get("/api/trials?project=p&study_name=s&status=incomplete")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 1
+        assert body[0]["status"] == "incomplete"
+
+    def test_status_invalid_returns_400(self, client):
+        response = client.get("/api/trials?project=p&study_name=s&status=invalid")
+        assert response.status_code == 400
+        body = response.json()
+        assert "error" in body
+
+    def test_status_omitted_returns_all_trials(self, client):
+        db = client.app.state.store
+
+        # Trial 0: complete
+        env_param0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=0)),
+        )
+        db.insert_event(env_param0)
+        env_end0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_end0)
+
+        # Trial 1: incomplete
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env_param1)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+
+    def test_status_applied_after_computation_and_before_limit(self, client):
+        db = client.app.state.store
+
+        # Insert 5 trials: 2 complete, 3 incomplete
+        for i in range(5):
+            env = Envelope(
+                project="p",
+                study_name="s",
+                trial_id=i,
+                timestamp_ns=1000 + i,
+                seq=0,
+                param=ParamEvent(key="x", value=Value(int_val=i)),
+            )
+            db.insert_event(env)
+
+            # Mark trials 0 and 1 as complete
+            if i < 2:
+                env_end = Envelope(
+                    project="p",
+                    study_name="s",
+                    trial_id=i,
+                    timestamp_ns=2000 + i,
+                    seq=0,
+                    trial_end=TrialEndEvent(),
+                )
+                db.insert_event(env_end)
+
+        # Request complete trials with limit=1
+        # Should return only 1 trial (first complete trial)
+        response = client.get(
+            "/api/trials?project=p&study_name=s&status=complete&limit=1"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 0
+        assert body[0]["status"] == "complete"
+
 
 class TestCompareSweepsEndpoint:
     def test_valid_request_returns_comparison(self, client):

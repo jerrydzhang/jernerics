@@ -488,6 +488,56 @@ class TestListTrials:
         assert result[0]["final_metrics"] == {"accuracy": 0.95, "loss": 0.05}
         assert "metric_keys=accuracy%2Closs" in MockHandler.received_path
 
+    def test_list_trials_with_status_complete(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1", status="complete")
+
+        assert len(result) == 1
+        assert result[0]["status"] == "complete"
+        assert "status=complete" in MockHandler.received_path
+
+    def test_list_trials_with_status_incomplete(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "incomplete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1", status="incomplete")
+
+        assert len(result) == 1
+        assert result[0]["status"] == "incomplete"
+        assert "status=incomplete" in MockHandler.received_path
+
+    def test_list_trials_without_status(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1")
+
+        assert len(result) == 1
+        assert "status" not in MockHandler.received_path
+
 
 class TestCompareSweeps:
     def test_compare_sweeps_success(self, mock_server):

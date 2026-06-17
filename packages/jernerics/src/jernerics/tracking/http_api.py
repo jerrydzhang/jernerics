@@ -105,6 +105,7 @@ def list_trials(
     study_name: str,
     limit: int | None = None,
     metric_keys: str | None = None,
+    status: str | None = None,
 ) -> list[dict]:
     """List trials from the tracking HTTP server.
 
@@ -114,6 +115,7 @@ def list_trials(
         study_name: Study/sweep name.
         limit: Maximum number of trials to return.
         metric_keys: Optional comma-separated list of metric keys to filter by.
+        status: Optional status filter ("complete" or "incomplete").
 
     Returns:
         List of trial dictionaries.
@@ -127,6 +129,8 @@ def list_trials(
         query_params["limit"] = str(limit)
     if metric_keys:
         query_params["metric_keys"] = metric_keys
+    if status is not None:
+        query_params["status"] = status
     url = f"{base_url.rstrip('/')}/api/trials?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, list):

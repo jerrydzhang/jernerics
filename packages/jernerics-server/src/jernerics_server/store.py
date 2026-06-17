@@ -222,7 +222,11 @@ class Store:
             con.close()
 
     def list_trials(
-        self, project: str, study_name: str, limit: int | None = None
+        self,
+        project: str,
+        study_name: str,
+        limit: int | None = None,
+        status: str | None = None,
     ) -> list[dict]:
         sql = """
         SELECT
@@ -250,13 +254,23 @@ class Store:
         ) t
         LEFT JOIN trial_end te ON t.trial_id = te.trial_id
             AND te.project = ? AND te.study_name = ?
-        ORDER BY t.trial_id
         """
+        params: list[str | int] = [project, study_name] * 7
+
+        # Apply status filter after status computation
+        if status is not None:
+            if status == "complete":
+                sql += " WHERE te.trial_id IS NOT NULL"
+            elif status == "incomplete":
+                sql += " WHERE te.trial_id IS NULL"
+
+        sql += " ORDER BY t.trial_id"
+
+        # Apply limit after status filter
         if limit is not None:
             sql += " LIMIT ?"
-        params: list[str | int] = [project, study_name] * 7
-        if limit is not None:
             params.append(limit)
+
         con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
         try:
             cursor = con.execute(sql, params)

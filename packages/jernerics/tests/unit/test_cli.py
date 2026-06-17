@@ -666,6 +666,77 @@ class TestTrialsCommand:
 
         assert exc_info.value.code == 3
 
+    def test_trials_with_status_complete(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 0,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            },
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            },
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            status="complete",
+        )
+
+        captured = capsys.readouterr()
+        assert "status=complete" in MockTrialsHandler.received_path
+
+    def test_trials_with_status_incomplete(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "incomplete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            status="incomplete",
+        )
+
+        captured = capsys.readouterr()
+        assert "status=incomplete" in MockTrialsHandler.received_path
+
+    def test_trials_without_status(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "status" not in MockTrialsHandler.received_path
+
 
 class TestCompareSweepsCommand:
     def test_compare_sweeps_with_server_option(self, mock_trials_server, capsys):

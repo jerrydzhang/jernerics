@@ -577,6 +577,10 @@ def trials(
         int,
         typer.Option("--limit", help="Maximum trials to show (default 100)"),
     ] = 100,
+    status: Annotated[
+        str | None,
+        typer.Option("--status", help="Filter by status: complete or incomplete"),
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Output as JSON"),
@@ -590,7 +594,7 @@ def trials(
 
     try:
         trials_data = list_trials(
-            base_url, project, sweep, limit=limit, metric_keys=metrics
+            base_url, project, sweep, limit=limit, metric_keys=metrics, status=status
         )
     except RuntimeError as e:
         print(f"Error: {e}")
