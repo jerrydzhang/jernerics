@@ -1443,6 +1443,261 @@ class TestCompareSweepsEndpoint:
         )
         assert response.status_code == 404
 
+    def test_without_metrics_parameter_returns_all_stats(self, client):
+        db = client.app.state.store
+
+        # Left sweep: studyA with metrics loss and accuracy
+        for trial_id in range(3):
+            env_metric_loss = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=3000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.5 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_loss)
+
+            env_metric_acc = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=4000 + trial_id,
+                seq=1,
+                metric=MetricEvent(
+                    key="accuracy", value=0.8 + trial_id * 0.05, step=-1
+                ),
+            )
+            db.insert_event(env_metric_acc)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=6000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        # Right sweep: studyB with metrics loss and accuracy
+        for trial_id in range(2):
+            env_metric_loss = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=9000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.6 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_loss)
+
+            env_metric_acc = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=10000 + trial_id,
+                seq=1,
+                metric=MetricEvent(
+                    key="accuracy", value=0.85 + trial_id * 0.05, step=-1
+                ),
+            )
+            db.insert_event(env_metric_acc)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=13000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB"
+        )
+        assert response.status_code == 200
+        body = response.json()
+
+        # Without metrics parameter, all shared metric stats are returned
+        assert set(body["final_metric_stats"].keys()) == {"loss", "accuracy"}
+        assert "loss" in body["final_metric_stats"]
+        assert "accuracy" in body["final_metric_stats"]
+
+    def test_with_metrics_parameter_returns_filtered_stats(self, client):
+        db = client.app.state.store
+
+        # Left sweep: studyA with metrics loss and accuracy
+        for trial_id in range(3):
+            env_metric_loss = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=3000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.5 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_loss)
+
+            env_metric_acc = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=4000 + trial_id,
+                seq=1,
+                metric=MetricEvent(
+                    key="accuracy", value=0.8 + trial_id * 0.05, step=-1
+                ),
+            )
+            db.insert_event(env_metric_acc)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=6000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        # Right sweep: studyB with metrics loss and accuracy
+        for trial_id in range(2):
+            env_metric_loss = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=9000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.6 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_loss)
+
+            env_metric_acc = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=10000 + trial_id,
+                seq=1,
+                metric=MetricEvent(
+                    key="accuracy", value=0.85 + trial_id * 0.05, step=-1
+                ),
+            )
+            db.insert_event(env_metric_acc)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=13000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB&metrics=loss"
+        )
+        assert response.status_code == 200
+        body = response.json()
+
+        # With metrics parameter, only the specified metric stats are returned
+        assert set(body["final_metric_stats"].keys()) == {"loss"}
+        assert "loss" in body["final_metric_stats"]
+        assert "accuracy" not in body["final_metric_stats"]
+
+    def test_metrics_filter_does_not_affect_final_metric_keys_overlap(self, client):
+        db = client.app.state.store
+
+        # Left sweep: studyA with metrics loss and accuracy
+        for trial_id in range(3):
+            env_metric_loss = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=3000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.5 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_loss)
+
+            env_metric_acc = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=4000 + trial_id,
+                seq=1,
+                metric=MetricEvent(
+                    key="accuracy", value=0.8 + trial_id * 0.05, step=-1
+                ),
+            )
+            db.insert_event(env_metric_acc)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=6000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        # Right sweep: studyB with metrics loss and accuracy
+        for trial_id in range(2):
+            env_metric_loss = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=9000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.6 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_loss)
+
+            env_metric_acc = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=10000 + trial_id,
+                seq=1,
+                metric=MetricEvent(
+                    key="accuracy", value=0.85 + trial_id * 0.05, step=-1
+                ),
+            )
+            db.insert_event(env_metric_acc)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=13000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        # Without filter
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB"
+        )
+        assert response.status_code == 200
+        body_without_filter = response.json()
+
+        # With filter
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB&metrics=loss"
+        )
+        assert response.status_code == 200
+        body_with_filter = response.json()
+
+        # final_metric_keys overlap information should be unchanged
+        assert (
+            body_without_filter["final_metric_keys"]
+            == body_with_filter["final_metric_keys"]
+        )
+
     def test_requires_bearer_auth(self, auth_client):
         db = auth_client.app.state.store
 

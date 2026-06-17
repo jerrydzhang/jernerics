@@ -154,7 +154,9 @@ def create_app(
         return JSONResponse(content=params)
 
     @app.get("/api/compare-sweeps", response_model=None, dependencies=deps)
-    def compare_sweeps(project: str, left: str, right: str) -> JSONResponse:
+    def compare_sweeps(
+        project: str, left: str, right: str, metrics: str | None = None
+    ) -> JSONResponse:
         left_summary = store.get_study_summary(project, left)
         right_summary = store.get_study_summary(project, right)
 
@@ -194,6 +196,12 @@ def create_app(
             metric_stats[key] = {
                 "left": _compute_metric_stats(values["left"]),
                 "right": _compute_metric_stats(values["right"]),
+            }
+
+        if metrics is not None:
+            requested_keys = [k.strip() for k in metrics.split(",") if k.strip()]
+            metric_stats = {
+                k: v for k, v in metric_stats.items() if k in requested_keys
             }
 
         return JSONResponse(

@@ -108,7 +108,13 @@ def list_trials(
     return result
 
 
-def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
+def compare_sweeps(
+    base_url: str,
+    project: str,
+    left: str,
+    right: str,
+    metrics: list[str] | None = None,
+) -> dict:
     """Compare two sweeps from the tracking HTTP server.
 
     Args:
@@ -116,6 +122,7 @@ def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
         project: Project name.
         left: Left sweep/study name.
         right: Right sweep/study name.
+        metrics: Optional list of metric keys to filter by.
 
     Returns:
         Comparison dictionary with trial counts, key overlap, and metric stats.
@@ -124,8 +131,10 @@ def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
         RuntimeError: If the server is unreachable, returns an error, or
             returns invalid JSON.
     """
-    query_params = urlencode({"project": project, "left": left, "right": right})
-    url = f"{base_url.rstrip('/')}/api/compare-sweeps?{query_params}"
+    query_params = {"project": project, "left": left, "right": right}
+    if metrics is not None:
+        query_params["metrics"] = ",".join(metrics)
+    url = f"{base_url.rstrip('/')}/api/compare-sweeps?{urlencode(query_params)}"
     result = _request(url)
     if not isinstance(result, dict):
         raise RuntimeError("Expected comparison dict from server")  # noqa: TRY004

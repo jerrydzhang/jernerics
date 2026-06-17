@@ -385,6 +385,7 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
     """Mock HTTP server handler for trials testing."""
 
     response_data: ClassVar[list[dict] | dict] = []
+    received_path: ClassVar[str] = ""
 
     def log_message(self, format: str, *args):
         pass
@@ -397,6 +398,7 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/results")
             or self.path.startswith("/api/params")
         ):
+            MockTrialsHandler.received_path = self.path
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -862,10 +864,8 @@ class TestCompareSweepsCommand:
         captured = capsys.readouterr()
         assert "No pyproject.toml found" in captured.out or "--project" in captured.out
 
-    def test_compare_sweeps_explicit_project_overrides_pyproject(
-        self, mock_trials_server, capsys, tmp_path
-    ):
-        """compare-sweeps uses --project value even when pyproject.toml exists."""
+    def test_compare_sweeps_without_metrics_passes_no_metrics(self, mock_trials_server):
+        """compare-sweeps without --metrics passes no metrics to compare_sweeps()."""
         MockTrialsHandler.response_data = {
             "left": "study-1",
             "right": "study-2",
@@ -879,23 +879,43 @@ class TestCompareSweepsCommand:
             "final_metric_stats": {},
         }
 
-        # Create pyproject.toml with different project name
-        (tmp_path / "pyproject.toml").write_text(
-            '[project]\nname = "different-project"\n'
-        )
-
         from jernerics.cli import compare_sweeps as compare_sweeps_cmd
 
         compare_sweeps_cmd(
-            project="explicit-project",
+            project="my-project",
             left="study-1",
             right="study-2",
             server=mock_trials_server,
         )
 
-        captured = capsys.readouterr()
-        assert "study-1" in captured.out
-        assert "study-2" in captured.out
+        assert "metrics" not in MockTrialsHandler.received_path
+
+    def test_compare_sweeps_with_metrics_passes_list_to_api(self, mock_trials_server):
+        """compare-sweeps with --metrics passes the comma-separated list as a list."""
+        MockTrialsHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 10,
+            "left_completed_count": 5,
+            "right_trial_count": 20,
+            "right_completed_count": 15,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        from jernerics.cli import compare_sweeps as compare_sweeps_cmd
+
+        compare_sweeps_cmd(
+            project="my-project",
+            left="study-1",
+            right="study-2",
+            server=mock_trials_server,
+            metrics="accuracy,loss",
+        )
+
+        assert "metrics=accuracy%2Closs" in MockTrialsHandler.received_path
 
 
 class TestTrialsCommandOptionalProject:

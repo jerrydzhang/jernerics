@@ -673,6 +673,50 @@ class TestCompareSweeps:
 
         assert "Expected comparison dict from server" in str(exc_info.value)
 
+    def test_compare_sweeps_without_metrics_param(self, mock_server):
+        """Test compare_sweeps without metrics param doesn't add metrics query param."""
+        MockHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 0,
+            "left_completed_count": 0,
+            "right_trial_count": 0,
+            "right_completed_count": 0,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        compare_sweeps(mock_server, "my-project", "study-1", "study-2")
+
+        assert "metrics" not in MockHandler.received_path
+
+    def test_compare_sweeps_with_metrics_param_url_encodes(self, mock_server):
+        """Test compare_sweeps with metrics list URL-encodes the parameter correctly."""
+        MockHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 0,
+            "left_completed_count": 0,
+            "right_trial_count": 0,
+            "right_completed_count": 0,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        compare_sweeps(
+            mock_server,
+            "my-project",
+            "study-1",
+            "study-2",
+            metrics=["accuracy", "loss"],
+        )
+
+        assert "metrics=accuracy%2Closs" in MockHandler.received_path
+
 
 class TestGetHealth:
     def test_get_health_success(self, mock_server):

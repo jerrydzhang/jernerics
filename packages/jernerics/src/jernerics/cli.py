@@ -659,6 +659,10 @@ def compare_sweeps(
         str | None,
         typer.Option("--server", help="Tracking HTTP server URL"),
     ] = None,
+    metrics: Annotated[
+        str | None,
+        typer.Option("--metrics", help="Comma-separated metric keys to filter"),
+    ] = None,
     json_output: Annotated[
         bool,
         typer.Option("--json", help="Output as JSON"),
@@ -670,8 +674,14 @@ def compare_sweeps(
     project = _resolve_project_name(project)
     base_url = _resolve_tracking_server_url(server)
 
+    metrics_list = None
+    if metrics is not None:
+        metrics_list = [m.strip() for m in metrics.split(",") if m.strip()]
+
     try:
-        comparison = compare_sweeps_api(base_url, project, left, right)
+        comparison = compare_sweeps_api(
+            base_url, project, left, right, metrics=metrics_list
+        )
     except RuntimeError as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.GENERAL_ERROR) from None
