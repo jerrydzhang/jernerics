@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-typed-trials-endpoint-to-tracking-server
+branch: null
 completed_at: '2026-06-16T23:20:51.537845'
 created: '2026-06-16T22:31:06.021646'
-merge_commit_sha: null
+merge_commit_sha: 8b2da7aaf2021c7775f80fd54a20f4d63bfa3b7f
 order: 3
 parent_id: null
 retry_count: 0
