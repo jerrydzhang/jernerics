@@ -17,7 +17,7 @@ test:
     pytest
 
 test-unit:
-    pytest tests/unit
+    pytest packages/jernerics/tests/unit packages/jernerics-server/tests
 
 proto:
     cd packages/jernerics-proto && python generate.py
