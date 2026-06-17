@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-server-side-limit-to-trials-endpoint
+branch: null
 completed_at: '2026-06-17T03:34:43.237041'
 created: '2026-06-17T02:28:06.213959'
-merge_commit_sha: null
+merge_commit_sha: 08dfad263bc823ccfc96b6229989e7c4b776f726
 parent_id: null
 retry_count: 0
 status: closed
