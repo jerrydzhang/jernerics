@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-typed-compare-sweeps-endpoint
+branch: null
 completed_at: '2026-06-16T23:51:12.619153'
 created: '2026-06-16T22:31:10.131288'
-merge_commit_sha: null
+merge_commit_sha: 8e87082ca9a05650f3450898c7f0ab9a49034112
 order: 5
 parent_id: null
 retry_count: 0
