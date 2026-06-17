@@ -549,3 +549,43 @@ class Store:
             return [dict(zip(columns, row, strict=True)) for row in rows]
         finally:
             con.close()
+
+    def list_results(
+        self,
+        project: str | None = None,
+        study_name: str | None = None,
+        trial_id: int | None = None,
+        key: str | None = None,
+    ) -> list[dict]:
+        where_clauses = []
+        params = []
+
+        if project is not None:
+            where_clauses.append("project = ?")
+            params.append(project)
+        if study_name is not None:
+            where_clauses.append("study_name = ?")
+            params.append(study_name)
+        if trial_id is not None:
+            where_clauses.append("trial_id = ?")
+            params.append(trial_id)
+        if key is not None:
+            where_clauses.append("key = ?")
+            params.append(key)
+
+        sql = """
+        SELECT trial_id, key, value, timestamp_ns
+        FROM results
+        """
+        if where_clauses:
+            sql += " WHERE " + " AND ".join(where_clauses)
+        sql += " ORDER BY trial_id, key"
+
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, params)
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            return [dict(zip(columns, row, strict=True)) for row in rows]
+        finally:
+            con.close()

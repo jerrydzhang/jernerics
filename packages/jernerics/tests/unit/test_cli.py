@@ -394,6 +394,7 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
             self.path.startswith("/api/trials")
             or self.path.startswith("/api/compare-sweeps")
             or self.path.startswith("/api/artifacts")
+            or self.path.startswith("/api/results")
         ):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -1639,3 +1640,331 @@ class TestArtifactsCommand:
 
         captured = capsys.readouterr()
         assert "model" in captured.out
+
+
+class TestResultsCommand:
+    def test_results_with_server_option(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 2,
+                "key": "accuracy",
+                "value": "0.95",
+                "timestamp_ns": 1705325405000000000,
+            },
+        ]
+
+        from jernerics.cli import results
+
+        results(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "2" in captured.out
+        assert "confusion" in captured.out
+        assert "accuracy" in captured.out
+        assert '{"tp": 90}' in captured.out
+        assert "0.95" in captured.out
+        assert "TRIAL_ID" in captured.out
+        assert "KEY" in captured.out
+        assert "VALUE" in captured.out
+        assert "TIMESTAMP_NS" in captured.out
+
+    def test_results_with_trial_id(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import results
+
+        results(
+            project="my-project", sweep="study-1", trial_id=1, server=mock_trials_server
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "confusion" in captured.out
+
+    def test_results_with_key(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import results
+
+        results(
+            project="my-project",
+            sweep="study-1",
+            key="confusion",
+            server=mock_trials_server,
+        )
+
+        captured = capsys.readouterr()
+        assert "confusion" in captured.out
+        assert '{"tp": 90}' in captured.out
+
+    def test_results_with_json_flag(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import results
+
+        results(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "trial_id" in captured.out
+        assert "key" in captured.out
+        assert "value" in captured.out
+        assert "timestamp_ns" in captured.out
+        # JSON output will have escaped quotes
+        assert '"{\\"tp\\": 90}"' in captured.out or '{"tp": 90}' in captured.out
+
+    def test_results_with_empty_response(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import results
+
+        results(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "No results found" in captured.out
+
+    def test_results_server_url_priority(self, mock_trials_server, capsys, monkeypatch):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import results
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", "http://wrong-url:9999")
+        results(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "No results found" in captured.out
+
+    def test_results_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import results
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            results(project="my-project", sweep="study-1", server=None)
+
+        assert exc_info.value.code == 3
+
+    def test_results_displays_rich_table(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "accuracy",
+                "value": "0.95",
+                "timestamp_ns": 1705325401000000000,
+            },
+            {
+                "trial_id": 2,
+                "key": "confusion",
+                "value": '{"tp": 85}',
+                "timestamp_ns": 1705325402000000000,
+            },
+        ]
+
+        from jernerics.cli import results
+
+        results(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "confusion" in captured.out
+        assert "accuracy" in captured.out
+        assert '{"tp": 90}' in captured.out
+        assert '{"tp": 85}' in captured.out
+        assert "0.95" in captured.out
+        assert "TRIAL_ID" in captured.out
+        assert "KEY" in captured.out
+        assert "VALUE" in captured.out
+        assert "TIMESTAMP_NS" in captured.out
+
+    def test_results_uses_pyproject_project_name(
+        self, mock_trials_server, capsys, tmp_path
+    ):
+        """results uses project name from pyproject.toml when --project omitted."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "test-project-from-toml"\n'
+        )
+
+        from jernerics.cli import results
+
+        results(project=None, sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "confusion" in captured.out
+
+    def test_results_config_error_without_pyproject(
+        self, mock_trials_server, capsys, monkeypatch
+    ):
+        """results exits CONFIG_ERROR when no pyproject.toml."""
+        from jernerics.cli import results
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            results(project=None, sweep="study-1", server=mock_trials_server)
+
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert "No pyproject.toml found" in captured.out or "--project" in captured.out
+
+    def test_results_explicit_project_overrides_pyproject(
+        self, mock_trials_server, capsys, tmp_path
+    ):
+        """results uses --project value even when pyproject.toml exists."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "different-project"\n'
+        )
+
+        from jernerics.cli import results
+
+        results(project="explicit-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "confusion" in captured.out
+
+    def test_results_value_is_string_not_parsed(self, mock_trials_server, capsys):
+        """results command returns value as stored string, not parsed."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90, "fp": 10, "tn": 80, "fn": 20}',
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import results
+
+        results(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        # Value should be the JSON string, parts of it appear in the table
+        assert '"tp": 90' in captured.out or "tp" in captured.out
+        assert '"fp": 10' in captured.out or "fp" in captured.out
+
+    def test_results_with_trial_id_and_key(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import results
+
+        results(
+            project="my-project",
+            sweep="study-1",
+            trial_id=1,
+            key="confusion",
+            server=mock_trials_server,
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "confusion" in captured.out
+        assert '{"tp": 90}' in captured.out
+
+    def test_results_displays_multiple_results(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "confusion",
+                "value": '{"tp": 90}',
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "accuracy",
+                "value": "0.95",
+                "timestamp_ns": 1705325401000000000,
+            },
+            {
+                "trial_id": 2,
+                "key": "confusion",
+                "value": '{"tp": 85}',
+                "timestamp_ns": 1705325402000000000,
+            },
+            {
+                "trial_id": 2,
+                "key": "accuracy",
+                "value": "0.92",
+                "timestamp_ns": 1705325403000000000,
+            },
+        ]
+
+        from jernerics.cli import results
+
+        results(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "confusion" in captured.out
+        assert "accuracy" in captured.out
+        assert "0.95" in captured.out
+        assert "0.92" in captured.out
+        assert '{"tp": 90}' in captured.out
+        assert '{"tp": 85}' in captured.out

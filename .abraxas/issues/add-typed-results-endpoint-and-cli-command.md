@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/add-typed-results-endpoint-and-cli-command
+completed_at: '2026-06-17T02:26:54.741027'
 created: '2026-06-17T01:14:58.917462'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Add typed results endpoint and CLI command
 ---
 

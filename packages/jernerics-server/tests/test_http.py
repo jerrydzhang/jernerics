@@ -1950,3 +1950,295 @@ class TestArtifactsEndpoint:
 
         response = client.get("/api/artifacts?project=p&study_name=s")
         assert response.status_code == 200  # trial_id is optional
+
+
+class TestResultsEndpoint:
+    def test_basic_listing_returns_all_results(self, client):
+        db = client.app.state.store
+
+        env_result1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            result=ResultEvent(key="confusion", value='{"tp": 90}'),
+        )
+        db.insert_event(env_result1)
+
+        env_result2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            result=ResultEvent(key="accuracy", value="0.95"),
+        )
+        db.insert_event(env_result2)
+
+        env_result3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            result=ResultEvent(key="confusion", value='{"tp": 85}'),
+        )
+        db.insert_event(env_result3)
+
+        response = client.get("/api/results?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 3
+
+        # Sorted by trial_id, then key
+        assert body[0] == {
+            "trial_id": 0,
+            "key": "accuracy",
+            "value": "0.95",
+            "timestamp_ns": 2000,
+        }
+        assert body[1] == {
+            "trial_id": 0,
+            "key": "confusion",
+            "value": '{"tp": 90}',
+            "timestamp_ns": 1000,
+        }
+        assert body[2] == {
+            "trial_id": 1,
+            "key": "confusion",
+            "value": '{"tp": 85}',
+            "timestamp_ns": 3000,
+        }
+
+    def test_filter_by_trial_id(self, client):
+        db = client.app.state.store
+
+        env_result1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            result=ResultEvent(key="confusion", value='{"tp": 90}'),
+        )
+        db.insert_event(env_result1)
+
+        env_result2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=0,
+            result=ResultEvent(key="confusion", value='{"tp": 85}'),
+        )
+        db.insert_event(env_result2)
+
+        response = client.get("/api/results?project=p&study_name=s&trial_id=0")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 0
+        assert body[0]["key"] == "confusion"
+        assert body[0]["value"] == '{"tp": 90}'
+        assert body[0]["timestamp_ns"] == 1000
+
+    def test_filter_by_key(self, client):
+        db = client.app.state.store
+
+        env_result1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            result=ResultEvent(key="confusion", value='{"tp": 90}'),
+        )
+        db.insert_event(env_result1)
+
+        env_result2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            result=ResultEvent(key="accuracy", value="0.95"),
+        )
+        db.insert_event(env_result2)
+
+        response = client.get("/api/results?project=p&study_name=s&key=confusion")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["key"] == "confusion"
+        assert body[0]["value"] == '{"tp": 90}'
+
+    def test_filter_by_trial_id_and_key(self, client):
+        db = client.app.state.store
+
+        env_result1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            result=ResultEvent(key="confusion", value='{"tp": 90}'),
+        )
+        db.insert_event(env_result1)
+
+        env_result2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            result=ResultEvent(key="accuracy", value="0.95"),
+        )
+        db.insert_event(env_result2)
+
+        env_result3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            result=ResultEvent(key="confusion", value='{"tp": 85}'),
+        )
+        db.insert_event(env_result3)
+
+        response = client.get(
+            "/api/results?project=p&study_name=s&trial_id=1&key=confusion"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 1
+        assert body[0]["key"] == "confusion"
+        assert body[0]["value"] == '{"tp": 85}'
+
+    def test_requires_bearer_auth(self, auth_client):
+        response = auth_client.get("/api/results?project=p&study_name=s")
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/results?project=p&study_name=s",
+            headers={"Authorization": "Bearer secret123"},
+        )
+        assert response.status_code == 200
+
+    def test_empty_results_for_no_results(self, client):
+        response = client.get("/api/results?project=p&study_name=s")
+        assert response.status_code == 200
+        assert response.json() == []
+
+        # Test with existing project/study but no results
+        db = client.app.state.store
+        env_param = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param)
+
+        response = client.get("/api/results?project=p&study_name=s")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_sorting_by_trial_id_and_key(self, client):
+        db = client.app.state.store
+
+        # Insert results in non-sorted order to test sorting
+        env_result1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=5000,
+            seq=0,
+            result=ResultEvent(key="z_data", value='{"x": 2}'),
+        )
+        db.insert_event(env_result1)
+
+        env_result2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            result=ResultEvent(key="a_info", value='{"y": 1}'),
+        )
+        db.insert_event(env_result2)
+
+        env_result3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=1,
+            result=ResultEvent(key="z_data", value='{"x": 1}'),
+        )
+        db.insert_event(env_result3)
+
+        env_result4 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            result=ResultEvent(key="m_stats", value='{"z": 0}'),
+        )
+        db.insert_event(env_result4)
+
+        response = client.get("/api/results?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 4
+
+        # Sorted by trial_id ASC, then key ASC
+        assert body[0]["trial_id"] == 0
+        assert body[0]["key"] == "m_stats"
+
+        assert body[1]["trial_id"] == 1
+        assert body[1]["key"] == "a_info"
+
+        assert body[2]["trial_id"] == 1
+        assert body[2]["key"] == "z_data"
+
+        assert body[3]["trial_id"] == 2
+        assert body[3]["key"] == "z_data"
+
+    def test_missing_params_returns_422(self, client):
+        response = client.get("/api/results")
+        assert response.status_code == 422
+
+        response = client.get("/api/results?project=p")
+        assert response.status_code == 422
+
+        response = client.get("/api/results?project=p&study_name=s")
+        assert response.status_code == 200  # trial_id and key are optional
+
+    def test_returns_value_as_stored_json_string(self, client):
+        db = client.app.state.store
+
+        env_result = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            result=ResultEvent(
+                key="confusion",
+                value='{"tp": 90, "fp": 10, "tn": 80, "fn": 20}',
+            ),
+        )
+        db.insert_event(env_result)
+
+        response = client.get("/api/results?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        # Value should be the stored JSON string, not parsed
+        assert body[0]["value"] == '{"tp": 90, "fp": 10, "tn": 80, "fn": 20}'
+        assert isinstance(body[0]["value"], str)

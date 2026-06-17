@@ -207,3 +207,38 @@ def list_artifacts(
     if not isinstance(result, list):
         raise TypeError("Expected list of artifacts from server")
     return result
+
+
+def list_results(
+    base_url: str,
+    project: str,
+    study_name: str,
+    trial_id: int | None = None,
+    key: str | None = None,
+) -> list[dict]:
+    """List results from the tracking HTTP server.
+
+    Args:
+        base_url: Base URL of the tracking server (e.g., "http://localhost:8000").
+        project: Project name.
+        study_name: Study/sweep name.
+        trial_id: Optional trial ID to filter results by.
+        key: Optional result key to filter by.
+
+    Returns:
+        List of result dictionaries with trial_id, key, value, timestamp_ns.
+
+    Raises:
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
+    """
+    query_params = {"project": project, "study_name": study_name}
+    if trial_id is not None:
+        query_params["trial_id"] = str(trial_id)
+    if key is not None:
+        query_params["key"] = key
+    url = f"{base_url.rstrip('/')}/api/results?{urlencode(query_params)}"
+    result = _request(url)
+    if not isinstance(result, list):
+        raise TypeError("Expected list of results from server")
+    return result

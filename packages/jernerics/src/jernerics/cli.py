@@ -1054,6 +1054,95 @@ def artifacts(
     Console().print(table)
 
 
+# ── results ────────────────────────────────────────────────────────────────────
+
+
+@app.command("results")
+def results(
+    sweep: Annotated[str, typer.Option(help="Sweep/study name")],
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Project name (default: from pyproject.toml)"),
+    ] = None,
+    trial_id: Annotated[
+        int | None,
+        typer.Option("--trial-id", help="Filter results by trial ID"),
+    ] = None,
+    key: Annotated[
+        str | None,
+        typer.Option("--key", help="Filter results by key"),
+    ] = None,
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Tracking HTTP server URL"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+):
+    """List results from the tracking HTTP server."""
+    from .tracking.http_api import list_results
+
+    if project is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is None:
+            print(
+                "Error: No pyproject.toml found. "
+                "Either provide --project or run from a Jernerics project directory."
+            )
+            raise SystemExit(ExitCode.CONFIG_ERROR)
+        project = get_project_name(project_dir)
+
+    base_url = server
+    if base_url is None:
+        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
+    if base_url is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is not None:
+            base_url = load_tracking_http_server(project_dir)
+
+    if base_url is None:
+        print(
+            "Error: No tracking HTTP server URL configured. "
+            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
+            "or tracking_http_server in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        results_data = list_results(
+            base_url, project, sweep, trial_id=trial_id, key=key
+        )
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(results_data, indent=2))
+        return
+
+    if not results_data:
+        print("No results found.")
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("TRIAL_ID")
+    table.add_column("KEY")
+    table.add_column("VALUE")
+    table.add_column("TIMESTAMP_NS")
+
+    for result in results_data:
+        table.add_row(
+            str(result.get("trial_id", "")),
+            result.get("key", ""),
+            result.get("value", ""),
+            str(result.get("timestamp_ns", "")),
+        )
+
+    Console().print(table)
+
+
 def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:
     target = project_path / filename
     if target.exists():
