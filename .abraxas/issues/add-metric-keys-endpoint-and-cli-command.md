@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-metric-keys-endpoint-and-cli-command
+branch: null
 completed_at: '2026-06-17T05:42:33.209165'
 created: '2026-06-17T04:25:40.437434'
-merge_commit_sha: null
+merge_commit_sha: 6460cd54b5a6ba736cf0483b349a1634f77254cb
 parent_id: null
 retry_count: 0
 status: closed
