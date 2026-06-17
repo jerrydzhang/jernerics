@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-typed-results-endpoint-and-cli-command
+branch: null
 completed_at: '2026-06-17T02:26:54.741027'
 created: '2026-06-17T01:14:58.917462'
-merge_commit_sha: null
+merge_commit_sha: b9246b2469c6218ab7c732526a4b8987083da59f
 parent_id: null
 retry_count: 0
 status: closed
