@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/extract-shared-observability-cli-resolution-helpers
+completed_at: '2026-06-17T03:12:43.782577'
 created: '2026-06-17T02:28:04.151598'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Extract shared observability CLI resolution helpers
 ---
 

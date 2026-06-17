@@ -37,6 +37,56 @@ app = typer.Typer(help="A modern toolkit for building and evaluating ML models."
 SAFE_RELPATH = re.compile(r"^[a-zA-Z0-9_./\-]+$")
 
 
+def _resolve_tracking_server_url(server: str | None) -> str:
+    """Resolve tracking HTTP server URL from --server arg, env var, or config.
+
+    Resolution order:
+    1. --server argument (if provided)
+    2. JERNERICS_TRACKING_HTTP_SERVER environment variable
+    3. [tool.jernerics].tracking_http_server in pyproject.toml
+
+    Raises SystemExit with ExitCode.CONFIG_ERROR if no URL is found.
+    """
+    base_url = server
+    if base_url is None:
+        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
+    if base_url is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is not None:
+            base_url = load_tracking_http_server(project_dir)
+
+    if base_url is None:
+        print(
+            "Error: No tracking HTTP server URL configured. "
+            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
+            "or tracking_http_server in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    return base_url
+
+
+def _resolve_project_name(project: str | None) -> str:
+    """Resolve project name from --project arg or default to current pyproject.toml.
+
+    If --project is provided, returns it as-is.
+    Otherwise, looks up project name from the nearest pyproject.toml.
+
+    Raises SystemExit with ExitCode.CONFIG_ERROR if no pyproject.toml is found.
+    """
+    if project is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is None:
+            print(
+                "Error: No pyproject.toml found. "
+                "Either provide --project or run from a Jernerics project directory."
+            )
+            raise SystemExit(ExitCode.CONFIG_ERROR)
+        project = get_project_name(project_dir)
+
+    return project
+
+
 def _validate_relpath(path: str, desc: str) -> str:
     if not SAFE_RELPATH.match(path):
         raise SystemExit(
@@ -462,21 +512,7 @@ def sweeps(
     """List sweeps from the tracking HTTP server."""
     from .tracking.http_api import list_sweeps
 
-    base_url = server
-    if base_url is None:
-        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
-    if base_url is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is not None:
-            base_url = load_tracking_http_server(project_dir)
-
-    if base_url is None:
-        print(
-            "Error: No tracking HTTP server URL configured. "
-            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
-            "or tracking_http_server in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+    base_url = _resolve_tracking_server_url(server)
 
     try:
         sweeps_data = list_sweeps(base_url, project=project)
@@ -549,31 +585,8 @@ def trials(
     """List trials from the tracking HTTP server."""
     from .tracking.http_api import list_trials
 
-    if project is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is None:
-            print(
-                "Error: No pyproject.toml found. "
-                "Either provide --project or run from a Jernerics project directory."
-            )
-            raise SystemExit(ExitCode.CONFIG_ERROR)
-        project = get_project_name(project_dir)
-
-    base_url = server
-    if base_url is None:
-        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
-    if base_url is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is not None:
-            base_url = load_tracking_http_server(project_dir)
-
-    if base_url is None:
-        print(
-            "Error: No tracking HTTP server URL configured. "
-            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
-            "or tracking_http_server in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+    project = _resolve_project_name(project)
+    base_url = _resolve_tracking_server_url(server)
 
     try:
         trials_data = list_trials(
@@ -654,31 +667,8 @@ def compare_sweeps(
     """Compare two sweeps from the tracking HTTP server."""
     from .tracking.http_api import compare_sweeps as compare_sweeps_api
 
-    if project is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is None:
-            print(
-                "Error: No pyproject.toml found. "
-                "Either provide --project or run from a Jernerics project directory."
-            )
-            raise SystemExit(ExitCode.CONFIG_ERROR)
-        project = get_project_name(project_dir)
-
-    base_url = server
-    if base_url is None:
-        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
-    if base_url is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is not None:
-            base_url = load_tracking_http_server(project_dir)
-
-    if base_url is None:
-        print(
-            "Error: No tracking HTTP server URL configured. "
-            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
-            "or tracking_http_server in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+    project = _resolve_project_name(project)
+    base_url = _resolve_tracking_server_url(server)
 
     try:
         comparison = compare_sweeps_api(base_url, project, left, right)
@@ -864,31 +854,8 @@ def metric_history(
     """Get metric history from the tracking HTTP server."""
     from .tracking.http_api import get_metric_history
 
-    if project is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is None:
-            print(
-                "Error: No pyproject.toml found. "
-                "Either provide --project or run from a Jernerics project directory."
-            )
-            raise SystemExit(ExitCode.CONFIG_ERROR)
-        project = get_project_name(project_dir)
-
-    base_url = server
-    if base_url is None:
-        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
-    if base_url is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is not None:
-            base_url = load_tracking_http_server(project_dir)
-
-    if base_url is None:
-        print(
-            "Error: No tracking HTTP server URL configured. "
-            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
-            "or tracking_http_server in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+    project = _resolve_project_name(project)
+    base_url = _resolve_tracking_server_url(server)
 
     try:
         history_data = get_metric_history(base_url, project, sweep, metric)
@@ -938,21 +905,7 @@ def tracking_health(
     """Check health of the tracking HTTP server."""
     from .tracking.http_api import get_health
 
-    base_url = server
-    if base_url is None:
-        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
-    if base_url is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is not None:
-            base_url = load_tracking_http_server(project_dir)
-
-    if base_url is None:
-        print(
-            "Error: No tracking HTTP server URL configured. "
-            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
-            "or tracking_http_server in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+    base_url = _resolve_tracking_server_url(server)
 
     try:
         health_data = get_health(base_url)
@@ -997,31 +950,8 @@ def artifacts(
     """List artifacts from the tracking HTTP server."""
     from .tracking.http_api import list_artifacts
 
-    if project is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is None:
-            print(
-                "Error: No pyproject.toml found. "
-                "Either provide --project or run from a Jernerics project directory."
-            )
-            raise SystemExit(ExitCode.CONFIG_ERROR)
-        project = get_project_name(project_dir)
-
-    base_url = server
-    if base_url is None:
-        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
-    if base_url is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is not None:
-            base_url = load_tracking_http_server(project_dir)
-
-    if base_url is None:
-        print(
-            "Error: No tracking HTTP server URL configured. "
-            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
-            "or tracking_http_server in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+    project = _resolve_project_name(project)
+    base_url = _resolve_tracking_server_url(server)
 
     try:
         artifacts_data = list_artifacts(base_url, project, sweep, trial_id=trial_id)
@@ -1084,31 +1014,8 @@ def results(
     """List results from the tracking HTTP server."""
     from .tracking.http_api import list_results
 
-    if project is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is None:
-            print(
-                "Error: No pyproject.toml found. "
-                "Either provide --project or run from a Jernerics project directory."
-            )
-            raise SystemExit(ExitCode.CONFIG_ERROR)
-        project = get_project_name(project_dir)
-
-    base_url = server
-    if base_url is None:
-        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
-    if base_url is None:
-        project_dir = find_pyproject_dir()
-        if project_dir is not None:
-            base_url = load_tracking_http_server(project_dir)
-
-    if base_url is None:
-        print(
-            "Error: No tracking HTTP server URL configured. "
-            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
-            "or tracking_http_server in pyproject.toml"
-        )
-        raise SystemExit(ExitCode.CONFIG_ERROR)
+    project = _resolve_project_name(project)
+    base_url = _resolve_tracking_server_url(server)
 
     try:
         results_data = list_results(
