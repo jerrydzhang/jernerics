@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-typed-params-endpoint-and-cli-command
+branch: null
 completed_at: '2026-06-17T04:02:23.016526'
 created: '2026-06-17T02:28:08.312877'
-merge_commit_sha: null
+merge_commit_sha: 7b9efed332fef8c67573452705ad06eded51e05c
 parent_id: null
 retry_count: 0
 status: closed
