@@ -49,11 +49,12 @@ def _request(url: str) -> list[dict] | dict:
         ) from None
 
 
-def list_sweeps(base_url: str) -> list[dict]:
+def list_sweeps(base_url: str, project: str | None = None) -> list[dict]:
     """List sweeps from the tracking HTTP server.
 
     Args:
         base_url: Base URL of the tracking server (e.g., "http://localhost:8000").
+        project: Optional project name to filter sweeps by.
 
     Returns:
         List of sweep dictionaries.
@@ -63,6 +64,9 @@ def list_sweeps(base_url: str) -> list[dict]:
             returns invalid JSON.
     """
     url = f"{base_url.rstrip('/')}/api/sweeps"
+    if project is not None:
+        query_params = urlencode({"project": project})
+        url += f"?{query_params}"
     result = _request(url)
     if not isinstance(result, list):
         raise TypeError("Expected list of sweeps from server")

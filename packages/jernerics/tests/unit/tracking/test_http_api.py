@@ -24,6 +24,7 @@ class MockHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if (
             self.path == "/api/sweeps"
+            or self.path.startswith("/api/sweeps?")
             or self.path.startswith("/api/trials")
             or self.path.startswith("/api/compare-sweeps")
         ):
@@ -219,6 +220,40 @@ class TestListSweeps:
 
         assert "Accept" in MockHandler.received_headers
         assert MockHandler.received_headers["Accept"] == "application/json"
+
+    def test_list_sweeps_with_project(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "project": "my-project",
+                "study_name": "study-1",
+                "trial_count": 10,
+                "completed_count": 5,
+                "last_event_timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        result = list_sweeps(mock_server, project="my-project")
+
+        assert len(result) == 1
+        assert result[0]["project"] == "my-project"
+        assert result[0]["study_name"] == "study-1"
+        assert "project=my-project" in MockHandler.received_path
+
+    def test_list_sweeps_project_url_encodes_spaces(self, mock_server):
+        MockHandler.response_data = []
+
+        result = list_sweeps(mock_server, project="my project")
+
+        assert result == []
+        assert "project=my+project" in MockHandler.received_path
+
+    def test_list_sweeps_project_url_encodes_special_chars(self, mock_server):
+        MockHandler.response_data = []
+
+        result = list_sweeps(mock_server, project="project&a")
+
+        assert result == []
+        assert "project=project%26a" in MockHandler.received_path
 
 
 class TestListTrials:

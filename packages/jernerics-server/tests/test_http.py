@@ -531,6 +531,79 @@ class TestSweepsEndpoint:
         assert len(body) == 1
         assert body[0]["last_event_timestamp_ns"] == 7000
 
+    def test_filters_by_project(self, client):
+        db = client.app.state.store
+
+        # Sweep for proj1
+        env1 = Envelope(
+            project="proj1",
+            study_name="study1",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env1)
+
+        # Sweep for proj2
+        env2 = Envelope(
+            project="proj2",
+            study_name="study2",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.1),
+        )
+        db.insert_event(env2)
+
+        # Query without project filter
+        response = client.get("/api/sweeps")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+
+        # Query with project filter for proj1
+        response = client.get("/api/sweeps?project=proj1")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["project"] == "proj1"
+        assert body[0]["study_name"] == "study1"
+
+        # Query with project filter for proj2
+        response = client.get("/api/sweeps?project=proj2")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["project"] == "proj2"
+        assert body[0]["study_name"] == "study2"
+
+        # Query with non-existent project
+        response = client.get("/api/sweeps?project=nonexistent")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 0
+
+    def test_url_encodes_project_parameter(self, client):
+        db = client.app.state.store
+
+        # Sweep with spaces in project name
+        env = Envelope(
+            project="my project",
+            study_name="study1",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env)
+
+        response = client.get("/api/sweeps?project=my%20project")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["project"] == "my project"
+
 
 class TestTrialsEndpoint:
     def test_valid_request(self, client):

@@ -166,7 +166,11 @@ class MockSweepsHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/api/sweeps" or self.path.startswith("/api/trials"):
+        if (
+            self.path == "/api/sweeps"
+            or self.path.startswith("/api/sweeps?")
+            or self.path.startswith("/api/trials")
+        ):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -310,6 +314,44 @@ class TestSweepsCommand:
         assert "TRIALS" in captured.out
         assert "COMPLETED" in captured.out
         assert "LAST_EVENT" in captured.out
+
+    def test_sweeps_with_project_flag(self, mock_sweeps_server, capsys):
+        MockSweepsHandler.response_data = [
+            {
+                "project": "my-project",
+                "study_name": "study-1",
+                "trials": 10,
+                "completed": 5,
+                "last_event": "2024-01-15T10:30:00Z",
+            }
+        ]
+
+        from jernerics.cli import sweeps
+
+        sweeps(server=mock_sweeps_server, project="my-project")
+
+        captured = capsys.readouterr()
+        assert "my-project" in captured.out
+        assert "study-1" in captured.out
+
+    def test_sweeps_with_project_flag_url_encodes(self, mock_sweeps_server, capsys):
+        MockSweepsHandler.response_data = [
+            {
+                "project": "my project",
+                "study_name": "study-1",
+                "trials": 10,
+                "completed": 5,
+                "last_event": "2024-01-15T10:30:00Z",
+            }
+        ]
+
+        from jernerics.cli import sweeps
+
+        sweeps(server=mock_sweeps_server, project="my project")
+
+        captured = capsys.readouterr()
+        assert "my project" in captured.out
+        assert "study-1" in captured.out
 
 
 class MockTrialsHandler(BaseHTTPRequestHandler):

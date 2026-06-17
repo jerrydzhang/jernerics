@@ -150,7 +150,7 @@ class Store:
         finally:
             con.close()
 
-    def list_sweeps(self) -> list[dict]:
+    def list_sweeps(self, project: str | None = None) -> list[dict]:
         sql = """
         SELECT
             project,
@@ -207,11 +207,14 @@ class Store:
             UNION
             SELECT DISTINCT project, study_name FROM trial_end
         ) s
-        ORDER BY project, study_name
         """
+        if project is not None:
+            sql += " WHERE s.project = ?"
+        sql += " ORDER BY project, study_name"
+
         con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
         try:
-            cursor = con.execute(sql)
+            cursor = con.execute(sql, [project] if project is not None else [])
             columns = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
             return [dict(zip(columns, row, strict=True)) for row in rows]

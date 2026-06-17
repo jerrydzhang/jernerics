@@ -454,6 +454,10 @@ def sweeps(
         bool,
         typer.Option("--json", help="Output as JSON"),
     ] = False,
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Filter sweeps by project name"),
+    ] = None,
 ):
     """List sweeps from the tracking HTTP server."""
     from .tracking.http_api import list_sweeps
@@ -475,7 +479,7 @@ def sweeps(
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        sweeps_data = list_sweeps(base_url)
+        sweeps_data = list_sweeps(base_url, project=project)
     except RuntimeError as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.GENERAL_ERROR) from None

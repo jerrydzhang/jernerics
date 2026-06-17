@@ -91,8 +91,8 @@ def create_app(
         )
 
     @app.get("/api/sweeps", response_model=None, dependencies=deps)
-    def list_sweeps() -> JSONResponse:
-        sweeps = store.list_sweeps()
+    def list_sweeps(project: str | None = None) -> JSONResponse:
+        sweeps = store.list_sweeps(project=project)
         return JSONResponse(content=sweeps)
 
     @app.get("/api/trials", response_model=None, dependencies=deps)
