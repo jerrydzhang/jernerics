@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-typed-sweeps-endpoint-to-tracking-server
+branch: null
 completed_at: '2026-06-16T23:02:14.322631'
 created: '2026-06-16T22:31:01.926317'
-merge_commit_sha: null
+merge_commit_sha: 3df8af47833c83ea0b476ee30788e49d54c5dded
 order: 1
 parent_id: null
 retry_count: 0
