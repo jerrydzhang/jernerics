@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-metric-filter-to-compare-sweeps
+branch: null
 completed_at: '2026-06-17T04:19:16.906651'
 created: '2026-06-17T02:28:10.374540'
-merge_commit_sha: null
+merge_commit_sha: bb3149f16c5921208b89b4c0f385f5d0542748d5
 parent_id: null
 retry_count: 0
 status: closed
