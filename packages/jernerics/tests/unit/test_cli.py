@@ -419,10 +419,14 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
                 parsed = urlparse(self.path)
                 query_params = parse_qs(parsed.query)
                 trials_to_return = response_data
+                if "offset" in query_params:
+                    offset = int(query_params["offset"][0])
+                    if isinstance(response_data, list):
+                        trials_to_return = response_data[offset:]
                 if "limit" in query_params:
                     limit = int(query_params["limit"][0])
-                    if isinstance(response_data, list):
-                        trials_to_return = response_data[:limit]
+                    if isinstance(trials_to_return, list):
+                        trials_to_return = trials_to_return[:limit]
                 if "metric_keys" in query_params:
                     metric_keys = [
                         k.strip() for k in query_params["metric_keys"][0].split(",")
@@ -1315,6 +1319,109 @@ class TestTrialsCommandOptionalProject:
         captured = capsys.readouterr()
         assert "ACCURACY" in captured.out
         assert "LOSS" in captured.out
+
+    def test_trials_with_offset(self, mock_trials_server, capsys):
+        """trials with --offset skips first n trials."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": i,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+            for i in range(6)
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            offset=3,
+        )
+
+        captured = capsys.readouterr()
+        assert "3" in captured.out
+        assert "4" in captured.out
+        assert "5" in captured.out
+        assert "offset=3" in MockTrialsHandler.received_path
+
+    def test_trials_with_offset_and_limit(self, mock_trials_server, capsys):
+        """trials with both --offset and --limit works correctly."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": i,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+            for i in range(6)
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            offset=3,
+            limit=2,
+        )
+
+        captured = capsys.readouterr()
+        assert "3" in captured.out
+        assert "4" in captured.out
+        assert "5" not in captured.out
+        assert "offset=3" in MockTrialsHandler.received_path
+        assert "limit=2" in MockTrialsHandler.received_path
+
+    def test_trials_with_offset_zero(self, mock_trials_server, capsys):
+        """trials with --offset=0 sends no offset param to server."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            offset=0,
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "offset" not in MockTrialsHandler.received_path
+
+    def test_trials_default_offset_zero(self, mock_trials_server, capsys):
+        """trials without --offset sends no offset param to server (default 0)."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "offset" not in MockTrialsHandler.received_path
 
 
 class MockHealthHandler(BaseHTTPRequestHandler):

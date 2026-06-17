@@ -227,6 +227,7 @@ class Store:
         study_name: str,
         limit: int | None = None,
         status: str | None = None,
+        offset: int = 0,
     ) -> list[dict]:
         sql = """
         SELECT
@@ -266,10 +267,17 @@ class Store:
 
         sql += " ORDER BY t.trial_id"
 
-        # Apply limit after status filter
+        # Apply limit and offset (SQL syntax: LIMIT x OFFSET y)
         if limit is not None:
             sql += " LIMIT ?"
             params.append(limit)
+            if offset > 0:
+                sql += " OFFSET ?"
+                params.append(offset)
+        elif offset > 0:
+            # Only offset, no limit - use large limit for pagination
+            sql += " LIMIT -1 OFFSET ?"
+            params.append(offset)
 
         con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
         try:

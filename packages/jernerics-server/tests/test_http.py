@@ -1631,6 +1631,137 @@ class TestTrialsEndpoint:
         assert body[0]["trial_id"] == 0
         assert body[0]["status"] == "complete"
 
+    def test_offset_default_is_zero(self, client):
+        db = client.app.state.store
+
+        # Insert 5 trials
+        for i in range(5):
+            env = Envelope(
+                project="p",
+                study_name="s",
+                trial_id=i,
+                timestamp_ns=1000 + i,
+                seq=0,
+                param=ParamEvent(key="x", value=Value(int_val=i)),
+            )
+            db.insert_event(env)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 5
+        assert body[0]["trial_id"] == 0
+        assert body[4]["trial_id"] == 4
+
+    def test_offset_skips_first_n_trials(self, client):
+        db = client.app.state.store
+
+        # Insert 5 trials
+        for i in range(5):
+            env = Envelope(
+                project="p",
+                study_name="s",
+                trial_id=i,
+                timestamp_ns=1000 + i,
+                seq=0,
+                param=ParamEvent(key="x", value=Value(int_val=i)),
+            )
+            db.insert_event(env)
+
+        response = client.get("/api/trials?project=p&study_name=s&offset=2")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 3
+        assert body[0]["trial_id"] == 2
+        assert body[1]["trial_id"] == 3
+        assert body[2]["trial_id"] == 4
+
+    def test_offset_greater_than_available_returns_empty_list(self, client):
+        db = client.app.state.store
+
+        env = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env)
+
+        response = client.get("/api/trials?project=p&study_name=s&offset=10")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 0
+
+    def test_offset_negative_returns_400(self, client):
+        response = client.get("/api/trials?project=p&study_name=s&offset=-1")
+        assert response.status_code == 400
+
+    def test_offset_non_integer_returns_422(self, client):
+        response = client.get("/api/trials?project=p&study_name=s&offset=abc")
+        assert response.status_code == 422
+
+    def test_offset_and_limit_work_together(self, client):
+        db = client.app.state.store
+
+        # Insert 10 trials
+        for i in range(10):
+            env = Envelope(
+                project="p",
+                study_name="s",
+                trial_id=i,
+                timestamp_ns=1000 + i,
+                seq=0,
+                param=ParamEvent(key="x", value=Value(int_val=i)),
+            )
+            db.insert_event(env)
+
+        response = client.get("/api/trials?project=p&study_name=s&offset=3&limit=2")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+        assert body[0]["trial_id"] == 3
+        assert body[1]["trial_id"] == 4
+
+    def test_offset_applied_after_status_filter(self, client):
+        db = client.app.state.store
+
+        # Insert 5 trials: 2 complete, 3 incomplete
+        for i in range(5):
+            env = Envelope(
+                project="p",
+                study_name="s",
+                trial_id=i,
+                timestamp_ns=1000 + i,
+                seq=0,
+                param=ParamEvent(key="x", value=Value(int_val=i)),
+            )
+            db.insert_event(env)
+
+            # Mark trials 0 and 1 as complete
+            if i < 2:
+                env_end = Envelope(
+                    project="p",
+                    study_name="s",
+                    trial_id=i,
+                    timestamp_ns=2000 + i,
+                    seq=0,
+                    trial_end=TrialEndEvent(),
+                )
+                db.insert_event(env_end)
+
+        # Request complete trials with offset=1
+        # Should return only 1 trial (second complete trial, trial_id=1)
+        response = client.get(
+            "/api/trials?project=p&study_name=s&status=complete&offset=1"
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 1
+        assert body[0]["status"] == "complete"
+
 
 class TestCompareSweepsEndpoint:
     def test_valid_request_returns_comparison(self, client):

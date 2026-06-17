@@ -111,18 +111,26 @@ def create_app(
         metric_keys: str | None = None,
         limit: int | None = None,
         status: str | None = None,
+        offset: int = 0,
     ) -> JSONResponse:
         if limit is not None and limit < 0:
             return JSONResponse(
                 status_code=400,
                 content={"error": "limit must be non-negative"},
             )
+        if offset < 0:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "offset must be non-negative"},
+            )
         if status is not None and status not in ("complete", "incomplete"):
             return JSONResponse(
                 status_code=400,
                 content={"error": "status must be 'complete' or 'incomplete'"},
             )
-        trials = store.list_trials(project, study_name, limit=limit, status=status)
+        trials = store.list_trials(
+            project, study_name, limit=limit, status=status, offset=offset
+        )
         if metric_keys:
             keys = [k.strip() for k in metric_keys.split(",") if k.strip()]
             for trial in trials:

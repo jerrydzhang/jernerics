@@ -539,6 +539,97 @@ class TestListTrials:
         assert len(result) == 1
         assert "status" not in MockHandler.received_path
 
+    def test_list_trials_with_offset(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": i,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+            for i in range(3, 6)
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1", offset=3)
+
+        assert len(result) == 3
+        assert result[0]["trial_id"] == 3
+        assert result[1]["trial_id"] == 4
+        assert result[2]["trial_id"] == 5
+        assert "offset=3" in MockHandler.received_path
+
+    def test_list_trials_without_offset(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1")
+
+        assert len(result) == 1
+        assert "offset" not in MockHandler.received_path
+
+    def test_list_trials_with_offset_and_limit(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": i,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+            for i in range(3, 5)
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1", offset=3, limit=2)
+
+        assert len(result) == 2
+        assert result[0]["trial_id"] == 3
+        assert result[1]["trial_id"] == 4
+        assert "offset=3" in MockHandler.received_path
+        assert "limit=2" in MockHandler.received_path
+
+    def test_list_trials_with_offset_zero_omits_param(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1", offset=0)
+
+        assert len(result) == 1
+        assert "offset" not in MockHandler.received_path
+
+    def test_list_trials_with_offset_and_status(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        result = list_trials(
+            mock_server, "my-project", "study-1", offset=1, status="complete"
+        )
+
+        assert len(result) == 1
+        assert "offset=1" in MockHandler.received_path
+        assert "status=complete" in MockHandler.received_path
+
 
 class TestCompareSweeps:
     def test_compare_sweeps_success(self, mock_server):
