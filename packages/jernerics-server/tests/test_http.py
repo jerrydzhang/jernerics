@@ -2,7 +2,16 @@ from io import BytesIO
 
 import pytest
 from fastapi.testclient import TestClient
-from jernerics_proto import ArtifactEvent, Envelope
+from jernerics_proto import (
+    ArtifactEvent,
+    Envelope,
+    MetricEvent,
+    ParamEvent,
+    ResultEvent,
+    SweepMetaEvent,
+    TrialEndEvent,
+    Value,
+)
 from jernerics_server.http import create_app
 from jernerics_server.store import Store
 
@@ -225,3 +234,299 @@ class TestArtifactProxy:
         assert response.content == b"A" * 100
         # StreamingResponse calls read() with a chunk size, not read() once for all
         assert body.read_calls > 1
+
+
+class TestSweepsEndpoint:
+    def test_empty_sweeps_returns_empty_list(self, client):
+        response = client.get("/api/sweeps")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_one_sweep_with_multiple_trials(self, client):
+        db = client.app.state.store
+
+        # Insert sweep meta
+        env_sweep_meta = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            sweep_meta=SweepMetaEvent(git_hash="abc123", config="{}"),
+        )
+        db.insert_event(env_sweep_meta)
+
+        # Insert params for trial 0
+        env_param0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param0)
+
+        # Insert params for trial 1
+        env_param1 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.01)),
+        )
+        db.insert_event(env_param1)
+
+        # Insert metrics for trial 0
+        env_metric0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=4000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=1),
+        )
+        db.insert_event(env_metric0)
+
+        # Insert trial end for trial 0
+        env_trial_end0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=5000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_trial_end0)
+
+        response = client.get("/api/sweeps")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["project"] == "myproj"
+        assert body[0]["study_name"] == "mystudy"
+        assert body[0]["trial_count"] == 2
+        assert body[0]["completed_count"] == 1
+        assert body[0]["last_event_timestamp_ns"] == 5000
+
+    def test_multiple_sweeps(self, client):
+        db = client.app.state.store
+
+        # Sweep 1
+        env1 = Envelope(
+            project="proj1",
+            study_name="study1",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env1)
+
+        # Sweep 2
+        env2 = Envelope(
+            project="proj2",
+            study_name="study2",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.1),
+        )
+        db.insert_event(env2)
+
+        response = client.get("/api/sweeps")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+
+        # Sort by project and study_name for predictable order
+        sorted_body = sorted(body, key=lambda x: (x["project"], x["study_name"]))
+        assert sorted_body[0]["project"] == "proj1"
+        assert sorted_body[0]["study_name"] == "study1"
+        assert sorted_body[0]["trial_count"] == 1
+        assert sorted_body[0]["completed_count"] == 0
+        assert sorted_body[0]["last_event_timestamp_ns"] == 1000
+
+        assert sorted_body[1]["project"] == "proj2"
+        assert sorted_body[1]["study_name"] == "study2"
+        assert sorted_body[1]["trial_count"] == 1
+        assert sorted_body[1]["completed_count"] == 0
+        assert sorted_body[1]["last_event_timestamp_ns"] == 2000
+
+    def test_requires_bearer_auth(self, auth_client):
+        response = auth_client.get("/api/sweeps")
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/sweeps", headers={"Authorization": "Bearer secret123"}
+        )
+        assert response.status_code == 200
+
+    def test_trial_count_aggregates_across_all_tables(self, client):
+        db = client.app.state.store
+
+        # Add params for trial 0
+        env_param = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param)
+
+        # Add metrics for trial 1
+        env_metric = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5),
+        )
+        db.insert_event(env_metric)
+
+        # Add results for trial 2
+        env_result = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=3000,
+            seq=0,
+            result=ResultEvent(key="result", value="{}"),
+        )
+        db.insert_event(env_result)
+
+        # Add artifacts for trial 3
+        env_artifact = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=3,
+            timestamp_ns=4000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact)
+
+        # Add sweep_meta for trial 4
+        env_sweep_meta = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=4,
+            timestamp_ns=5000,
+            seq=0,
+            sweep_meta=SweepMetaEvent(git_hash="abc", config="{}"),
+        )
+        db.insert_event(env_sweep_meta)
+
+        # Add trial_end for trial 5
+        env_trial_end = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=5,
+            timestamp_ns=6000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_trial_end)
+
+        response = client.get("/api/sweeps")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_count"] == 6
+
+    def test_completed_count_counts_only_trial_end(self, client):
+        db = client.app.state.store
+
+        # Trial 0: has trial_end
+        env_end0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_end0)
+
+        # Trial 1: has trial_end
+        env_end1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_end1)
+
+        # Trial 2: only has param, not ended
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=3000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env_param2)
+
+        response = client.get("/api/sweeps")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_count"] == 3
+        assert body[0]["completed_count"] == 2
+
+    def test_last_event_timestamp_ns_is_max_across_all_tables(self, client):
+        db = client.app.state.store
+
+        # Add events with different timestamps
+        env1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env1)
+
+        env2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=5000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.1),
+        )
+        db.insert_event(env2)
+
+        env3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=3000,
+            seq=0,
+            result=ResultEvent(key="r", value="{}"),
+        )
+        db.insert_event(env3)
+
+        env4 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=7000,
+            seq=1,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env4)
+
+        response = client.get("/api/sweeps")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["last_event_timestamp_ns"] == 7000

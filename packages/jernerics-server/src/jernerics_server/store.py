@@ -141,6 +141,74 @@ class Store:
         finally:
             con.close()
 
+    def list_sweeps(self) -> list[dict]:
+        sql = """
+        SELECT
+            project,
+            study_name,
+            (
+                SELECT COUNT(DISTINCT trial_id)
+                FROM (
+                    SELECT trial_id FROM params
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT trial_id FROM metrics
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT trial_id FROM results
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT trial_id FROM artifacts
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT trial_id FROM sweep_meta
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT trial_id FROM trial_end
+                    WHERE project = s.project AND study_name = s.study_name
+                )
+            ) AS trial_count,
+            (
+                SELECT COUNT(DISTINCT trial_id)
+                FROM trial_end
+                WHERE project = s.project AND study_name = s.study_name
+            ) AS completed_count,
+            (
+                SELECT MAX(timestamp_ns)
+                FROM (
+                    SELECT timestamp_ns FROM params
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT timestamp_ns FROM metrics
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT timestamp_ns FROM results
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT timestamp_ns FROM artifacts
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT timestamp_ns FROM sweep_meta
+                    WHERE project = s.project AND study_name = s.study_name
+                    UNION SELECT timestamp_ns FROM trial_end
+                    WHERE project = s.project AND study_name = s.study_name
+                )
+            ) AS last_event_timestamp_ns
+        FROM (
+            SELECT DISTINCT project, study_name FROM params
+            UNION
+            SELECT DISTINCT project, study_name FROM metrics
+            UNION
+            SELECT DISTINCT project, study_name FROM results
+            UNION
+            SELECT DISTINCT project, study_name FROM artifacts
+            UNION
+            SELECT DISTINCT project, study_name FROM sweep_meta
+            UNION
+            SELECT DISTINCT project, study_name FROM trial_end
+        ) s
+        ORDER BY project, study_name
+        """
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql)
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            return [dict(zip(columns, row, strict=True)) for row in rows]
+        finally:
+            con.close()
+
     def _insert_param(self, env: Envelope) -> None:
         p = env.param
         val = p.value

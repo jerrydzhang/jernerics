@@ -70,6 +70,11 @@ def create_app(
             content={"columns": columns, "rows": [list(r) for r in rows]}
         )
 
+    @app.get("/api/sweeps", response_model=None, dependencies=deps)
+    def list_sweeps() -> JSONResponse:
+        sweeps = store.list_sweeps()
+        return JSONResponse(content=sweeps)
+
     if s3_fetch is not None:
 
         @app.get(
