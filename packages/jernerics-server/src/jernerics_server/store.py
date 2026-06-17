@@ -505,3 +505,19 @@ class Store:
             return [row[0] for row in cursor.fetchall()]
         finally:
             con.close()
+
+    def get_metrics_by_key(self, project: str, study_name: str, key: str) -> list[dict]:
+        sql = """
+        SELECT trial_id, key, value, step, timestamp_ns
+        FROM metrics
+        WHERE project = ? AND study_name = ? AND key = ?
+        ORDER BY trial_id, step IS NULL, step
+        """
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, [project, study_name, key])
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            return [dict(zip(columns, row, strict=True)) for row in rows]
+        finally:
+            con.close()

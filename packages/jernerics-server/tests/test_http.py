@@ -1561,3 +1561,197 @@ class TestHealthEndpoint:
         response = client.get("/api/health")
         assert response.status_code == 200
         assert response.json() == {"ok": True}
+
+
+class TestMetricsEndpoint:
+    def test_returns_stepped_and_final_metrics(self, client):
+        db = client.app.state.store
+
+        # Insert stepped metrics
+        env1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.8, step=1),
+        )
+        db.insert_event(env1)
+
+        env2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            metric=MetricEvent(key="loss", value=0.6, step=2),
+        )
+        db.insert_event(env2)
+
+        # Insert final metric (step=-1 becomes NULL in DB)
+        env3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=3000,
+            seq=2,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env3)
+
+        response = client.get("/api/metrics?project=p&study_name=s&key=loss")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 3
+        # ORDER BY trial_id, step with NULLs last
+        assert body[0]["trial_id"] == 0
+        assert body[0]["key"] == "loss"
+        assert body[0]["value"] == pytest.approx(0.8)
+        assert body[0]["step"] == 1
+        assert body[0]["timestamp_ns"] == 1000
+        assert body[1]["step"] == 2
+        assert body[2]["step"] is None
+        assert body[2]["value"] == pytest.approx(0.5)
+
+    def test_sorted_by_trial_id_then_step(self, client):
+        db = client.app.state.store
+
+        # Trial 1 metrics (using unique seq values)
+        env1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=5000,
+            seq=3,
+            metric=MetricEvent(key="acc", value=0.9, step=2),
+        )
+        db.insert_event(env1)
+
+        env2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=4000,
+            seq=2,
+            metric=MetricEvent(key="acc", value=0.8, step=1),
+        )
+        db.insert_event(env2)
+
+        # Trial 0 metrics (using unique seq values)
+        env3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=3000,
+            seq=0,
+            metric=MetricEvent(key="acc", value=0.7, step=5),
+        )
+        db.insert_event(env3)
+
+        env4 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            metric=MetricEvent(key="acc", value=0.6, step=3),
+        )
+        db.insert_event(env4)
+
+        env5 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=2,
+            metric=MetricEvent(key="acc", value=0.5, step=1),
+        )
+        db.insert_event(env5)
+
+        response = client.get("/api/metrics?project=p&study_name=s&key=acc")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 5
+
+        # Trial 0, step 1
+        assert body[0]["trial_id"] == 0
+        assert body[0]["step"] == 1
+        assert body[0]["value"] == pytest.approx(0.5)
+        # Trial 0, step 3
+        assert body[1]["trial_id"] == 0
+        assert body[1]["step"] == 3
+        assert body[1]["value"] == pytest.approx(0.6)
+        # Trial 0, step 5
+        assert body[2]["trial_id"] == 0
+        assert body[2]["step"] == 5
+        assert body[2]["value"] == pytest.approx(0.7)
+        # Trial 1, step 1
+        assert body[3]["trial_id"] == 1
+        assert body[3]["step"] == 1
+        assert body[3]["value"] == pytest.approx(0.8)
+        # Trial 1, step 2
+        assert body[4]["trial_id"] == 1
+        assert body[4]["step"] == 2
+        assert body[4]["value"] == pytest.approx(0.9)
+
+    def test_null_step_serializes_as_json_null(self, client):
+        db = client.app.state.store
+
+        env = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env)
+
+        response = client.get("/api/metrics?project=p&study_name=s&key=loss")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["step"] is None
+
+    def test_empty_results_for_nonexistent_data(self, client):
+        response = client.get(
+            "/api/metrics?project=nonexistent&study_name=nonexistent&key=loss"
+        )
+        assert response.status_code == 200
+        assert response.json() == []
+
+        # Test with existing project/study but non-existent key
+        db = client.app.state.store
+        env = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="other_key", value=0.5),
+        )
+        db.insert_event(env)
+
+        response = client.get("/api/metrics?project=p&study_name=s&key=loss")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_requires_bearer_auth(self, auth_client):
+        response = auth_client.get("/api/metrics?project=p&study_name=s&key=loss")
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/metrics?project=p&study_name=s&key=loss",
+            headers={"Authorization": "Bearer secret123"},
+        )
+        assert response.status_code == 200
+
+    def test_missing_params_returns_422(self, client):
+        response = client.get("/api/metrics")
+        assert response.status_code == 422
+
+        response = client.get("/api/metrics?project=p")
+        assert response.status_code == 422
+
+        response = client.get("/api/metrics?project=p&study_name=s")
+        assert response.status_code == 422

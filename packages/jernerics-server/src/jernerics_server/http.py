@@ -99,6 +99,11 @@ def create_app(
     def health() -> JSONResponse:
         return JSONResponse(content={"ok": True})
 
+    @app.get("/api/metrics", response_model=None, dependencies=deps)
+    def get_metrics(project: str, study_name: str, key: str) -> JSONResponse:
+        metrics = store.get_metrics_by_key(project, study_name, key)
+        return JSONResponse(content=metrics)
+
     @app.get("/api/trials", response_model=None, dependencies=deps)
     def list_trials(
         project: str, study_name: str, metric_keys: str | None = None
