@@ -1,10 +1,12 @@
 import json
+import os
 import re
 import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
+from urllib.error import HTTPError, URLError
 
 import tomli_w
 import tomllib
@@ -24,6 +26,7 @@ from .config import (
     get_project_name,
     load_backend_config,
     load_config,
+    load_tracking_http_server,
     load_tracking_server,
 )
 from .container.templates import get_starter, list_starters
@@ -437,6 +440,75 @@ def sync(
     backend, _, project_dir = _get_backend(backend_name)
     project_name = get_project_name(project_dir)
     backend.sync(project_name, study=study)
+
+
+# ── sweeps ───────────────────────────────────────────────────────────────────
+
+
+@app.command("sweeps")
+def sweeps(
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Tracking HTTP server URL"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+):
+    """List sweeps from the tracking HTTP server."""
+    from .tracking.http_api import list_sweeps
+
+    base_url = server
+    if base_url is None:
+        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
+    if base_url is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is not None:
+            base_url = load_tracking_http_server(project_dir)
+
+    if base_url is None:
+        print(
+            "Error: No tracking HTTP server URL configured. "
+            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
+            "or tracking_http_server in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        sweeps_data = list_sweeps(base_url)
+    except (URLError, HTTPError) as e:
+        print(f"Error: Failed to fetch sweeps: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+    except ValueError as e:
+        print(f"Error: Invalid response from server: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(sweeps_data, indent=2))
+        return
+
+    if not sweeps_data:
+        print("No sweeps found.")
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("PROJECT")
+    table.add_column("STUDY_NAME")
+    table.add_column("TRIALS")
+    table.add_column("COMPLETED")
+    table.add_column("LAST_EVENT")
+
+    for sweep in sweeps_data:
+        table.add_row(
+            sweep.get("project", ""),
+            sweep.get("study_name", ""),
+            str(sweep.get("trials", 0)),
+            str(sweep.get("completed", 0)),
+            sweep.get("last_event", ""),
+        )
+
+    Console().print(table)
 
 
 def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:

@@ -145,6 +145,13 @@ def load_tracking_server(project_dir: str | Path) -> str | None:
     )
 
 
+def load_tracking_http_server(project_dir: str | Path) -> str | None:
+    tool_config = _load_tool_config(project_dir)
+    return os.environ.get("JERNERICS_TRACKING_HTTP_SERVER") or tool_config.get(
+        "tracking_http_server"
+    )
+
+
 def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
     tool_config = _load_tool_config(project_dir)
     backends = tool_config.get("backends", {})

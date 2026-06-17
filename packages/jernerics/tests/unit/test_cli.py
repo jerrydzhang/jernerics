@@ -1,3 +1,7 @@
+import json
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -151,3 +155,158 @@ class TestMainFunction:
         with patch("jernerics.cli.app") as mock_app:
             main()
             mock_app.assert_called_once()
+
+
+class MockSweepsHandler(BaseHTTPRequestHandler):
+    """Mock HTTP server handler for sweeps testing."""
+
+    response_data: ClassVar[list[dict]] = []
+
+    def log_message(self, format: str, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/api/sweeps":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            response_body = json.dumps(MockSweepsHandler.response_data).encode("utf-8")
+            self.wfile.write(response_body)
+        else:
+            self.send_error(404, "Not Found")
+
+
+@pytest.fixture
+def mock_sweeps_server():
+    """Start a mock HTTP server for sweeps testing."""
+    server = HTTPServer(("localhost", 0), MockSweepsHandler)
+    port = server.server_address[1]
+
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    yield f"http://localhost:{port}"
+
+    server.shutdown()
+
+
+class TestSweepsCommand:
+    def test_sweeps_with_server_option(self, mock_sweeps_server, capsys):
+        MockSweepsHandler.response_data = [
+            {
+                "project": "my-project",
+                "study_name": "study-1",
+                "trials": 10,
+                "completed": 5,
+                "last_event": "2024-01-15T10:30:00Z",
+            }
+        ]
+
+        from jernerics.cli import sweeps
+
+        sweeps(server=mock_sweeps_server)
+
+        captured = capsys.readouterr()
+        assert "my-project" in captured.out
+        assert "study-1" in captured.out
+        assert "10" in captured.out
+        assert "5" in captured.out
+
+    def test_sweeps_with_env_var(self, mock_sweeps_server, capsys, monkeypatch):
+        MockSweepsHandler.response_data = []
+
+        from jernerics.cli import sweeps
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", mock_sweeps_server)
+        sweeps(server=None)
+
+        captured = capsys.readouterr()
+        assert "No sweeps found" in captured.out
+
+    def test_sweeps_with_json_flag(self, mock_sweeps_server, capsys):
+        MockSweepsHandler.response_data = [
+            {
+                "project": "my-project",
+                "study_name": "study-1",
+                "trials": 10,
+                "completed": 5,
+                "last_event": "2024-01-15T10:30:00Z",
+            }
+        ]
+
+        from jernerics.cli import sweeps
+
+        sweeps(server=mock_sweeps_server, json_output=True)
+
+        captured = capsys.readouterr()
+        assert "my-project" in captured.out
+        assert "study-1" in captured.out
+
+    def test_sweeps_with_empty_response(self, mock_sweeps_server, capsys):
+        MockSweepsHandler.response_data = []
+
+        from jernerics.cli import sweeps
+
+        sweeps(server=mock_sweeps_server)
+
+        captured = capsys.readouterr()
+        assert "No sweeps found" in captured.out
+
+    def test_sweeps_server_url_priority(self, mock_sweeps_server, capsys, monkeypatch):
+        MockSweepsHandler.response_data = []
+
+        from jernerics.cli import sweeps
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", "http://wrong-url:9999")
+        sweeps(server=mock_sweeps_server)
+
+        captured = capsys.readouterr()
+        assert "No sweeps found" in captured.out
+
+    def test_sweeps_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import sweeps
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            sweeps(server=None)
+
+        assert exc_info.value.code == 3
+
+    def test_sweeps_displays_rich_table(self, mock_sweeps_server, capsys):
+        MockSweepsHandler.response_data = [
+            {
+                "project": "project-a",
+                "study_name": "study-1",
+                "trials": 5,
+                "completed": 2,
+                "last_event": "2024-01-15T10:30:00Z",
+            },
+            {
+                "project": "project-b",
+                "study_name": "study-2",
+                "trials": 20,
+                "completed": 20,
+                "last_event": "2024-01-15T11:00:00Z",
+            },
+        ]
+
+        from jernerics.cli import sweeps
+
+        sweeps(server=mock_sweeps_server)
+
+        captured = capsys.readouterr()
+        assert "project-a" in captured.out
+        assert "project-b" in captured.out
+        assert "study-1" in captured.out
+        assert "study-2" in captured.out
+        assert "PROJECT" in captured.out
+        assert "STUDY_NAME" in captured.out
+        assert "TRIALS" in captured.out
+        assert "COMPLETED" in captured.out
+        assert "LAST_EVENT" in captured.out
