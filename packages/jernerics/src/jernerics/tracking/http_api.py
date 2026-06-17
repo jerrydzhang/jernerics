@@ -130,3 +130,23 @@ def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
     if not isinstance(result, dict):
         raise TypeError("Expected comparison dict from server")
     return result
+
+
+def get_health(base_url: str) -> dict:
+    """Check health of the tracking HTTP server.
+
+    Args:
+        base_url: Base URL of the tracking server (e.g., "http://localhost:8000").
+
+    Returns:
+        Health dictionary (e.g., {"ok": True}).
+
+    Raises:
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
+    """
+    url = f"{base_url.rstrip('/')}/api/health"
+    result = _request(url)
+    if not isinstance(result, dict):
+        raise TypeError("Expected health dict from server")
+    return result

@@ -841,6 +841,56 @@ def compare_sweeps(
         console.print()
 
 
+# ── tracking-health ─────────────────────────────────────────────────────────────
+
+
+@app.command("tracking-health")
+def tracking_health(
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Tracking HTTP server URL"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+):
+    """Check health of the tracking HTTP server."""
+    from .tracking.http_api import get_health
+
+    base_url = server
+    if base_url is None:
+        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
+    if base_url is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is not None:
+            base_url = load_tracking_http_server(project_dir)
+
+    if base_url is None:
+        print(
+            "Error: No tracking HTTP server URL configured. "
+            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
+            "or tracking_http_server in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        health_data = get_health(base_url)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(health_data, indent=2))
+        return
+
+    if health_data.get("ok"):
+        print("Tracking server is OK")
+    else:
+        print("Tracking server is not OK")
+        print(json.dumps(health_data, indent=2))
+
+
 def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:
     target = project_path / filename
     if target.exists():

@@ -27,6 +27,7 @@ class MockHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/sweeps?")
             or self.path.startswith("/api/trials")
             or self.path.startswith("/api/compare-sweeps")
+            or self.path == "/api/health"
         ):
             MockHandler.received_headers = dict(self.headers)
             MockHandler.received_path = self.path
@@ -647,3 +648,109 @@ class TestCompareSweeps:
         assert "project=project%26a" in MockHandler.received_path
         assert "left=study%26a" in MockHandler.received_path
         assert "right=study%26b" in MockHandler.received_path
+
+
+class TestGetHealth:
+    def test_get_health_success(self, mock_server):
+        MockHandler.response_data = {"ok": True}
+
+        from jernerics.tracking.http_api import get_health
+
+        result = get_health(mock_server)
+
+        assert result == {"ok": True}
+
+    def test_get_health_with_api_key(self, mock_server):
+        MockHandler.response_data = {"ok": True}
+
+        os.environ["JERNERICS_API_KEY"] = "test-key-123"
+        try:
+            from jernerics.tracking.http_api import get_health
+
+            get_health(mock_server)
+        finally:
+            os.environ.pop("JERNERICS_API_KEY", None)
+
+        assert "Authorization" in MockHandler.received_headers
+        assert MockHandler.received_headers["Authorization"] == "Bearer test-key-123"
+
+    def test_get_health_without_api_key(self, mock_server):
+        MockHandler.response_data = {"ok": True}
+
+        api_key = os.environ.pop("JERNERICS_API_KEY", None)
+        try:
+            from jernerics.tracking.http_api import get_health
+
+            get_health(mock_server)
+        finally:
+            if api_key:
+                os.environ["JERNERICS_API_KEY"] = api_key
+
+        assert "Authorization" not in MockHandler.received_headers
+
+    def test_get_health_accepts_trailing_slash(self, mock_server):
+        MockHandler.response_data = {"ok": True}
+
+        from jernerics.tracking.http_api import get_health
+
+        result = get_health(mock_server + "/")
+
+        assert result == {"ok": True}
+
+    def test_get_health_http_error(self, mock_server):
+        MockHandler.response_status = 500
+        MockHandler.response_data = {}
+
+        from jernerics.tracking.http_api import get_health
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_health(mock_server)
+
+        assert "500" in str(exc_info.value)
+        MockHandler.response_status = 200
+
+    def test_get_health_unreachable_server(self):
+        from jernerics.tracking.http_api import get_health
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_health("http://localhost:9999")
+
+        assert "http://localhost:9999" in str(exc_info.value)
+
+    def test_get_health_invalid_json(self, mock_server):
+        MockHandler.response_data = {}
+        MockHandler.response_status = 200
+        MockHandler.return_invalid_json = True
+
+        from jernerics.tracking.http_api import get_health
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            get_health(mock_server)
+
+        MockHandler.return_invalid_json = False
+
+    def test_get_health_http_error_with_detail(self, mock_server):
+        MockHandler.response_status = 503
+        body = json.dumps({"detail": "Service unavailable"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        from jernerics.tracking.http_api import get_health
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_health(mock_server)
+
+        assert "503" in str(exc_info.value)
+        assert "Service unavailable" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_get_health_sends_accept_header(self, mock_server):
+        MockHandler.response_data = {"ok": True}
+
+        from jernerics.tracking.http_api import get_health
+
+        get_health(mock_server)
+
+        assert "Accept" in MockHandler.received_headers
+        assert MockHandler.received_headers["Accept"] == "application/json"

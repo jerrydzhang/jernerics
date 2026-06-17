@@ -95,6 +95,10 @@ def create_app(
         sweeps = store.list_sweeps(project=project)
         return JSONResponse(content=sweeps)
 
+    @app.get("/api/health", response_model=None, dependencies=deps)
+    def health() -> JSONResponse:
+        return JSONResponse(content={"ok": True})
+
     @app.get("/api/trials", response_model=None, dependencies=deps)
     def list_trials(
         project: str, study_name: str, metric_keys: str | None = None

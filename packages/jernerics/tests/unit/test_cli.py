@@ -1030,3 +1030,99 @@ class TestTrialsCommandOptionalProject:
         captured = capsys.readouterr()
         assert "ACCURACY" in captured.out
         assert "LOSS" in captured.out
+
+
+class MockHealthHandler(BaseHTTPRequestHandler):
+    """Mock HTTP server handler for health testing."""
+
+    response_data: ClassVar[dict] = {}
+
+    def log_message(self, format: str, *args):
+        pass
+
+    def do_GET(self):
+        if self.path == "/api/health":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            response_body = json.dumps(MockHealthHandler.response_data).encode("utf-8")
+            self.wfile.write(response_body)
+        else:
+            self.send_error(404, "Not Found")
+
+
+@pytest.fixture
+def mock_health_server():
+    """Start a mock HTTP server for health testing."""
+    server = HTTPServer(("localhost", 0), MockHealthHandler)
+    port = server.server_address[1]
+
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    yield f"http://localhost:{port}"
+
+    server.shutdown()
+
+
+class TestTrackingHealthCommand:
+    def test_tracking_health_with_server_option(self, mock_health_server, capsys):
+        MockHealthHandler.response_data = {"ok": True}
+
+        from jernerics.cli import tracking_health
+
+        tracking_health(server=mock_health_server)
+
+        captured = capsys.readouterr()
+        assert "ok" in captured.out or "OK" in captured.out
+
+    def test_tracking_health_with_env_var(
+        self, mock_health_server, capsys, monkeypatch
+    ):
+        MockHealthHandler.response_data = {"ok": True}
+
+        from jernerics.cli import tracking_health
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", mock_health_server)
+        tracking_health(server=None)
+
+        captured = capsys.readouterr()
+        assert "ok" in captured.out or "OK" in captured.out
+
+    def test_tracking_health_with_json_flag(self, mock_health_server, capsys):
+        MockHealthHandler.response_data = {"ok": True}
+
+        from jernerics.cli import tracking_health
+
+        tracking_health(server=mock_health_server, json_output=True)
+
+        captured = capsys.readouterr()
+        assert "ok" in captured.out
+
+    def test_tracking_health_server_url_priority(
+        self, mock_health_server, capsys, monkeypatch
+    ):
+        MockHealthHandler.response_data = {"ok": True}
+
+        from jernerics.cli import tracking_health
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", "http://wrong-url:9999")
+        tracking_health(server=mock_health_server)
+
+        captured = capsys.readouterr()
+        assert "ok" in captured.out or "OK" in captured.out
+
+    def test_tracking_health_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import tracking_health
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            tracking_health(server=None)
+
+        assert exc_info.value.code == 3

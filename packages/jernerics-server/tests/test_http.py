@@ -1538,3 +1538,26 @@ class TestCompareSweepsEndpoint:
         assert (
             body["final_metric_stats"]["loss"]["right"]["max"] == 0.6  # noqa: RUF069
         )
+
+
+class TestHealthEndpoint:
+    def test_returns_ok_true(self, client):
+        response = client.get("/api/health")
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {"ok": True}
+
+    def test_requires_bearer_auth(self, auth_client):
+        response = auth_client.get("/api/health")
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/health", headers={"Authorization": "Bearer secret123"}
+        )
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+
+    def test_no_auth_when_key_not_set(self, client):
+        response = client.get("/api/health")
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
