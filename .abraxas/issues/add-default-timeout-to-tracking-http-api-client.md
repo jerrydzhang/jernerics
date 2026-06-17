@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/add-default-timeout-to-tracking-http-api-client
+completed_at: '2026-06-17T04:34:34.398406'
 created: '2026-06-17T04:25:34.211876'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Add default timeout to tracking HTTP API client
 ---
 

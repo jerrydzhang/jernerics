@@ -4,6 +4,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+DEFAULT_TIMEOUT = 30
+
 
 def _request(url: str) -> list[dict] | dict:
     """Internal helper to make HTTP requests with error handling.
@@ -25,7 +27,7 @@ def _request(url: str) -> list[dict] | dict:
     req = Request(url, headers=headers)
 
     try:
-        with urlopen(req) as response:
+        with urlopen(req, timeout=DEFAULT_TIMEOUT) as response:
             data = response.read().decode("utf-8")
             try:
                 return json.loads(data)

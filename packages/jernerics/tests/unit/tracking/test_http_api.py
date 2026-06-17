@@ -1932,3 +1932,26 @@ class TestListParams:
         assert len(result) == 2
         assert result[0]["value"] == "adam"
         assert result[1]["value"] == "resnet50"
+
+
+class TestTimeout:
+    def test_request_passes_timeout_to_urlopen(self):
+        """Test that _request passes DEFAULT_TIMEOUT to urlopen."""
+        from unittest.mock import MagicMock, patch
+
+        from jernerics.tracking.http_api import DEFAULT_TIMEOUT, _request
+
+        mock_response = MagicMock()
+        mock_response.read.return_value = b'{"key": "value"}'
+        mock_response.__enter__ = lambda self: self
+        mock_response.__exit__ = lambda self, *args: None
+
+        with patch(
+            "jernerics.tracking.http_api.urlopen", return_value=mock_response
+        ) as mock_urlopen:
+            _request("http://example.com/api/test")
+
+            mock_urlopen.assert_called_once()
+            call_kwargs = mock_urlopen.call_args[1]
+            assert "timeout" in call_kwargs
+            assert call_kwargs["timeout"] == DEFAULT_TIMEOUT
