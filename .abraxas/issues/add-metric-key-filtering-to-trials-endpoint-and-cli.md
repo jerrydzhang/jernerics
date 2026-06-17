@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-metric-key-filtering-to-trials-endpoint-and-cli
+branch: null
 completed_at: '2026-06-17T00:58:02.966452'
 created: '2026-06-17T00:03:55.434796'
-merge_commit_sha: null
+merge_commit_sha: 974fa319cd8d185e8c12b243f58784ed6236d087
 parent_id: null
 retry_count: 0
 status: closed
