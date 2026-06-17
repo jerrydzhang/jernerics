@@ -6,7 +6,7 @@ merge_commit_sha: null
 order: 0
 parent_id: null
 retry_count: 1
-status: open
+status: failed
 title: Bootstrap Abraxas validation for Jernerics
 ---
 
