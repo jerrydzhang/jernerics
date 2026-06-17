@@ -5,8 +5,8 @@ created: '2026-06-16T22:30:59.812247'
 merge_commit_sha: null
 order: 0
 parent_id: null
-retry_count: 1
-status: failed
+retry_count: 2
+status: open
 title: Bootstrap Abraxas validation for Jernerics
 ---
 
