@@ -1,0 +1,38 @@
+---
+base_branch: null
+branch: null
+created: '2026-06-16T22:31:01.926317'
+merge_commit_sha: null
+parent_id: null
+retry_count: 0
+status: open
+title: Add typed sweeps endpoint to tracking server
+---
+
+# Plan
+
+Add typed sweeps endpoint to tracking server
+
+Add a typed HTTP endpoint for listing tracked sweeps without exposing raw SQL.
+
+Files:
+- packages/jernerics-server/src/jernerics_server/http.py
+- packages/jernerics-server/tests/test_http.py
+
+Behavior:
+- Add GET /api/sweeps.
+- Return JSON list of objects with:
+  - project
+  - study_name
+  - trial_count
+  - completed_count
+  - last_event_timestamp_ns
+- trial_count should count distinct trial ids seen in params, metrics, results, artifacts, sweep_meta, or trial_end.
+- completed_count should count distinct trial ids in trial_end.
+- last_event_timestamp_ns should be the max timestamp_ns across tracked event tables.
+- Respect the same bearer auth dependency as /query.
+- Do not remove or change /query.
+- Do not expose SQL to the client.
+
+Validation:
+- .abraxas/validate.sh
