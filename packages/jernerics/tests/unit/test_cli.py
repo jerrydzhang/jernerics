@@ -745,3 +745,192 @@ class TestCompareSweepsCommand:
             )
 
         assert exc_info.value.code == 3
+
+    def test_compare_sweeps_uses_pyproject_project_name(
+        self, mock_trials_server, capsys, tmp_path
+    ):
+        """compare-sweeps uses project name from pyproject.toml."""
+        MockTrialsHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 10,
+            "left_completed_count": 5,
+            "right_trial_count": 20,
+            "right_completed_count": 15,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        # Create pyproject.toml with project name
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "test-project-from-toml"\n'
+        )
+
+        from jernerics.cli import compare_sweeps as compare_sweeps_cmd
+
+        compare_sweeps_cmd(
+            project=None, left="study-1", right="study-2", server=mock_trials_server
+        )
+
+        captured = capsys.readouterr()
+        assert "study-1" in captured.out
+        assert "study-2" in captured.out
+
+    def test_compare_sweeps_config_error_without_pyproject(
+        self, mock_trials_server, capsys, monkeypatch
+    ):
+        """compare-sweeps exits CONFIG_ERROR when no pyproject.toml."""
+        from jernerics.cli import compare_sweeps as compare_sweeps_cmd
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            compare_sweeps_cmd(
+                project=None,
+                left="study-1",
+                right="study-2",
+                server=mock_trials_server,
+            )
+
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert "No pyproject.toml found" in captured.out or "--project" in captured.out
+
+    def test_compare_sweeps_explicit_project_overrides_pyproject(
+        self, mock_trials_server, capsys, tmp_path
+    ):
+        """compare-sweeps uses --project value even when pyproject.toml exists."""
+        MockTrialsHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 10,
+            "left_completed_count": 5,
+            "right_trial_count": 20,
+            "right_completed_count": 15,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        # Create pyproject.toml with different project name
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "different-project"\n'
+        )
+
+        from jernerics.cli import compare_sweeps as compare_sweeps_cmd
+
+        compare_sweeps_cmd(
+            project="explicit-project",
+            left="study-1",
+            right="study-2",
+            server=mock_trials_server,
+        )
+
+        captured = capsys.readouterr()
+        assert "study-1" in captured.out
+        assert "study-2" in captured.out
+
+
+class TestTrialsCommandOptionalProject:
+    def test_trials_uses_pyproject_project_name(
+        self, mock_trials_server, capsys, tmp_path
+    ):
+        """trials uses project name from pyproject.toml when --project omitted."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {"lr": 0.01},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            }
+        ]
+
+        # Create pyproject.toml with project name
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "test-project-from-toml"\n'
+        )
+
+        from jernerics.cli import trials
+
+        trials(project=None, sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "complete" in captured.out
+
+    def test_trials_config_error_without_pyproject(
+        self, mock_trials_server, capsys, monkeypatch
+    ):
+        """trials exits CONFIG_ERROR when no pyproject.toml and --project omitted."""
+        from jernerics.cli import trials
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            trials(project=None, sweep="study-1", server=mock_trials_server)
+
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert "No pyproject.toml found" in captured.out or "--project" in captured.out
+
+    def test_trials_explicit_project_overrides_pyproject(
+        self, mock_trials_server, capsys, tmp_path
+    ):
+        """trials uses --project value even when pyproject.toml exists."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {"lr": 0.01},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            }
+        ]
+
+        # Create pyproject.toml with different project name
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "different-project"\n'
+        )
+
+        from jernerics.cli import trials
+
+        trials(project="explicit-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "complete" in captured.out
+
+    def test_trials_server_resolution_without_pyproject(
+        self, mock_trials_server, capsys, monkeypatch
+    ):
+        """trials resolves server from env even without pyproject.toml."""
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", mock_trials_server)
+
+        trials(project="my-project", sweep="study-1", server=None)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "complete" in captured.out

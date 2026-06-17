@@ -516,8 +516,11 @@ def sweeps(
 
 @app.command("trials")
 def trials(
-    project: Annotated[str, typer.Option(help="Project name")],
     sweep: Annotated[str, typer.Option(help="Sweep/study name")],
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Project name (default: from pyproject.toml)"),
+    ] = None,
     server: Annotated[
         str | None,
         typer.Option("--server", help="Tracking HTTP server URL"),
@@ -541,6 +544,16 @@ def trials(
 ):
     """List trials from the tracking HTTP server."""
     from .tracking.http_api import list_trials
+
+    if project is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is None:
+            print(
+                "Error: No pyproject.toml found. "
+                "Either provide --project or run from a Jernerics project directory."
+            )
+            raise SystemExit(ExitCode.CONFIG_ERROR)
+        project = get_project_name(project_dir)
 
     base_url = server
     if base_url is None:
@@ -617,9 +630,12 @@ def trials(
 
 @app.command("compare-sweeps")
 def compare_sweeps(
-    project: Annotated[str, typer.Option(help="Project name")],
     left: Annotated[str, typer.Argument(help="Left sweep/study name")],
     right: Annotated[str, typer.Argument(help="Right sweep/study name")],
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Project name (default: from pyproject.toml)"),
+    ] = None,
     server: Annotated[
         str | None,
         typer.Option("--server", help="Tracking HTTP server URL"),
@@ -631,6 +647,16 @@ def compare_sweeps(
 ):
     """Compare two sweeps from the tracking HTTP server."""
     from .tracking.http_api import compare_sweeps as compare_sweeps_api
+
+    if project is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is None:
+            print(
+                "Error: No pyproject.toml found. "
+                "Either provide --project or run from a Jernerics project directory."
+            )
+            raise SystemExit(ExitCode.CONFIG_ERROR)
+        project = get_project_name(project_dir)
 
     base_url = server
     if base_url is None:
