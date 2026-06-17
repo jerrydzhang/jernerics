@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/default-trials-and-compare-commands-to-current-project
+branch: null
 completed_at: '2026-06-17T00:38:27.390306'
 created: '2026-06-17T00:03:53.354678'
-merge_commit_sha: null
+merge_commit_sha: 8aa965e5eb951d1bea261f690c46ec7d52275f91
 parent_id: null
 retry_count: 0
 status: closed
