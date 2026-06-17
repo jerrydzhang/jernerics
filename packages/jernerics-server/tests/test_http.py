@@ -530,3 +530,375 @@ class TestSweepsEndpoint:
         body = response.json()
         assert len(body) == 1
         assert body[0]["last_event_timestamp_ns"] == 7000
+
+
+class TestTrialsEndpoint:
+    def test_valid_request(self, client):
+        db = client.app.state.store
+
+        # Insert params for trial 0
+        env_param0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param0)
+
+        # Insert final metric for trial 0
+        env_metric0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric0)
+
+        # Insert artifact for trial 0
+        env_artifact0 = Envelope(
+            project="myproj",
+            study_name="mystudy",
+            trial_id=0,
+            timestamp_ns=3000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact0)
+
+        response = client.get("/api/trials?project=myproj&study_name=mystudy")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 0
+        assert body[0]["status"] == "incomplete"
+        assert body[0]["params"] == {"lr": 0.001}
+        assert body[0]["final_metrics"] == {"loss": 0.5}
+        assert body[0]["artifact_keys"] == ["model"]
+
+    def test_missing_auth(self, auth_client):
+        response = auth_client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/trials?project=p&study_name=s",
+            headers={"Authorization": "Bearer secret123"},
+        )
+        assert response.status_code == 200
+
+    def test_missing_params(self, client):
+        response = client.get("/api/trials")
+        assert response.status_code == 422  # FastAPI validation error
+
+    def test_empty_results(self, client):
+        response = client.get("/api/trials?project=nonexistent&study_name=nonexistent")
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_multiple_trials_sorted(self, client):
+        db = client.app.state.store
+
+        # Trial 2 first (out of order)
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=3000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=2)),
+        )
+        db.insert_event(env_param2)
+
+        # Trial 0
+        env_param0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=0)),
+        )
+        db.insert_event(env_param0)
+
+        env_end0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_end0)
+
+        # Trial 1
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=4000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env_param1)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 3
+        assert body[0]["trial_id"] == 0
+        assert body[1]["trial_id"] == 1
+        assert body[2]["trial_id"] == 2
+        assert body[0]["status"] == "complete"
+        assert body[1]["status"] == "incomplete"
+        assert body[2]["status"] == "incomplete"
+
+    def test_status_complete_when_trial_end_exists(self, client):
+        db = client.app.state.store
+
+        env_param = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env_param)
+
+        env_end = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=0,
+            trial_end=TrialEndEvent(),
+        )
+        db.insert_event(env_end)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["status"] == "complete"
+
+    def test_status_incomplete_when_no_trial_end(self, client):
+        db = client.app.state.store
+
+        env_param = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env_param)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["status"] == "incomplete"
+
+    def test_params_with_different_types(self, client):
+        db = client.app.state.store
+
+        env_param_float = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param_float)
+
+        env_param_int = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            param=ParamEvent(key="batch_size", value=Value(int_val=32)),
+        )
+        db.insert_event(env_param_int)
+
+        env_param_string = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=3000,
+            seq=2,
+            param=ParamEvent(key="optimizer", value=Value(string_val="adam")),
+        )
+        db.insert_event(env_param_string)
+
+        env_param_bool = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=4000,
+            seq=3,
+            param=ParamEvent(key="use_bn", value=Value(bool_val=True)),
+        )
+        db.insert_event(env_param_bool)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["params"] == {
+            "lr": 0.001,
+            "batch_size": 32,
+            "optimizer": "adam",
+            "use_bn": True,
+        }
+
+    def test_final_metrics_excludes_step_metrics(self, client):
+        db = client.app.state.store
+
+        # Final metric (step IS NULL, represented as step=-1 in proto)
+        env_metric_final = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5, step=-1),
+        )
+        db.insert_event(env_metric_final)
+
+        # Intermediate metric (step IS NOT NULL)
+        env_metric_intermediate = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            metric=MetricEvent(key="loss", value=0.8, step=1),
+        )
+        db.insert_event(env_metric_intermediate)
+
+        env_metric_acc = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=3000,
+            seq=2,
+            metric=MetricEvent(key="accuracy", value=0.9, step=-1),
+        )
+        db.insert_event(env_metric_acc)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["final_metrics"] == {"loss": 0.5, "accuracy": 0.9}
+
+    def test_artifact_keys_lists_all_artifacts(self, client):
+        db = client.app.state.store
+
+        env_artifact1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact1)
+
+        env_artifact2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            artifact=ArtifactEvent(key="plot", filename="loss.png"),
+        )
+        db.insert_event(env_artifact2)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert sorted(body[0]["artifact_keys"]) == ["model", "plot"]
+
+    def test_empty_params_metrics_artifacts(self, client):
+        db = client.app.state.store
+
+        # Trial with only results (no params, metrics, or artifacts)
+        env_result = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            result=ResultEvent(key="result", value="{}"),
+        )
+        db.insert_event(env_result)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["params"] == {}
+        assert body[0]["final_metrics"] == {}
+        assert body[0]["artifact_keys"] == []
+
+    def test_trials_from_multiple_tables(self, client):
+        db = client.app.state.store
+
+        # Trial 0: has params
+        env_param0 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="x", value=Value(int_val=1)),
+        )
+        db.insert_event(env_param0)
+
+        # Trial 1: has metrics
+        env_metric1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=0,
+            metric=MetricEvent(key="loss", value=0.5),
+        )
+        db.insert_event(env_metric1)
+
+        # Trial 2: has results
+        env_result2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=2,
+            timestamp_ns=3000,
+            seq=0,
+            result=ResultEvent(key="result", value="{}"),
+        )
+        db.insert_event(env_result2)
+
+        # Trial 3: has artifacts
+        env_artifact3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=3,
+            timestamp_ns=4000,
+            seq=0,
+            artifact=ArtifactEvent(key="model", filename="model.bin"),
+        )
+        db.insert_event(env_artifact3)
+
+        response = client.get("/api/trials?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 4
+        trial_ids = [t["trial_id"] for t in body]
+        assert trial_ids == [0, 1, 2, 3]

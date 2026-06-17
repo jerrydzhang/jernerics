@@ -1,6 +1,7 @@
 import mimetypes
 from collections.abc import Callable
 from io import BytesIO
+from typing import TypedDict
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -10,6 +11,14 @@ from .store import Store
 
 _READ_ONLY_KEYWORDS = {"SELECT", "WITH", "VALUES", "EXPLAIN", "SHOW", "DESCRIBE"}
 MAX_ROWS = 10_000
+
+
+class TrialResponse(TypedDict):
+    trial_id: int
+    status: str
+    params: dict[str, float | int | str | bool]
+    final_metrics: dict[str, float]
+    artifact_keys: list[str]
 
 
 class QueryRequest(BaseModel):
@@ -74,6 +83,11 @@ def create_app(
     def list_sweeps() -> JSONResponse:
         sweeps = store.list_sweeps()
         return JSONResponse(content=sweeps)
+
+    @app.get("/api/trials", response_model=None, dependencies=deps)
+    def list_trials(project: str, study_name: str) -> JSONResponse:
+        trials = store.list_trials(project, study_name)
+        return JSONResponse(content=trials)
 
     if s3_fetch is not None:
 

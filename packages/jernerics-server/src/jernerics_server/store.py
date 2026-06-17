@@ -209,6 +209,88 @@ class Store:
         finally:
             con.close()
 
+    def list_trials(self, project: str, study_name: str) -> list[dict]:
+        sql = """
+        SELECT
+            t.trial_id,
+            CASE WHEN te.trial_id IS NOT NULL THEN 'complete' ELSE 'incomplete' END
+            AS status
+        FROM (
+            SELECT DISTINCT trial_id FROM params
+            WHERE project = ? AND study_name = ?
+            UNION
+            SELECT DISTINCT trial_id FROM metrics
+            WHERE project = ? AND study_name = ?
+            UNION
+            SELECT DISTINCT trial_id FROM results
+            WHERE project = ? AND study_name = ?
+            UNION
+            SELECT DISTINCT trial_id FROM artifacts
+            WHERE project = ? AND study_name = ?
+            UNION
+            SELECT DISTINCT trial_id FROM sweep_meta
+            WHERE project = ? AND study_name = ?
+            UNION
+            SELECT DISTINCT trial_id FROM trial_end
+            WHERE project = ? AND study_name = ?
+        ) t
+        LEFT JOIN trial_end te ON t.trial_id = te.trial_id
+            AND te.project = ? AND te.study_name = ?
+        ORDER BY t.trial_id
+        """
+        params = [project, study_name] * 7
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, params)
+            columns = [desc[0] for desc in cursor.description]
+            rows = cursor.fetchall()
+            trials = []
+            for row in rows:
+                trial = dict(zip(columns, row, strict=True))
+                trial_id = trial["trial_id"]
+
+                # Fetch params
+                cursor2 = con.execute(
+                    "SELECT key, float_val, int_val, string_val, bool_val "
+                    "FROM params WHERE project = ? AND study_name = ? AND trial_id = ?",
+                    [project, study_name, trial_id],
+                )
+                params_dict = {}
+                for key, float_val, int_val, string_val, bool_val in cursor2.fetchall():
+                    if float_val is not None:
+                        params_dict[key] = float_val
+                    elif int_val is not None:
+                        params_dict[key] = int_val
+                    elif string_val is not None:
+                        params_dict[key] = string_val
+                    elif bool_val is not None:
+                        params_dict[key] = bool(bool_val)
+                trial["params"] = params_dict
+
+                # Fetch final metrics (step IS NULL)
+                cursor3 = con.execute(
+                    "SELECT key, value FROM metrics "
+                    "WHERE project = ? AND study_name = ? "
+                    "AND trial_id = ? AND step IS NULL",
+                    [project, study_name, trial_id],
+                )
+                trial["final_metrics"] = {
+                    key: value for key, value in cursor3.fetchall()
+                }
+
+                # Fetch artifact keys
+                cursor4 = con.execute(
+                    "SELECT key FROM artifacts "
+                    "WHERE project = ? AND study_name = ? AND trial_id = ?",
+                    [project, study_name, trial_id],
+                )
+                trial["artifact_keys"] = [row[0] for row in cursor4.fetchall()]
+
+                trials.append(trial)
+            return trials
+        finally:
+            con.close()
+
     def _insert_param(self, env: Envelope) -> None:
         p = env.param
         val = p.value
