@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-project-filtering-to-sweeps-endpoint-and-cli
+branch: null
 completed_at: '2026-06-17T00:29:43.437618'
 created: '2026-06-17T00:03:51.294218'
-merge_commit_sha: null
+merge_commit_sha: b10cb87b0cd81dc0de61d87bad2b6e00ed6c9230
 parent_id: null
 retry_count: 0
 status: closed
