@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-trial-status-filter-to-trials-endpoint-and-cli
+branch: null
 completed_at: '2026-06-17T05:16:58.186977'
 created: '2026-06-17T04:25:38.379590'
-merge_commit_sha: null
+merge_commit_sha: 14d4989a215146c8d38ac6a933b886d35d20583a
 parent_id: null
 retry_count: 0
 status: closed
