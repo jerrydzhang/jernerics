@@ -1,12 +1,13 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/add-typed-compare-sweeps-endpoint
+completed_at: '2026-06-16T23:51:12.619153'
 created: '2026-06-16T22:31:10.131288'
 merge_commit_sha: null
 order: 5
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Add typed compare-sweeps endpoint
 ---
 

@@ -1,9 +1,18 @@
 import sqlite3
 import threading
 from pathlib import Path
-from typing import Self
+from typing import Self, TypedDict
 
 from jernerics_proto import Envelope
+
+
+class StudySummary(TypedDict):
+    trial_count: int
+    completed_count: int
+    param_keys: list[str]
+    final_metric_keys: list[str]
+    artifact_keys: list[str]
+
 
 _CREATE_PARAMS = """
 CREATE TABLE IF NOT EXISTS params (
@@ -382,3 +391,114 @@ class Store:
             "INSERT OR IGNORE INTO trial_end VALUES (?, ?, ?, ?, ?)",
             [env.project, env.study_name, env.trial_id, env.timestamp_ns, env.seq],
         )
+
+    def get_study_summary(self, project: str, study_name: str) -> StudySummary | None:
+        sql = """
+        SELECT
+            (
+                SELECT COUNT(DISTINCT trial_id)
+                FROM (
+                    SELECT trial_id FROM params
+                    WHERE project = ? AND study_name = ?
+                    UNION SELECT trial_id FROM metrics
+                    WHERE project = ? AND study_name = ?
+                    UNION SELECT trial_id FROM results
+                    WHERE project = ? AND study_name = ?
+                    UNION SELECT trial_id FROM artifacts
+                    WHERE project = ? AND study_name = ?
+                    UNION SELECT trial_id FROM sweep_meta
+                    WHERE project = ? AND study_name = ?
+                    UNION SELECT trial_id FROM trial_end
+                    WHERE project = ? AND study_name = ?
+                )
+            ) AS trial_count,
+            (
+                SELECT COUNT(DISTINCT trial_id)
+                FROM trial_end
+                WHERE project = ? AND study_name = ?
+            ) AS completed_count
+        """
+        params = [project, study_name] * 7
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, params)
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            trial_count, completed_count = row
+            if trial_count == 0:
+                return None
+        finally:
+            con.close()
+
+        param_keys = self._get_keys(project, study_name, "params")
+        final_metric_keys = self._get_final_metric_keys(project, study_name)
+        artifact_keys = self._get_keys(project, study_name, "artifacts")
+
+        return {
+            "trial_count": trial_count,
+            "completed_count": completed_count,
+            "param_keys": param_keys,
+            "final_metric_keys": final_metric_keys,
+            "artifact_keys": artifact_keys,
+        }
+
+    def get_shared_final_metrics(
+        self, project: str, left_study: str, right_study: str
+    ) -> dict[str, dict[str, list[float]]]:
+        left_summary = self.get_study_summary(project, left_study)
+        right_summary = self.get_study_summary(project, right_study)
+        if left_summary is None or right_summary is None:
+            return {}
+
+        left_metric_keys: list[str] = left_summary["final_metric_keys"]
+        right_metric_keys: list[str] = right_summary["final_metric_keys"]
+        shared_keys = set(left_metric_keys) & set(right_metric_keys)
+        if not shared_keys:
+            return {}
+
+        result: dict[str, dict[str, list[float]]] = {}
+        for key in shared_keys:
+            left_values = self._get_final_metric_values(project, left_study, str(key))
+            right_values = self._get_final_metric_values(project, right_study, str(key))
+            result[str(key)] = {"left": left_values, "right": right_values}
+
+        return result
+
+    def _get_keys(self, project: str, study_name: str, table: str) -> list[str]:
+        sql = f"SELECT DISTINCT key FROM {table} WHERE project = ? AND study_name = ?"
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, [project, study_name])
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            con.close()
+
+    def _get_final_metric_keys(self, project: str, study_name: str) -> list[str]:
+        sql = (
+            "SELECT DISTINCT key FROM metrics "
+            "WHERE project = ? AND study_name = ? AND step IS NULL"
+        )
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, [project, study_name])
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            con.close()
+
+    def _get_final_metric_values(
+        self, project: str, study_name: str, key: str
+    ) -> list[float]:
+        sql = (
+            "SELECT m.value "
+            "FROM metrics m "
+            "JOIN trial_end te ON m.trial_id = te.trial_id "
+            "AND te.project = m.project AND te.study_name = m.study_name "
+            "WHERE m.project = ? AND m.study_name = ? AND m.key = ? AND m.step IS NULL"
+        )
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, [project, study_name, key])
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            con.close()

@@ -902,3 +902,401 @@ class TestTrialsEndpoint:
         assert len(body) == 4
         trial_ids = [t["trial_id"] for t in body]
         assert trial_ids == [0, 1, 2, 3]
+
+
+class TestCompareSweepsEndpoint:
+    def test_valid_request_returns_comparison(self, client):
+        db = client.app.state.store
+
+        # Left sweep: studyA with params lr, batch_size,
+        # metrics loss, accuracy, artifacts model
+        for trial_id in range(3):
+            env_param_lr = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=1000 + trial_id,
+                seq=0,
+                param=ParamEvent(
+                    key="lr", value=Value(float_val=0.001 * (trial_id + 1))
+                ),
+            )
+            db.insert_event(env_param_lr)
+
+            env_param_bs = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=2000 + trial_id,
+                seq=1,
+                param=ParamEvent(key="batch_size", value=Value(int_val=32)),
+            )
+            db.insert_event(env_param_bs)
+
+            env_metric_loss = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=3000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.5 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_loss)
+
+            env_metric_acc = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=4000 + trial_id,
+                seq=1,
+                metric=MetricEvent(
+                    key="accuracy", value=0.8 + trial_id * 0.05, step=-1
+                ),
+            )
+            db.insert_event(env_metric_acc)
+
+            env_artifact = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=5000 + trial_id,
+                seq=0,
+                artifact=ArtifactEvent(key="model", filename="model.bin"),
+            )
+            db.insert_event(env_artifact)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=6000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        # Right sweep: studyB with params lr, dropout,
+        # metrics loss, f1, artifacts model, plot
+        for trial_id in range(2):
+            env_param_lr = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=7000 + trial_id,
+                seq=0,
+                param=ParamEvent(
+                    key="lr", value=Value(float_val=0.01 * (trial_id + 1))
+                ),
+            )
+            db.insert_event(env_param_lr)
+
+            env_param_do = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=8000 + trial_id,
+                seq=1,
+                param=ParamEvent(key="dropout", value=Value(float_val=0.2)),
+            )
+            db.insert_event(env_param_do)
+
+            env_metric_loss = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=9000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.6 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_loss)
+
+            env_metric_f1 = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=10000 + trial_id,
+                seq=1,
+                metric=MetricEvent(key="f1", value=0.7 + trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric_f1)
+
+            env_artifact_model = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=11000 + trial_id,
+                seq=0,
+                artifact=ArtifactEvent(key="model", filename="model.bin"),
+            )
+            db.insert_event(env_artifact_model)
+
+            env_artifact_plot = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=12000 + trial_id,
+                seq=1,
+                artifact=ArtifactEvent(key="plot", filename="loss.png"),
+            )
+            db.insert_event(env_artifact_plot)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=13000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB"
+        )
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["left"] == "studyA"
+        assert body["right"] == "studyB"
+        assert body["left_trial_count"] == 3
+        assert body["left_completed_count"] == 3
+        assert body["right_trial_count"] == 2
+        assert body["right_completed_count"] == 2
+
+        # Params: shared {lr}, left_only {batch_size}, right_only {dropout}
+        assert set(body["param_keys"]["shared"]) == {"lr"}
+        assert set(body["param_keys"]["left_only"]) == {"batch_size"}
+        assert set(body["param_keys"]["right_only"]) == {"dropout"}
+
+        # Final metrics: shared {loss}, left_only {accuracy}, right_only {f1}
+        assert set(body["final_metric_keys"]["shared"]) == {"loss"}
+        assert set(body["final_metric_keys"]["left_only"]) == {"accuracy"}
+        assert set(body["final_metric_keys"]["right_only"]) == {"f1"}
+
+        # Artifacts: shared {model}, left_only {}, right_only {plot}
+        assert set(body["artifact_keys"]["shared"]) == {"model"}
+        assert set(body["artifact_keys"]["left_only"]) == set()
+        assert set(body["artifact_keys"]["right_only"]) == {"plot"}
+
+        # Metric stats for shared loss metric
+        assert "loss" in body["final_metric_stats"]
+        assert (
+            body["final_metric_stats"]["loss"]["left"]["min"] == 0.3  # noqa: RUF069
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["left"]["median"] == 0.4  # noqa: RUF069
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["left"]["max"] == 0.5  # noqa: RUF069
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["right"]["min"] == 0.5  # noqa: RUF069
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["right"]["median"]  # noqa: RUF069
+            == 0.55
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["right"]["max"] == 0.6  # noqa: RUF069
+        )
+
+    def test_missing_query_params_returns_422(self, client):
+        response = client.get("/api/compare-sweeps")
+        assert response.status_code == 422
+
+        response = client.get("/api/compare-sweeps?project=proj")
+        assert response.status_code == 422
+
+        response = client.get("/api/compare-sweeps?project=proj&left=studyA")
+        assert response.status_code == 422
+
+    def test_nonexistent_study_returns_404(self, client):
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=nonexistent&right=also_nonexistent"
+        )
+        assert response.status_code == 404
+
+    def test_requires_bearer_auth(self, auth_client):
+        db = auth_client.app.state.store
+
+        # Create two empty sweeps
+        for study_name in ["studyA", "studyB"]:
+            env = Envelope(
+                project="proj",
+                study_name=study_name,
+                trial_id=0,
+                timestamp_ns=1000,
+                seq=0,
+                sweep_meta=SweepMetaEvent(git_hash="abc", config="{}"),
+            )
+            db.insert_event(env)
+
+        response = auth_client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB"
+        )
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB",
+            headers={"Authorization": "Bearer secret123"},
+        )
+        assert response.status_code == 200
+
+    def test_no_auth_when_key_not_set(self, client):
+        db = client.app.state.store
+
+        # Create two empty sweeps
+        for study_name in ["studyA", "studyB"]:
+            env = Envelope(
+                project="proj",
+                study_name=study_name,
+                trial_id=0,
+                timestamp_ns=1000,
+                seq=0,
+                sweep_meta=SweepMetaEvent(git_hash="abc", config="{}"),
+            )
+            db.insert_event(env)
+
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB"
+        )
+        assert response.status_code == 200
+
+    def test_empty_sweeps_comparison(self, client):
+        db = client.app.state.store
+
+        # Create two empty sweeps (only sweep meta)
+        for study_name in ["studyA", "studyB"]:
+            env = Envelope(
+                project="proj",
+                study_name=study_name,
+                trial_id=0,
+                timestamp_ns=1000,
+                seq=0,
+                sweep_meta=SweepMetaEvent(git_hash="abc", config="{}"),
+            )
+            db.insert_event(env)
+
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB"
+        )
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["left_trial_count"] == 1
+        assert body["left_completed_count"] == 0
+        assert body["right_trial_count"] == 1
+        assert body["right_completed_count"] == 0
+        assert body["param_keys"]["shared"] == []
+        assert body["param_keys"]["left_only"] == []
+        assert body["param_keys"]["right_only"] == []
+        assert body["final_metric_keys"]["shared"] == []
+        assert body["final_metric_keys"]["left_only"] == []
+        assert body["final_metric_keys"]["right_only"] == []
+        assert body["artifact_keys"]["shared"] == []
+        assert body["artifact_keys"]["left_only"] == []
+        assert body["artifact_keys"]["right_only"] == []
+        assert body["final_metric_stats"] == {}
+
+    def test_incomplete_trials_counted_but_not_in_metrics(self, client):
+        db = client.app.state.store
+
+        # Left: 3 trials, 2 completed
+        for trial_id in range(3):
+            env_param = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=1000 + trial_id,
+                seq=0,
+                param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+            )
+            db.insert_event(env_param)
+
+            env_metric = Envelope(
+                project="proj",
+                study_name="studyA",
+                trial_id=trial_id,
+                timestamp_ns=2000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.5 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric)
+
+            if trial_id < 2:
+                env_end = Envelope(
+                    project="proj",
+                    study_name="studyA",
+                    trial_id=trial_id,
+                    timestamp_ns=3000 + trial_id,
+                    seq=0,
+                    trial_end=TrialEndEvent(),
+                )
+                db.insert_event(env_end)
+
+        # Right: 2 trials, both completed
+        for trial_id in range(2):
+            env_param = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=4000 + trial_id,
+                seq=0,
+                param=ParamEvent(key="lr", value=Value(float_val=0.01)),
+            )
+            db.insert_event(env_param)
+
+            env_metric = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=5000 + trial_id,
+                seq=0,
+                metric=MetricEvent(key="loss", value=0.6 - trial_id * 0.1, step=-1),
+            )
+            db.insert_event(env_metric)
+
+            env_end = Envelope(
+                project="proj",
+                study_name="studyB",
+                trial_id=trial_id,
+                timestamp_ns=6000 + trial_id,
+                seq=0,
+                trial_end=TrialEndEvent(),
+            )
+            db.insert_event(env_end)
+
+        response = client.get(
+            "/api/compare-sweeps?project=proj&left=studyA&right=studyB"
+        )
+        assert response.status_code == 200
+        body = response.json()
+
+        assert body["left_trial_count"] == 3
+        assert body["left_completed_count"] == 2
+        assert body["right_trial_count"] == 2
+        assert body["right_completed_count"] == 2
+
+        # Metric stats should only include completed trials
+        # studyA: trials 0 and 1 completed with loss 0.5 and 0.4
+        # studyB: trials 0 and 1 completed with loss 0.6 and 0.5
+        assert (
+            body["final_metric_stats"]["loss"]["left"]["min"] == 0.4  # noqa: RUF069
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["left"]["median"]  # noqa: RUF069
+            == 0.45
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["left"]["max"] == 0.5  # noqa: RUF069
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["right"]["min"] == 0.5  # noqa: RUF069
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["right"]["median"]  # noqa: RUF069
+            == 0.55
+        )
+        assert (
+            body["final_metric_stats"]["loss"]["right"]["max"] == 0.6  # noqa: RUF069
+        )

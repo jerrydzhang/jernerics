@@ -1,4 +1,5 @@
 import mimetypes
+import statistics
 from collections.abc import Callable
 from io import BytesIO
 from typing import TypedDict
@@ -47,6 +48,16 @@ def _file_chunks(body, chunk_size: int = 65_536):
         yield chunk
 
 
+def _compute_metric_stats(values: list[float]) -> dict[str, float]:
+    if not values:
+        return {"min": 0.0, "median": 0.0, "max": 0.0}
+    return {
+        "min": min(values),
+        "median": statistics.median(values),
+        "max": max(values),
+    }
+
+
 def create_app(
     store: Store,
     *,
@@ -88,6 +99,64 @@ def create_app(
     def list_trials(project: str, study_name: str) -> JSONResponse:
         trials = store.list_trials(project, study_name)
         return JSONResponse(content=trials)
+
+    @app.get("/api/compare-sweeps", response_model=None, dependencies=deps)
+    def compare_sweeps(project: str, left: str, right: str) -> JSONResponse:
+        left_summary = store.get_study_summary(project, left)
+        right_summary = store.get_study_summary(project, right)
+
+        if left_summary is None:
+            raise HTTPException(status_code=404, detail=f"Study '{left}' not found")
+        if right_summary is None:
+            raise HTTPException(status_code=404, detail=f"Study '{right}' not found")
+
+        left_param_keys_set = set(left_summary["param_keys"])
+        right_param_keys_set = set(right_summary["param_keys"])
+        left_metric_keys_set = set(left_summary["final_metric_keys"])
+        right_metric_keys_set = set(right_summary["final_metric_keys"])
+        left_artifact_keys_set = set(left_summary["artifact_keys"])
+        right_artifact_keys_set = set(right_summary["artifact_keys"])
+
+        param_keys = {
+            "shared": sorted(left_param_keys_set & right_param_keys_set),
+            "left_only": sorted(left_param_keys_set - right_param_keys_set),
+            "right_only": sorted(right_param_keys_set - left_param_keys_set),
+        }
+
+        final_metric_keys = {
+            "shared": sorted(left_metric_keys_set & right_metric_keys_set),
+            "left_only": sorted(left_metric_keys_set - right_metric_keys_set),
+            "right_only": sorted(right_metric_keys_set - left_metric_keys_set),
+        }
+
+        artifact_keys = {
+            "shared": sorted(left_artifact_keys_set & right_artifact_keys_set),
+            "left_only": sorted(left_artifact_keys_set - right_artifact_keys_set),
+            "right_only": sorted(right_artifact_keys_set - left_artifact_keys_set),
+        }
+
+        metric_stats: dict[str, dict[str, dict[str, float]]] = {}
+        shared_metrics = store.get_shared_final_metrics(project, left, right)
+        for key, values in shared_metrics.items():
+            metric_stats[key] = {
+                "left": _compute_metric_stats(values["left"]),
+                "right": _compute_metric_stats(values["right"]),
+            }
+
+        return JSONResponse(
+            content={
+                "left": left,
+                "right": right,
+                "left_trial_count": left_summary["trial_count"],
+                "left_completed_count": left_summary["completed_count"],
+                "right_trial_count": right_summary["trial_count"],
+                "right_completed_count": right_summary["completed_count"],
+                "param_keys": param_keys,
+                "final_metric_keys": final_metric_keys,
+                "artifact_keys": artifact_keys,
+                "final_metric_stats": metric_stats,
+            }
+        )
 
     if s3_fetch is not None:
 
