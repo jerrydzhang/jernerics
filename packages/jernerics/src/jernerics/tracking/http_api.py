@@ -132,6 +132,32 @@ def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
     return result
 
 
+def get_metric_history(
+    base_url: str, project: str, study_name: str, key: str
+) -> list[dict]:
+    """Get metric history from the tracking HTTP server.
+
+    Args:
+        base_url: Base URL of the tracking server (e.g., "http://localhost:8000").
+        project: Project name.
+        study_name: Study/sweep name.
+        key: Metric key.
+
+    Returns:
+        List of metric history entries with trial_id, step, value, timestamp_ns.
+
+    Raises:
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
+    """
+    query_params = {"project": project, "study_name": study_name, "key": key}
+    url = f"{base_url.rstrip('/')}/api/metrics/history?{urlencode(query_params)}"
+    result = _request(url)
+    if not isinstance(result, list):
+        raise TypeError("Expected list of metric history entries from server")
+    return result
+
+
 def get_health(base_url: str) -> dict:
     """Check health of the tracking HTTP server.
 

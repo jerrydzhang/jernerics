@@ -27,6 +27,7 @@ class MockHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/sweeps?")
             or self.path.startswith("/api/trials")
             or self.path.startswith("/api/compare-sweeps")
+            or self.path.startswith("/api/metrics/history")
             or self.path == "/api/health"
         ):
             MockHandler.received_headers = dict(self.headers)
@@ -754,3 +755,223 @@ class TestGetHealth:
 
         assert "Accept" in MockHandler.received_headers
         assert MockHandler.received_headers["Accept"] == "application/json"
+
+
+class TestGetMetricHistory:
+    def test_get_metric_history_success(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "step": 0,
+                "value": 0.85,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "step": 1,
+                "value": 0.90,
+                "timestamp_ns": 1705325405000000000,
+            },
+        ]
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        result = get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert len(result) == 2
+        assert result[0]["trial_id"] == 1
+        assert result[0]["step"] == 0
+        assert result[0]["value"] == pytest.approx(0.85)
+        assert result[0]["timestamp_ns"] == 1705325400000000000
+        assert result[1]["step"] == 1
+        assert result[1]["value"] == pytest.approx(0.90)
+
+    def test_get_metric_history_multiple_trials(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "step": 0,
+                "value": 0.85,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 2,
+                "step": 0,
+                "value": 0.88,
+                "timestamp_ns": 1705325402000000000,
+            },
+            {
+                "trial_id": 1,
+                "step": 1,
+                "value": 0.90,
+                "timestamp_ns": 1705325405000000000,
+            },
+        ]
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        result = get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert len(result) == 3
+        assert result[0]["trial_id"] == 1
+        assert result[1]["trial_id"] == 2
+        assert result[2]["trial_id"] == 1
+
+    def test_get_metric_history_empty_list(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        result = get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert result == []
+
+    def test_get_metric_history_with_api_key(self, mock_server):
+        MockHandler.response_data = []
+
+        os.environ["JERNERICS_API_KEY"] = "test-key-123"
+        try:
+            from jernerics.tracking.http_api import get_metric_history
+
+            get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+        finally:
+            os.environ.pop("JERNERICS_API_KEY", None)
+
+        assert "Authorization" in MockHandler.received_headers
+        assert MockHandler.received_headers["Authorization"] == "Bearer test-key-123"
+
+    def test_get_metric_history_without_api_key(self, mock_server):
+        MockHandler.response_data = []
+
+        api_key = os.environ.pop("JERNERICS_API_KEY", None)
+        try:
+            from jernerics.tracking.http_api import get_metric_history
+
+            get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+        finally:
+            if api_key:
+                os.environ["JERNERICS_API_KEY"] = api_key
+
+        assert "Authorization" not in MockHandler.received_headers
+
+    def test_get_metric_history_http_error(self, mock_server):
+        MockHandler.response_status = 404
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert "404" in str(exc_info.value)
+        MockHandler.response_status = 200
+
+    def test_get_metric_history_unreachable_server(self):
+        from jernerics.tracking.http_api import get_metric_history
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_metric_history(
+                "http://localhost:9999", "my-project", "study-1", "accuracy"
+            )
+
+        assert "http://localhost:9999" in str(exc_info.value)
+
+    def test_get_metric_history_invalid_json(self, mock_server):
+        MockHandler.response_data = []
+        MockHandler.response_status = 200
+        MockHandler.return_invalid_json = True
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        MockHandler.return_invalid_json = False
+
+    def test_get_metric_history_sends_accept_header(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert "Accept" in MockHandler.received_headers
+        assert MockHandler.received_headers["Accept"] == "application/json"
+
+    def test_get_metric_history_url_encodes_spaces(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        get_metric_history(mock_server, "my project", "study one", "accuracy metric")
+
+        assert "project=my+project" in MockHandler.received_path
+        assert "study_name=study+one" in MockHandler.received_path
+        assert "key=accuracy+metric" in MockHandler.received_path
+
+    def test_get_metric_history_url_encodes_special_chars(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        get_metric_history(mock_server, "project&a", "study&b", "key&c")
+
+        assert "project=project%26a" in MockHandler.received_path
+        assert "study_name=study%26b" in MockHandler.received_path
+        assert "key=key%26c" in MockHandler.received_path
+
+    def test_get_metric_history_accepts_trailing_slash(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        result = get_metric_history(
+            mock_server + "/", "my-project", "study-1", "accuracy"
+        )
+
+        assert result == []
+
+    def test_get_metric_history_http_error_with_detail(self, mock_server):
+        MockHandler.response_status = 403
+        body = json.dumps({"detail": "Forbidden access"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert "403" in str(exc_info.value)
+        assert "Forbidden access" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_get_metric_history_http_error_with_error_field(self, mock_server):
+        MockHandler.response_status = 500
+        body = json.dumps({"error": "Internal server error"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert "500" in str(exc_info.value)
+        assert "Internal server error" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_get_metric_history_http_error_no_body(self, mock_server):
+        MockHandler.response_status = 503
+        MockHandler.response_body = b""
+
+        from jernerics.tracking.http_api import get_metric_history
+
+        with pytest.raises(RuntimeError) as exc_info:
+            get_metric_history(mock_server, "my-project", "study-1", "accuracy")
+
+        assert "503" in str(exc_info.value)
+
+        MockHandler.response_status = 200

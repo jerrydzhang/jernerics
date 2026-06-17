@@ -841,6 +841,86 @@ def compare_sweeps(
         console.print()
 
 
+# ── metric-history ───────────────────────────────────────────────────────────────
+
+
+@app.command("metric-history")
+def metric_history(
+    sweep: Annotated[str, typer.Option(help="Sweep/study name")],
+    metric: Annotated[str, typer.Option(help="Metric key")],
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Project name (default: from pyproject.toml)"),
+    ] = None,
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Tracking HTTP server URL"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+):
+    """Get metric history from the tracking HTTP server."""
+    from .tracking.http_api import get_metric_history
+
+    if project is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is None:
+            print(
+                "Error: No pyproject.toml found. "
+                "Either provide --project or run from a Jernerics project directory."
+            )
+            raise SystemExit(ExitCode.CONFIG_ERROR)
+        project = get_project_name(project_dir)
+
+    base_url = server
+    if base_url is None:
+        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
+    if base_url is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is not None:
+            base_url = load_tracking_http_server(project_dir)
+
+    if base_url is None:
+        print(
+            "Error: No tracking HTTP server URL configured. "
+            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
+            "or tracking_http_server in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        history_data = get_metric_history(base_url, project, sweep, metric)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(history_data, indent=2))
+        return
+
+    if not history_data:
+        print("No metric history found.")
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("TRIAL_ID")
+    table.add_column("STEP")
+    table.add_column("VALUE")
+    table.add_column("TIMESTAMP_NS")
+
+    for entry in history_data:
+        table.add_row(
+            str(entry.get("trial_id", "")),
+            str(entry.get("step", "")),
+            str(entry.get("value", "")),
+            str(entry.get("timestamp_ns", "")),
+        )
+
+    Console().print(table)
+
+
 # ── tracking-health ─────────────────────────────────────────────────────────────
 
 

@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/add-metric-history-cli-command
+completed_at: '2026-06-17T01:45:36.033506'
 created: '2026-06-17T01:14:52.714725'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Add metric-history CLI command
 ---
 

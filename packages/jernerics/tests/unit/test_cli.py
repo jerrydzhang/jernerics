@@ -1153,3 +1153,266 @@ class TestTrackingHealthCommand:
             tracking_health(server=None)
 
         assert exc_info.value.code == 3
+
+
+class MockMetricHistoryHandler(BaseHTTPRequestHandler):
+    """Mock HTTP server handler for metric-history testing."""
+
+    response_data: ClassVar[list[dict]] = []
+
+    def log_message(self, format: str, *args):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/api/metrics/history"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            response_body = json.dumps(MockMetricHistoryHandler.response_data).encode(
+                "utf-8"
+            )
+            self.wfile.write(response_body)
+        else:
+            self.send_error(404, "Not Found")
+
+
+@pytest.fixture
+def mock_metric_history_server():
+    """Start a mock HTTP server for metric-history testing."""
+    server = HTTPServer(("localhost", 0), MockMetricHistoryHandler)
+    port = server.server_address[1]
+
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    yield f"http://localhost:{port}"
+
+    server.shutdown()
+
+
+class TestMetricHistoryCommand:
+    def test_metric_history_with_server_option(
+        self, mock_metric_history_server, capsys
+    ):
+        MockMetricHistoryHandler.response_data = [
+            {
+                "trial_id": 1,
+                "step": 0,
+                "value": 0.85,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "step": 1,
+                "value": 0.90,
+                "timestamp_ns": 1705325405000000000,
+            },
+        ]
+
+        from jernerics.cli import metric_history
+
+        metric_history(
+            sweep="study-1", metric="accuracy", server=mock_metric_history_server
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "0" in captured.out
+        assert "0.85" in captured.out
+        assert "0.9" in captured.out
+        assert "1705325400000000000" in captured.out
+
+    def test_metric_history_with_env_var(
+        self, mock_metric_history_server, capsys, monkeypatch
+    ):
+        MockMetricHistoryHandler.response_data = []
+
+        from jernerics.cli import metric_history
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", mock_metric_history_server)
+        metric_history(
+            project="my-project", sweep="study-1", metric="accuracy", server=None
+        )
+
+        captured = capsys.readouterr()
+        assert "No metric history found" in captured.out
+
+    def test_metric_history_with_json_flag(self, mock_metric_history_server, capsys):
+        MockMetricHistoryHandler.response_data = [
+            {
+                "trial_id": 1,
+                "step": 0,
+                "value": 0.85,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import metric_history
+
+        metric_history(
+            sweep="study-1",
+            metric="accuracy",
+            server=mock_metric_history_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "trial_id" in captured.out
+        assert "step" in captured.out
+        assert "value" in captured.out
+        assert "timestamp_ns" in captured.out
+
+    def test_metric_history_with_empty_response(
+        self, mock_metric_history_server, capsys
+    ):
+        MockMetricHistoryHandler.response_data = []
+
+        from jernerics.cli import metric_history
+
+        metric_history(
+            sweep="study-1", metric="accuracy", server=mock_metric_history_server
+        )
+
+        captured = capsys.readouterr()
+        assert "No metric history found" in captured.out
+
+    def test_metric_history_displays_rich_table(
+        self, mock_metric_history_server, capsys
+    ):
+        MockMetricHistoryHandler.response_data = [
+            {
+                "trial_id": 1,
+                "step": 0,
+                "value": 0.85,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 2,
+                "step": 0,
+                "value": 0.88,
+                "timestamp_ns": 1705325402000000000,
+            },
+        ]
+
+        from jernerics.cli import metric_history
+
+        metric_history(
+            sweep="study-1", metric="accuracy", server=mock_metric_history_server
+        )
+
+        captured = capsys.readouterr()
+        assert "TRIAL_ID" in captured.out
+        assert "STEP" in captured.out
+        assert "VALUE" in captured.out
+        assert "TIMESTAMP_NS" in captured.out
+
+    def test_metric_history_server_url_priority(
+        self, mock_metric_history_server, capsys, monkeypatch
+    ):
+        MockMetricHistoryHandler.response_data = []
+
+        from jernerics.cli import metric_history
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", "http://wrong-url:9999")
+        metric_history(
+            sweep="study-1", metric="accuracy", server=mock_metric_history_server
+        )
+
+        captured = capsys.readouterr()
+        assert "No metric history found" in captured.out
+
+    def test_metric_history_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import metric_history
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            metric_history(sweep="study-1", metric="accuracy", server=None)
+
+        assert exc_info.value.code == 3
+
+    def test_metric_history_uses_pyproject_project_name(
+        self, mock_metric_history_server, capsys, tmp_path
+    ):
+        """metric-history uses project name from pyproject.toml."""
+        MockMetricHistoryHandler.response_data = [
+            {
+                "trial_id": 1,
+                "step": 0,
+                "value": 0.85,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "test-project-from-toml"\n'
+        )
+
+        from jernerics.cli import metric_history
+
+        metric_history(
+            project=None,
+            sweep="study-1",
+            metric="accuracy",
+            server=mock_metric_history_server,
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+
+    def test_metric_history_config_error_without_pyproject(
+        self, mock_metric_history_server, capsys, monkeypatch
+    ):
+        """metric-history exits CONFIG_ERROR when no pyproject.toml."""
+        from jernerics.cli import metric_history
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            metric_history(
+                project=None,
+                sweep="study-1",
+                metric="accuracy",
+                server=mock_metric_history_server,
+            )
+
+        assert exc_info.value.code == 3
+        captured = capsys.readouterr()
+        assert "No pyproject.toml found" in captured.out or "--project" in captured.out
+
+    def test_metric_history_explicit_project_overrides_pyproject(
+        self, mock_metric_history_server, capsys, tmp_path
+    ):
+        """metric-history uses --project value even when pyproject.toml exists."""
+        MockMetricHistoryHandler.response_data = [
+            {
+                "trial_id": 1,
+                "step": 0,
+                "value": 0.85,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        (tmp_path / "pyproject.toml").write_text(
+            '[project]\nname = "different-project"\n'
+        )
+
+        from jernerics.cli import metric_history
+
+        metric_history(
+            project="explicit-project",
+            sweep="study-1",
+            metric="accuracy",
+            server=mock_metric_history_server,
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
