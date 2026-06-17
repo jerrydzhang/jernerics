@@ -13,6 +13,7 @@ class MockHandler(BaseHTTPRequestHandler):
     """Mock HTTP server handler for testing."""
 
     received_headers: ClassVar[dict] = {}
+    received_path: ClassVar[str] = ""
     response_data: ClassVar[list[dict] | dict] = []
     response_status: ClassVar[int] = 200
     return_invalid_json: ClassVar[bool] = False
@@ -27,6 +28,7 @@ class MockHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/compare-sweeps")
         ):
             MockHandler.received_headers = dict(self.headers)
+            MockHandler.received_path = self.path
 
             if MockHandler.response_status != 200:
                 self.send_response(MockHandler.response_status)
@@ -317,6 +319,22 @@ class TestListTrials:
         assert "Accept" in MockHandler.received_headers
         assert MockHandler.received_headers["Accept"] == "application/json"
 
+    def test_list_trials_url_encodes_spaces(self, mock_server):
+        MockHandler.response_data = []
+
+        list_trials(mock_server, "my project", "study one")
+
+        assert "project=my+project" in MockHandler.received_path
+        assert "study_name=study+one" in MockHandler.received_path
+
+    def test_list_trials_url_encodes_ampersands(self, mock_server):
+        MockHandler.response_data = []
+
+        list_trials(mock_server, "project&a", "study&b")
+
+        assert "project=project%26a" in MockHandler.received_path
+        assert "study_name=study%26b" in MockHandler.received_path
+
 
 class TestCompareSweeps:
     def test_compare_sweeps_success(self, mock_server):
@@ -451,3 +469,43 @@ class TestCompareSweeps:
 
         assert "Accept" in MockHandler.received_headers
         assert MockHandler.received_headers["Accept"] == "application/json"
+
+    def test_compare_sweeps_url_encodes_spaces(self, mock_server):
+        MockHandler.response_data = {
+            "left": "study one",
+            "right": "study two",
+            "left_trial_count": 0,
+            "left_completed_count": 0,
+            "right_trial_count": 0,
+            "right_completed_count": 0,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        compare_sweeps(mock_server, "my project", "study one", "study two")
+
+        assert "project=my+project" in MockHandler.received_path
+        assert "left=study+one" in MockHandler.received_path
+        assert "right=study+two" in MockHandler.received_path
+
+    def test_compare_sweeps_url_encodes_ampersands(self, mock_server):
+        MockHandler.response_data = {
+            "left": "study&a",
+            "right": "study&b",
+            "left_trial_count": 0,
+            "left_completed_count": 0,
+            "right_trial_count": 0,
+            "right_completed_count": 0,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        compare_sweeps(mock_server, "project&a", "study&a", "study&b")
+
+        assert "project=project%26a" in MockHandler.received_path
+        assert "left=study%26a" in MockHandler.received_path
+        assert "right=study%26b" in MockHandler.received_path

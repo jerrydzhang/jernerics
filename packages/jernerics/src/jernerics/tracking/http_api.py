@@ -1,5 +1,6 @@
 import json
 import os
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -51,7 +52,8 @@ def list_trials(
         ValueError: If the response is not valid JSON.
     """
     api_key = os.environ.get("JERNERICS_API_KEY")
-    url = f"{base_url.rstrip('/')}/api/trials?project={project}&study_name={study_name}"
+    query_params = urlencode({"project": project, "study_name": study_name})
+    url = f"{base_url.rstrip('/')}/api/trials?{query_params}"
 
     headers = {"Accept": "application/json"}
     if api_key:
@@ -85,10 +87,8 @@ def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
         ValueError: If the response is not valid JSON.
     """
     api_key = os.environ.get("JERNERICS_API_KEY")
-    url = (
-        f"{base_url.rstrip('/')}/api/compare-sweeps"
-        f"?project={project}&left={left}&right={right}"
-    )
+    query_params = urlencode({"project": project, "left": left, "right": right})
+    url = f"{base_url.rstrip('/')}/api/compare-sweeps?{query_params}"
 
     headers = {"Accept": "application/json"}
     if api_key:

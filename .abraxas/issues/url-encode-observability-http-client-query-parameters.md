@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/url-encode-observability-http-client-query-parameters
+completed_at: '2026-06-17T00:08:25.989285'
 created: '2026-06-17T00:03:47.196953'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: URL-encode observability HTTP client query parameters
 ---
 
