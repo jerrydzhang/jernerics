@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/document-tracking-http-observability-commands
+branch: null
 completed_at: '2026-06-17T04:24:20.736958'
 created: '2026-06-17T02:28:12.439282'
-merge_commit_sha: null
+merge_commit_sha: b9f6446d1a3c48f2e4a683b76e341c0b8aacfbc2
 parent_id: null
 retry_count: 0
 status: closed
