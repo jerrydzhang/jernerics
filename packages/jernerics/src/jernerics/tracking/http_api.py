@@ -1,7 +1,52 @@
 import json
 import os
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+
+
+def _request(url: str) -> list[dict] | dict:
+    """Internal helper to make HTTP requests with error handling.
+
+    Args:
+        url: Full URL to request.
+
+    Returns:
+        Parsed JSON response.
+
+    Raises:
+        RuntimeError: On HTTPError, URLError, or invalid JSON.
+    """
+    api_key = os.environ.get("JERNERICS_API_KEY")
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    req = Request(url, headers=headers)
+
+    try:
+        with urlopen(req) as response:
+            data = response.read().decode("utf-8")
+            try:
+                return json.loads(data)
+            except json.JSONDecodeError:
+                raise RuntimeError("Server returned invalid JSON") from None
+    except HTTPError as e:
+        body = e.read().decode("utf-8")
+        error_detail = None
+        try:
+            error_json = json.loads(body)
+            error_detail = error_json.get("detail") or error_json.get("error")
+        except json.JSONDecodeError:
+            pass
+        if error_detail:
+            raise RuntimeError(f"HTTP {e.code}: {error_detail}") from None
+        raise RuntimeError(f"HTTP {e.code}") from None
+    except URLError as e:
+        base_url = url.split("?")[0]
+        raise RuntimeError(
+            f"Cannot reach tracking server at {base_url}: {e.reason}"
+        ) from None
 
 
 def list_sweeps(base_url: str) -> list[dict]:
@@ -14,22 +59,14 @@ def list_sweeps(base_url: str) -> list[dict]:
         List of sweep dictionaries.
 
     Raises:
-        URLError: If the server is unreachable.
-        HTTPError: If the server returns an error status.
-        ValueError: If the response is not valid JSON.
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
     """
-    api_key = os.environ.get("JERNERICS_API_KEY")
     url = f"{base_url.rstrip('/')}/api/sweeps"
-
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    req = Request(url, headers=headers)
-
-    with urlopen(req) as response:
-        data = response.read().decode("utf-8")
-        return json.loads(data)
+    result = _request(url)
+    if not isinstance(result, list):
+        raise TypeError("Expected list of sweeps from server")
+    return result
 
 
 def list_trials(
@@ -47,26 +84,17 @@ def list_trials(
         List of trial dictionaries.
 
     Raises:
-        URLError: If the server is unreachable.
-        HTTPError: If the server returns an error status.
-        ValueError: If the response is not valid JSON.
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
     """
-    api_key = os.environ.get("JERNERICS_API_KEY")
     query_params = urlencode({"project": project, "study_name": study_name})
     url = f"{base_url.rstrip('/')}/api/trials?{query_params}"
-
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    req = Request(url, headers=headers)
-
-    with urlopen(req) as response:
-        data = response.read().decode("utf-8")
-        trials = json.loads(data)
-        if limit:
-            trials = trials[:limit]
-        return trials
+    result = _request(url)
+    if not isinstance(result, list):
+        raise TypeError("Expected list of trials from server")
+    if limit:
+        result = result[:limit]
+    return result
 
 
 def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
@@ -82,20 +110,12 @@ def compare_sweeps(base_url: str, project: str, left: str, right: str) -> dict:
         Comparison dictionary with trial counts, key overlap, and metric stats.
 
     Raises:
-        URLError: If the server is unreachable.
-        HTTPError: If the server returns an error status.
-        ValueError: If the response is not valid JSON.
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
     """
-    api_key = os.environ.get("JERNERICS_API_KEY")
     query_params = urlencode({"project": project, "left": left, "right": right})
     url = f"{base_url.rstrip('/')}/api/compare-sweeps?{query_params}"
-
-    headers = {"Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    req = Request(url, headers=headers)
-
-    with urlopen(req) as response:
-        data = response.read().decode("utf-8")
-        return json.loads(data)
+    result = _request(url)
+    if not isinstance(result, dict):
+        raise TypeError("Expected comparison dict from server")
+    return result

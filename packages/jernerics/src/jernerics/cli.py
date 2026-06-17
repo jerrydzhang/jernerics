@@ -6,7 +6,6 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
-from urllib.error import HTTPError, URLError
 
 import tomli_w
 import tomllib
@@ -477,11 +476,8 @@ def sweeps(
 
     try:
         sweeps_data = list_sweeps(base_url)
-    except (URLError, HTTPError) as e:
-        print(f"Error: Failed to fetch sweeps: {e}")
-        raise SystemExit(ExitCode.GENERAL_ERROR) from None
-    except ValueError as e:
-        print(f"Error: Invalid response from server: {e}")
+    except RuntimeError as e:
+        print(f"Error: {e}")
         raise SystemExit(ExitCode.GENERAL_ERROR) from None
 
     if json_output:
@@ -560,11 +556,8 @@ def trials(
 
     try:
         trials_data = list_trials(base_url, project, sweep, limit=limit)
-    except (URLError, HTTPError) as e:
-        print(f"Error: Failed to fetch trials: {e}")
-        raise SystemExit(ExitCode.GENERAL_ERROR) from None
-    except ValueError as e:
-        print(f"Error: Invalid response from server: {e}")
+    except RuntimeError as e:
+        print(f"Error: {e}")
         raise SystemExit(ExitCode.GENERAL_ERROR) from None
 
     if json_output:
@@ -653,11 +646,8 @@ def compare_sweeps(
 
     try:
         comparison = compare_sweeps_api(base_url, project, left, right)
-    except (URLError, HTTPError) as e:
-        print(f"Error: Failed to fetch comparison: {e}")
-        raise SystemExit(ExitCode.GENERAL_ERROR) from None
-    except ValueError as e:
-        print(f"Error: Invalid response from server: {e}")
+    except RuntimeError as e:
+        print(f"Error: {e}")
         raise SystemExit(ExitCode.GENERAL_ERROR) from None
 
     if json_output:

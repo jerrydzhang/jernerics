@@ -3,7 +3,6 @@ import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from typing import ClassVar
-from urllib.error import HTTPError, URLError
 
 import pytest
 from jernerics.tracking.http_api import compare_sweeps, list_sweeps, list_trials
@@ -17,6 +16,7 @@ class MockHandler(BaseHTTPRequestHandler):
     response_data: ClassVar[list[dict] | dict] = []
     response_status: ClassVar[int] = 200
     return_invalid_json: ClassVar[bool] = False
+    response_body: ClassVar[bytes] = b""
 
     def log_message(self, format: str, *args):
         pass
@@ -32,7 +32,10 @@ class MockHandler(BaseHTTPRequestHandler):
 
             if MockHandler.response_status != 200:
                 self.send_response(MockHandler.response_status)
+                self.send_header("Content-Type", "application/json")
                 self.end_headers()
+                if MockHandler.response_body:
+                    self.wfile.write(MockHandler.response_body)
                 return
 
             self.send_response(200)
@@ -148,25 +151,66 @@ class TestListSweeps:
         MockHandler.response_status = 500
         MockHandler.response_data = []
 
-        with pytest.raises(HTTPError) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:
             list_sweeps(mock_server)
 
-        assert exc_info.value.code == 500
+        assert "500" in str(exc_info.value)
         MockHandler.response_status = 200
 
     def test_list_sweeps_unreachable_server(self):
-        with pytest.raises(URLError):
+        with pytest.raises(RuntimeError) as exc_info:
             list_sweeps("http://localhost:9999")
+
+        assert "http://localhost:9999" in str(exc_info.value)
 
     def test_list_sweeps_invalid_json(self, mock_server):
         MockHandler.response_data = []  # Override the response
         MockHandler.response_status = 200
         MockHandler.return_invalid_json = True
 
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(RuntimeError, match="invalid JSON"):
             list_sweeps(mock_server)
 
         MockHandler.return_invalid_json = False
+
+    def test_list_sweeps_http_error_with_detail(self, mock_server):
+        MockHandler.response_status = 403
+        body = json.dumps({"detail": "Forbidden access"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_sweeps(mock_server)
+
+        assert "403" in str(exc_info.value)
+        assert "Forbidden access" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_list_sweeps_http_error_with_error_field(self, mock_server):
+        MockHandler.response_status = 500
+        body = json.dumps({"error": "Internal server error"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_sweeps(mock_server)
+
+        assert "500" in str(exc_info.value)
+        assert "Internal server error" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_list_sweeps_http_error_no_body(self, mock_server):
+        MockHandler.response_status = 503
+        MockHandler.response_body = b""
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_sweeps(mock_server)
+
+        assert "503" in str(exc_info.value)
+
+        MockHandler.response_status = 200
 
     def test_list_sweeps_sends_accept_header(self, mock_server):
         MockHandler.response_data = []
@@ -291,22 +335,24 @@ class TestListTrials:
         MockHandler.response_status = 500
         MockHandler.response_data = []
 
-        with pytest.raises(HTTPError) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:
             list_trials(mock_server, "my-project", "study-1")
 
-        assert exc_info.value.code == 500
+        assert "500" in str(exc_info.value)
         MockHandler.response_status = 200
 
     def test_list_trials_unreachable_server(self):
-        with pytest.raises(URLError):
+        with pytest.raises(RuntimeError) as exc_info:
             list_trials("http://localhost:9999", "my-project", "study-1")
+
+        assert "http://localhost:9999" in str(exc_info.value)
 
     def test_list_trials_invalid_json(self, mock_server):
         MockHandler.response_data = []
         MockHandler.response_status = 200
         MockHandler.return_invalid_json = True
 
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(RuntimeError, match="invalid JSON"):
             list_trials(mock_server, "my-project", "study-1")
 
         MockHandler.return_invalid_json = False
@@ -431,22 +477,24 @@ class TestCompareSweeps:
         MockHandler.response_status = 404
         MockHandler.response_data = {}
 
-        with pytest.raises(HTTPError) as exc_info:
+        with pytest.raises(RuntimeError) as exc_info:
             compare_sweeps(mock_server, "my-project", "study-1", "study-2")
 
-        assert exc_info.value.code == 404
+        assert "404" in str(exc_info.value)
         MockHandler.response_status = 200
 
     def test_compare_sweeps_unreachable_server(self):
-        with pytest.raises(URLError):
+        with pytest.raises(RuntimeError) as exc_info:
             compare_sweeps("http://localhost:9999", "my-project", "study-1", "study-2")
+
+        assert "http://localhost:9999" in str(exc_info.value)
 
     def test_compare_sweeps_invalid_json(self, mock_server):
         MockHandler.response_data = {}
         MockHandler.response_status = 200
         MockHandler.return_invalid_json = True
 
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(RuntimeError, match="invalid JSON"):
             compare_sweeps(mock_server, "my-project", "study-1", "study-2")
 
         MockHandler.return_invalid_json = False
