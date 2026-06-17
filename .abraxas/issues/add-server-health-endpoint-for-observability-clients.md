@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-server-health-endpoint-for-observability-clients
+branch: null
 completed_at: '2026-06-17T01:13:41.043865'
 created: '2026-06-17T00:03:57.481448'
-merge_commit_sha: null
+merge_commit_sha: 327ecdc74b6e4d98c44694c31820509bee1283a1
 parent_id: null
 retry_count: 0
 status: closed
