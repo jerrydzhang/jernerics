@@ -143,6 +143,16 @@ def create_app(
         results = store.list_results(project, study_name, trial_id, key)
         return JSONResponse(content=results)
 
+    @app.get("/api/params", response_model=None, dependencies=deps)
+    def list_params(
+        project: str,
+        study_name: str,
+        trial_id: int | None = None,
+        key: str | None = None,
+    ) -> JSONResponse:
+        params = store.list_params(project, study_name, trial_id, key)
+        return JSONResponse(content=params)
+
     @app.get("/api/compare-sweeps", response_model=None, dependencies=deps)
     def compare_sweeps(project: str, left: str, right: str) -> JSONResponse:
         left_summary = store.get_study_summary(project, left)

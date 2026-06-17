@@ -1,11 +1,12 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/add-typed-params-endpoint-and-cli-command
+completed_at: '2026-06-17T04:02:23.016526'
 created: '2026-06-17T02:28:08.312877'
 merge_commit_sha: null
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Add typed params endpoint and CLI command
 ---
 

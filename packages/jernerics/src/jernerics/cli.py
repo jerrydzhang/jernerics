@@ -1050,6 +1050,70 @@ def results(
     Console().print(table)
 
 
+# ── params ────────────────────────────────────────────────────────────────────
+
+
+@app.command("params")
+def params(
+    sweep: Annotated[str, typer.Option(help="Sweep/study name")],
+    project: Annotated[
+        str | None,
+        typer.Option("--project", help="Project name (default: from pyproject.toml)"),
+    ] = None,
+    trial_id: Annotated[
+        int | None,
+        typer.Option("--trial-id", help="Filter params by trial ID"),
+    ] = None,
+    key: Annotated[
+        str | None,
+        typer.Option("--key", help="Filter params by key"),
+    ] = None,
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Tracking HTTP server URL"),
+    ] = None,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+):
+    """List params from the tracking HTTP server."""
+    from .tracking.http_api import list_params
+
+    project = _resolve_project_name(project)
+    base_url = _resolve_tracking_server_url(server)
+
+    try:
+        params_data = list_params(base_url, project, sweep, trial_id=trial_id, key=key)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(params_data, indent=2))
+        return
+
+    if not params_data:
+        print("No params found.")
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("TRIAL_ID")
+    table.add_column("KEY")
+    table.add_column("VALUE")
+    table.add_column("TIMESTAMP_NS")
+
+    for param in params_data:
+        table.add_row(
+            str(param.get("trial_id", "")),
+            param.get("key", ""),
+            str(param.get("value", "")),
+            str(param.get("timestamp_ns", "")),
+        )
+
+    Console().print(table)
+
+
 def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:
     target = project_path / filename
     if target.exists():

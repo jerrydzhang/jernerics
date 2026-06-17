@@ -395,6 +395,7 @@ class MockTrialsHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/compare-sweeps")
             or self.path.startswith("/api/artifacts")
             or self.path.startswith("/api/results")
+            or self.path.startswith("/api/params")
         ):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -1977,3 +1978,248 @@ class TestResultsCommand:
         assert "0.92" in captured.out
         assert '{"tp": 90}' in captured.out
         assert '{"tp": 85}' in captured.out
+
+
+class TestParamsCommand:
+    def test_params_with_server_option(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "batch_size",
+                "value": 32,
+                "timestamp_ns": 1705325401000000000,
+            },
+        ]
+
+        from jernerics.cli import params
+
+        params(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "lr" in captured.out
+        assert "0.001" in captured.out
+        assert "batch_size" in captured.out
+        assert "32" in captured.out
+
+    def test_params_with_json_flag(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import params
+
+        params(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "trial_id" in captured.out
+        assert "key" in captured.out
+        assert "value" in captured.out
+        assert "timestamp_ns" in captured.out
+
+    def test_params_with_empty_response(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import params
+
+        params(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "No params found" in captured.out
+
+    def test_params_server_url_priority(self, mock_trials_server, capsys, monkeypatch):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import params
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", "http://wrong-url:9999")
+        params(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "No params found" in captured.out
+
+    def test_params_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import params
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            params(project="my-project", sweep="study-1", server=None)
+
+        assert exc_info.value.code == 3
+
+    def test_params_displays_rich_table(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "batch_size",
+                "value": 32,
+                "timestamp_ns": 1705325401000000000,
+            },
+            {
+                "trial_id": 2,
+                "key": "lr",
+                "value": 0.01,
+                "timestamp_ns": 1705325402000000000,
+            },
+        ]
+
+        from jernerics.cli import params
+
+        params(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "lr" in captured.out
+        assert "batch_size" in captured.out
+        assert "0.001" in captured.out
+        assert "0.01" in captured.out
+        assert "TRIAL_ID" in captured.out
+        assert "KEY" in captured.out
+        assert "VALUE" in captured.out
+        assert "TIMESTAMP_NS" in captured.out
+
+    def test_params_with_trial_id(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import params
+
+        params(
+            project="my-project", sweep="study-1", trial_id=1, server=mock_trials_server
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "lr" in captured.out
+        assert "0.001" in captured.out
+
+    def test_params_with_key(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import params
+
+        params(
+            project="my-project", sweep="study-1", key="lr", server=mock_trials_server
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "lr" in captured.out
+        assert "0.001" in captured.out
+
+    def test_params_with_trial_id_and_key(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.cli import params
+
+        params(
+            project="my-project",
+            sweep="study-1",
+            trial_id=1,
+            key="lr",
+            server=mock_trials_server,
+        )
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "lr" in captured.out
+        assert "0.001" in captured.out
+
+    def test_params_bool_values(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "use_cuda",
+                "value": True,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "use_mixed_precision",
+                "value": False,
+                "timestamp_ns": 1705325401000000000,
+            },
+        ]
+
+        from jernerics.cli import params
+
+        params(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "use_cuda" in captured.out
+        assert "use_mixed_precision" in captured.out
+        assert "True" in captured.out
+        assert "False" in captured.out
+
+    def test_params_string_values(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "optimizer",
+                "value": "adam",
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "model",
+                "value": "resnet50",
+                "timestamp_ns": 1705325401000000000,
+            },
+        ]
+
+        from jernerics.cli import params
+
+        params(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "optimizer" in captured.out
+        assert "model" in captured.out
+        assert "adam" in captured.out
+        assert "resnet50" in captured.out

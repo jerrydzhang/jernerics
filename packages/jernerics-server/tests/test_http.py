@@ -2041,6 +2041,287 @@ class TestArtifactsEndpoint:
         assert response.status_code == 200  # trial_id is optional
 
 
+class TestParamsEndpoint:
+    def test_basic_listing_returns_all_params(self, client):
+        db = client.app.state.store
+
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param1)
+
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            param=ParamEvent(key="batch_size", value=Value(int_val=32)),
+        )
+        db.insert_event(env_param2)
+
+        env_param3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.01)),
+        )
+        db.insert_event(env_param3)
+
+        response = client.get("/api/params?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 3
+
+        # Sorted by trial_id, then key
+        assert body[0] == {
+            "trial_id": 0,
+            "key": "batch_size",
+            "value": 32,
+            "timestamp_ns": 2000,
+        }
+        assert body[1] == {
+            "trial_id": 0,
+            "key": "lr",
+            "value": 0.001,
+            "timestamp_ns": 1000,
+        }
+        assert body[2] == {
+            "trial_id": 1,
+            "key": "lr",
+            "value": 0.01,
+            "timestamp_ns": 3000,
+        }
+
+    def test_filter_by_trial_id(self, client):
+        db = client.app.state.store
+
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param1)
+
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=2000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.01)),
+        )
+        db.insert_event(env_param2)
+
+        response = client.get("/api/params?project=p&study_name=s&trial_id=0")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 0
+        assert body[0]["key"] == "lr"
+        assert body[0]["value"] == pytest.approx(0.001)
+        assert body[0]["timestamp_ns"] == 1000
+
+    def test_filter_by_key(self, client):
+        db = client.app.state.store
+
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param1)
+
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            param=ParamEvent(key="batch_size", value=Value(int_val=32)),
+        )
+        db.insert_event(env_param2)
+
+        response = client.get("/api/params?project=p&study_name=s&key=lr")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["key"] == "lr"
+        assert body[0]["value"] == pytest.approx(0.001)
+
+    def test_filter_by_trial_id_and_key(self, client):
+        db = client.app.state.store
+
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param1)
+
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            param=ParamEvent(key="batch_size", value=Value(int_val=32)),
+        )
+        db.insert_event(env_param2)
+
+        env_param3 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=1,
+            timestamp_ns=3000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.01)),
+        )
+        db.insert_event(env_param3)
+
+        response = client.get("/api/params?project=p&study_name=s&trial_id=1&key=lr")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["trial_id"] == 1
+        assert body[0]["key"] == "lr"
+        assert body[0]["value"] == pytest.approx(0.01)
+        assert body[0]["timestamp_ns"] == 3000
+
+    def test_bool_conversion(self, client):
+        db = client.app.state.store
+
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="use_cuda", value=Value(bool_val=True)),
+        )
+        db.insert_event(env_param1)
+
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            param=ParamEvent(key="use_cuda", value=Value(bool_val=False)),
+        )
+        db.insert_event(env_param2)
+
+        response = client.get("/api/params?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+        assert body[0]["value"] is True
+        assert body[1]["value"] is False
+
+    def test_string_values(self, client):
+        db = client.app.state.store
+
+        env_param1 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="optimizer", value=Value(string_val="adam")),
+        )
+        db.insert_event(env_param1)
+
+        env_param2 = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=2000,
+            seq=1,
+            param=ParamEvent(key="model", value=Value(string_val="resnet50")),
+        )
+        db.insert_event(env_param2)
+
+        response = client.get("/api/params?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 2
+        # Sorted by trial_id, then key (model < optimizer)
+        assert body[0]["value"] == "resnet50"
+        assert body[0]["key"] == "model"
+        assert body[1]["value"] == "adam"
+        assert body[1]["key"] == "optimizer"
+
+    def test_empty_response(self, client):
+        response = client.get("/api/params?project=p&study_name=s")
+        assert response.status_code == 200
+        body = response.json()
+        assert body == []
+
+    def test_missing_params_returns_422(self, client):
+        response = client.get("/api/params")
+        assert response.status_code == 422
+
+        response = client.get("/api/params?project=p")
+        assert response.status_code == 422
+
+        response = client.get("/api/params?project=p&study_name=s")
+        assert response.status_code == 200  # trial_id and key are optional
+
+    def test_requires_bearer_auth(self, auth_client):
+        db = auth_client.app.state.store
+
+        env_param = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param)
+
+        response = auth_client.get("/api/params?project=p&study_name=s")
+        assert response.status_code == 401
+
+        response = auth_client.get(
+            "/api/params?project=p&study_name=s",
+            headers={"Authorization": "Bearer secret123"},
+        )
+        assert response.status_code == 200
+
+    def test_no_auth_when_key_not_set(self, client):
+        db = client.app.state.store
+
+        env_param = Envelope(
+            project="p",
+            study_name="s",
+            trial_id=0,
+            timestamp_ns=1000,
+            seq=0,
+            param=ParamEvent(key="lr", value=Value(float_val=0.001)),
+        )
+        db.insert_event(env_param)
+
+        response = client.get("/api/params?project=p&study_name=s")
+        assert response.status_code == 200
+
+
 class TestResultsEndpoint:
     def test_basic_listing_returns_all_results(self, client):
         db = client.app.state.store

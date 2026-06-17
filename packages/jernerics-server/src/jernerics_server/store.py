@@ -595,3 +595,80 @@ class Store:
             return [dict(zip(columns, row, strict=True)) for row in rows]
         finally:
             con.close()
+
+    def list_params(
+        self,
+        project: str,
+        study_name: str,
+        trial_id: int | None = None,
+        key: str | None = None,
+    ) -> list[dict]:
+        if trial_id is not None and key is not None:
+            sql = """
+            SELECT trial_id, key, float_val, int_val, string_val, bool_val, timestamp_ns
+            FROM params
+            WHERE project = ? AND study_name = ? AND trial_id = ? AND key = ?
+            ORDER BY trial_id, key
+            """
+            query_params: list[str | int] = [project, study_name, trial_id, key]
+        elif trial_id is not None:
+            sql = """
+            SELECT trial_id, key, float_val, int_val, string_val, bool_val, timestamp_ns
+            FROM params
+            WHERE project = ? AND study_name = ? AND trial_id = ?
+            ORDER BY trial_id, key
+            """
+            query_params = [project, study_name, trial_id]
+        elif key is not None:
+            sql = """
+            SELECT trial_id, key, float_val, int_val, string_val, bool_val, timestamp_ns
+            FROM params
+            WHERE project = ? AND study_name = ? AND key = ?
+            ORDER BY trial_id, key
+            """
+            query_params = [project, study_name, key]
+        else:
+            sql = """
+            SELECT trial_id, key, float_val, int_val, string_val, bool_val, timestamp_ns
+            FROM params
+            WHERE project = ? AND study_name = ?
+            ORDER BY trial_id, key
+            """
+            query_params = [project, study_name]
+
+        con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
+        try:
+            cursor = con.execute(sql, query_params)
+            rows = cursor.fetchall()
+            results = []
+            for row in rows:
+                (
+                    trial_id,
+                    key,
+                    float_val,
+                    int_val,
+                    string_val,
+                    bool_val,
+                    timestamp_ns,
+                ) = row
+                if float_val is not None:
+                    value = float_val
+                elif int_val is not None:
+                    value = int_val
+                elif string_val is not None:
+                    value = string_val
+                elif bool_val is not None:
+                    value = bool(bool_val)
+                else:
+                    value = None
+                results.append(
+                    {
+                        "trial_id": trial_id,
+                        "key": key,
+                        "value": value,
+                        "timestamp_ns": timestamp_ns,
+                    }
+                )
+            return results
+        finally:
+            con.close()

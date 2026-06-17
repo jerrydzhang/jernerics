@@ -242,3 +242,38 @@ def list_results(
     if not isinstance(result, list):
         raise RuntimeError("Expected list of results from server")  # noqa: TRY004
     return result
+
+
+def list_params(
+    base_url: str,
+    project: str,
+    study_name: str,
+    trial_id: int | None = None,
+    key: str | None = None,
+) -> list[dict]:
+    """List params from the tracking HTTP server.
+
+    Args:
+        base_url: Base URL of the tracking server (e.g., "http://localhost:8000").
+        project: Project name.
+        study_name: Study/sweep name.
+        trial_id: Optional trial ID to filter params by.
+        key: Optional param key to filter by.
+
+    Returns:
+        List of param dictionaries with trial_id, key, value, timestamp_ns.
+
+    Raises:
+        RuntimeError: If the server is unreachable, returns an error, or
+            returns invalid JSON.
+    """
+    query_params = {"project": project, "study_name": study_name}
+    if trial_id is not None:
+        query_params["trial_id"] = str(trial_id)
+    if key is not None:
+        query_params["key"] = key
+    url = f"{base_url.rstrip('/')}/api/params?{urlencode(query_params)}"
+    result = _request(url)
+    if not isinstance(result, list):
+        raise RuntimeError("Expected list of params from server")  # noqa: TRY004
+    return result

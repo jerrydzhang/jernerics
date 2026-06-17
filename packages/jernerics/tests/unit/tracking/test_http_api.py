@@ -30,6 +30,7 @@ class MockHandler(BaseHTTPRequestHandler):
             or self.path.startswith("/api/metrics")
             or self.path.startswith("/api/artifacts")
             or self.path.startswith("/api/results")
+            or self.path.startswith("/api/params")
             or self.path == "/api/health"
         ):
             MockHandler.received_headers = dict(self.headers)
@@ -1558,3 +1559,332 @@ class TestListResults:
         # Value should be string, not parsed
         assert result[0]["value"] == '{"tp": 90}'
         assert isinstance(result[0]["value"], str)
+
+
+class TestListParams:
+    def test_list_params_success(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "batch_size",
+                "value": 32,
+                "timestamp_ns": 1705325401000000000,
+            },
+        ]
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server, "my-project", "study-1")
+
+        assert len(result) == 2
+        assert result[0]["trial_id"] == 1
+        assert result[0]["key"] == "lr"
+        assert result[0]["value"] == pytest.approx(0.001)
+        assert result[1]["key"] == "batch_size"
+        assert result[1]["value"] == 32
+
+    def test_list_params_multiple_items(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 2,
+                "key": "lr",
+                "value": 0.01,
+                "timestamp_ns": 1705325402000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "batch_size",
+                "value": 32,
+                "timestamp_ns": 1705325401000000000,
+            },
+        ]
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server, "my-project", "study-1")
+
+        assert len(result) == 3
+        # Client returns data in the order the mock server sends it
+        assert result[0]["trial_id"] == 1
+        assert result[1]["trial_id"] == 2
+        assert result[2]["trial_id"] == 1
+
+    def test_list_params_empty_list(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server, "my-project", "study-1")
+
+        assert result == []
+
+    def test_list_params_with_trial_id(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server, "my-project", "study-1", trial_id=1)
+
+        assert len(result) == 1
+        assert result[0]["trial_id"] == 1
+        assert "trial_id=1" in MockHandler.received_path
+
+    def test_list_params_with_key(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server, "my-project", "study-1", key="lr")
+
+        assert len(result) == 1
+        assert result[0]["key"] == "lr"
+        assert "key=lr" in MockHandler.received_path
+
+    def test_list_params_with_trial_id_and_key(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "lr",
+                "value": 0.001,
+                "timestamp_ns": 1705325400000000000,
+            }
+        ]
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server, "my-project", "study-1", trial_id=1, key="lr")
+
+        assert len(result) == 1
+        assert result[0]["trial_id"] == 1
+        assert result[0]["key"] == "lr"
+        assert "trial_id=1" in MockHandler.received_path
+        assert "key=lr" in MockHandler.received_path
+
+    def test_list_params_with_api_key(self, mock_server):
+        MockHandler.response_data = []
+
+        os.environ["JERNERICS_API_KEY"] = "test-key-123"
+        try:
+            from jernerics.tracking.http_api import list_params
+
+            list_params(mock_server, "my-project", "study-1")
+        finally:
+            os.environ.pop("JERNERICS_API_KEY", None)
+
+        assert "Authorization" in MockHandler.received_headers
+        assert MockHandler.received_headers["Authorization"] == "Bearer test-key-123"
+
+    def test_list_params_without_api_key(self, mock_server):
+        MockHandler.response_data = []
+
+        api_key = os.environ.pop("JERNERICS_API_KEY", None)
+        try:
+            from jernerics.tracking.http_api import list_params
+
+            list_params(mock_server, "my-project", "study-1")
+        finally:
+            if api_key:
+                os.environ["JERNERICS_API_KEY"] = api_key
+
+        assert "Authorization" not in MockHandler.received_headers
+
+    def test_list_params_http_error(self, mock_server):
+        MockHandler.response_status = 404
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import list_params
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_params(mock_server, "my-project", "study-1")
+
+        assert "404" in str(exc_info.value)
+        MockHandler.response_status = 200
+
+    def test_list_params_unreachable_server(self):
+        from jernerics.tracking.http_api import list_params
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_params("http://localhost:9999", "my-project", "study-1")
+
+        assert "http://localhost:9999" in str(exc_info.value)
+
+    def test_list_params_invalid_json(self, mock_server):
+        MockHandler.response_data = []
+        MockHandler.response_status = 200
+        MockHandler.return_invalid_json = True
+
+        from jernerics.tracking.http_api import list_params
+
+        with pytest.raises(RuntimeError, match="invalid JSON"):
+            list_params(mock_server, "my-project", "study-1")
+
+        MockHandler.return_invalid_json = False
+
+    def test_list_params_sends_accept_header(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import list_params
+
+        list_params(mock_server, "my-project", "study-1")
+
+        assert "Accept" in MockHandler.received_headers
+        assert MockHandler.received_headers["Accept"] == "application/json"
+
+    def test_list_params_url_encodes_spaces(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import list_params
+
+        list_params(mock_server, "my project", "study one")
+
+        assert "project=my+project" in MockHandler.received_path
+        assert "study_name=study+one" in MockHandler.received_path
+
+    def test_list_params_url_encodes_special_chars(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import list_params
+
+        list_params(mock_server, "project&a", "study&b")
+
+        assert "project=project%26a" in MockHandler.received_path
+        assert "study_name=study%26b" in MockHandler.received_path
+
+    def test_list_params_accepts_trailing_slash(self, mock_server):
+        MockHandler.response_data = []
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server + "/", "my-project", "study-1")
+
+        assert result == []
+
+    def test_list_params_http_error_with_detail(self, mock_server):
+        MockHandler.response_status = 403
+        body = json.dumps({"detail": "Forbidden access"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        from jernerics.tracking.http_api import list_params
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_params(mock_server, "my-project", "study-1")
+
+        assert "403" in str(exc_info.value)
+        assert "Forbidden access" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_list_params_http_error_with_error_field(self, mock_server):
+        MockHandler.response_status = 500
+        body = json.dumps({"error": "Internal server error"})
+        MockHandler.response_body = body.encode("utf-8")
+
+        from jernerics.tracking.http_api import list_params
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_params(mock_server, "my-project", "study-1")
+
+        assert "500" in str(exc_info.value)
+        assert "Internal server error" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+        MockHandler.response_body = b""
+
+    def test_list_params_http_error_no_body(self, mock_server):
+        MockHandler.response_status = 503
+        MockHandler.response_body = b""
+
+        from jernerics.tracking.http_api import list_params
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_params(mock_server, "my-project", "study-1")
+
+        assert "503" in str(exc_info.value)
+
+        MockHandler.response_status = 200
+
+    def test_list_params_wrong_shape(self, mock_server):
+        """Test that list_params raises RuntimeError when server returns non-list."""
+        MockHandler.response_data = {"error": "not a list"}
+
+        from jernerics.tracking.http_api import list_params
+
+        with pytest.raises(RuntimeError) as exc_info:
+            list_params(mock_server, "my-project", "study-1")
+
+        assert "Expected list of params from server" in str(exc_info.value)
+
+    def test_list_params_bool_values(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "use_cuda",
+                "value": True,
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "use_mixed_precision",
+                "value": False,
+                "timestamp_ns": 1705325401000000000,
+            },
+        ]
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server, "my-project", "study-1")
+
+        assert len(result) == 2
+        assert result[0]["value"] is True
+        assert result[1]["value"] is False
+
+    def test_list_params_string_values(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "key": "optimizer",
+                "value": "adam",
+                "timestamp_ns": 1705325400000000000,
+            },
+            {
+                "trial_id": 1,
+                "key": "model",
+                "value": "resnet50",
+                "timestamp_ns": 1705325401000000000,
+            },
+        ]
+
+        from jernerics.tracking.http_api import list_params
+
+        result = list_params(mock_server, "my-project", "study-1")
+
+        assert len(result) == 2
+        assert result[0]["value"] == "adam"
+        assert result[1]["value"] == "resnet50"
