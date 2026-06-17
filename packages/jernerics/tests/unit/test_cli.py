@@ -166,7 +166,7 @@ class MockSweepsHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/api/sweeps":
+        if self.path == "/api/sweeps" or self.path.startswith("/api/trials"):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -310,3 +310,243 @@ class TestSweepsCommand:
         assert "TRIALS" in captured.out
         assert "COMPLETED" in captured.out
         assert "LAST_EVENT" in captured.out
+
+
+class MockTrialsHandler(BaseHTTPRequestHandler):
+    """Mock HTTP server handler for trials testing."""
+
+    response_data: ClassVar[list[dict]] = []
+
+    def log_message(self, format: str, *args):
+        pass
+
+    def do_GET(self):
+        if self.path.startswith("/api/trials"):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            response_body = json.dumps(MockTrialsHandler.response_data).encode("utf-8")
+            self.wfile.write(response_body)
+        else:
+            self.send_error(404, "Not Found")
+
+
+@pytest.fixture
+def mock_trials_server():
+    """Start a mock HTTP server for trials testing."""
+    server = HTTPServer(("localhost", 0), MockTrialsHandler)
+    port = server.server_address[1]
+
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    yield f"http://localhost:{port}"
+
+    server.shutdown()
+
+
+class TestTrialsCommand:
+    def test_trials_with_server_option(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {"lr": 0.01, "batch_size": 32},
+                "final_metrics": {"accuracy": 0.95, "loss": 0.05},
+                "artifact_keys": ["model.pkl", "log.txt"],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "complete" in captured.out
+        assert "0.95" in captured.out
+        assert "0.05" in captured.out
+        assert "2" in captured.out  # artifact_count
+
+    def test_trials_with_env_var(self, mock_trials_server, capsys, monkeypatch):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import trials
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", mock_trials_server)
+        trials(project="my-project", sweep="study-1", server=None)
+
+        captured = capsys.readouterr()
+        assert "No trials found" in captured.out
+
+    def test_trials_with_json_flag(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {"lr": 0.01},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "trial_id" in captured.out
+        assert "complete" in captured.out
+        assert "0.01" in captured.out
+        assert "0.95" in captured.out
+
+    def test_trials_with_empty_response(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import trials
+
+        trials(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "No trials found" in captured.out
+
+    def test_trials_with_params_flag(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {"lr": 0.01, "batch_size": 32},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            params=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "LR" in captured.out
+        assert "BATCH_SIZE" in captured.out
+        assert "0.01" in captured.out
+        assert "32" in captured.out
+
+    def test_trials_with_columns_option(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {"lr": 0.01},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            }
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            columns="trial_id,accuracy",
+        )
+
+        captured = capsys.readouterr()
+        assert "TRIAL_ID" in captured.out
+        assert "ACCURACY" in captured.out
+        assert "1" in captured.out
+        assert "0.95" in captured.out
+        assert "STATUS" not in captured.out  # Should not show status column
+
+    def test_trials_with_limit(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": i,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+            for i in range(1, 11)
+        ]
+
+        from jernerics.cli import trials
+
+        trials(
+            project="my-project",
+            sweep="study-1",
+            server=mock_trials_server,
+            limit=5,
+        )
+
+        captured = capsys.readouterr()
+        # Should show only 5 trials
+        assert "10" not in captured.out
+
+    def test_trials_displays_rich_table(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            },
+            {
+                "trial_id": 2,
+                "status": "incomplete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": ["log.txt"],
+            },
+        ]
+
+        from jernerics.cli import trials
+
+        trials(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "1" in captured.out
+        assert "2" in captured.out
+        assert "complete" in captured.out
+        assert "incomplete" in captured.out
+        assert "TRIAL_ID" in captured.out
+        assert "STATUS" in captured.out
+        assert "ACCURACY" in captured.out
+        assert "ARTIFACT_COUNT" in captured.out
+
+    def test_trials_server_url_priority(self, mock_trials_server, capsys, monkeypatch):
+        MockTrialsHandler.response_data = []
+
+        from jernerics.cli import trials
+
+        monkeypatch.setenv("JERNERICS_TRACKING_HTTP_SERVER", "http://wrong-url:9999")
+        trials(project="my-project", sweep="study-1", server=mock_trials_server)
+
+        captured = capsys.readouterr()
+        assert "No trials found" in captured.out
+
+    def test_trials_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import trials
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            trials(project="my-project", sweep="study-1", server=None)
+
+        assert exc_info.value.code == 3

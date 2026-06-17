@@ -6,7 +6,7 @@ from typing import ClassVar
 from urllib.error import HTTPError, URLError
 
 import pytest
-from jernerics.tracking.http_api import list_sweeps
+from jernerics.tracking.http_api import list_sweeps, list_trials
 
 
 class MockHandler(BaseHTTPRequestHandler):
@@ -21,25 +21,24 @@ class MockHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path != "/api/sweeps":
-            self.send_error(404, "Not Found")
-            return
+        if self.path == "/api/sweeps" or self.path.startswith("/api/trials"):
+            MockHandler.received_headers = dict(self.headers)
 
-        MockHandler.received_headers = dict(self.headers)
+            if MockHandler.response_status != 200:
+                self.send_response(MockHandler.response_status)
+                self.end_headers()
+                return
 
-        if MockHandler.response_status != 200:
-            self.send_response(MockHandler.response_status)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
             self.end_headers()
-            return
-
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        if MockHandler.return_invalid_json:
-            self.wfile.write(b"invalid json")
+            if MockHandler.return_invalid_json:
+                self.wfile.write(b"invalid json")
+            else:
+                response_body = json.dumps(MockHandler.response_data).encode("utf-8")
+                self.wfile.write(response_body)
         else:
-            response_body = json.dumps(MockHandler.response_data).encode("utf-8")
-            self.wfile.write(response_body)
+            self.send_error(404, "Not Found")
 
 
 @pytest.fixture
@@ -167,6 +166,149 @@ class TestListSweeps:
         MockHandler.response_data = []
 
         list_sweeps(mock_server)
+
+        assert "Accept" in MockHandler.received_headers
+        assert MockHandler.received_headers["Accept"] == "application/json"
+
+
+class TestListTrials:
+    def test_list_trials_success(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {"lr": 0.01, "batch_size": 32},
+                "final_metrics": {"accuracy": 0.95, "loss": 0.05},
+                "artifact_keys": ["model.pkl", "log.txt"],
+            }
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1")
+
+        assert len(result) == 1
+        assert result[0]["trial_id"] == 1
+        assert result[0]["status"] == "complete"
+        assert result[0]["params"] == {"lr": 0.01, "batch_size": 32}
+        assert result[0]["final_metrics"] == {"accuracy": 0.95, "loss": 0.05}
+        assert result[0]["artifact_keys"] == ["model.pkl", "log.txt"]
+
+    def test_list_trials_multiple_items(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": 1,
+                "status": "complete",
+                "params": {"lr": 0.01},
+                "final_metrics": {"accuracy": 0.95},
+                "artifact_keys": [],
+            },
+            {
+                "trial_id": 2,
+                "status": "incomplete",
+                "params": {"lr": 0.001},
+                "final_metrics": {},
+                "artifact_keys": ["log.txt"],
+            },
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1")
+
+        assert len(result) == 2
+        assert result[0]["trial_id"] == 1
+        assert result[1]["trial_id"] == 2
+
+    def test_list_trials_empty_list(self, mock_server):
+        MockHandler.response_data = []
+
+        result = list_trials(mock_server, "my-project", "study-1")
+
+        assert result == []
+
+    def test_list_trials_with_api_key(self, mock_server):
+        MockHandler.response_data = []
+
+        os.environ["JERNERICS_API_KEY"] = "test-key-123"
+        try:
+            list_trials(mock_server, "my-project", "study-1")
+        finally:
+            os.environ.pop("JERNERICS_API_KEY", None)
+
+        assert "Authorization" in MockHandler.received_headers
+        assert MockHandler.received_headers["Authorization"] == "Bearer test-key-123"
+
+    def test_list_trials_without_api_key(self, mock_server):
+        MockHandler.response_data = []
+
+        api_key = os.environ.pop("JERNERICS_API_KEY", None)
+        try:
+            list_trials(mock_server, "my-project", "study-1")
+        finally:
+            if api_key:
+                os.environ["JERNERICS_API_KEY"] = api_key
+
+        assert "Authorization" not in MockHandler.received_headers
+
+    def test_list_trials_with_limit(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": i,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+            for i in range(1, 11)
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1", limit=5)
+
+        assert len(result) == 5
+        assert result[0]["trial_id"] == 1
+        assert result[4]["trial_id"] == 5
+
+    def test_list_trials_limit_default(self, mock_server):
+        MockHandler.response_data = [
+            {
+                "trial_id": i,
+                "status": "complete",
+                "params": {},
+                "final_metrics": {},
+                "artifact_keys": [],
+            }
+            for i in range(1, 201)
+        ]
+
+        result = list_trials(mock_server, "my-project", "study-1")
+
+        assert len(result) == 100
+
+    def test_list_trials_http_error(self, mock_server):
+        MockHandler.response_status = 500
+        MockHandler.response_data = []
+
+        with pytest.raises(HTTPError) as exc_info:
+            list_trials(mock_server, "my-project", "study-1")
+
+        assert exc_info.value.code == 500
+        MockHandler.response_status = 200
+
+    def test_list_trials_unreachable_server(self):
+        with pytest.raises(URLError):
+            list_trials("http://localhost:9999", "my-project", "study-1")
+
+    def test_list_trials_invalid_json(self, mock_server):
+        MockHandler.response_data = []
+        MockHandler.response_status = 200
+        MockHandler.return_invalid_json = True
+
+        with pytest.raises(json.JSONDecodeError):
+            list_trials(mock_server, "my-project", "study-1")
+
+        MockHandler.return_invalid_json = False
+
+    def test_list_trials_sends_accept_header(self, mock_server):
+        MockHandler.response_data = []
+
+        list_trials(mock_server, "my-project", "study-1")
 
         assert "Accept" in MockHandler.received_headers
         assert MockHandler.received_headers["Accept"] == "application/json"

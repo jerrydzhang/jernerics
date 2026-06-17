@@ -1,12 +1,13 @@
 ---
-base_branch: null
-branch: null
+base_branch: main
+branch: abraxas/add-jernerics-trials-command-using-typed-endpoint
+completed_at: '2026-06-16T23:33:25.793489'
 created: '2026-06-16T22:31:08.076625'
 merge_commit_sha: null
 order: 4
 parent_id: null
 retry_count: 0
-status: open
+status: closed
 title: Add jernerics trials command using typed endpoint
 ---
 

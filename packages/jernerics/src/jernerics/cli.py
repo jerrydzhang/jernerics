@@ -511,6 +511,110 @@ def sweeps(
     Console().print(table)
 
 
+# ── trials ───────────────────────────────────────────────────────────────────
+
+
+@app.command("trials")
+def trials(
+    project: Annotated[str, typer.Option(help="Project name")],
+    sweep: Annotated[str, typer.Option(help="Sweep/study name")],
+    server: Annotated[
+        str | None,
+        typer.Option("--server", help="Tracking HTTP server URL"),
+    ] = None,
+    params: Annotated[
+        bool,
+        typer.Option("--params", help="Include param columns in human table"),
+    ] = False,
+    columns: Annotated[
+        str | None,
+        typer.Option("--columns", help="Comma-separated column projection"),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Maximum trials to show (default 100)"),
+    ] = 100,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", help="Output as JSON"),
+    ] = False,
+):
+    """List trials from the tracking HTTP server."""
+    from .tracking.http_api import list_trials
+
+    base_url = server
+    if base_url is None:
+        base_url = os.environ.get("JERNERICS_TRACKING_HTTP_SERVER")
+    if base_url is None:
+        project_dir = find_pyproject_dir()
+        if project_dir is not None:
+            base_url = load_tracking_http_server(project_dir)
+
+    if base_url is None:
+        print(
+            "Error: No tracking HTTP server URL configured. "
+            "Set --server, JERNERICS_TRACKING_HTTP_SERVER, "
+            "or tracking_http_server in pyproject.toml"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        trials_data = list_trials(base_url, project, sweep, limit=limit)
+    except (URLError, HTTPError) as e:
+        print(f"Error: Failed to fetch trials: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+    except ValueError as e:
+        print(f"Error: Invalid response from server: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(trials_data, indent=2))
+        return
+
+    if not trials_data:
+        print("No trials found.")
+        return
+
+    if columns:
+        selected_columns = [c.strip() for c in columns.split(",")]
+    else:
+        selected_columns = ["trial_id", "status"]
+        if params:
+            for trial in trials_data:
+                for param_key in trial.get("params", {}):
+                    if param_key not in selected_columns:
+                        selected_columns.append(param_key)
+        for trial in trials_data:
+            for metric_key in trial.get("final_metrics", {}):
+                if metric_key not in selected_columns:
+                    selected_columns.append(metric_key)
+        if "artifact_count" not in selected_columns:
+            selected_columns.append("artifact_count")
+
+    table = Table(show_header=True, header_style="bold")
+    for col in selected_columns:
+        table.add_column(col.upper())
+
+    for trial in trials_data:
+        row_values = []
+        for col in selected_columns:
+            if col == "trial_id":
+                row_values.append(str(trial.get("trial_id", "")))
+            elif col == "status":
+                row_values.append(trial.get("status", ""))
+            elif col == "artifact_count":
+                row_values.append(str(len(trial.get("artifact_keys", []))))
+            elif col in trial.get("params", {}):
+                row_values.append(str(trial["params"][col]))
+            elif col in trial.get("final_metrics", {}):
+                row_values.append(str(trial["final_metrics"][col]))
+            else:
+                row_values.append("")
+        table.add_row(*row_values)
+
+    Console().print(table)
+
+
 def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:
     target = project_path / filename
     if target.exists():
