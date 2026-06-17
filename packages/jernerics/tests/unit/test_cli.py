@@ -315,13 +315,15 @@ class TestSweepsCommand:
 class MockTrialsHandler(BaseHTTPRequestHandler):
     """Mock HTTP server handler for trials testing."""
 
-    response_data: ClassVar[list[dict]] = []
+    response_data: ClassVar[list[dict] | dict] = []
 
     def log_message(self, format: str, *args):
         pass
 
     def do_GET(self):
-        if self.path.startswith("/api/trials"):
+        if self.path.startswith("/api/trials") or self.path.startswith(
+            "/api/compare-sweeps"
+        ):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -548,5 +550,156 @@ class TestTrialsCommand:
             pytest.raises(SystemExit) as exc_info,
         ):
             trials(project="my-project", sweep="study-1", server=None)
+
+        assert exc_info.value.code == 3
+
+
+class TestCompareSweepsCommand:
+    def test_compare_sweeps_with_server_option(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 10,
+            "left_completed_count": 5,
+            "right_trial_count": 20,
+            "right_completed_count": 15,
+            "param_keys": {
+                "shared": ["lr", "batch_size"],
+                "left_only": ["optimizer"],
+                "right_only": ["momentum"],
+            },
+            "final_metric_keys": {
+                "shared": ["accuracy"],
+                "left_only": ["loss"],
+                "right_only": [],
+            },
+            "artifact_keys": {
+                "shared": ["model.pkl"],
+                "left_only": [],
+                "right_only": ["log.txt"],
+            },
+            "final_metric_stats": {
+                "accuracy": {
+                    "left": {"min": 0.8, "median": 0.9, "max": 0.95},
+                    "right": {"min": 0.85, "median": 0.88, "max": 0.92},
+                }
+            },
+        }
+
+        from jernerics.cli import compare_sweeps as compare_sweeps_cmd
+
+        compare_sweeps_cmd(
+            project="my-project",
+            left="study-1",
+            right="study-2",
+            server=mock_trials_server,
+        )
+
+        captured = capsys.readouterr()
+        assert "study-1" in captured.out
+        assert "study-2" in captured.out
+        assert "10" in captured.out
+        assert "20" in captured.out
+        assert "accuracy" in captured.out
+        assert "0.8" in captured.out
+
+    def test_compare_sweeps_with_json_flag(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 10,
+            "left_completed_count": 5,
+            "right_trial_count": 20,
+            "right_completed_count": 15,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        from jernerics.cli import compare_sweeps as compare_sweeps_cmd
+
+        compare_sweeps_cmd(
+            project="my-project",
+            left="study-1",
+            right="study-2",
+            server=mock_trials_server,
+            json_output=True,
+        )
+
+        captured = capsys.readouterr()
+        assert "study-1" in captured.out
+        assert "study-2" in captured.out
+        assert "left_trial_count" in captured.out
+
+    def test_compare_sweeps_displays_rich_table(self, mock_trials_server, capsys):
+        MockTrialsHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 10,
+            "left_completed_count": 5,
+            "right_trial_count": 20,
+            "right_completed_count": 15,
+            "param_keys": {
+                "shared": ["lr"],
+                "left_only": ["optimizer"],
+                "right_only": ["momentum"],
+            },
+            "final_metric_keys": {
+                "shared": ["accuracy", "loss"],
+                "left_only": [],
+                "right_only": [],
+            },
+            "artifact_keys": {
+                "shared": ["model.pkl"],
+                "left_only": [],
+                "right_only": ["log.txt"],
+            },
+            "final_metric_stats": {
+                "accuracy": {
+                    "left": {"min": 0.8, "median": 0.9, "max": 0.95},
+                    "right": {"min": 0.85, "median": 0.88, "max": 0.92},
+                },
+                "loss": {
+                    "left": {"min": 0.05, "median": 0.1, "max": 0.15},
+                    "right": {"min": 0.03, "median": 0.08, "max": 0.12},
+                },
+            },
+        }
+
+        from jernerics.cli import compare_sweeps as compare_sweeps_cmd
+
+        compare_sweeps_cmd(
+            project="my-project",
+            left="study-1",
+            right="study-2",
+            server=mock_trials_server,
+        )
+
+        captured = capsys.readouterr()
+        assert "study-1" in captured.out
+        assert "study-2" in captured.out
+        assert "Parameter Keys" in captured.out
+        assert "Final Metric Keys" in captured.out
+        assert "Artifact Keys" in captured.out
+        assert "10" in captured.out
+        assert "20" in captured.out
+        assert "accuracy" in captured.out
+        assert "loss" in captured.out
+
+    def test_compare_sweeps_no_server_url_error(self, capsys, monkeypatch, tmp_path):
+        from jernerics.cli import compare_sweeps as compare_sweeps_cmd
+
+        monkeypatch.delenv("JERNERICS_TRACKING_HTTP_SERVER", raising=False)
+
+        (tmp_path / "pyproject.toml").write_text("[tool]\n[jernerics]\n")
+
+        with (
+            patch("jernerics.cli.find_pyproject_dir", return_value=tmp_path),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            compare_sweeps_cmd(
+                project="my-project", left="study-1", right="study-2", server=None
+            )
 
         assert exc_info.value.code == 3

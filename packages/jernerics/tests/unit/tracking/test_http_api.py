@@ -6,14 +6,14 @@ from typing import ClassVar
 from urllib.error import HTTPError, URLError
 
 import pytest
-from jernerics.tracking.http_api import list_sweeps, list_trials
+from jernerics.tracking.http_api import compare_sweeps, list_sweeps, list_trials
 
 
 class MockHandler(BaseHTTPRequestHandler):
     """Mock HTTP server handler for testing."""
 
     received_headers: ClassVar[dict] = {}
-    response_data: ClassVar[list[dict]] = []
+    response_data: ClassVar[list[dict] | dict] = []
     response_status: ClassVar[int] = 200
     return_invalid_json: ClassVar[bool] = False
 
@@ -21,7 +21,11 @@ class MockHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == "/api/sweeps" or self.path.startswith("/api/trials"):
+        if (
+            self.path == "/api/sweeps"
+            or self.path.startswith("/api/trials")
+            or self.path.startswith("/api/compare-sweeps")
+        ):
             MockHandler.received_headers = dict(self.headers)
 
             if MockHandler.response_status != 200:
@@ -309,6 +313,141 @@ class TestListTrials:
         MockHandler.response_data = []
 
         list_trials(mock_server, "my-project", "study-1")
+
+        assert "Accept" in MockHandler.received_headers
+        assert MockHandler.received_headers["Accept"] == "application/json"
+
+
+class TestCompareSweeps:
+    def test_compare_sweeps_success(self, mock_server):
+        MockHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 10,
+            "left_completed_count": 5,
+            "right_trial_count": 20,
+            "right_completed_count": 15,
+            "param_keys": {
+                "shared": ["lr", "batch_size"],
+                "left_only": ["optimizer"],
+                "right_only": ["momentum"],
+            },
+            "final_metric_keys": {
+                "shared": ["accuracy"],
+                "left_only": ["loss"],
+                "right_only": [],
+            },
+            "artifact_keys": {
+                "shared": ["model.pkl"],
+                "left_only": [],
+                "right_only": ["log.txt"],
+            },
+            "final_metric_stats": {
+                "accuracy": {
+                    "left": {"min": 0.8, "median": 0.9, "max": 0.95},
+                    "right": {"min": 0.85, "median": 0.88, "max": 0.92},
+                }
+            },
+        }
+
+        result = compare_sweeps(mock_server, "my-project", "study-1", "study-2")
+
+        assert result["left"] == "study-1"
+        assert result["right"] == "study-2"
+        assert result["left_trial_count"] == 10
+        assert result["left_completed_count"] == 5
+        assert result["right_trial_count"] == 20
+        assert result["right_completed_count"] == 15
+        assert result["param_keys"]["shared"] == ["lr", "batch_size"]
+        assert result["final_metric_keys"]["shared"] == ["accuracy"]
+        assert result["artifact_keys"]["shared"] == ["model.pkl"]
+        assert "accuracy" in result["final_metric_stats"]
+
+    def test_compare_sweeps_with_api_key(self, mock_server):
+        MockHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 0,
+            "left_completed_count": 0,
+            "right_trial_count": 0,
+            "right_completed_count": 0,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        os.environ["JERNERICS_API_KEY"] = "test-key-123"
+        try:
+            compare_sweeps(mock_server, "my-project", "study-1", "study-2")
+        finally:
+            os.environ.pop("JERNERICS_API_KEY", None)
+
+        assert "Authorization" in MockHandler.received_headers
+        assert MockHandler.received_headers["Authorization"] == "Bearer test-key-123"
+
+    def test_compare_sweeps_without_api_key(self, mock_server):
+        MockHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 0,
+            "left_completed_count": 0,
+            "right_trial_count": 0,
+            "right_completed_count": 0,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        api_key = os.environ.pop("JERNERICS_API_KEY", None)
+        try:
+            compare_sweeps(mock_server, "my-project", "study-1", "study-2")
+        finally:
+            if api_key:
+                os.environ["JERNERICS_API_KEY"] = api_key
+
+        assert "Authorization" not in MockHandler.received_headers
+
+    def test_compare_sweeps_http_error(self, mock_server):
+        MockHandler.response_status = 404
+        MockHandler.response_data = {}
+
+        with pytest.raises(HTTPError) as exc_info:
+            compare_sweeps(mock_server, "my-project", "study-1", "study-2")
+
+        assert exc_info.value.code == 404
+        MockHandler.response_status = 200
+
+    def test_compare_sweeps_unreachable_server(self):
+        with pytest.raises(URLError):
+            compare_sweeps("http://localhost:9999", "my-project", "study-1", "study-2")
+
+    def test_compare_sweeps_invalid_json(self, mock_server):
+        MockHandler.response_data = {}
+        MockHandler.response_status = 200
+        MockHandler.return_invalid_json = True
+
+        with pytest.raises(json.JSONDecodeError):
+            compare_sweeps(mock_server, "my-project", "study-1", "study-2")
+
+        MockHandler.return_invalid_json = False
+
+    def test_compare_sweeps_sends_accept_header(self, mock_server):
+        MockHandler.response_data = {
+            "left": "study-1",
+            "right": "study-2",
+            "left_trial_count": 0,
+            "left_completed_count": 0,
+            "right_trial_count": 0,
+            "right_completed_count": 0,
+            "param_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_keys": {"shared": [], "left_only": [], "right_only": []},
+            "artifact_keys": {"shared": [], "left_only": [], "right_only": []},
+            "final_metric_stats": {},
+        }
+
+        compare_sweeps(mock_server, "my-project", "study-1", "study-2")
 
         assert "Accept" in MockHandler.received_headers
         assert MockHandler.received_headers["Accept"] == "application/json"
