@@ -1,9 +1,9 @@
 ---
 base_branch: main
-branch: abraxas/add-compare-sweeps-cli-command
+branch: null
 completed_at: '2026-06-17T00:02:52.791994'
 created: '2026-06-16T22:31:12.182809'
-merge_commit_sha: null
+merge_commit_sha: 621dc6dfd5a3268abe825a606e512cd278a6ae54
 order: 6
 parent_id: null
 retry_count: 0
