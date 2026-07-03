@@ -53,8 +53,8 @@ trigger the heartbeat-based retry path.
 After a sweep completes, the post-hook runs:
 
 1. **Retry check** — detect stale heartbeats, submit retry job if needed
-2. **Tracking replay** — sync local tracking data to the gRPC server
-3. **Artifact sync** — upload artifacts to S3 storage
+2. **Tracking replay** — replay local JSONL events to the HTTP tracking server
+3. **Artifact sync** — upload artifacts to the tracking server's disk
 
 If a retry job is submitted, the post-hook returns early. The retry
 job will run its own post-hook when it completes.

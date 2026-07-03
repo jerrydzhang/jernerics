@@ -1,6 +1,6 @@
 # Jernerics
 
-DAG-based experiment runner with multi-backend execution, hyperparameter sweeps, and tracking. Define tasks with dependencies, sweep over configs with Optuna, and run locally or on Slurm/Pueue clusters — without code changes.
+Experiment runner with multi-backend execution, hyperparameter sweeps, and tracking. Author a `trial(config, tracker)` function, sweep over configs with Optuna, and run locally or on Slurm/Pueue clusters — without code changes.
 
 ## Installation
 
@@ -25,32 +25,21 @@ cd my-project
 
 Creates `pyproject.toml`, `container.def`, `Dockerfile`, and `src/`.
 
-### 2. Define your DAG
+### 2. Define your trial
 
-`dag.py`:
+`trial.py`:
 
 ```python
-from jernerics.dag import DAG, task
-
-with DAG() as dag:
-
-    @task
-    def load_data(config):
-        data = ...
-        return {"data": data, "n_samples": len(data)}
-
-    @task(depends_on=[load_data])
-    def train(load_data, config):
-        model = ...
-        return {"loss": 0.05, "model_path": "model.pt"}
-
-    @task(depends_on=[train])
-    def evaluate(train, config):
-        accuracy = 1.0 - train["loss"]
-        return {"accuracy": accuracy}
+def trial(config, tracker):
+    data = load_data(config["seed"])
+    model = train(data, lr=config["lr"])
+    accuracy = evaluate(model)
+    tracker.log_metric("accuracy", accuracy)
+    tracker.log_artifact("model", "model.pt")
+    return {"loss": 1.0 - accuracy}
 ```
 
-Dependencies are injected by parameter name. `config` is always available and contains the current hyperparameters. Return dicts to pass data between tasks.
+`config` holds the current hyperparameters (`base` merged with sampled `search_space`). Use `tracker.log_metric` / `log_param` / `log_result` / `log_artifact` to record what matters. Return a dict; the `objective` lambda reads it.
 
 ### 3. Create a config
 
@@ -68,7 +57,7 @@ def search_space(trial):
     }
 
 n_trials = 50
-objective = lambda results: results["evaluate"]["loss"]
+objective = lambda results: results["loss"]
 direction = "minimize"
 
 backend_overrides = {
@@ -82,32 +71,30 @@ For a single run without sweeps, omit `search_space` and set `n_trials = 1`.
 
 ```bash
 # Local test first
-jernerics local dag.py config.py
+jernerics local trial.py config.py
 
 # Then on a backend
-jernerics run --backend hpc dag.py config.py
+jernerics run --backend hpc trial.py config.py
 ```
 
 ## Concepts
 
-- **DAG** — A directed acyclic graph of tasks. Tasks without dependencies run in parallel.
-- **Task** — A function decorated with `@task`. Receives results from dependencies plus `config` and optional `tracker`.
-- **Sweep** — An Optuna-driven search over a `search_space` function. Each sample is a **trial**.
-- **Trial** — One execution of the full DAG with a specific set of hyperparameters.
+- **Trial** — A `trial(config, tracker)` function authored by the user. `config` is the merged hyperparameters; `tracker` records metrics/params/results/artifacts.
+- **Sweep** — An Optuna-driven search over a `search_space` function. Each sample is one trial invocation.
 - **Backend** — An execution target: local, Slurm, or Pueue. Configured in `pyproject.toml`.
-- **Tracking** — gRPC-based tracking server that streams trial metrics and artifacts.
-- **Artifact storage** — S3-compatible object storage (MinIO) for trial artifacts.
+- **Tracking** — An HTTP tracking server that ingests trial events (JSONL over HTTP) and serves them via a SQL `/query` endpoint. Live metrics stream during the run; a final replay guarantees delivery.
+- **Artifact storage** — Artifact files served from the tracking server's disk over HTTP.
 - **Retry** — Heartbeat-based failure detection with automatic resubmission for node deaths.
 
 ## CLI reference
 
 | Command | Description |
 |---------|-------------|
-| `jernerics init [dir]` | Create project scaffolding (`--starter`, `--force`) |
-| `jernerics local <dag> <config>` | Run in-process (no backend) |
-| `jernerics run --backend <name> <dag> <config>` | Submit sweep to a backend (`--set`, `--dry-run`) |
-| `jernerics build --backend <name>` | Build container on remote (`--force`, `--dry-run`) |
-| `jernerics jobs --backend <name>` | List jobs (`--all`, `--json`) |
+| `jernerics init <name>` | Scaffold a project |
+| `jernerics local <trial> <config>` | Run a sweep locally |
+| `jernerics run --backend <name> <trial> <config>` | Run on a backend |
+| `jernerics build --backend <name>` | Build the container on the remote |
+| `jernerics jobs --backend <name>` | List jobs (`--study`) |
 | `jernerics cancel --backend <name> [id]` | Cancel jobs (`--all`) |
 | `jernerics logs --backend <name> <id>` | View logs (`--follow`, `--array-index`, `--stderr`) |
 | `jernerics clean --backend <name>` | Delete remote artifacts (`--full`, `--force`) |
@@ -162,15 +149,11 @@ remote_dir = "."
 ### Environment variables
 
 ```bash
-JERNERICS_TRACKING_SERVER   # gRPC tracking server (host:port)
-JERNERICS_API_KEY           # Optional API key for gRPC auth (must match on server and client)
-AWS_ENDPOINT_URL            # S3-compatible endpoint for artifact storage
-AWS_ACCESS_KEY_ID           # S3 credentials
-AWS_SECRET_ACCESS_KEY
-JERNERICS_ARTIFACT_BUCKET   # Bucket name (default: "jernerics")
+JERNERICS_TRACKING_SERVER   # Tracking HTTP server base URL (http://host:port)
+JERNERICS_API_KEY           # Optional bearer token; must match on server and client
 ```
 
-When `JERNERICS_API_KEY` is set in the server's environment, all gRPC calls must include a matching `x-api-key` header. Set the same value on the client side (it gets forwarded to remote backends automatically). If unset on the server, auth is disabled and all connections are accepted.
+When `JERNERICS_API_KEY` is set in the server's environment, all requests (`/query`, `/ingest`, `/artifact`) must include an `Authorization: Bearer <key>` header. The same value is forwarded to remote backends automatically. If unset on the server, auth is disabled and all connections are accepted. Artifacts are stored on the server's disk (configured via `--artifacts-dir`); no external object storage is required.
 
 ## Container starters
 
@@ -183,55 +166,28 @@ When `JERNERICS_API_KEY` is set in the server's environment, all gRPC calls must
 
 **Rebuild when** `pyproject.toml` dependencies or the container definition file changes. Source code is bind-mounted at runtime.
 
-## DAG authoring
+## Trial authoring
 
-### Dependency injection
-
-```python
-@task
-def step_a(config):
-    return {"result": 1}
-
-@task(depends_on=[step_a])
-def step_b(step_a, config):      # step_a["result"] available
-    return step_a["result"] + 1
-
-@task(depends_on=[step_a])
-def step_c(step_a, config):      # runs in parallel with step_b
-    return step_a["result"] * 2
-```
-
-### Tracking
-
-Inject the `Tracker` to log metrics and artifacts:
+A trial is a plain Python function. `config` holds the merged hyperparameters; `tracker` records what matters.
 
 ```python
-from jernerics.tracking.tracker import Tracker
+def trial(config, tracker):
+    model = train(lr=config["lr"], seed=config["seed"])
+    accuracy = evaluate(model)
 
-@task
-def evaluate(train, config, tracker: Tracker):
-    tracker.log_metrics({"accuracy": 0.95})
-    tracker.log_artifact("summary.txt", "/path/to/summary.txt")
-    return {"accuracy": 0.95}
+    tracker.log_metric("accuracy", accuracy, step=config["config_index"])
+    tracker.log_param("lr", config["lr"])
+    tracker.log_result("summary", {"accuracy": accuracy, "lr": config["lr"]})
+    tracker.log_artifact("model", "model.pt")
+
+    return {"loss": 1.0 - accuracy}
 ```
 
-### Serial execution
-
-For debugging with pdb:
-
-```python
-from jernerics.dag.executor import SyncRunner
-# In config.py:
-runner = SyncRunner()
-```
+The returned dict is passed to the config's `objective` lambda (e.g. `lambda results: results["loss"]`). For a long run, call `tracker.log_metric(..., step=n)` repeatedly — metrics stream live to the server.
 
 ## Features
 
-- **Tracking server** — gRPC stream of trial events (params, metrics, artifacts) to a central DuckDB-backed server.
-- **Artifact storage** — Automatic upload of logged artifacts to S3-compatible storage via manifest-based batching.
+- **Tracking server** — A single HTTP process: ingests trial events (`POST /ingest`, JSONL), serves them via SQL (`POST /query`), and serves artifact files (`GET /artifact/...`) from disk. Live metrics stream during the run; a final replay guarantees delivery.
+- **Artifact storage** — Logged artifacts upload to the tracking server's disk over HTTP and are served back the same way — no external object storage.
 - **Retry system** — Heartbeat-based staleness detection for node deaths; configurable retries with persistent failure handling.
-- **Post-hook pipeline** — After a sweep completes, automatically replays tracking data and syncs to the server.
-
-## Example
-
-See [`example/`](example/) for a complete end-to-end setup with multiple backends, GPU detection, and retry configurations.
+- **Post-hook pipeline** — After a sweep completes, automatically replays tracking data and syncs artifacts to the server.

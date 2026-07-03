@@ -25,8 +25,8 @@ All commands run from repo root inside the nix devShell (`nix develop`).
 # Test
 just test                                       # All tests
 just test-unit                                  # Unit tests only
-pytest tests/unit/dag/test_task.py              # Specific file
-pytest tests/unit/dag/test_task.py::TestTaskDecorator::test_task_decorator_returns_task  # Single test
+pytest packages/jernerics/tests/unit/tracking/test_tracker.py  # Specific file
+pytest packages/jernerics/tests/unit/tracking/test_tracker.py::TestLogParam::test_float  # Single test
 pytest -x                                       # Stop on first failure
 
 # Lint & format (must pass before committing)
@@ -48,9 +48,8 @@ uv workspace monorepo at repo root:
 
 ```
 packages/
-  jernerics-proto/       # Proto schema + generated code (pb2, pb2_grpc)
-  jernerics/             # Client library (backend, DAG, CLI, tracking)
-  jernerics-server/      # gRPC service, DuckDB store, dashboard
+  jernerics/             # Client library (backend, CLI, tracking, runner)
+  jernerics-server/      # HTTP tracking server (SQLite store, /query, /ingest, /artifact)
 ```
 
 Source layout inside `packages/jernerics/`:
@@ -64,7 +63,7 @@ src/jernerics/
   post_hook.py           # Post-sweep hook (replay tracking, sync to server)
   retry.py               # Retry orchestration logic
   retry_checker.py       # Heartbeat staleness detection
-  dag/                   # DAG executor, task decorator
+  dag/                   # (removed — trials are now plain trial(config, tracker) functions)
   backend/               # Multi-backend execution
     adapter.py           # SchedulerAdapter protocol + SweepSubmissionParams
     backend.py           # Backend class (orchestrator: host + container + adapter)
@@ -84,8 +83,8 @@ src/jernerics/
       adapter.py         # PueueAdapter (pueue + Docker/Apptainer/none)
   container/
     templates.py         # Container definition templates (.def and Dockerfile)
-  tracking/              # Protobuf tracker, wire format, gRPC sync client, replay
-                         # Also: artifact_manifest, artifact_uploader, infra, trial_environment
+  tracking/              # JSONL tracker, HTTP ship client, replay, artifact upload/manifest
+                         # Also: infra, trial_environment, envelope (TypedDicts)
 tests/
   unit/                  # Mirrors src/ structure
 ```
@@ -165,10 +164,4 @@ When `just typecheck` (or `ty`) reports errors, fix the underlying type issues. 
 
 ## Packages
 
-Proto regeneration (from repo root):
-
-```bash
-just proto
-```
-
-Generated protobuf files are excluded from ruff via `extend-exclude` in root `pyproject.toml`. Do not add `# noqa` or `# type: ignore` to generated files.
+The `jernerics-proto` package and gRPC/protobuf transport were removed. Tracking is now JSONL over HTTP (see `packages/jernerics/src/jernerics/tracking/envelope.py` for the envelope shape). The `just proto` recipe is gone.

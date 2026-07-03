@@ -1,6 +1,6 @@
 # Jernerics
 
-A toolkit for running hyperparameter sweeps over DAG-structured ML experiments across multiple execution backends (local, Slurm, Pueue).
+A toolkit for running hyperparameter sweeps over ML experiments across multiple execution backends (local, Slurm, Pueue). Each experiment is authored as a plain `trial(config, tracker)` function.
 
 ## Language
 
@@ -9,17 +9,10 @@ A single hyperparameter search — defines a search space, a number of trials, a
 _Avoid_: study (Optuna-internal term, not user-facing)
 
 **Trial**:
-A single run within a sweep. Executes the full DAG with one parameter combination drawn from the search space.
-
-**Task**:
-A node in a DAG — a Python function decorated with `@task`, with declared dependencies on other tasks.
-
-**DAG**:
-A directed acyclic graph of tasks, defined in a Python file. The unit of work executed per trial.
+A single run within a sweep. One invocation of the user's `trial(config, tracker)` function with a specific parameter combination drawn from the search space.
 
 **Backend**:
 A scheduler-backed execution environment that runs sweeps. Slurm and Pueue are the two backend types. Composed from an Orchestrator, a Scheduler Adapter, and a ProjectSync.
-_Avoid_: executor, runner (those refer to the DAG executor, not the backend)
 
 **Local runner**:
 The in-process trial runner invoked by `jernerics local`. Not a backend — has no host, no container, no scheduler. Used for debugging and iteration.
@@ -31,7 +24,7 @@ _Avoid_: prepare_and_submit (implementation name), stage, launch
 
 **Job**:
 A single unit of work submitted to a scheduler backend. One sweep may produce multiple jobs (e.g. the array job + checker job on Slurm). Meaningful only for scheduler backends — Local runs directly.
-_Avoid_: task (that's a DAG node)
+_Avoid_: trial (that's the user's function, not a scheduler unit)
 
 **Project**:
 The user's codebase being experimented on. Identified by the nearest `pyproject.toml` with a `[tool.jernerics]` section.
@@ -60,26 +53,26 @@ _Avoid_: template (implies variable substitution)
 The interface (`Tracker` protocol) for logging params, metrics, results, and artifacts during a trial.
 
 **Envelope**:
-A single tracked event (param, metric, result, artifact, or trial_end). Serialized as delimited protobuf.
+A single tracked event (param, metric, result, artifact, or trial_end). One JSON object per line in the local JSONL buffer; POSTed to the server's `/ingest` endpoint.
 
 **Stream**:
-The real-time path: ProtobufTracker writes envelopes to a local `.pb` file, and a streaming client forwards them to the gRPC server while the trial is running.
+The live path: the tracker appends each envelope to a local `.jsonl` file, and a ship client tails it and POSTs each envelope to the server's `/ingest` endpoint while the trial is running — so metrics appear live.
 _Avoid_: sync (ambiguous with the CLI command / replay path)
 
 **Replay**:
-The batch path: after trials finish, orphaned `.pb` files on the remote are replayed to the gRPC server via SSH. Triggered by the `sync` CLI command.
+The batch path: after trials finish, any `.jsonl` files not fully shipped live are replayed to the server via HTTP POST. Triggered by the `sync` CLI command and the post-hook. Ingest is idempotent (`INSERT OR IGNORE` on a unique seq), so live + replay overlapping is safe.
 
 **Query endpoint**:
-An HTTP endpoint on the tracking server that accepts SQL and returns JSON rows. The thin interface between analytical clients (dashboard, notebooks) and the DuckDB store. Transport is swappable (future: Arrow Flight) as long as the interface stays stateless.
+An HTTP endpoint (`POST /query`) on the tracking server that accepts read-only SQL and returns JSON rows. The thin interface between analytical clients (notebooks, ad-hoc tools) and the SQLite store.
 
 **Dashboard**:
-A React SPA that renders sweep comparison views using ECharts with a base16-derived theme. Lives in a separate repo (`jernerics-dashboard`). Currently set aside — not wired into the tracking server, and no longer shipped via a `dashboardPackage` option in the NixOS module. Will be revisited once the observability read-surface is redesigned off real need.
+A React SPA that renders sweep comparison views. Lives in a separate repo (`jernerics-dashboard`). Currently set aside — not wired into the tracking server, and no longer shipped via a `dashboardPackage` option in the NixOS module. Will be revisited once the observability read-surface is redesigned off real need.
 
 **Tracking server**:
-A single process running gRPC ingestion, HTTP query endpoint, and static file serving for the dashboard. Owns the DuckDB file exclusively — all reads go through the HTTP query endpoint. Authenticated via API key in gRPC metadata / HTTP header. Proxies artifact downloads from MinIO — single URL, single auth point.
+A single HTTP process. Ingests trial events (`POST /ingest`), serves them via SQL (`POST /query`), and serves/stores artifact files (`GET`/`POST /artifact/...`) on its own disk. Owns the SQLite file exclusively. Authenticated via a bearer API key in the `Authorization` header. No external object storage — artifacts live on the server's disk.
 
 **Funnel vs tailnet**:
-All gRPC traffic (ingestion from HPC, replay from post-hook, streaming from local runs) goes through the Tailscale funnel URL with TLS. The dashboard, HTTP query endpoint, and artifact proxy listen on a separate port not exposed via funnel — tailnet-only, accessible only from personal devices. API key auth applies everywhere regardless.
+All HTTP traffic (ingestion from HPC, replay from post-hook, live streaming from local runs) goes through the Tailscale funnel URL with TLS. The query and artifact endpoints listen on the same process — tailnet-only, accessible only from personal devices. API key auth applies everywhere regardless.
 
 **Heartbeat**:
 A file touched periodically by a running trial. Used to detect stale (presumably dead) trials. Exists under `heartbeats/<trial_number>.heartbeat`.
@@ -97,7 +90,7 @@ The shared layer that composes host + container runtime + path resolver + projec
 _Avoid_: orchestration (that's the module name, not the concept)
 
 **Post-hook**:
-The process that runs on the remote after all trials finish. Currently performs retry detection and resubmission. Will expand to include optuna sync and artifact upload. Generalizing the checker into an extensible post-sweep pipeline.
+The process that runs on the remote after all trials finish. Performs retry detection/resubmission, uploads the optuna journal, replays tracking events, and syncs artifacts to the server.
 _Avoid_: checker (that's the current implementation name — it will grow beyond checking)
 
 ## Relationships
@@ -106,14 +99,12 @@ _Avoid_: checker (that's the current implementation name — it will grow beyond
 
 - A **Project** has many **Sweeps**.
 - A **Sweep** has many **Trials**.
-- Each **Trial** executes a **DAG** with a specific parameter combination.
-- A **DAG** contains **Tasks** with declared dependencies.
-- A **DAG Runner** executes tasks within a DAG (sync or thread-pool).
-- The **Runner script** (`runner.py`) is invoked inside the execution environment to run a single trial — it loads the Optuna study, executes the DAG, and handles tracking.
+- Each **Trial** is one invocation of the user's `trial(config, tracker)` function with a specific parameter combination.
+- The **Runner script** (`runner.py`) is invoked inside the execution environment to run a single trial — it loads the Optuna study, calls `trial(config, tracker)`, and handles tracking.
 - An **Orchestrator** composes the deploy sequence. It builds command strings and delegates scheduling to a **Scheduler Adapter**.
 - A **Scheduler Adapter** receives pre-wrapped command strings (setup, trial, post-hook) and decides how to compose them on its scheduler (e.g. Slurm uses `--dependency`, Pueue uses inline `wait`).
 - A **Deploy** (sync → build → submit) sends a **Sweep** to a **Backend** via the **Orchestrator**.
-- A **Post-hook** runs after all trials finish. Currently implements retry. Will expand to optuna sync and artifact upload.
+- A **Post-hook** runs after all trials finish: retry detection, optuna journal upload, tracking replay, and artifact sync.
 - Heartbeat and retry are separate subsystems — heartbeat detects staleness, retry acts on it — but they belong to the same domain (auto-retry).
 
 **Container runtime**:
