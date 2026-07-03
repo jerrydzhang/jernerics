@@ -42,7 +42,7 @@ class Apptainer:
         binds: Sequence[str],
         *,
         env: dict[str, str] | None = None,
-        fakeroot: bool = True,
+        fakeroot: bool = False,
         gpu: bool = True,
         contain: bool = True,
     ) -> str:

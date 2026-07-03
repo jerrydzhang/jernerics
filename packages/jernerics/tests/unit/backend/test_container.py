@@ -61,3 +61,18 @@ class TestNoContainerEnvPassthrough:
             env={"FOO": "bar"},
         )
         assert result == "python run.py"
+
+
+class TestApptainerFakeroot:
+    def test_exec_omits_fakeroot_by_default(self):
+        # --fakeroot forces a root-mapped user namespace that intermittently
+        # fails ("unknown userid") on clusters without /etc/subuid; exec
+        # must not use it. It belongs only on the build command.
+        container = Apptainer()
+        result = container.wrap("python run.py", ["src:/work"])
+        assert "--fakeroot" not in result
+
+    def test_fakeroot_remains_opt_in(self):
+        container = Apptainer()
+        result = container.wrap("python run.py", ["src:/work"], fakeroot=True)
+        assert "--fakeroot" in result
