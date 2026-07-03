@@ -3,10 +3,8 @@ import time
 from pathlib import Path
 from typing import Any, Protocol, Self
 
-from jernerics_proto import Envelope
-
 from .artifact_manifest import ArtifactManifest
-from .pb_io import TrackingWriter
+from .jsonl_io import TrackingWriter
 
 
 class Tracker(Protocol):
@@ -19,7 +17,7 @@ class Tracker(Protocol):
     def close(self) -> None: ...
 
 
-class ProtobufTracker:
+class JsonlTracker:
     def __init__(
         self,
         project: str,
@@ -47,51 +45,47 @@ class ProtobufTracker:
         self._seq += 1
         return seq
 
-    def _make_envelope(self) -> Envelope:
-        return Envelope(
-            project=self.project,
-            study_name=self.study_name,
-            trial_id=self.trial_id,
-            timestamp_ns=time.time_ns(),
-            seq=self._next_seq(),
-        )
+    def _make_envelope(self) -> dict:
+        return {
+            "project": self.project,
+            "study_name": self.study_name,
+            "trial_id": self.trial_id,
+            "timestamp_ns": time.time_ns(),
+            "seq": self._next_seq(),
+        }
 
     def log_param(self, key: str, value: bool | float | str) -> None:
         env = self._make_envelope()
-        env.param.key = key
         if isinstance(value, bool):
-            env.param.value.bool_val = value
+            typed = {"bool_val": value}
         elif isinstance(value, int):
-            env.param.value.int_val = value
+            typed = {"int_val": value}
         elif isinstance(value, float):
-            env.param.value.float_val = value
+            typed = {"float_val": value}
         elif isinstance(value, str):
-            env.param.value.string_val = value
+            typed = {"string_val": value}
         else:
             raise TypeError(f"Unsupported parameter value type: {type(value)}")
 
+        env["param"] = {"key": key, "value": typed}
         self.writer.write_envelope(env)
 
     def log_metric(self, key: str, value: float, step: int | None = None) -> None:
         env = self._make_envelope()
-        env.metric.key = key
-        env.metric.value = value
-        env.metric.step = step if step is not None else -1
-
+        metric: dict[str, Any] = {"key": key, "value": value}
+        if step is not None:
+            metric["step"] = step
+        env["metric"] = metric
         self.writer.write_envelope(env)
 
     def log_result(self, key: str, value: Any) -> None:
         env = self._make_envelope()
-        env.result.key = key
-        env.result.value = json.dumps(value)
-
+        env["result"] = {"key": key, "value": json.dumps(value)}
         self.writer.write_envelope(env)
 
     def log_artifact(self, key: str, local_path: str) -> None:
         env = self._make_envelope()
-        env.artifact.key = key
-        env.artifact.filename = Path(local_path).name
-
+        env["artifact"] = {"key": key, "filename": Path(local_path).name}
         self.writer.write_envelope(env)
 
         if self._manifest:
@@ -99,7 +93,7 @@ class ProtobufTracker:
 
     def close(self) -> None:
         env = self._make_envelope()
-        env.trial_end.SetInParent()
+        env["trial_end"] = {}
         self.writer.write_envelope(env)
         self.writer.close()
 

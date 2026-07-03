@@ -5,22 +5,15 @@ import pytest
 from jernerics.backend.local_backend import LocalBackend
 from jernerics.backend.models import SweepSubmission
 from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
+from jernerics.tracking.infra import resolve_artifact_storage
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 STUDY_NAME = "test-sweep"
 
 
-def _write_dag(path, body, tracker_param=""):
-    """Write a minimal DAG file with a single train task.
-
-    tracker_param: set to ", tracker" to inject the tracker into the task.
-    """
-    path.write_text(
-        "from jernerics.dag import task\n\n"
-        "@task\n"
-        f"def train(config{tracker_param}):\n"
-        f"    {body}\n"
-    )
+def _write_trial(path, body):
+    """Write a minimal trial file defining ``trial(config, tracker)``."""
+    path.write_text(f"def trial(config, tracker):\n    {body}\n")
 
 
 def _write_config(path, base=None, n_trials=2, objective_expr=None):
@@ -32,11 +25,11 @@ def _write_config(path, base=None, n_trials=2, objective_expr=None):
     path.write_text("\n".join(lines) + "\n")
 
 
-def _make_spec(tmp_path, dag_file, config_file, n_trials=2):
+def _make_spec(tmp_path, trial_file, config_file, n_trials=2):
     journal_dir = tmp_path / "optuna"
     journal_dir.mkdir(exist_ok=True)
     return SweepSubmission(
-        dag_path=dag_file,
+        trial_path=trial_file,
         config_path=config_file,
         study_name=STUDY_NAME,
         storage_url=str(journal_dir / f"{STUDY_NAME}.journal"),
@@ -47,13 +40,13 @@ def _make_spec(tmp_path, dag_file, config_file, n_trials=2):
 
 class TestBasicSweep:
     def test_optuna_study_has_correct_trials_and_objectives(self, tmp_path):
-        dag_file = tmp_path / "dag.py"
+        trial_file = tmp_path / "trial.py"
         config_file = tmp_path / "config.py"
 
-        _write_dag(dag_file, 'return {"loss": config["lr"] * 2}')
-        _write_config(config_file, objective_expr='results["train"]["loss"]')
+        _write_trial(trial_file, 'return {"loss": config["lr"] * 2}')
+        _write_config(config_file, objective_expr='results["loss"]')
 
-        spec = _make_spec(tmp_path, dag_file, config_file, n_trials=2)
+        spec = _make_spec(tmp_path, trial_file, config_file, n_trials=2)
         backend = LocalBackend()
         result = backend.submit_sweep(spec)
 
@@ -68,96 +61,79 @@ class TestBasicSweep:
 
 
 class TestArtifactRoundTrip:
-    def test_artifacts_uploaded_to_s3_with_correct_keys(self, tmp_path, monkeypatch):
-        import boto3
-        from moto import mock_aws
-
-        monkeypatch.delenv("AWS_ENDPOINT_URL", raising=False)
+    def test_artifacts_uploaded_and_served_over_http(self, tmp_path, http_server):
+        base_url, _db_path = http_server
 
         artifact_dir = tmp_path / "artifact_data"
         artifact_dir.mkdir()
 
-        dag_file = tmp_path / "dag.py"
+        trial_file = tmp_path / "trial.py"
         config_file = tmp_path / "config.py"
 
-        _write_dag(
-            dag_file,
+        _write_trial(
+            trial_file,
             "import os\n"
             '    path = os.path.join(config["artifact_dir"], "model.txt")\n'
             '    with open(path, "w") as f:\n'
             '        f.write("model data")\n'
             "    tracker.log_artifact('model', path)\n"
             '    return {"loss": config["lr"] * 2}',
-            tracker_param=", tracker",
         )
         _write_config(
             config_file,
             base={"lr": 0.01, "artifact_dir": str(artifact_dir)},
             n_trials=2,
-            objective_expr='results["train"]["loss"]',
+            objective_expr='results["loss"]',
         )
 
-        spec = _make_spec(tmp_path, dag_file, config_file, n_trials=2)
+        spec = _make_spec(tmp_path, trial_file, config_file, n_trials=2)
         backend = LocalBackend()
         backend.submit_sweep(spec)
 
-        with mock_aws():
-            s3 = boto3.client("s3", region_name="us-east-1")
-            bucket = "test-artifacts"
-            s3.create_bucket(Bucket=bucket)
+        upload_fn = resolve_artifact_storage(base_url)
+        assert upload_fn is not None
+        sync_artifacts(
+            tracking_dir=tmp_path / "tracking",
+            upload_fn=upload_fn,
+            project="test-project",
+            study=STUDY_NAME,
+        )
 
-            def upload_file(s3_key, local_path):
-                s3.upload_file(local_path, bucket, s3_key)
+        import httpx
 
-            sync_artifacts(
-                tracking_dir=tmp_path / "tracking",
-                upload_fn=upload_file,
-                project="test-project",
-                study=STUDY_NAME,
-            )
-
-            objects = s3.list_objects_v2(Bucket=bucket)
-            keys = sorted(obj["Key"] for obj in objects["Contents"])
-            assert keys == [
-                "test-project/test-sweep/0/model",
-                "test-project/test-sweep/1/model",
-            ]
-
-            body = (
-                s3.get_object(Bucket=bucket, Key="test-project/test-sweep/0/model")[
-                    "Body"
-                ]
-                .read()
-                .decode()
-            )
-            assert body == "model data"
+        for trial_id in (0, 1):
+            key = f"test-project/{STUDY_NAME}/{trial_id}/model"
+            resp = httpx.get(f"{base_url}/artifact/{key}")
+            assert resp.status_code == 200
+            assert resp.text == "model data"
 
 
 class TestTrackingReplayRoundTrip:
-    def test_replay_sends_all_event_types_to_sqlite(self, tmp_path, grpc_server):
-        stub, db_path, _ = grpc_server
+    def test_replay_sends_all_event_types_to_sqlite(self, tmp_path, http_server):
+        base_url, db_path = http_server
 
-        dag_file = tmp_path / "dag.py"
+        trial_file = tmp_path / "trial.py"
         config_file = tmp_path / "config.py"
 
-        _write_dag(
-            dag_file,
+        _write_trial(
+            trial_file,
             'lr = config["lr"]\n'
             "    tracker.log_param('lr', lr)\n"
             "    tracker.log_metric('loss', lr * 2, step=1)\n"
             "    tracker.log_result('summary', {'accuracy': 0.95})\n"
             '    return {"loss": lr * 2}',
-            tracker_param=", tracker",
         )
-        _write_config(config_file, objective_expr='results["train"]["loss"]')
+        _write_config(config_file, objective_expr='results["loss"]')
 
-        spec = _make_spec(tmp_path, dag_file, config_file, n_trials=2)
+        spec = _make_spec(tmp_path, trial_file, config_file, n_trials=2)
         backend = LocalBackend()
         backend.submit_sweep(spec)
 
-        # Replay .pb files to gRPC server
+        # Replay .jsonl files to HTTP server
         tracking_parent = (tmp_path / "tracking" / STUDY_NAME).parent
-        replay_tracking(tracking_dir=tracking_parent, stub=stub, study=STUDY_NAME)
+        replay_tracking(
+            tracking_dir=tracking_parent, base_url=base_url, study=STUDY_NAME
+        )
 
         # Verify all event types in SQLite
         con = sqlite3.connect(str(db_path))
@@ -170,13 +146,13 @@ class TestTrackingReplayRoundTrip:
 
 class TestSweepFailure:
     def test_failed_trial_raises_runtime_error(self, tmp_path):
-        dag_file = tmp_path / "dag.py"
+        trial_file = tmp_path / "trial.py"
         config_file = tmp_path / "config.py"
 
-        _write_dag(dag_file, 'raise ValueError("boom")')
+        _write_trial(trial_file, 'raise ValueError("boom")')
         _write_config(config_file, n_trials=1)
 
-        spec = _make_spec(tmp_path, dag_file, config_file, n_trials=1)
+        spec = _make_spec(tmp_path, trial_file, config_file, n_trials=1)
         backend = LocalBackend()
 
         with pytest.raises(RuntimeError, match="One or more trials failed"):

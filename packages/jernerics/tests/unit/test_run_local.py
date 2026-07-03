@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from jernerics.config import SweepConfig
 
@@ -7,14 +7,14 @@ class TestLocalBackendPostHook:
     @patch("jernerics.backend.local_backend.sync_artifacts")
     @patch("jernerics.backend.local_backend.replay_tracking")
     @patch("jernerics.backend.local_backend.resolve_artifact_storage")
-    @patch("jernerics.backend.local_backend.resolve_streaming")
+    @patch("jernerics.backend.local_backend.resolve_tracking_ship")
     @patch("jernerics.backend.local_backend.run_trial")
     @patch("jernerics.backend.local_backend.cache_dir")
     def test_calls_sync_after_trials(
         self,
         mock_cache_dir,
         mock_run_trial,
-        mock_resolve_streaming,
+        mock_resolve_tracking_ship,
         mock_resolve_artifacts,
         mock_replay,
         mock_sync_artifacts,
@@ -30,16 +30,16 @@ class TestLocalBackendPostHook:
         (tmp_path / "tracking" / "mystudy" / "artifacts").mkdir(parents=True)
         (tmp_path / "tracking" / "mystudy" / "heartbeats").mkdir(parents=True)
 
-        mock_resolve_streaming.return_value = (
-            MagicMock(),
-            MagicMock(),
-        )  # (channel, stub)
+        mock_resolve_tracking_ship.return_value = (
+            "http://localhost:8000",
+            None,
+        )  # (base_url, api_key)
         mock_resolve_artifacts.return_value = lambda *a: None  # truthy upload_fn
 
         backend = LocalBackend(tracking_server="localhost:50051")
         storage_path = str(tmp_path / "optuna" / "mystudy.journal")
         spec = SweepSubmission(
-            dag_path=tmp_path / "dag.py",
+            trial_path=tmp_path / "trial.py",
             config_path=tmp_path / "config.py",
             study_name="mystudy",
             storage_url=storage_path,
@@ -47,7 +47,7 @@ class TestLocalBackendPostHook:
             project_name="proj",
             tracking_dir=tmp_path / "tracking" / "mystudy",
         )
-        (tmp_path / "dag.py").write_text("pass")
+        (tmp_path / "trial.py").write_text("pass")
         (tmp_path / "config.py").write_text(
             "from optuna.samplers import TPESampler\n"
             "base = {}\n"
@@ -81,7 +81,7 @@ class TestLocalBackendPostHook:
         backend = LocalBackend(tracking_server=None)
         storage_path = str(tmp_path / "optuna" / "mystudy.journal")
         spec = SweepSubmission(
-            dag_path=tmp_path / "dag.py",
+            trial_path=tmp_path / "trial.py",
             config_path=tmp_path / "config.py",
             study_name="mystudy",
             storage_url=storage_path,
@@ -89,7 +89,7 @@ class TestLocalBackendPostHook:
             project_name="proj",
             tracking_dir=tmp_path / "tracking" / "mystudy",
         )
-        (tmp_path / "dag.py").write_text("pass")
+        (tmp_path / "trial.py").write_text("pass")
         (tmp_path / "config.py").write_text(
             "from optuna.samplers import TPESampler\n"
             "base = {}\n"
@@ -121,21 +121,20 @@ class TestRunLocalSingleConfig:
             sampler=None,
             direction="minimize",
             backend_overrides={},
-            runner=None,
             objective=None,
         )
         mock_cache_dir.return_value = Path(tempfile.mkdtemp())
 
         with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
             f.write(b"pass")
-            dag_path = f.name
+            trial_path = f.name
 
         try:
-            run_local(dag_path, dag_path)
+            run_local(trial_path, trial_path)
         finally:
             import os
 
-            os.unlink(dag_path)
+            os.unlink(trial_path)
 
         assert mock_run_trial.call_count == 1
 
@@ -157,20 +156,19 @@ class TestRunLocalSweep:
             sampler=None,
             direction="minimize",
             backend_overrides={},
-            runner=None,
             objective=None,
         )
         mock_cache_dir.return_value = Path(tempfile.mkdtemp())
 
         with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
             f.write(b"pass")
-            dag_path = f.name
+            trial_path = f.name
 
         try:
-            run_local(dag_path, dag_path)
+            run_local(trial_path, trial_path)
         finally:
             import os
 
-            os.unlink(dag_path)
+            os.unlink(trial_path)
 
         assert mock_run_trial.call_count == 5

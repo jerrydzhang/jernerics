@@ -52,7 +52,7 @@ def build_setup_command(
 
 def build_trial_command(
     *,
-    dag_relpath: str,
+    trial_relpath: str,
     config_relpath: str,
     study_name: str,
     storage_path: str,
@@ -67,7 +67,7 @@ def build_trial_command(
         "python",
         "-m",
         "jernerics.runner",
-        f"{work_prefix}/{dag_relpath}",
+        f"{work_prefix}/{trial_relpath}",
         f"{work_prefix}/{config_relpath}",
         "--study-name",
         study_name,
@@ -127,7 +127,7 @@ def build_sweep_commands(
     cache_host = paths.resolve_cache()
     bind_args = paths.bind_args(cache_host)
 
-    dag_relpath = spec.dag_relpath or str(spec.dag_path.name)
+    trial_relpath = spec.trial_relpath or str(spec.trial_path.name)
     config_relpath = spec.config_relpath or str(spec.config_path.name)
 
     setup_cmd = build_setup_command(
@@ -143,7 +143,7 @@ def build_sweep_commands(
 
     tracking_dir = paths.tracking_dir(spec.study_name)
     trial_cmd = build_trial_command(
-        dag_relpath=dag_relpath,
+        trial_relpath=trial_relpath,
         config_relpath=config_relpath,
         study_name=spec.study_name,
         storage_path=spec.storage_url,

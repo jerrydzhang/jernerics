@@ -69,7 +69,7 @@ def _setup_common_mocks(
     ctx = RetryContext(
         study_name="mystudy",
         backend_name="hpc",
-        dag_relpath="dag.py",
+        trial_relpath="trial.py",
         config_relpath="config.py",
         cli_overrides=cli_overrides or {},
         storage_path=storage_path,
@@ -159,8 +159,7 @@ class TestRetryCheckerArtifactEnv:
         )
 
         env_vars = {
-            "AWS_ENDPOINT_URL": "http://minio:9000",
-            "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+            "JERNERICS_API_KEY": "secret",
         }
 
         with (
@@ -259,7 +258,7 @@ class TestRetryCheckerUsesSubmitSweep:
         ctx = RetryContext(
             study_name="mystudy",
             backend_name="hpc",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             storage_path=storage_path,
             tracking_dir=str(tracking_dir),

@@ -20,7 +20,7 @@ def search_space(trial):
 
 n_trials = 6
 sampler = optuna.samplers.GridSampler(grid)
-objective = lambda results: results["evaluate"]["loss"]
+objective = lambda results: results["loss"]
 direction = "minimize"
 
 backend_overrides = {

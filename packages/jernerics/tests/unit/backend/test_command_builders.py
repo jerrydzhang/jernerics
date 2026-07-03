@@ -22,18 +22,18 @@ def _make_paths(
 
 def _make_spec(
     study_name="mystudy",
-    dag_relpath="dag.py",
+    trial_relpath="trial.py",
     config_relpath="config.py",
     n_trials=5,
     project_name="proj",
 ):
     return SweepSubmission(
-        dag_path=Path("dag.py"),
+        trial_path=Path("trial.py"),
         config_path=Path("config.py"),
         study_name=study_name,
         storage_url="sqlite:////cache/optuna/mystudy.journal",
         n_trials=n_trials,
-        dag_relpath=dag_relpath,
+        trial_relpath=trial_relpath,
         config_relpath=config_relpath,
         project_name=project_name,
     )
@@ -87,7 +87,7 @@ class TestBuildSweepCommandsBasics:
             paths=paths,
             direction="minimize",
         )
-        assert "/scratch/user/proj/dag.py" in trial
+        assert "/scratch/user/proj/trial.py" in trial
         assert "/scratch/user/proj/config.py" in trial
 
     def test_commands_use_container_paths_with_apptainer(self):
@@ -99,7 +99,7 @@ class TestBuildSweepCommandsBasics:
             paths=paths,
             direction="minimize",
         )
-        assert "/work/dag.py" in trial
+        assert "/work/trial.py" in trial
         assert "/work/config.py" in trial
 
     def test_setup_command_wrapped_by_container(self):
@@ -295,16 +295,14 @@ class TestBuildSweepCommandsEnvPassthrough:
             paths=paths,
             direction="minimize",
             artifact_env={
-                "AWS_ENDPOINT_URL": "http://minio:9000",
-                "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+                "JERNERICS_API_KEY": "secret",
             },
         )
 
         # Trial command should be wrapped with env vars
         trial_call = container.wrap.call_args_list[1]
         assert trial_call[1]["env"] == {
-            "AWS_ENDPOINT_URL": "http://minio:9000",
-            "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+            "JERNERICS_API_KEY": "secret",
         }
 
     def test_no_env_when_not_provided(self):
@@ -338,16 +336,14 @@ class TestBuildSweepCommandsEnvPassthrough:
             retry_ctx_path="/cache/retry/ctx.json",
             chain_depth=0,
             artifact_env={
-                "AWS_ENDPOINT_URL": "http://minio:9000",
-                "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+                "JERNERICS_API_KEY": "secret",
             },
         )
 
         # Post-hook wrap (3rd call) should have same env vars as trial
         post_hook_call = container.wrap.call_args_list[2]
         assert post_hook_call[1]["env"] == {
-            "AWS_ENDPOINT_URL": "http://minio:9000",
-            "JERNERICS_ARTIFACT_BUCKET": "jernerics",
+            "JERNERICS_API_KEY": "secret",
         }
 
 

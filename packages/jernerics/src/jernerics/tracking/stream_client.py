@@ -4,36 +4,41 @@ from pathlib import Path
 from queue import Queue
 from threading import Thread
 
-import grpc
-from jernerics_proto import tracking_pb2_grpc
-from jernerics_proto.tracking_pb2 import Envelope
+import httpx
 
-from .pb_io import TrackingReader
+from .jsonl_io import TrackingReader
 
 
 class StreamClient:
+    """Tails the local JSONL buffer and ships each envelope to /ingest live.
+
+    Live observability is first-class: metrics appear on the server as the
+    trial runs. The local file remains the durable source of truth; a later
+    replay (batch_sync) re-sends anything this client failed to confirm, and
+    the server's INSERT OR IGNORE makes the overlap safe.
+    """
+
     def __init__(
         self,
-        stub: tracking_pb2_grpc.TrackingServiceStub,
+        base_url: str,
         path: Path,
+        api_key: str | None = None,
         poll_interval: float = 0.5,
         flush_timeout: float = 60.0,
         send_deadline: float = 30.0,
         max_retry_time: float = 300.0,
-        api_key: str | None = None,
     ):
-        self.stub: tracking_pb2_grpc.TrackingServiceStub = stub
-        self.path: Path = path
-        self.poll_interval: float = poll_interval
-        self.flush_timeout: float = flush_timeout
-        self.send_deadline: float = send_deadline
-        self.max_retry_time: float = max_retry_time
-        self._metadata: list[tuple[str, str]] | None = (
-            [("x-api-key", api_key)] if api_key else None
-        )
+        self.base_url = base_url.rstrip("/")
+        self.path = path
+        self.api_key = api_key
+        self.poll_interval = poll_interval
+        self.flush_timeout = flush_timeout
+        self.send_deadline = send_deadline
+        self.max_retry_time = max_retry_time
+        self._headers = {"authorization": f"Bearer {api_key}"} if api_key else None
         self.producer_thread = Thread(target=self._read_file_buffer, daemon=True)
         self.consumer = Thread(target=self._consume_buffer, daemon=True)
-        self.buffer: Queue[Envelope] = Queue(maxsize=10000)
+        self.buffer: Queue[dict] = Queue(maxsize=10000)
 
     def start(self) -> None:
         self.producer_thread.start()
@@ -65,7 +70,7 @@ class StreamClient:
 
                 self.buffer.put(event)
 
-                if event.WhichOneof("payload") == "trial_end":
+                if "trial_end" in event:
                     break
 
     def _consume_buffer(self) -> None:
@@ -86,15 +91,17 @@ class StreamClient:
                     return
 
                 try:
-                    self.stub.SendEvent(
-                        event,
+                    response = httpx.post(
+                        f"{self.base_url}/ingest",
+                        json=event,
+                        headers=self._headers,
                         timeout=self.send_deadline,
-                        metadata=self._metadata,
                     )
+                    response.raise_for_status()
                     retry_count = 0
                     retry_start = time.monotonic()
                     sent = True
-                except grpc.RpcError:
+                except httpx.HTTPError:
                     print(
                         f"Failed to send event, retry {retry_count + 1} ...",
                         file=sys.stderr,
@@ -103,5 +110,5 @@ class StreamClient:
                     retry_count += 1
                     time.sleep(wait_time)
 
-            if event.WhichOneof("payload") == "trial_end":
+            if "trial_end" in event:
                 break

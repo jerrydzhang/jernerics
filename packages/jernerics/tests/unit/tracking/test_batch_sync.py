@@ -1,274 +1,285 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import grpc
+import httpx
 from jernerics.tracking.batch_sync import (
     ReplayResult,
     _replay_file,
+    discover_jsonl_files,
     discover_manifest_files,
-    discover_pb_files,
     replay_tracking,
     sync_artifacts,
 )
-from jernerics.tracking.pb_io import TrackingWriter
-from jernerics_proto import (
-    Envelope,
-    MetricEvent,
-    ParamEvent,
-    TrialEndEvent,
-    Value,
-)
+from jernerics.tracking.jsonl_io import TrackingWriter
+
+BASE_URL = "http://localhost:8000"
 
 
-class FakeRpcError(grpc.RpcError):
-    def code(self):
-        return grpc.StatusCode.UNAVAILABLE
-
-    def details(self):
-        return "test error"
-
-
-def _param_envelope(seq: int, key: str, value: float) -> Envelope:
-    return Envelope(
-        project="p",
-        study_name="s",
-        trial_id=0,
-        timestamp_ns=1000 + seq,
-        seq=seq,
-        param=ParamEvent(key=key, value=Value(float_val=value)),
-    )
+def _param_envelope(seq: int, key: str, value: float) -> dict:
+    return {
+        "project": "p",
+        "study_name": "s",
+        "trial_id": 0,
+        "timestamp_ns": 1000 + seq,
+        "seq": seq,
+        "param": {"key": key, "value": {"float_val": value}},
+    }
 
 
-def _metric_envelope(seq: int, key: str, value: float, step: int) -> Envelope:
-    return Envelope(
-        project="p",
-        study_name="s",
-        trial_id=0,
-        timestamp_ns=1000 + seq,
-        seq=seq,
-        metric=MetricEvent(key=key, value=value, step=step),
-    )
+def _metric_envelope(seq: int, key: str, value: float, step: int) -> dict:
+    return {
+        "project": "p",
+        "study_name": "s",
+        "trial_id": 0,
+        "timestamp_ns": 1000 + seq,
+        "seq": seq,
+        "metric": {"key": key, "value": value, "step": step},
+    }
 
 
-def _trial_end_envelope(seq: int) -> Envelope:
-    return Envelope(
-        project="p",
-        study_name="s",
-        trial_id=0,
-        timestamp_ns=1000 + seq,
-        seq=seq,
-        trial_end=TrialEndEvent(),
-    )
+def _trial_end_envelope(seq: int) -> dict:
+    return {
+        "project": "p",
+        "study_name": "s",
+        "trial_id": 0,
+        "timestamp_ns": 1000 + seq,
+        "seq": seq,
+        "trial_end": {},
+    }
 
 
-def _write_events(path: Path, events: list[Envelope]) -> None:
+def _write_events(path: Path, events: list[dict]) -> None:
     with TrackingWriter(path) as writer:
         for event in events:
             writer.write_envelope(event)
 
 
+def _ok_response() -> MagicMock:
+    """A mocked httpx.Response: raise_for_status is a no-op, status 200."""
+    return MagicMock(status_code=200)
+
+
 class TestReplayFileWithAuth:
-    def test_passes_metadata_to_send_event(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
-        pb_file = tmp_path / "0.pb"
-        _write_events(pb_file, [_param_envelope(0, "lr", 0.01)])
+    @patch("jernerics.tracking.batch_sync.httpx.post")
+    def test_sends_bearer_header_with_api_key(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        _write_events(events_file, [_param_envelope(0, "lr", 0.01)])
 
-        metadata = [("x-api-key", "secret")]
-        _replay_file(pb_file, mock_stub, max_retries=3, metadata=metadata)
+        result = _replay_file(events_file, BASE_URL, "secret", max_retries=3)
 
-        call_kwargs = mock_stub.SendEvent.call_args
-        assert call_kwargs.kwargs.get("metadata") == metadata
+        assert result.error is None
+        assert mock_post.call_args.kwargs["headers"] == {
+            "authorization": "Bearer secret"
+        }
 
-    def test_no_metadata_when_none(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
-        pb_file = tmp_path / "0.pb"
-        _write_events(pb_file, [_param_envelope(0, "lr", 0.01)])
+    @patch("jernerics.tracking.batch_sync.httpx.post")
+    def test_no_header_without_api_key(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        _write_events(events_file, [_param_envelope(0, "lr", 0.01)])
 
-        _replay_file(pb_file, mock_stub, max_retries=3, metadata=None)
+        result = _replay_file(events_file, BASE_URL, None, max_retries=3)
 
-        call_kwargs = mock_stub.SendEvent.call_args
-        assert call_kwargs.kwargs.get("metadata") is None
+        assert result.error is None
+        assert mock_post.call_args.kwargs["headers"] is None
 
 
-class TestDiscoverPbFiles:
+class TestDiscoverJsonlFiles:
     def test_finds_all_studies(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
         (tracking / "study_a" / "events").mkdir(parents=True)
         (tracking / "study_b" / "events").mkdir(parents=True)
-        (tracking / "study_a" / "events" / "0.pb").touch()
-        (tracking / "study_a" / "events" / "1.pb").touch()
-        (tracking / "study_b" / "events" / "0.pb").touch()
+        (tracking / "study_a" / "events" / "0.jsonl").touch()
+        (tracking / "study_a" / "events" / "1.jsonl").touch()
+        (tracking / "study_b" / "events" / "0.jsonl").touch()
 
-        result = discover_pb_files(tracking)
+        result = discover_jsonl_files(tracking)
 
         names = [p.name for p in result]
-        assert names == ["0.pb", "1.pb", "0.pb"]
+        assert names == ["0.jsonl", "1.jsonl", "0.jsonl"]
 
     def test_scopes_to_single_study(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
         (tracking / "study_a" / "events").mkdir(parents=True)
         (tracking / "study_b" / "events").mkdir(parents=True)
-        (tracking / "study_a" / "events" / "0.pb").touch()
-        (tracking / "study_b" / "events" / "0.pb").touch()
+        (tracking / "study_a" / "events" / "0.jsonl").touch()
+        (tracking / "study_b" / "events" / "0.jsonl").touch()
 
-        result = discover_pb_files(tracking, study="study_b")
+        result = discover_jsonl_files(tracking, study="study_b")
 
         assert len(result) == 1
-        assert result[0].parent.name == "events"
+        assert result[0].parent.parent.name == "study_b"
 
     def test_returns_empty_for_no_files(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
         tracking.mkdir()
 
-        result = discover_pb_files(tracking)
+        result = discover_jsonl_files(tracking)
 
         assert result == []
 
-    def test_ignores_non_pb_files(self, tmp_path: Path) -> None:
+    def test_ignores_non_jsonl_files(self, tmp_path: Path) -> None:
         tracking = tmp_path / "tracking"
         (tracking / "study_a" / "events").mkdir(parents=True)
-        (tracking / "study_a" / "events" / "0.pb").touch()
+        (tracking / "study_a" / "events" / "0.jsonl").touch()
         (tracking / "study_a" / "events" / "0.db").touch()
 
-        result = discover_pb_files(tracking)
+        result = discover_jsonl_files(tracking)
 
         assert len(result) == 1
 
 
 class TestReplayFile:
-    def test_sends_all_events(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
-        pb_file = tmp_path / "0.pb"
+    @patch("jernerics.tracking.batch_sync.httpx.post")
+    def test_sends_all_events(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
         events = [
             _param_envelope(0, "lr", 0.01),
             _metric_envelope(1, "loss", 0.5, 10),
             _trial_end_envelope(2),
         ]
-        _write_events(pb_file, events)
+        _write_events(events_file, events)
 
-        result = _replay_file(pb_file, mock_stub, max_retries=3)
+        result = _replay_file(events_file, BASE_URL, None, max_retries=3)
 
         assert result.events_sent == 3
         assert result.events_total == 3
         assert result.error is None
-        assert mock_stub.SendEvent.call_count == 3
+        assert mock_post.call_count == 3
+        for call, env in zip(mock_post.call_args_list, events, strict=False):
+            assert call.args[0] == f"{BASE_URL}/ingest"
+            assert call.kwargs["json"] == env
+            assert call.kwargs["headers"] is None
 
-    def test_retries_on_failure(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
+    @patch("jernerics.tracking.batch_sync.httpx.post")
+    def test_retries_on_failure(self, mock_post, tmp_path: Path) -> None:
         call_count = 0
 
-        def send_side_effect(_event, **_kwargs):
+        def post_side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
-                raise FakeRpcError()
+                raise httpx.ConnectError("boom")
+            return _ok_response()
 
-        mock_stub.SendEvent.side_effect = send_side_effect
+        mock_post.side_effect = post_side_effect
 
-        pb_file = tmp_path / "0.pb"
-        _write_events(pb_file, [_param_envelope(0, "lr", 0.01)])
+        events_file = tmp_path / "0.jsonl"
+        _write_events(events_file, [_param_envelope(0, "lr", 0.01)])
 
         with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
-            result = _replay_file(pb_file, mock_stub, max_retries=5)
+            result = _replay_file(events_file, BASE_URL, None, max_retries=5)
 
         assert result.events_sent == 1
         assert result.error is None
+        assert mock_post.call_count == 3
 
-    def test_records_error_on_max_retries_exceeded(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
-        mock_stub.SendEvent.side_effect = FakeRpcError()
+    @patch("jernerics.tracking.batch_sync.httpx.post")
+    def test_records_error_on_max_retries_exceeded(
+        self, mock_post, tmp_path: Path
+    ) -> None:
+        mock_post.side_effect = httpx.ConnectError("boom")
 
-        pb_file = tmp_path / "0.pb"
+        events_file = tmp_path / "0.jsonl"
         _write_events(
-            pb_file,
+            events_file,
             [_param_envelope(0, "lr", 0.01), _metric_envelope(1, "loss", 0.5, 10)],
         )
 
         with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
-            result = _replay_file(pb_file, mock_stub, max_retries=2)
+            result = _replay_file(events_file, BASE_URL, None, max_retries=2)
 
         assert result.events_sent == 0
         assert result.error is not None
         assert result.events_total == 2
 
-    def test_handles_corrupt_file(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
-        pb_file = tmp_path / "0.pb"
-        pb_file.write_bytes(b"\xff\xff\xff")
-
-        result = _replay_file(pb_file, mock_stub, max_retries=3)
-
-        assert result.error is not None
-
 
 class TestReplayTracking:
-    def test_replays_all_files(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
+    @patch("jernerics.tracking.batch_sync.httpx.post")
+    def test_replays_all_files_and_deletes_on_success(
+        self, mock_post, tmp_path: Path
+    ) -> None:
+        mock_post.return_value = _ok_response()
         tracking = tmp_path / "tracking"
         events_dir = tracking / "study_a" / "events"
         events_dir.mkdir(parents=True)
 
-        _write_events(events_dir / "0.pb", [_param_envelope(0, "lr", 0.01)])
-        _write_events(events_dir / "1.pb", [_metric_envelope(0, "loss", 0.5, 10)])
+        _write_events(events_dir / "0.jsonl", [_param_envelope(0, "lr", 0.01)])
+        _write_events(events_dir / "1.jsonl", [_metric_envelope(0, "loss", 0.5, 10)])
 
-        result = replay_tracking(tracking, mock_stub, max_workers=2, max_retries=3)
+        result = replay_tracking(tracking, BASE_URL, max_workers=2, max_retries=3)
 
         assert result.files_processed == 2
         assert result.events_sent == 2
         assert result.errors == []
-        assert not (events_dir / "0.pb").exists()
-        assert not (events_dir / "1.pb").exists()
+        assert not (events_dir / "0.jsonl").exists()
+        assert not (events_dir / "1.jsonl").exists()
 
-    def test_scopes_to_study(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
+    @patch("jernerics.tracking.batch_sync.httpx.post")
+    def test_scopes_to_study(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
         tracking = tmp_path / "tracking"
         (tracking / "study_a" / "events").mkdir(parents=True)
         (tracking / "study_b" / "events").mkdir(parents=True)
         _write_events(
-            tracking / "study_a" / "events" / "0.pb", [_param_envelope(0, "x", 1.0)]
+            tracking / "study_a" / "events" / "0.jsonl",
+            [_param_envelope(0, "x", 1.0)],
         )
         _write_events(
-            tracking / "study_b" / "events" / "0.pb", [_param_envelope(0, "y", 2.0)]
+            tracking / "study_b" / "events" / "0.jsonl",
+            [_param_envelope(0, "y", 2.0)],
         )
 
         result = replay_tracking(
-            tracking, mock_stub, study="study_b", max_workers=2, max_retries=3
+            tracking, BASE_URL, study="study_b", max_workers=2, max_retries=3
         )
 
         assert result.files_processed == 1
         assert result.events_sent == 1
-        assert not (tracking / "study_b" / "events" / "0.pb").exists()
-        assert (tracking / "study_a" / "events" / "0.pb").exists()
+        assert not (tracking / "study_b" / "events" / "0.jsonl").exists()
+        assert (tracking / "study_a" / "events" / "0.jsonl").exists()
 
     def test_returns_empty_result_for_no_files(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
         tracking = tmp_path / "tracking"
         tracking.mkdir()
 
-        result = replay_tracking(tracking, mock_stub, max_retries=3)
+        result = replay_tracking(tracking, BASE_URL, max_retries=3)
 
         assert result == ReplayResult()
         assert not result.errors
 
-    def test_records_partial_failure(self, tmp_path: Path) -> None:
+    @patch("jernerics.tracking.batch_sync.httpx.post")
+    def test_records_partial_failure_and_keeps_files(
+        self, mock_post, tmp_path: Path
+    ) -> None:
         tracking = tmp_path / "tracking"
         events_dir = tracking / "study_a" / "events"
         events_dir.mkdir(parents=True)
 
-        _write_events(events_dir / "0.pb", [_param_envelope(0, "lr", 0.01)])
+        # File 0 replays cleanly; file 1 fails every POST permanently.
+        _write_events(events_dir / "0.jsonl", [_param_envelope(0, "ok", 1.0)])
+        _write_events(events_dir / "1.jsonl", [_param_envelope(0, "fail", 2.0)])
 
-        corrupt_file = events_dir / "1.pb"
-        corrupt_file.write_bytes(b"\xff\xff\xff")
+        def post_side_effect(*args, **kwargs):
+            event = kwargs["json"]
+            if event.get("param", {}).get("key") == "fail":
+                raise httpx.ConnectError("boom")
+            return _ok_response()
 
-        mock_stub = MagicMock()
+        mock_post.side_effect = post_side_effect
 
-        result = replay_tracking(tracking, mock_stub, max_workers=2, max_retries=3)
+        with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
+            result = replay_tracking(tracking, BASE_URL, max_workers=2, max_retries=3)
 
         assert result.files_processed == 2
         assert len(result.errors) == 1
         assert result.events_sent == 1
-        assert (events_dir / "0.pb").exists()
-        assert (events_dir / "1.pb").exists()
+        # Errors present -> no files deleted.
+        assert (events_dir / "0.jsonl").exists()
+        assert (events_dir / "1.jsonl").exists()
 
 
 class TestDiscoverManifestFiles:
@@ -311,8 +322,6 @@ class TestSyncArtifacts:
 
         # Write a manifest with one entry
         manifest = artifacts_dir / "0.manifest"
-        import json
-
         manifest.write_text(
             json.dumps({"key": "model.pt", "path": "/work/m.pt"}) + "\n"
         )

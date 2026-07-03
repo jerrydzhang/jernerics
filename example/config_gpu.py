@@ -12,7 +12,7 @@ def search_space(trial):
 
 n_trials = 1
 sampler = optuna.samplers.TPESampler(seed=42)
-objective = lambda results: results["evaluate"]["loss"]
+objective = lambda results: results["loss"]
 direction = "minimize"
 
 backend_overrides = {

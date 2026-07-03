@@ -5,14 +5,13 @@ Invoked via ``python -m jernerics.post_hook`` after each sweep batch.
 
 import argparse
 import enum
-import os
 import sys
 from pathlib import Path
 
 from jernerics.retry import RetryContext
 from jernerics.retry_checker import run_checker
 from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
-from jernerics.tracking.infra import resolve_artifact_storage, resolve_streaming
+from jernerics.tracking.infra import resolve_artifact_storage, resolve_tracking_ship
 
 
 class PipelineResult(enum.Enum):
@@ -27,29 +26,28 @@ def run_pipeline(
     storage_path: str,
     *,
     upload_fn=None,
-    stub=None,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> PipelineResult:
     submitted = run_checker(ctx_path=ctx_path, chain_depth=chain_depth)
 
     if submitted:
         return PipelineResult.RETRY_SUBMITTED
 
-    if upload_fn is not None or stub is not None:
+    if upload_fn is not None or base_url is not None:
         ctx = RetryContext.from_json(Path(ctx_path).read_text())
 
     if upload_fn is not None:
         s3_key = f"{ctx.project_name}/{ctx.study_name}/optuna.journal"
         upload_fn(s3_key, storage_path)
 
-    if stub is not None:
-        api_key = os.environ.get("JERNERICS_API_KEY")
-        metadata = [("x-api-key", api_key)] if api_key else None
+    if base_url is not None:
         tracking_dir_path = Path(tracking_dir)
         replay_tracking(
             tracking_dir=tracking_dir_path.parent,
-            stub=stub,
+            base_url=base_url,
+            api_key=api_key,
             study=ctx.study_name,
-            metadata=metadata,
         )
         sync_artifacts(
             tracking_dir=tracking_dir_path.parent,
@@ -70,13 +68,14 @@ if __name__ == "__main__":
     parser.add_argument("--server-addr", default=None)
     args = parser.parse_args()
 
-    upload_fn = resolve_artifact_storage()
-
-    stub = None
+    base_url = None
+    api_key = None
     if args.server_addr:
-        streaming = resolve_streaming(args.server_addr)
-        if streaming:
-            stub = streaming[1]
+        ship = resolve_tracking_ship(args.server_addr)
+        if ship:
+            base_url, api_key = ship
+
+    upload_fn = resolve_artifact_storage(base_url)
 
     result = run_pipeline(
         ctx_path=args.context,
@@ -84,7 +83,8 @@ if __name__ == "__main__":
         tracking_dir=args.tracking_dir,
         storage_path=args.storage_path,
         upload_fn=upload_fn,
-        stub=stub,
+        base_url=base_url,
+        api_key=api_key,
     )
 
     if result == PipelineResult.RETRY_SUBMITTED:

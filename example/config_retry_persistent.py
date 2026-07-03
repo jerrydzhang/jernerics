@@ -18,7 +18,7 @@ def search_space(trial):
 
 
 n_trials = 2
-objective = lambda results: results["evaluate"]["loss"]
+objective = lambda results: results["loss"]
 direction = "minimize"
 
 backend_overrides = {

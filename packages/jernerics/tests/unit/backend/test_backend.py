@@ -47,22 +47,22 @@ def _make_backend(host=None, container=None, adapter=None, syncer=None, **overri
 
 
 def _make_spec(
-    dag_path=Path("dag.py"),
+    trial_path=Path("trial.py"),
     config_path=Path("config.py"),
     study_name="mystudy",
     storage_url="sqlite:////cache/optuna/mystudy.journal",
     n_trials=5,
-    dag_relpath="dag.py",
+    trial_relpath="trial.py",
     config_relpath="config.py",
     project_name="proj",
 ):
     return SweepSubmission(
-        dag_path=dag_path,
+        trial_path=trial_path,
         config_path=config_path,
         study_name=study_name,
         storage_url=storage_url,
         n_trials=n_trials,
-        dag_relpath=dag_relpath,
+        trial_relpath=trial_relpath,
         config_relpath=config_relpath,
         project_name=project_name,
     )

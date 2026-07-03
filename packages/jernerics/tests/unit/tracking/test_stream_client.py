@@ -1,366 +1,344 @@
-import sqlite3
 import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import grpc
-from jernerics.tracking.pb_io import TrackingWriter
+import httpx
+import pytest
+from jernerics.tracking.jsonl_io import TrackingWriter
 from jernerics.tracking.stream_client import StreamClient
-from jernerics_proto import (
-    Envelope,
-    MetricEvent,
-    ParamEvent,
-    TrialEndEvent,
-    Value,
-    tracking_pb2,
-    tracking_pb2_grpc,
-)
+
+BASE_URL = "http://localhost:8000"
 
 
-class TestGrpcChannelKeepalive:
-    @patch("jernerics.tracking.grpc_channel.grpc.insecure_channel")
-    def test_insecure_channel_has_keepalive_options(self, mock_insecure):
-        from jernerics.tracking.grpc_channel import grpc_channel
-
-        grpc_channel("localhost:50051")
-        kwargs = mock_insecure.call_args[1]
-        options = kwargs.get("options")
-        assert options is not None
-        opt_dict = {k: v for k, v in options}
-        assert "grpc.keepalive_time_ms" in opt_dict
-
-    @patch("jernerics.tracking.grpc_channel.grpc.secure_channel")
-    def test_secure_channel_has_keepalive_options(self, mock_secure):
-        from jernerics.tracking.grpc_channel import grpc_channel
-
-        grpc_channel("server.example.com:443")
-        kwargs = mock_secure.call_args[1]
-        options = kwargs.get("options")
-        assert options is not None
-        opt_dict = {k: v for k, v in options}
-        assert "grpc.keepalive_time_ms" in opt_dict
+def _param_envelope(seq: int, key: str, value: float) -> dict:
+    return {
+        "project": "p",
+        "study_name": "s",
+        "trial_id": 0,
+        "timestamp_ns": 1000 + seq,
+        "seq": seq,
+        "param": {"key": key, "value": {"float_val": value}},
+    }
 
 
-class TestApiKeyAuth:
-    def test_stream_client_authenticates_with_server(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        api_key = "test-key"
-        server = _start_server(tmp_path / "test.sqlite", api_key=api_key)
-        stub = _make_stub()
-        pb_file = tmp_path / "0.pb"
-
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
-
-        client = StreamClient(
-            stub, pb_file, poll_interval=0.05, flush_timeout=5.0, api_key=api_key
-        )
-        client.start()
-        client.join()
-        server.stop(grace=0)
-
-        con = sqlite3.connect(str(tmp_path / "test.sqlite"))
-        assert _count(con, "params") == 1
-        con.close()
-
-    def test_stream_client_without_key_against_auth_server_fails(
-        self, tmp_path: Path
-    ) -> None:
-        api_key = "test-key"
-        server = _start_server(tmp_path / "test.sqlite", api_key=api_key)
-        stub = _make_stub()
-        pb_file = tmp_path / "0.pb"
-
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
-
-        client = StreamClient(
-            stub, pb_file, poll_interval=0.01, flush_timeout=2.0, max_retry_time=0.5
-        )
-        client.start()
-        client.join()
-        server.stop(grace=0)
-
-        con = sqlite3.connect(str(tmp_path / "test.sqlite"))
-        assert _count(con, "params") == 0
-        con.close()
+def _metric_envelope(seq: int, key: str, value: float, step: int) -> dict:
+    return {
+        "project": "p",
+        "study_name": "s",
+        "trial_id": 0,
+        "timestamp_ns": 1000 + seq,
+        "seq": seq,
+        "metric": {"key": key, "value": value, "step": step},
+    }
 
 
-class TestSendEventDeadline:
-    def test_send_event_called_with_deadline(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
-        mock_stub.SendEvent.return_value = tracking_pb2.Ack()
-
-        pb_file = tmp_path / "0.pb"
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
-
-        client = StreamClient(mock_stub, pb_file, poll_interval=0.01, flush_timeout=5.0)
-        client.start()
-        client.join()
-
-        # Every SendEvent call should have a timeout/deadline argument
-        for call in mock_stub.SendEvent.call_args_list:
-            assert (
-                call.kwargs.get("timeout") is not None
-                or call[1].get("timeout") is not None
-            )
-
-    def test_deadline_exceeded_retried(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
-        call_count = 0
-
-        class DeadlineExceededError(grpc.RpcError):
-            def code(self):
-                return grpc.StatusCode.DEADLINE_EXCEEDED
-
-            def details(self):
-                return "deadline exceeded"
-
-        def send_side_effect(event, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                raise DeadlineExceededError()
-            return tracking_pb2.Ack()
-
-        mock_stub.SendEvent.side_effect = send_side_effect
-
-        pb_file = tmp_path / "0.pb"
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
-
-        client = StreamClient(mock_stub, pb_file, poll_interval=0.01, flush_timeout=5.0)
-        client.start()
-        client.join()
-
-        assert mock_stub.SendEvent.call_count >= 3
-
-    def test_total_retry_budget_exceeded_stops(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
-
-        class DeadlineExceededError(grpc.RpcError):
-            def code(self):
-                return grpc.StatusCode.DEADLINE_EXCEEDED
-
-            def details(self):
-                return "deadline exceeded"
-
-        mock_stub.SendEvent.side_effect = DeadlineExceededError()
-
-        pb_file = tmp_path / "0.pb"
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
-
-        client = StreamClient(
-            mock_stub,
-            pb_file,
-            poll_interval=0.01,
-            flush_timeout=5.0,
-            max_retry_time=0.5,
-        )
-        client.start()
-        client.join()
-
-        # Should have stopped retrying after budget exceeded
-        # Not infinite calls
-        assert mock_stub.SendEvent.call_count < 100
+def _trial_end_envelope(seq: int) -> dict:
+    return {
+        "project": "p",
+        "study_name": "s",
+        "trial_id": 0,
+        "timestamp_ns": 1000 + seq,
+        "seq": seq,
+        "trial_end": {},
+    }
 
 
-class FakeRpcError(grpc.RpcError):
-    def code(self):
-        return grpc.StatusCode.UNAVAILABLE
-
-    def details(self):
-        return "test error"
+def _write_envelopes(path: Path, envelopes: list[dict]) -> None:
+    with TrackingWriter(path) as writer:
+        for env in envelopes:
+            writer.write_envelope(env)
 
 
-def _param_envelope(seq: int, key: str, value: float) -> Envelope:
-    return Envelope(
-        project="p",
-        study_name="s",
-        trial_id=0,
-        timestamp_ns=1000 + seq,
-        seq=seq,
-        param=ParamEvent(key=key, value=Value(float_val=value)),
-    )
-
-
-def _metric_envelope(seq: int, key: str, value: float, step: int) -> Envelope:
-    return Envelope(
-        project="p",
-        study_name="s",
-        trial_id=0,
-        timestamp_ns=1000 + seq,
-        seq=seq,
-        metric=MetricEvent(key=key, value=value, step=step),
-    )
-
-
-def _trial_end_envelope(seq: int) -> Envelope:
-    return Envelope(
-        project="p",
-        study_name="s",
-        trial_id=0,
-        timestamp_ns=1000 + seq,
-        seq=seq,
-        trial_end=TrialEndEvent(),
-    )
+def _ok_response() -> MagicMock:
+    """A mocked httpx.Response: raise_for_status is a no-op, status 200."""
+    return MagicMock(status_code=200)
 
 
 class TestHappyPath:
-    def test_sends_events_to_server(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.sqlite")
-        stub = _make_stub()
-        pb_file = tmp_path / "0.pb"
-
-        events = [
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_posts_each_envelope_to_ingest(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        envelopes = [
             _param_envelope(0, "lr", 0.01),
             _metric_envelope(1, "loss", 0.5, 10),
             _trial_end_envelope(2),
         ]
-        with TrackingWriter(pb_file) as writer:
-            for env in events:
-                writer.write_envelope(env)
+        _write_envelopes(events_file, envelopes)
 
-        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.01,
+            flush_timeout=5.0,
+        )
         client.start()
         client.join()
-        server.stop(grace=0)
 
-        con = sqlite3.connect(str(tmp_path / "test.sqlite"))
-        assert _count(con, "params") == 1
-        assert _count(con, "metrics") == 1
-        assert _count(con, "trial_end") == 1
-        con.close()
+        assert mock_post.call_count == len(envelopes)
+        for call, env in zip(mock_post.call_args_list, envelopes, strict=False):
+            assert call.args[0] == f"{BASE_URL}/ingest"
+            assert call.kwargs["json"] == env
+            # No api key -> no auth header.
+            assert call.kwargs["headers"] is None
+
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_trial_end_terminates_shipping(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        _write_envelopes(
+            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
+        )
+
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.01,
+            flush_timeout=5.0,
+        )
+        client.start()
+        client.join()
+
+        # Both threads exit once trial_end has shipped.
+        assert not client.producer_thread.is_alive()
+        assert not client.consumer.is_alive()
+        # Exactly one POST per envelope and no more.
+        assert mock_post.call_count == 2
+
+
+class TestSendDeadline:
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_each_post_carries_send_deadline(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        _write_envelopes(
+            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
+        )
+
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.01,
+            flush_timeout=5.0,
+            send_deadline=12.5,
+        )
+        client.start()
+        client.join()
+
+        for call in mock_post.call_args_list:
+            assert call.kwargs["timeout"] == pytest.approx(client.send_deadline)
+
+
+class TestAuthHeader:
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_sends_bearer_header_when_api_key_set(
+        self, mock_post, tmp_path: Path
+    ) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        _write_envelopes(
+            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
+        )
+
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            api_key="secret-key",
+            poll_interval=0.01,
+            flush_timeout=5.0,
+        )
+        client.start()
+        client.join()
+
+        for call in mock_post.call_args_list:
+            assert call.kwargs["headers"] == {"authorization": "Bearer secret-key"}
+
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_no_header_without_api_key(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        _write_envelopes(
+            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
+        )
+
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.01,
+            flush_timeout=5.0,
+        )
+        client.start()
+        client.join()
+
+        for call in mock_post.call_args_list:
+            assert call.kwargs["headers"] is None
 
 
 class TestShutdown:
-    def test_join_returns_after_trial_end(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.sqlite")
-        stub = _make_stub()
-        pb_file = tmp_path / "0.pb"
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_join_returns_after_trial_end(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        _write_envelopes(
+            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
+        )
 
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
-
-        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.01,
+            flush_timeout=5.0,
+        )
         client.start()
         client.join()
-        server.stop(grace=0)
 
         assert not client.producer_thread.is_alive()
         assert not client.consumer.is_alive()
 
-    def test_join_timeout_without_trial_end(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.sqlite")
-        stub = _make_stub()
-        pb_file = tmp_path / "0.pb"
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_threads_stay_alive_without_trial_end(
+        self, mock_post, tmp_path: Path
+    ) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
+        # No trial_end: the producer keeps tailing the file forever.
+        _write_envelopes(events_file, [_param_envelope(0, "lr", 0.01)])
 
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-
-        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=0.5)
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.01,
+            flush_timeout=0.5,
+        )
         client.start()
         client.join()
 
-        assert client.producer_thread.is_alive() or client.consumer.is_alive()
-        server.stop(grace=0)
+        # join() times out; the producer is still polling.
+        assert client.producer_thread.is_alive()
 
 
 class TestRetryOnFailure:
-    def test_retries_and_succeeds(self, tmp_path: Path) -> None:
-        mock_stub = MagicMock()
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_retries_on_connect_error_then_succeeds(
+        self, mock_post, tmp_path: Path
+    ) -> None:
         call_count = 0
 
-        def send_side_effect(event, **kwargs):
+        def post_side_effect(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             if call_count <= 2:
-                raise FakeRpcError()
-            return tracking_pb2.Ack()
+                raise httpx.ConnectError("boom")
+            return _ok_response()
 
-        mock_stub.SendEvent.side_effect = send_side_effect
+        mock_post.side_effect = post_side_effect
 
-        pb_file = tmp_path / "0.pb"
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
+        events_file = tmp_path / "0.jsonl"
+        _write_envelopes(
+            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
+        )
 
-        client = StreamClient(mock_stub, pb_file, poll_interval=0.01, flush_timeout=5.0)
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.01,
+            flush_timeout=5.0,
+            max_retry_time=10.0,
+        )
         client.start()
         client.join()
 
-        assert mock_stub.SendEvent.call_count >= 3
+        # param event: 2 failed attempts + 1 success; trial_end: 1 success.
+        assert mock_post.call_count == 4
+        # trial_end shipped -> consumer exited cleanly.
+        assert not client.consumer.is_alive()
 
 
 class TestDeferredFileCreation:
-    def test_waits_for_file_to_exist(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.sqlite")
-        stub = _make_stub()
-        pb_file = tmp_path / "0.pb"
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_waits_for_file_to_exist(self, mock_post, tmp_path: Path) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
 
-        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.05,
+            flush_timeout=5.0,
+        )
         client.start()
 
         time.sleep(0.2)
-        assert not pb_file.exists()
+        assert not events_file.exists()
+        assert client.producer_thread.is_alive()
 
-        with TrackingWriter(pb_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
+        _write_envelopes(
+            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
+        )
 
         client.join()
-        server.stop(grace=0)
 
         assert not client.producer_thread.is_alive()
+        assert mock_post.call_count == 2
 
 
 class TestPartialEvent:
-    def test_truncated_event_does_not_crash_producer(self, tmp_path: Path) -> None:
-        server = _start_server(tmp_path / "test.sqlite")
-        stub = _make_stub()
-        pb_file = tmp_path / "0.pb"
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_truncated_trailing_line_does_not_crash_producer(
+        self, mock_post, tmp_path: Path
+    ) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
 
-        from jernerics.tracking.pb_io import encode_varint
-
-        with TrackingWriter(pb_file) as writer:
+        with TrackingWriter(events_file) as writer:
             writer.write_envelope(_param_envelope(0, "lr", 0.01))
             writer.write_envelope(_trial_end_envelope(1))
 
-        with open(pb_file, "ab") as f:
-            f.write(encode_varint(1000) + b"\x00\x00\x00\x00\x00")
+        # Append a truncated JSON line (writer crashed mid-flush). It sits
+        # after trial_end, so the producer never reaches it; this confirms a
+        # partial line trailing valid events doesn't trip the producer.
+        with open(events_file, "a") as f:
+            f.write('{"project":"p","study_name"')
 
-        client = StreamClient(stub, pb_file, poll_interval=0.05, flush_timeout=5.0)
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.01,
+            flush_timeout=5.0,
+        )
         client.start()
         client.join()
-        server.stop(grace=0)
 
-        con = sqlite3.connect(str(tmp_path / "test.sqlite"))
-        assert _count(con, "params") == 1
-        assert _count(con, "trial_end") == 1
-        con.close()
+        assert not client.consumer.is_alive()
+        # The two complete envelopes shipped; the truncated line was ignored.
+        assert mock_post.call_count == 2
 
+    @patch("jernerics.tracking.stream_client.httpx.post")
+    def test_partial_line_is_waited_for_not_crashed(
+        self, mock_post, tmp_path: Path
+    ) -> None:
+        mock_post.return_value = _ok_response()
+        events_file = tmp_path / "0.jsonl"
 
-def _count(con, table: str) -> int:
-    row = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
-    assert row is not None
-    return row[0]
+        # A partial line (writer crashed mid-flush): no newline, invalid JSON.
+        with open(events_file, "w") as f:
+            f.write('{"project":"p","study_name"')
 
+        client = StreamClient(
+            base_url=BASE_URL,
+            path=events_file,
+            poll_interval=0.02,
+            flush_timeout=0.5,
+        )
+        client.start()
 
-def _start_server(db_path: Path, api_key: str | None = None) -> grpc.Server:
-    from jernerics_server.server import serve
+        time.sleep(0.2)
+        # The producer did not crash and has shipped nothing yet.
+        assert client.producer_thread.is_alive()
+        assert mock_post.call_count == 0
 
-    return serve(db_path, port=50053, api_key=api_key)
+        client.join()
 
-
-def _make_stub() -> tracking_pb2_grpc.TrackingServiceStub:
-    channel = grpc.insecure_channel("localhost:50053")
-    return tracking_pb2_grpc.TrackingServiceStub(channel)
+        # No trial_end -> the producer keeps waiting on the partial line,
+        # past join()'s timeout. Graceful, not crashed.
+        assert client.producer_thread.is_alive()

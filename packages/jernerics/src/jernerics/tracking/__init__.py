@@ -1,9 +1,9 @@
-from jernerics.tracking.pb_io import TrackingReader, TrackingWriter
-from jernerics.tracking.tracker import NullTracker, ProtobufTracker, Tracker
+from jernerics.tracking.jsonl_io import TrackingReader, TrackingWriter
+from jernerics.tracking.tracker import JsonlTracker, NullTracker, Tracker
 
 __all__ = [
+    "JsonlTracker",
     "NullTracker",
-    "ProtobufTracker",
     "Tracker",
     "TrackingReader",
     "TrackingWriter",

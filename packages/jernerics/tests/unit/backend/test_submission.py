@@ -59,7 +59,7 @@ class TestSubmitSweep:
         )
         infra = self._make_infra(adapter)
         spec = SweepSubmission(
-            dag_path=Path("dag.py"),
+            trial_path=Path("trial.py"),
             config_path=Path("config.py"),
             study_name="mystudy",
             storage_url="/cache/optuna/mystudy.journal",
@@ -91,7 +91,7 @@ class TestSubmitSweep:
         )
         infra = self._make_infra(adapter)
         spec = SweepSubmission(
-            dag_path=Path("dag.py"),
+            trial_path=Path("trial.py"),
             config_path=Path("config.py"),
             study_name="mystudy",
             storage_url="/cache/optuna/mystudy.journal",
@@ -126,7 +126,7 @@ class TestSubmitSweep:
         )
         infra = self._make_infra(adapter)
         spec = SweepSubmission(
-            dag_path=Path("dag.py"),
+            trial_path=Path("trial.py"),
             config_path=Path("config.py"),
             study_name="mystudy",
             storage_url="/cache/optuna/mystudy.journal",
@@ -158,7 +158,7 @@ class TestSubmitSweep:
         )
         infra = self._make_infra(adapter)
         spec = SweepSubmission(
-            dag_path=Path("dag.py"),
+            trial_path=Path("trial.py"),
             config_path=Path("config.py"),
             study_name="mystudy",
             storage_url="/cache/optuna/mystudy.journal",
@@ -192,12 +192,12 @@ class TestSubmitSweep:
         )
         infra = self._make_infra(adapter)
         spec = SweepSubmission(
-            dag_path=Path("dag.py"),
+            trial_path=Path("trial.py"),
             config_path=Path("config.py"),
             study_name="mystudy",
             storage_url="/cache/optuna/mystudy.journal",
             n_trials=5,
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
         )
         host = MagicMock()
@@ -242,7 +242,7 @@ class TestSubmitSweep:
         adapter.render_sweep.return_value = "#!/bin/bash\necho hello"
         infra = self._make_infra(adapter)
         spec = SweepSubmission(
-            dag_path=Path("dag.py"),
+            trial_path=Path("trial.py"),
             config_path=Path("config.py"),
             study_name="mystudy",
             storage_url="/cache/optuna/mystudy.journal",

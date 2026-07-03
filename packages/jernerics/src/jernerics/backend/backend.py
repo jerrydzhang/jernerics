@@ -294,14 +294,14 @@ class Backend:
             (
                 [
                     f"find {cache_host}/tracking"
-                    " -path '*/events/*.pb' 2>/dev/null | head -n 1"
+                    " -path '*/events/*.jsonl' 2>/dev/null | head -n 1"
                 ]
                 if isinstance(self.host, SSHHost)
                 else [
                     "sh",
                     "-c",
                     f"find {cache_host}/tracking"
-                    " -path '*/events/*.pb' 2>/dev/null | head -n 1",
+                    " -path '*/events/*.jsonl' 2>/dev/null | head -n 1",
                 ]
             ),
             check=False,

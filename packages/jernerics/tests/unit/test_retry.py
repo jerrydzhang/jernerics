@@ -494,7 +494,7 @@ class TestRetryContextProjectName:
         ctx = RetryContext(
             study_name="test-study",
             backend_name="hpc",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             project_name="sweep-retry",
         )
@@ -505,7 +505,7 @@ class TestRetryContextProjectName:
         ctx = RetryContext(
             study_name="test-study",
             backend_name="hpc",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
         )
         assert ctx.project_name is None
@@ -514,7 +514,7 @@ class TestRetryContextProjectName:
         ctx = RetryContext(
             study_name="test-study",
             backend_name="hpc",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             project_name=None,
         )
@@ -527,7 +527,7 @@ class TestRetryContextHostHome:
         ctx = RetryContext(
             study_name="test-study",
             backend_name="hpc",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             host_home="/home/jez21005",
         )
@@ -540,7 +540,7 @@ class TestRetryContextHostHome:
         ctx = RetryContext(
             study_name="test-study",
             backend_name="hpc",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
         )
         assert ctx.host_home == ""
@@ -549,7 +549,7 @@ class TestRetryContextHostHome:
         ctx = RetryContext(
             study_name="test-study",
             backend_name="hpc",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             host_home="",
         )

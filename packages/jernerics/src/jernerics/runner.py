@@ -1,3 +1,4 @@
+import runpy
 import sys
 from pathlib import Path
 from typing import Any
@@ -6,7 +7,6 @@ import optuna
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.config import load_config
-from jernerics.dag import DAG
 from jernerics.tracking.trial_environment import TrialEnvironment
 
 
@@ -15,7 +15,7 @@ class _TaskFailure(Exception):
 
 
 def run_trial(
-    dag_file: str,
+    trial_file: str,
     config_file: str,
     study_name: str,
     storage_url: str,
@@ -24,12 +24,18 @@ def run_trial(
     server_addr: str | None = None,
     heartbeat_interval_s: float = 60.0,
 ) -> None:
-    dag_dir = Path(dag_file).parent
-    if str(dag_dir) not in sys.path:
-        sys.path.insert(0, str(dag_dir))
+    trial_dir = Path(trial_file).parent
+    if str(trial_dir) not in sys.path:
+        sys.path.insert(0, str(trial_dir))
 
     sweep = load_config(config_file)
-    dag = DAG(dag_file, project_name)
+    module = runpy.run_path(trial_file)
+    if "trial" not in module or not callable(module["trial"]):
+        raise RuntimeError(
+            f"Trial file '{trial_file}' must define a callable 'trial(config, tracker)'"
+        )
+    trial_fn = module["trial"]
+
     study = optuna.load_study(
         study_name=study_name,
         storage=JournalStorage(JournalFileBackend(storage_url)),
@@ -58,23 +64,7 @@ def run_trial(
 
             config = {**sweep.base, **params, "config_index": trial.number}
 
-            results = dag.run(
-                config,
-                tracker=env.tracker,
-                runner=sweep.runner,
-            )
-
-            failed_tasks = [
-                (name, res) for name, res in results.items() if res.is_error
-            ]
-            if failed_tasks:
-                for task_name, task_result in failed_tasks:
-                    print(
-                        f"\t[{task_name}] Task failed with exception:",
-                        file=sys.stderr,
-                    )
-                    print(task_result.error_traceback, file=sys.stderr)
-                raise _TaskFailure
+            results = trial_fn(config, env.tracker)
 
             print(f"Trial {trial.number + 1} completed", file=sys.stderr)
 
@@ -92,7 +82,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("dag_file")
+    parser.add_argument("trial_file")
     parser.add_argument("config_file")
     parser.add_argument("--study-name")
     parser.add_argument("--storage-url")
@@ -103,7 +93,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_trial(
-        dag_file=args.dag_file,
+        trial_file=args.trial_file,
         config_file=args.config_file,
         study_name=args.study_name,
         storage_url=args.storage_url,

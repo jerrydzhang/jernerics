@@ -28,15 +28,10 @@ cpus = 4
 
 
 @pytest.fixture
-def tmp_dag_config(tmp_project):
-    """Create DAG and config files in a project directory."""
-    (tmp_project / "dag.py").write_text("""
-from jernerics.dag import DAG, task
-
-dag = DAG()
-
-@task
-def setup(config):
+def tmp_trial_config(tmp_project):
+    """Create trial and config files in a project directory."""
+    (tmp_project / "trial.py").write_text("""
+def trial(config, tracker):
     return {"done": True}
 """)
 

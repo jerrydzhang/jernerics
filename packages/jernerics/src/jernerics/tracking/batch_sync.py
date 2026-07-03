@@ -1,4 +1,4 @@
-"""Replay orphaned .pb tracking files to the gRPC server."""
+"""Replay orphaned JSONL tracking files to the HTTP server."""
 
 import sys
 import time
@@ -6,10 +6,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import grpc
-from jernerics_proto import tracking_pb2_grpc
+import httpx
 
-from .pb_io import TrackingReader
+from .jsonl_io import TrackingReader
 
 # Default retry settings (matches StreamClient).
 _RETRY_BASE_INTERVAL = 0.5
@@ -34,11 +33,12 @@ class ReplayResult:
 
 def _replay_file(
     path: Path,
-    stub: tracking_pb2_grpc.TrackingServiceStub,
+    base_url: str,
+    api_key: str | None,
     max_retries: int = 10,
-    metadata: list[tuple[str, str]] | None = None,
 ) -> FileResult:
     result = FileResult(path=path)
+    headers = {"authorization": f"Bearer {api_key}"} if api_key else None
 
     try:
         with TrackingReader(path) as reader:
@@ -49,9 +49,15 @@ def _replay_file(
             retry_count = 0
             while True:
                 try:
-                    stub.SendEvent(event, metadata=metadata)
+                    response = httpx.post(
+                        f"{base_url}/ingest",
+                        json=event,
+                        headers=headers,
+                        timeout=30.0,
+                    )
+                    response.raise_for_status()
                     break
-                except grpc.RpcError:
+                except httpx.HTTPError:
                     retry_count += 1
                     if retry_count >= max_retries:
                         raise
@@ -61,50 +67,52 @@ def _replay_file(
                     )
                     time.sleep(wait_time)
             result.events_sent += 1
-    except (grpc.RpcError, EOFError, OSError) as e:
+    except (httpx.HTTPError, OSError, ValueError) as e:
         result.error = str(e)
 
     return result
 
 
-def discover_pb_files(
+def discover_jsonl_files(
     tracking_dir: Path,
     study: str | None = None,
 ) -> list[Path]:
-    """Find all .pb files under tracking_dir, optionally scoped to one study."""
-    pattern = f"{study}/events/*.pb" if study else "*/events/*.pb"
+    """Find all .jsonl files under tracking_dir, optionally scoped to one study."""
+    pattern = f"{study}/events/*.jsonl" if study else "*/events/*.jsonl"
     return sorted(tracking_dir.glob(pattern))
 
 
 def replay_tracking(
     tracking_dir: Path,
-    stub: tracking_pb2_grpc.TrackingServiceStub,
+    base_url: str,
+    api_key: str | None = None,
     study: str | None = None,
     max_workers: int = 16,
     max_retries: int = 10,
-    metadata: list[tuple[str, str]] | None = None,
 ) -> ReplayResult:
     """
-    Replay .pb tracking files to the gRPC server.
+    Replay JSONL tracking files to the HTTP server.
 
     Idempotent: the server uses INSERT OR IGNORE, so already-synced
-    events are silently dropped.
+    events (e.g. those a live StreamClient already shipped) are silently
+    dropped, and overlapping live + replay is safe.
 
     Args:
-        tracking_dir: Host path containing study subdirectories with .pb files.
-        stub: gRPC stub for the tracking server.
+        tracking_dir: Host path containing study subdirectories with .jsonl files.
+        base_url: Base URL of the tracking HTTP server.
+        api_key: Optional bearer API key for authentication.
         study: Optional study name to scope the replay.
         max_workers: Thread pool size for concurrent sends.
-        max_retries: Max retries per event on gRPC failure.
+        max_retries: Max retries per event on HTTP failure.
     """
-    pb_files = discover_pb_files(tracking_dir, study)
+    jsonl_files = discover_jsonl_files(tracking_dir, study)
 
-    if not pb_files:
-        print("No .pb files found.", file=sys.stderr)
+    if not jsonl_files:
+        print("No .jsonl files found.", file=sys.stderr)
         return ReplayResult()
 
     print(
-        f"Replaying {len(pb_files)} file(s)"
+        f"Replaying {len(jsonl_files)} file(s)"
         + (f" for study '{study}'" if study else "")
         + "...",
         file=sys.stderr,
@@ -114,8 +122,8 @@ def replay_tracking(
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(_replay_file, path, stub, max_retries, metadata): path
-            for path in pb_files
+            executor.submit(_replay_file, path, base_url, api_key, max_retries): path
+            for path in jsonl_files
         }
 
         for future in futures:
@@ -135,7 +143,7 @@ def replay_tracking(
                 aggregated.events_sent += file_result.events_sent
                 if file_result.events_total > 0:
                     print(
-                        f"  [{aggregated.files_processed}/{len(pb_files)}] "
+                        f"  [{aggregated.files_processed}/{len(jsonl_files)}] "
                         f"{file_result.path.name} "
                         f"({file_result.events_sent}/"
                         f"{file_result.events_total} events)",
@@ -150,10 +158,10 @@ def replay_tracking(
     )
 
     if not aggregated.errors:
-        for path in pb_files:
+        for path in jsonl_files:
             path.unlink()
         print(
-            f"Deleted {len(pb_files)} synced .pb file(s).",
+            f"Deleted {len(jsonl_files)} synced .jsonl file(s).",
             file=sys.stderr,
         )
 
@@ -176,7 +184,7 @@ def sync_artifacts(
     study: str,
     trial_id: int | None = None,
 ) -> None:
-    """Upload artifacts from manifests to S3.
+    """Upload artifacts from manifests.
 
     Reads manifest entries, uploads via upload_fn, advances cursor.
     """

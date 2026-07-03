@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from jernerics.post_hook import PipelineResult, run_pipeline
 from jernerics.retry import RetryContext
@@ -50,7 +50,7 @@ class TestRunPipeline:
         ctx = RetryContext(
             study_name="mystudy",
             backend_name="slurm",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             project_name="myproject",
         )
@@ -88,12 +88,12 @@ class TestRunPipeline:
         self, mock_run_checker, mock_replay, mock_sync_artifacts, tmp_path
     ):
         mock_run_checker.return_value = None
-        mock_stub = MagicMock()
+        base_url = "http://localhost:8000"
 
         ctx = RetryContext(
             study_name="mystudy",
             backend_name="slurm",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             project_name="myproject",
         )
@@ -105,7 +105,7 @@ class TestRunPipeline:
             chain_depth=0,
             tracking_dir=str(tmp_path / "tracking"),
             storage_path=str(tmp_path / "optuna" / "mystudy.journal"),
-            stub=mock_stub,
+            base_url=base_url,
             upload_fn=lambda k, p: None,
         )
 
@@ -128,7 +128,7 @@ class TestRunPipeline:
         ctx = RetryContext(
             study_name="mystudy",
             backend_name="slurm",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             project_name="myproject",
         )
@@ -162,7 +162,7 @@ class TestRunPipeline:
             tracking_dir="/cache/tracking/mystudy",
             storage_path="/cache/optuna/mystudy.journal",
             upload_fn=lambda k, p: uploads.append((k, p)),
-            stub=MagicMock(),
+            base_url="http://localhost:8000",
         )
 
         assert result == PipelineResult.RETRY_SUBMITTED
@@ -177,7 +177,7 @@ class TestRunPipeline:
         ctx = RetryContext(
             study_name="mystudy",
             backend_name="slurm",
-            dag_relpath="dag.py",
+            trial_relpath="trial.py",
             config_relpath="config.py",
             project_name="myproject",
         )

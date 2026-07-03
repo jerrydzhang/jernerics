@@ -1,13 +1,10 @@
-import os
 import threading
 from pathlib import Path
 from typing import Self
 
-import grpc
-
 from jernerics.tracking import Tracker
 from jernerics.tracking.artifact_uploader import ArtifactUploader
-from jernerics.tracking.infra import resolve_artifact_storage, resolve_streaming
+from jernerics.tracking.infra import resolve_artifact_storage, resolve_tracking_ship
 from jernerics.tracking.stream_client import StreamClient
 
 
@@ -36,7 +33,6 @@ class TrialEnvironment:
 
         self._sync_client: StreamClient | None = None
         self._artifact_uploader: ArtifactUploader | None = None
-        self._channel: grpc.Channel | None = None
         self._heartbeat_stop: threading.Event | None = None
 
         self.tracker: Tracker | None = None
@@ -55,28 +51,30 @@ class TrialEnvironment:
         manifest_path = artifacts_dir / f"{self._trial_number}.manifest"
         cursor_path = artifacts_dir / f"{self._trial_number}.cursor"
 
-        from jernerics.tracking.tracker import ProtobufTracker
+        from jernerics.tracking.tracker import JsonlTracker
 
-        self.tracker = ProtobufTracker(
+        events_path = events_dir / f"{self._trial_number}.jsonl"
+        self.tracker = JsonlTracker(
             self._project_name,
             self._study_name,
             self._trial_number,
-            events_dir / f"{self._trial_number}.pb",
+            events_path,
             manifest_path=manifest_path,
         )
 
-        if self._server_addr:
-            streaming = resolve_streaming(self._server_addr)
-            if streaming:
-                self._channel, stub = streaming
-                self._sync_client = StreamClient(
-                    stub,
-                    events_dir / f"{self._trial_number}.pb",
-                    api_key=os.environ.get("JERNERICS_API_KEY"),
-                )
-                self._sync_client.start()
+        ship = resolve_tracking_ship(self._server_addr) if self._server_addr else None
+        if ship:
+            base_url, api_key = ship
+            self._sync_client = StreamClient(
+                base_url=base_url,
+                path=events_path,
+                api_key=api_key,
+            )
+            self._sync_client.start()
+        else:
+            base_url = None
 
-        upload_fn = resolve_artifact_storage()
+        upload_fn = resolve_artifact_storage(base_url)
         if upload_fn:
             self._artifact_uploader = ArtifactUploader(
                 manifest_path=manifest_path,
@@ -110,5 +108,3 @@ class TrialEnvironment:
             self.tracker.close()
         if self._sync_client:
             self._sync_client.join()
-        if self._channel:
-            self._channel.close()

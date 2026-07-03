@@ -11,7 +11,6 @@ from jernerics.config import (
     SlurmConfig,
     SweepConfig,
     find_pyproject_dir,
-    get_script_path,
     is_tty,
     load_backend_config,
     load_config,
@@ -35,29 +34,17 @@ class TestArtifactEnvVars:
 
         assert "JERNERICS_API_KEY" in ARTIFACT_ENV_VARS
 
-    def test_includes_s3_vars(self):
+    def test_excludes_s3_vars(self):
         from jernerics.config import ARTIFACT_ENV_VARS
 
-        assert "AWS_ENDPOINT_URL" in ARTIFACT_ENV_VARS
-        assert "AWS_ACCESS_KEY_ID" in ARTIFACT_ENV_VARS
-        assert "AWS_SECRET_ACCESS_KEY" in ARTIFACT_ENV_VARS
-        assert "JERNERICS_ARTIFACT_BUCKET" in ARTIFACT_ENV_VARS
+        assert "AWS_ENDPOINT_URL" not in ARTIFACT_ENV_VARS
+        assert "JERNERICS_ARTIFACT_BUCKET" not in ARTIFACT_ENV_VARS
 
 
 class TestIsTty:
     def test_is_tty_returns_bool(self):
         result = is_tty()
         assert isinstance(result, bool)
-
-
-class TestGetScriptPath:
-    def test_get_script_path_existing_script(self):
-        path = get_script_path("run_with_container.sh")
-        assert path.endswith("run_with_container.sh")
-
-    def test_get_script_path_nonexistent_script(self):
-        with pytest.raises(FileNotFoundError, match="Script not found"):
-            get_script_path("nonexistent_script.sh")
 
 
 class TestLoadBackendConfig:
@@ -357,7 +344,6 @@ class TestLoadConfig:
     def test_load_config_sweep(self, tmp_path):
         config_content = """
 import optuna
-from jernerics.dag.executor import ThreadPoolRunner
 
 base = {"seed": 42, "model": "gpt"}
 
@@ -373,7 +359,6 @@ objective = lambda results: results["train"].value["loss"]
 direction = "minimize"
 
 backend_overrides = {"partition": "gpu"}
-runner = ThreadPoolRunner(max_workers=4)
 """
         config_file = tmp_path / "config.py"
         config_file.write_text(config_content)
@@ -388,7 +373,6 @@ runner = ThreadPoolRunner(max_workers=4)
         assert sweep.objective is not None
         assert sweep.direction == "minimize"
         assert sweep.backend_overrides == {"partition": "gpu"}
-        assert sweep.runner is not None
 
     def test_load_config_single_no_search_space(self, tmp_path):
         config_content = """
@@ -422,20 +406,6 @@ sampler = optuna.samplers.GridSampler({"lr": [0.001, 0.01, 0.1]})
 
         assert isinstance(sweep.sampler, optuna.samplers.GridSampler)
 
-    def test_load_config_runner(self, tmp_path):
-        config_content = """
-backend_overrides = {"time": "1:00:00", "mem": "4G"}
-from jernerics.dag.executor import SyncRunner
-runner = SyncRunner()
-"""
-        config_file = tmp_path / "config.py"
-        config_file.write_text(config_content)
-
-        sweep = load_config(str(config_file))
-
-        assert sweep.backend_overrides == {"time": "1:00:00", "mem": "4G"}
-        assert sweep.runner is not None
-
     def test_load_config_missing_file_raises(self):
         with pytest.raises(FileNotFoundError):
             load_config("/nonexistent/config.py")
@@ -467,7 +437,6 @@ pass
         assert sweep.objective is None
         assert sweep.direction == "minimize"
         assert sweep.backend_overrides == {}
-        assert sweep.runner is None
 
     def test_load_config_with_special_characters_in_paths(self, tmp_path):
         config_file = tmp_path / "config with spaces.py"

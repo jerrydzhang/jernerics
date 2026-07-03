@@ -92,14 +92,14 @@ def _get_backend(backend_name: str) -> tuple[Backend, str, Path]:
 
 @app.command("local")
 def run_local(
-    dag_file: Annotated[str, typer.Argument(help="Path to the DAG file.")],
+    trial_file: Annotated[str, typer.Argument(help="Path to the trial file.")],
     config_file: Annotated[str, typer.Argument(help="Path to the config file.")],
 ):
-    dag_path = Path(dag_file).resolve()
+    trial_path = Path(trial_file).resolve()
     config_path = Path(config_file).resolve()
 
-    if not dag_path.exists():
-        print(f"Error: DAG file not found: {dag_path}")
+    if not trial_path.exists():
+        print(f"Error: trial file not found: {trial_path}")
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
@@ -120,7 +120,7 @@ def run_local(
     storage_path = str(optuna_dir / (study_name + ".journal"))
 
     spec = SweepSubmission(
-        dag_path=dag_path,
+        trial_path=trial_path,
         config_path=config_path,
         study_name=study_name,
         storage_url=storage_path,
@@ -143,7 +143,7 @@ def run_local(
 
 @app.command("run")
 def run_remote(
-    dag_file: Annotated[str, typer.Argument(help="Path to the DAG file.")],
+    trial_file: Annotated[str, typer.Argument(help="Path to the trial file.")],
     config_file: Annotated[str, typer.Argument(help="Path to the config file.")],
     backend_name: Annotated[
         str, typer.Option("--backend", "-b", help="Backend name from config")
@@ -164,11 +164,11 @@ def run_remote(
         print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
-    dag_path = Path(dag_file).resolve()
+    trial_path = Path(trial_file).resolve()
     config_path = Path(config_file).resolve()
 
-    if not dag_path.exists():
-        print(f"Error: DAG file not found: {dag_path}")
+    if not trial_path.exists():
+        print(f"Error: trial file not found: {trial_path}")
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
@@ -190,7 +190,9 @@ def run_remote(
 
     backend, project_name, project_dir = _get_backend(backend_name)
 
-    dag_relpath = _validate_relpath(str(dag_path.relative_to(project_dir)), "DAG file")
+    trial_relpath = _validate_relpath(
+        str(trial_path.relative_to(project_dir)), "trial file"
+    )
     config_relpath = _validate_relpath(
         str(config_path.relative_to(project_dir)), "Config file"
     )
@@ -200,12 +202,12 @@ def run_remote(
     storage_url = backend.storage_path(study_name)
 
     spec = SweepSubmission(
-        dag_path=dag_path,
+        trial_path=trial_path,
         config_path=config_path,
         study_name=study_name,
         storage_url=storage_url,
         n_trials=sweep.n_trials,
-        dag_relpath=dag_relpath,
+        trial_relpath=trial_relpath,
         config_relpath=config_relpath,
         project_name=project_name,
         server_addr=backend.tracking_server,
@@ -547,8 +549,8 @@ def init(
     print("\nNext steps:")
     print("  1. Edit pyproject.toml to add dependencies")
     print(
-        "  2. Create your DAG and config files "
-        "(e.g., experiments/dag.py, configs/default.py)"
+        "  2. Create your trial and config files "
+        "(e.g., experiments/trial.py, configs/default.py)"
     )
     print("  3. Run 'jernerics build --backend <name>' to build on remote")
 

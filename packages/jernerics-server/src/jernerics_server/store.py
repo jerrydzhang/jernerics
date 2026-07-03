@@ -3,8 +3,6 @@ import threading
 from pathlib import Path
 from typing import Self
 
-from jernerics_proto import Envelope
-
 _CREATE_PARAMS = """
 CREATE TABLE IF NOT EXISTS params (
     project TEXT NOT NULL,
@@ -112,20 +110,19 @@ class Store:
     def close(self) -> None:
         self._con.close()
 
-    def insert_event(self, envelope: Envelope) -> None:
-        payload = envelope.WhichOneof("payload")
+    def insert_event(self, envelope: dict) -> None:
         with self._lock:
-            if payload == "param":
+            if "param" in envelope:
                 self._insert_param(envelope)
-            elif payload == "metric":
+            elif "metric" in envelope:
                 self._insert_metric(envelope)
-            elif payload == "result":
+            elif "result" in envelope:
                 self._insert_result(envelope)
-            elif payload == "artifact":
+            elif "artifact" in envelope:
                 self._insert_artifact(envelope)
-            elif payload == "sweep_meta":
+            elif "sweep_meta" in envelope:
                 self._insert_sweep_meta(envelope)
-            elif payload == "trial_end":
+            elif "trial_end" in envelope:
                 self._insert_trial_end(envelope)
             self._con.commit()
 
@@ -141,94 +138,94 @@ class Store:
         finally:
             con.close()
 
-    def _insert_param(self, env: Envelope) -> None:
-        p = env.param
-        val = p.value
-        tag = val.WhichOneof("value")
-        float_val = val.float_val if tag == "float_val" else None
-        int_val = val.int_val if tag == "int_val" else None
-        string_val = val.string_val if tag == "string_val" else None
-        bool_val = val.bool_val if tag == "bool_val" else None
+    def _insert_param(self, env: dict) -> None:
+        p = env["param"]
+        val = p["value"]
         self._con.execute(
             "INSERT OR IGNORE INTO params VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                env.project,
-                env.study_name,
-                env.trial_id,
-                env.timestamp_ns,
-                env.seq,
-                p.key,
-                float_val,
-                int_val,
-                string_val,
-                bool_val,
+                env["project"],
+                env["study_name"],
+                env["trial_id"],
+                env["timestamp_ns"],
+                env["seq"],
+                p["key"],
+                val.get("float_val"),
+                val.get("int_val"),
+                val.get("string_val"),
+                val.get("bool_val"),
             ],
         )
 
-    def _insert_metric(self, env: Envelope) -> None:
-        m = env.metric
-        step = m.step if m.step != -1 else None
+    def _insert_metric(self, env: dict) -> None:
+        m = env["metric"]
         self._con.execute(
             "INSERT OR IGNORE INTO metrics VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             [
-                env.project,
-                env.study_name,
-                env.trial_id,
-                env.timestamp_ns,
-                env.seq,
-                m.key,
-                m.value,
-                step,
+                env["project"],
+                env["study_name"],
+                env["trial_id"],
+                env["timestamp_ns"],
+                env["seq"],
+                m["key"],
+                m["value"],
+                m.get("step"),
             ],
         )
 
-    def _insert_result(self, env: Envelope) -> None:
-        r = env.result
+    def _insert_result(self, env: dict) -> None:
+        r = env["result"]
         self._con.execute(
             "INSERT OR IGNORE INTO results VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
-                env.project,
-                env.study_name,
-                env.trial_id,
-                env.timestamp_ns,
-                env.seq,
-                r.key,
-                r.value,
+                env["project"],
+                env["study_name"],
+                env["trial_id"],
+                env["timestamp_ns"],
+                env["seq"],
+                r["key"],
+                r["value"],
             ],
         )
 
-    def _insert_artifact(self, env: Envelope) -> None:
-        a = env.artifact
+    def _insert_artifact(self, env: dict) -> None:
+        a = env["artifact"]
         self._con.execute(
             "INSERT OR IGNORE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
-                env.project,
-                env.study_name,
-                env.trial_id,
-                env.timestamp_ns,
-                env.seq,
-                a.key,
-                a.filename,
+                env["project"],
+                env["study_name"],
+                env["trial_id"],
+                env["timestamp_ns"],
+                env["seq"],
+                a["key"],
+                a["filename"],
             ],
         )
 
-    def _insert_sweep_meta(self, env: Envelope) -> None:
-        s = env.sweep_meta
+    def _insert_sweep_meta(self, env: dict) -> None:
+        s = env["sweep_meta"]
         self._con.execute(
             "INSERT OR IGNORE INTO sweep_meta VALUES (?, ?, ?, ?, ?, ?, ?)",
             [
-                env.project,
-                env.study_name,
-                env.trial_id,
-                env.timestamp_ns,
-                env.seq,
-                s.git_hash,
-                s.config,
+                env["project"],
+                env["study_name"],
+                env["trial_id"],
+                env["timestamp_ns"],
+                env["seq"],
+                s.get("git_hash"),
+                s.get("config"),
             ],
         )
 
-    def _insert_trial_end(self, env: Envelope) -> None:
+    def _insert_trial_end(self, env: dict) -> None:
         self._con.execute(
             "INSERT OR IGNORE INTO trial_end VALUES (?, ?, ?, ?, ?)",
-            [env.project, env.study_name, env.trial_id, env.timestamp_ns, env.seq],
+            [
+                env["project"],
+                env["study_name"],
+                env["trial_id"],
+                env["timestamp_ns"],
+                env["seq"],
+            ],
         )

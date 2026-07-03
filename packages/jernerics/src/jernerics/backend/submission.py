@@ -147,7 +147,7 @@ def submit_sweep(
     retry_ctx = RetryContext(
         study_name=spec.study_name,
         backend_name=backend_name,
-        dag_relpath=spec.dag_relpath,
+        trial_relpath=spec.trial_relpath,
         config_relpath=spec.config_relpath,
         cli_overrides=cli_overrides or {},
         storage_path=spec.storage_url,

@@ -1,5 +1,4 @@
 import itertools
-import os
 from pathlib import Path
 
 import optuna
@@ -14,7 +13,7 @@ from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
-from jernerics.tracking.infra import resolve_artifact_storage, resolve_streaming
+from jernerics.tracking.infra import resolve_artifact_storage, resolve_tracking_ship
 
 
 class LocalBackend:
@@ -58,7 +57,7 @@ class LocalBackend:
 
             try:
                 run_trial(
-                    dag_file=str(spec.dag_path),
+                    trial_file=str(spec.trial_path),
                     config_file=str(spec.config_path),
                     study_name=spec.study_name,
                     storage_url=spec.storage_url,
@@ -85,23 +84,20 @@ class LocalBackend:
         )
 
     def _run_post_hook(self, tracking_dir, spec: SweepSubmission) -> None:
-        streaming = resolve_streaming(self.tracking_server or "")
-        if not streaming:
+        ship = resolve_tracking_ship(self.tracking_server or "")
+        if not ship:
             return
 
-        channel, stub = streaming
-
-        api_key = os.environ.get("JERNERICS_API_KEY")
-        metadata = [("x-api-key", api_key)] if api_key else None
+        base_url, api_key = ship
 
         replay_tracking(
             tracking_dir=tracking_dir,
-            stub=stub,
+            base_url=base_url,
+            api_key=api_key,
             study=spec.study_name,
-            metadata=metadata,
         )
 
-        upload_fn = resolve_artifact_storage()
+        upload_fn = resolve_artifact_storage(base_url)
         if upload_fn:
             sync_artifacts(
                 tracking_dir=tracking_dir,
@@ -109,4 +105,3 @@ class LocalBackend:
                 project=spec.project_name or "",
                 study=spec.study_name,
             )
-        channel.close()

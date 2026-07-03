@@ -133,7 +133,7 @@ class TestProjectSync:
         syncer = ProjectSync(mock_ssh, "~/projects/test")
 
         (tmp_path / "experiments").mkdir()
-        (tmp_path / "experiments" / "dag.py").write_text("dag")
+        (tmp_path / "experiments" / "trial.py").write_text("trial")
         (tmp_path / "experiments" / "config.py").write_text("config")
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "main.py").write_text("main")

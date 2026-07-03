@@ -5,22 +5,14 @@ import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
-from importlib import resources
 from pathlib import Path
 from typing import Any
 
 import tomllib
 from optuna.samplers import BaseSampler
 
-from .dag import Runner
-
 ARTIFACT_ENV_VARS = [
-    "AWS_ENDPOINT_URL",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "JERNERICS_ARTIFACT_BUCKET",
     "JERNERICS_API_KEY",
-    "JERNERICS_TRACKING_SERVER",
 ]
 
 
@@ -46,7 +38,6 @@ class SweepConfig:
     objective: Callable[..., float] | None
     direction: str
     backend_overrides: dict[str, dict[str, Any]]
-    runner: Runner | None
     grid: dict[str, list] | None = None
 
 
@@ -270,7 +261,6 @@ def load_config(config_file: str) -> SweepConfig:
         objective=module_ns.get("objective", None),
         direction=module_ns.get("direction", "minimize"),
         backend_overrides=module_ns.get("backend_overrides", {}),
-        runner=module_ns.get("runner", None),
         grid=module_ns.get("grid", None),
     )
 
@@ -282,10 +272,3 @@ def load_config(config_file: str) -> SweepConfig:
             sweep.n_trials = n_combos
 
     return sweep
-
-
-def get_script_path(script_name: str, script_module: str = "jernerics.scripts") -> str:
-    path = resources.files(script_module).joinpath(script_name)
-    if not Path(str(path)).exists():
-        raise FileNotFoundError(f"Script not found: {script_name}")
-    return str(path)

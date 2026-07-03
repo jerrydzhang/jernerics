@@ -90,12 +90,12 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
     }
 
     retry_spec = SweepSubmission(
-        dag_path=Path(f"{ctx.project_dir}/{ctx.dag_relpath}"),
+        trial_path=Path(f"{ctx.project_dir}/{ctx.trial_relpath}"),
         config_path=Path(f"{ctx.project_dir}/{ctx.config_relpath}"),
         study_name=ctx.study_name,
         storage_url=storage_path,
         n_trials=plan.total_array_size,
-        dag_relpath=ctx.dag_relpath,
+        trial_relpath=ctx.trial_relpath,
         config_relpath=ctx.config_relpath,
         project_name=ctx.project_name,
     )

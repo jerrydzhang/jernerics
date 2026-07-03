@@ -32,7 +32,7 @@ class RetryPlan:
 class RetryContext:
     study_name: str
     backend_name: str
-    dag_relpath: str
+    trial_relpath: str
     config_relpath: str
     cli_overrides: dict[str, str] = field(default_factory=dict)
     storage_path: str = ""

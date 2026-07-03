@@ -19,9 +19,6 @@ test:
 test-unit:
     pytest packages/jernerics/tests/unit packages/jernerics-server/tests
 
-proto:
-    cd packages/jernerics-proto && python generate.py
-
 check: lint format-check typecheck test
 
 install-skills:

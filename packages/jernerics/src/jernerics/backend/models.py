@@ -4,12 +4,12 @@ from pathlib import Path
 
 @dataclass
 class SweepSubmission:
-    dag_path: Path
+    trial_path: Path
     config_path: Path
     study_name: str
     storage_url: str
     n_trials: int
-    dag_relpath: str = ""
+    trial_relpath: str = ""
     config_relpath: str = ""
     tracking_dir: Path | None = None
     project_name: str | None = None
