@@ -154,6 +154,9 @@ class PueueAdapter:
             lines.append(params.post_hook_command)
             lines.append("JERNERICS_EOF")
             lines.append("")
+            # pueue wait, not --after $TRIAL_N_ID: --after only fires on upstream
+            # success, but the post-hook must run after failed trials too (it
+            # detects and retries them). Costs a worker slot while waiting.
             lines.append(
                 f"cat > {checker_wrapper_path} <<JERNERICS_EOF\n"
                 f"pueue wait {trial_ids} -q\n"

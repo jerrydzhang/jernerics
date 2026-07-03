@@ -40,6 +40,12 @@ class JobSubmission:
 
 @dataclass
 class SubmitResult:
+    """A list because Slurm yields multiple jobs (array + post-hook, each with
+    its own log path) while Pueue yields one group. Normalizing both to a list
+    lets the backend save them unconditionally instead of special-casing per
+    scheduler.
+    """
+
     submissions: list[JobSubmission]
 
 

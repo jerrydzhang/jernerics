@@ -1,3 +1,25 @@
+"""SQLite (WAL) store for trial events.
+
+Replaces an earlier DuckDB store. DuckDB connections are not thread-safe and
+cannot hold concurrent read-only and read-write connections to one file, so the
+/query endpoint silently returned empty results under concurrent access. SQLite
+in WAL mode allows concurrent readers that do not block the writer (and vice
+versa).
+
+- Single write connection guarded by a threading.Lock: the gRPC server's
+  ThreadPoolExecutor calls insert_event concurrently; the lock serializes fast
+  single-row INSERTs. SendEvent is synchronous (acks after INSERT), so there is
+  no write queue -- a queue would either sacrifice durability (fire-and-forget)
+  or add latency (wait-for-ack) for no throughput gain.
+- Per-request read-only connections serve HTTP queries.
+- STRICT tables preserve DuckDB-equivalent type discipline; SQLite's default
+  type affinity would accept a string in a REAL column.
+
+This is a single-user, single-process tool, so PostgreSQL would add operational
+cost for unused multi-writer capability. SQLite -> PostgreSQL is a
+near-verbatim schema migration if that ever changes.
+"""
+
 import sqlite3
 import threading
 from pathlib import Path

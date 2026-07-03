@@ -78,6 +78,15 @@ class StdoutHost:
 
 
 class SSHHost(Host):
+    """A Host reached over SSH.
+
+    Resolves the remote $HOME via an SSH call at construction rather than
+    embedding ``$HOME``/``~`` in path strings and deferring expansion to call
+    sites. The deferral approach produced bugs when the wrong context's home was
+    substituted; eager resolution gives every caller a concrete ``home`` to
+    build absolute paths with. (LocalHost mirrors this with Path.home().)
+    """
+
     def __init__(self, host: str):
         self.host = host
         result = subprocess.run(

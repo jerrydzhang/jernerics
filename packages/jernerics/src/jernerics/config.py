@@ -98,6 +98,16 @@ class PueueConfig:
 
 @dataclass
 class ApptainerConfig:
+    """Container options for ``container_type = "apptainer"``.
+
+    Lives in its own ``[tool.jernerics.backends.<name>.apptainer]`` table rather
+    than as a generic field on SharedConfig. The build_dir scratch pattern
+    (stage somewhere fast, copy back) is Apptainer-specific -- Docker images
+    live in the daemon store, not as files. A runtime-specific name on shared
+    config was rejected; a dedicated table mirrors the slurm/pueue pattern and
+    scales as Docker or other runtimes gain their own options.
+    """
+
     build_dir: str | None = None
 
 

@@ -6,6 +6,12 @@ from jernerics.backend.models import JobInfo, SubmitResult
 
 @dataclass
 class SweepSubmissionParams:
+    """``overrides`` is a flat dict interpreted by the adapter rather than a
+    typed config object -- it is already user-facing as a flat dict (``--set
+    partition=priority``), so a typed translation layer would just be dict ->
+    dataclass -> dict with the adapter as the natural interpreter.
+    """
+
     setup_command: str
     trial_command: str
     n_trials: int
@@ -19,6 +25,17 @@ class SweepSubmissionParams:
 
 @runtime_checkable
 class SchedulerAdapter(Protocol):
+    """Per-scheduler submission and job lifecycle.
+
+    Adapters receive command strings that are already container-wrapped with
+    resolved paths (see SweepSubmissionParams). They never see the
+    ContainerRuntime or PathResolver, which keeps their job narrow: "given these
+    runnable strings, schedule them on my scheduler." Letting the adapter do the
+    wrapping would duplicate composition logic across every scheduler and pull
+    PathResolver/ContainerRuntime knowledge into a component that should not
+    need it.
+    """
+
     def submit_sweep(self, params: SweepSubmissionParams) -> SubmitResult: ...
 
     def render_sweep(self, params: SweepSubmissionParams) -> str: ...
