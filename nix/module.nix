@@ -54,15 +54,6 @@ in
           Compatible with sops-nix EnvironmentFile format.
         '';
       };
-
-      dashboardPackage = lib.mkOption {
-        type = lib.types.nullOr lib.types.package;
-        default = lib.mkDefault null;
-        description = ''
-          Dashboard static files package (jernerics-dashboard flake output).
-          null disables dashboard serving.
-        '';
-      };
     };
 
     minio = {
@@ -121,12 +112,9 @@ in
           httpFlag = lib.optionalString (
             cfg.tracking.httpPort != null
           ) " --http-port ${toString cfg.tracking.httpPort}${lib.optionalString (cfg.tracking.httpHost != null) " --http-host ${cfg.tracking.httpHost}"}";
-          dashboardFlag = lib.optionalString (
-            cfg.tracking.dashboardPackage != null
-          ) " --dashboard-dir ${cfg.tracking.dashboardPackage}";
         in
         {
-          ExecStart = "${cfg.tracking.package}/bin/python -m jernerics_server --db ${cfg.tracking.dbPath} --host ${cfg.tracking.host} --port ${toString cfg.tracking.port}${httpFlag}${dashboardFlag}";
+          ExecStart = "${cfg.tracking.package}/bin/python -m jernerics_server --db ${cfg.tracking.dbPath} --host ${cfg.tracking.host} --port ${toString cfg.tracking.port}${httpFlag}";
           Type = "simple";
           Restart = "on-failure";
           RestartSec = 5;

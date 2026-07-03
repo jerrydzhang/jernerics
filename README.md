@@ -113,28 +113,6 @@ jernerics run --backend hpc dag.py config.py
 | `jernerics clean --backend <name>` | Delete remote artifacts (`--full`, `--force`) |
 | `jernerics sync --backend <name>` | Replay tracking data from remote to server (`--study`) |
 
-## Tracking HTTP Observability
-
-Query sweep and trial data via HTTP commands. These use the tracking **HTTP server**, not the gRPC `tracking_server` address.
-
-**Server URL resolution** (first wins):
-1. `--server <url>` flag
-2. `JERNERICS_TRACKING_HTTP_SERVER` environment variable
-3. `[tool.jernerics].tracking_http_server` in `pyproject.toml`
-
-| Command | Description |
-|---------|-------------|
-| `jernerics sweeps` | List sweeps |
-| `jernerics trials <sweep_id>` | List trials for a sweep |
-| `jernerics compare-sweeps <sweep_id...>` | Compare sweeps side-by-side |
-| `jernerics metric-history <sweep_id> <metric>` | Plot metric over trials |
-| `jernerics artifacts <sweep_id> [trial_id]` | List artifact paths |
-| `jernerics results <sweep_id> [trial_id]` | Show trial results |
-| `jernerics params <sweep_id> [trial_id]` | Show trial hyperparameters |
-| `jernerics tracking-health` | Check server connectivity |
-
-Add `--json` to any command for machine-readable output.
-
 ## Configuration
 
 ### pyproject.toml — backend profiles

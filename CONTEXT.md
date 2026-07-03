@@ -73,7 +73,7 @@ The batch path: after trials finish, orphaned `.pb` files on the remote are repl
 An HTTP endpoint on the tracking server that accepts SQL and returns JSON rows. The thin interface between analytical clients (dashboard, notebooks) and the DuckDB store. Transport is swappable (future: Arrow Flight) as long as the interface stays stateless.
 
 **Dashboard**:
-A React SPA served as static files by the tracking server. Renders sweep comparison views using ECharts with a base16-derived theme. Shows artifact previews inline (images, tables) with download links for other types. Artifacts are displayed in trial/sweep context — not a separate browser. Lives in a separate repo (`jernerics-dashboard`) and is wired into the NixOS module via a nullable `dashboardPackage` option.
+A React SPA that renders sweep comparison views using ECharts with a base16-derived theme. Lives in a separate repo (`jernerics-dashboard`). Currently set aside — not wired into the tracking server, and no longer shipped via a `dashboardPackage` option in the NixOS module. Will be revisited once the observability read-surface is redesigned off real need.
 
 **Tracking server**:
 A single process running gRPC ingestion, HTTP query endpoint, and static file serving for the dashboard. Owns the DuckDB file exclusively — all reads go through the HTTP query endpoint. Authenticated via API key in gRPC metadata / HTTP header. Proxies artifact downloads from MinIO — single URL, single auth point.
