@@ -18,25 +18,25 @@ in
 
       host = lib.mkOption {
         type = lib.types.str;
-        default = lib.mkDefault "[::]";
+        default = "127.0.0.1";
         description = "Host/address to bind the tracking server to.";
       };
 
       dbPath = lib.mkOption {
-        type = lib.types.path;
-        default = lib.mkDefault "/var/lib/jernerics/db.sqlite";
+        type = lib.types.str;
+        default = "/var/lib/jernerics/db.sqlite";
         description = "Path to the SQLite database file.";
       };
 
       httpPort = lib.mkOption {
         type = lib.types.port;
-        default = lib.mkDefault 8000;
+        default = 8000;
         description = "HTTP port for the tracking server.";
       };
 
       apiKeyFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
-        default = lib.mkDefault null;
+        default = null;
         description = ''
           File containing JERNERICS_API_KEY.
           Compatible with sops-nix EnvironmentFile format.
@@ -44,8 +44,8 @@ in
       };
 
       artifactsDir = lib.mkOption {
-        type = lib.types.nullOr lib.types.path;
-        default = lib.mkDefault null;
+        type = lib.types.nullOr lib.types.str;
+        default = null;
         description = "Directory to store artifact files. null uses a sibling of the database.";
       };
     };

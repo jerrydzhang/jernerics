@@ -23,7 +23,7 @@ jernerics init my-project
 cd my-project
 ```
 
-Creates `pyproject.toml`, `container.def`, `Dockerfile`, and `src/`.
+Creates `pyproject.toml`, `container.def`, `Dockerfile`, `src/`, and starter `trial.py` + `config.py`.
 
 ### 2. Define your trial
 
@@ -154,6 +154,29 @@ JERNERICS_API_KEY           # Optional bearer token; must match on server and cl
 ```
 
 When `JERNERICS_API_KEY` is set in the server's environment, all requests (`/query`, `/ingest`, `/artifact`) must include an `Authorization: Bearer <key>` header. The same value is forwarded to remote backends automatically. If unset on the server, auth is disabled and all connections are accepted. Artifacts are stored on the server's disk (configured via `--artifacts-dir`); no external object storage is required.
+
+## Deployment
+
+The tracking server is plaintext HTTP by design. For remote access over the public internet, terminate TLS in front of it. With [Tailscale Funnel](https://tailscale.com/kb/1223/funnel), `tailscaled` provisions a `*.ts.net` certificate and forwards plain HTTP to a localhost port — so the bearer API key travels encrypted over the Funnel's TLS and the server itself is never exposed directly.
+
+With the NixOS module, bind to loopback and supply an API key:
+
+```nix
+services.jernerics.tracking = {
+  enable = true;
+  host = "127.0.0.1";                              # only localhost (tailscaled) reaches it
+  httpPort = 8000;
+  apiKeyFile = /run/secrets/jernerics-api-key;     # contains JERNERICS_API_KEY=...
+};
+```
+
+Then point Funnel at it:
+
+```bash
+tailscale funnel --https=443 http://localhost:8000
+```
+
+On clients, set `JERNERICS_TRACKING_SERVER` to the Funnel URL (e.g. `https://your-host.ts.net`) and `JERNERICS_API_KEY` to the shared bearer.
 
 ## Container starters
 

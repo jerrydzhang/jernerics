@@ -39,8 +39,8 @@ pkgs.testers.nixosTest {
     assert "\"n\"" in output
 
     # Artifact upload + download round-trip
-    machine.succeed("curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/artifact/proj/study/0/ckpt -H 'Authorization: Bearer test-secret-key' -F 'file=@/etc/hostname'")
-    machine.succeed("curl -s -o /tmp/got -w '' http://localhost:8080/artifact/proj/study/0/ckpt -H 'Authorization: Bearer test-secret-key'")
+    machine.succeed("curl -s -o /dev/null -w '%{http_code}' -X POST http://localhost:8080/artifact/proj/study/0/ckpt -H 'Authorization: Bearer test-secret-key' --data-binary @/etc/hostname");
+    machine.succeed("curl -s -o /tmp/got http://localhost:8080/artifact/proj/study/0/ckpt -H 'Authorization: Bearer test-secret-key'")
     machine.succeed("diff /etc/hostname /tmp/got")
   '';
 }
