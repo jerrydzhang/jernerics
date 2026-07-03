@@ -68,6 +68,9 @@ extra-paths = [
 possibly-missing-submodule = "ignore"
 
 [tool.pytest.ini_options]
+markers = [
+    "remote: submits real jobs to remote backends; skipped unless JERNERICS_RUN_REMOTE=1",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:websockets",
     "ignore::DeprecationWarning:uvicorn",

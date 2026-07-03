@@ -8,6 +8,7 @@ dependencies = [
     "optuna",
     "torch",
     "jernerics",
+    "jernerics-server",
 ]
 
 [[tool.uv.index]]
@@ -20,14 +21,23 @@ torch = { index = "pytorch-cu124" }
 
 [tool.uv.sources.jernerics]
 git = "https://github.com/jerrydzhang/jernerics.git"
-branch = "human-ownership"
+branch = "main"
 subdirectory = "packages/jernerics"
+
+[tool.uv.sources.jernerics-server]
+git = "https://github.com/jerrydzhang/jernerics.git"
+branch = "main"
+subdirectory = "packages/jernerics-server"
 
 [tool.jernerics.backends.hpc]
 type = "slurm"
 host = "jez21005@hpc2.storrs.hpc.uconn.edu"
 remote_dir = "~/projects/jernerics-examples/sweep-e2e"
 cache_dir = "/scratch/qiy18011/jez21005/jernerics"
+heartbeat_interval_s = 2
+stale_after_s = 10
+grace_period_s = 10
+max_retries = 2
 
 [tool.jernerics.backends.hpc.slurm]
 partition = "priority"
@@ -45,6 +55,10 @@ remote_dir = "~/projects/jernerics-examples/sweep-e2e"
 cache_dir = "~/.cache/jernerics"
 parallel = 2
 container_type = "docker"
+heartbeat_interval_s = 2
+stale_after_s = 10
+grace_period_s = 10
+max_retries = 2
 
 [tool.jernerics.backends.pueue-remote.docker]
 gpu = true
