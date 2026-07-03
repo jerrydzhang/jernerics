@@ -2,6 +2,7 @@
 
 ## Project Documentation
 
+- **`docs/vision.md`** — Why the project exists, who it's for, principles, non-goals, and direction. Read this first; it is the anchor for every design decision and the test for whether new work belongs here at all.
 - **`CONTEXT.md`** — Domain glossary. Read this before working on the project. It defines canonical terms (sweep, trial, task, backend, deploy, etc.) and flags ambiguities. When you use a term, check that it matches the glossary.
 
 ## Environment
