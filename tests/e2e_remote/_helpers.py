@@ -211,7 +211,7 @@ def retry_ledger(host, cache_dir, study):
     """Return the retry ledger contents, or None if not (yet) written."""
     res = ssh(
         host,
-        f"cat {cache_dir}/tracking/{study}/.retry_ledger.json",
+        f"cat {cache_dir}/{PROJECT}/tracking/{study}/.retry_ledger.json",
         capture_output=True,
         text=True,
     )

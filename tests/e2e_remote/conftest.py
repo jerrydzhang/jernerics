@@ -52,7 +52,7 @@ def scimlab_server():
         SCIMLAB,
         f"docker run --network=host --rm -d --name {SERVER_CONTAINER} "
         f"-e JERNERICS_API_KEY={TEST_API_KEY} "
-        f"sweep-e2e python -m jernerics_server --http-port {PORT} "
+        f"sweep-e2e python -m jernerics_server --host 0.0.0.0 --http-port {PORT} "
         f"--db {SERVER_DB} --artifacts-dir {SERVER_ARTIFACTS}",
         check=True,
         capture_output=True,
@@ -83,18 +83,23 @@ def hpc_server():
     build_backend("hpc")
     ssh(HPC, "pkill -f jernerics_server", capture_output=True)
     ssh(HPC, f"rm -rf {SERVER_DB} {SERVER_ARTIFACTS}", capture_output=True)
-    ssh(
-        HPC,
-        f"cd ~/projects/jernerics-examples/{PROJECT} && "
-        f"nohup apptainer exec container.sif "
-        f"python -m jernerics_server --http-port {PORT} "
-        f"--db {SERVER_DB} --artifacts-dir {SERVER_ARTIFACTS} "
-        f"> {HPC_SERVER_LOG} 2>&1 &",
+    login_host = ssh(HPC, "hostname -f", capture_output=True, text=True).stdout.strip()
+    subprocess.run(
+        [
+            "ssh",
+            "-f",
+            HPC,
+            f"cd ~/projects/jernerics-examples/{PROJECT} && "
+            f"apptainer exec --env JERNERICS_API_KEY={TEST_API_KEY} container.sif "
+            f"python -m jernerics_server --host 0.0.0.0 --http-port {PORT} "
+            f"--db {SERVER_DB} --artifacts-dir {SERVER_ARTIFACTS} "
+            f"> {HPC_SERVER_LOG} 2>&1",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
         check=True,
-        capture_output=True,
-        text=True,
     )
-    server = (HPC, f"http://hpc2.storrs.hpc.uconn.edu:{PORT}")
+    server = (HPC, f"http://{login_host}:{PORT}")
     if not wait_for_health(server):
         logs = ssh(HPC, f"cat {HPC_SERVER_LOG}", capture_output=True, text=True).stdout
         pytest.fail(f"hpc co-located server did not become healthy:\n{logs}")
