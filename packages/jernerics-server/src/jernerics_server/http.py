@@ -1,6 +1,7 @@
 import asyncio
 import mimetypes
 from pathlib import Path
+from typing import IO
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -10,6 +11,14 @@ from .store import Store
 
 _READ_ONLY_KEYWORDS = {"SELECT", "WITH", "VALUES", "EXPLAIN", "SHOW", "DESCRIBE"}
 MAX_ROWS = 10_000
+
+
+def _open_binary(path: Path) -> IO[bytes]:
+    return open(path, "wb")
+
+
+def _write_chunk(f: IO[bytes], chunk: bytes) -> None:
+    f.write(chunk)
 
 
 class QueryRequest(BaseModel):
@@ -84,8 +93,13 @@ def create_app(
         ) -> JSONResponse:
             target = artifacts_dir / project / study / str(trial_id) / key
             target.parent.mkdir(parents=True, exist_ok=True)
-            body = await request.body()
-            await asyncio.to_thread(target.write_bytes, body)
+            f = await asyncio.to_thread(_open_binary, target)
+            try:
+                async for chunk in request.stream():
+                    if chunk:
+                        await asyncio.to_thread(_write_chunk, f, chunk)
+            finally:
+                await asyncio.to_thread(f.close)
             return JSONResponse(content={"ok": True})
 
         @app.get(

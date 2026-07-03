@@ -123,9 +123,9 @@ class TestBuildSweepCommandsBasics:
             container=NoContainer(),
             paths=paths,
             direction="minimize",
-            tracking_server="grpc://server:8080",
+            tracking_server="http://server:8080",
         )
-        assert "--server-addr grpc://server:8080" in trial
+        assert "--server-addr http://server:8080" in trial
 
     def test_heartbeat_interval_passed_to_trial(self):
         spec = _make_spec()
@@ -262,12 +262,12 @@ class TestBuildSweepCommandsMatchesSlurmOutput:
             container=container,
             paths=paths,
             direction="minimize",
-            tracking_server="grpc://server:8080",
+            tracking_server="http://server:8080",
         )
 
         assert "wrapped(" in trial
         assert "jernerics.runner" in trial
-        assert "--server-addr grpc://server:8080" in trial
+        assert "--server-addr http://server:8080" in trial
 
     def test_multiline_trial_command(self):
         spec = _make_spec()
@@ -356,9 +356,9 @@ class TestBuildPostHookTrackingServer:
             chain_depth=0,
             tracking_dir="/cache/tracking/study",
             storage_path="/cache/optuna/study.journal",
-            tracking_server="grpc://server:8080",
+            tracking_server="http://server:8080",
         )
-        assert "--server-addr grpc://server:8080" in cmd
+        assert "--server-addr http://server:8080" in cmd
 
     def test_omits_server_addr_when_not_provided(self):
         from jernerics.backend.command_builders import build_post_hook_command
@@ -379,9 +379,9 @@ class TestBuildPostHookTrackingServer:
             container=NoContainer(),
             paths=paths,
             direction="minimize",
-            tracking_server="grpc://server:8080",
+            tracking_server="http://server:8080",
             retry_ctx_path="/cache/retry/ctx.json",
             chain_depth=0,
         )
         assert post_hook is not None
-        assert "--server-addr grpc://server:8080" in post_hook
+        assert "--server-addr http://server:8080" in post_hook

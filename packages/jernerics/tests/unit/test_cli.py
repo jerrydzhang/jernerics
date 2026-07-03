@@ -105,6 +105,40 @@ class TestInitCommand:
 
         assert (project_dir / "container.def").exists()
 
+    def test_init_scaffolds_trial_and_config(self, tmp_path):
+        project_dir = tmp_path / "new-project"
+
+        with patch("shutil.which") as mock_which:
+            mock_which.return_value = "/usr/bin/uv"
+            with patch("jernerics.cli.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+                from jernerics.cli import init
+
+                init(str(project_dir))
+
+        trial = (project_dir / "trial.py").read_text()
+        assert "def trial(config, tracker)" in trial
+        assert (project_dir / "config.py").exists()
+
+    def test_init_preserves_existing_trial_and_config(self, tmp_path):
+        project_dir = tmp_path / "existing-project"
+        project_dir.mkdir()
+        (project_dir / "trial.py").write_text("# my trial")
+        (project_dir / "config.py").write_text("# my config")
+
+        with patch("shutil.which") as mock_which:
+            mock_which.return_value = "/usr/bin/uv"
+            with patch("jernerics.cli.subprocess.run") as mock_run:
+                mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
+
+                from jernerics.cli import init
+
+                init(str(project_dir))
+
+        assert (project_dir / "trial.py").read_text() == "# my trial"
+        assert (project_dir / "config.py").read_text() == "# my config"
+
     def test_init_requires_uv(self, tmp_path):
         project_dir = tmp_path / "new-project"
 

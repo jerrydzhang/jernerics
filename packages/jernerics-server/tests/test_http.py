@@ -218,3 +218,12 @@ class TestArtifactEndpoints:
     def test_download_missing_returns_404(self, artifacts_client):
         resp = artifacts_client.get("/artifact/p/s/0/nope")
         assert resp.status_code == 404
+
+    def test_large_upload_round_trips(self, artifacts_client, tmp_path):
+        body = bytes(range(256)) * 40960
+        resp = artifacts_client.post("/artifact/p/s/0/big", content=body)
+        assert resp.status_code == 200
+        on_disk = (tmp_path / "artifacts" / "p" / "s" / "0" / "big").read_bytes()
+        assert on_disk == body
+        got = artifacts_client.get("/artifact/p/s/0/big")
+        assert got.content == body

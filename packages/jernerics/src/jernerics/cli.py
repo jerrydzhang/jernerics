@@ -454,6 +454,17 @@ def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> 
         pass
 
 
+_TRIAL_SCAFFOLD = """def trial(config, tracker):
+    tracker.log_metric("loss", config.get("loss", 0.5))
+    return {"loss": config.get("loss", 0.5)}
+"""
+
+_CONFIG_SCAFFOLD = """base = {"loss": 0.5}
+
+n_trials = 3
+objective = lambda results: results["loss"]
+direction = "minimize"
+"""
 # ── init ─────────────────────────────────────────────────────────────────────
 
 
@@ -533,6 +544,20 @@ def init(
     else:
         print("Skipped: src/ (already exists)")
 
+    trial_path = project_path / "trial.py"
+    if trial_path.exists():
+        print("Skipped: trial.py (already exists)")
+    else:
+        trial_path.write_text(_TRIAL_SCAFFOLD)
+        print("Created: trial.py")
+
+    sweep_path = project_path / "config.py"
+    if sweep_path.exists():
+        print("Skipped: config.py (already exists)")
+    else:
+        sweep_path.write_text(_CONFIG_SCAFFOLD)
+        print("Created: config.py")
+
     uv_result = subprocess.run(
         ["uv", "sync"],
         cwd=project_path,
@@ -548,10 +573,7 @@ def init(
     print(f"\nProject initialized in {project_path}")
     print("\nNext steps:")
     print("  1. Edit pyproject.toml to add dependencies")
-    print(
-        "  2. Create your trial and config files "
-        "(e.g., experiments/trial.py, configs/default.py)"
-    )
+    print("  2. Run 'jernerics local trial.py config.py' to test the scaffold")
     print("  3. Run 'jernerics build --backend <name>' to build on remote")
 
 

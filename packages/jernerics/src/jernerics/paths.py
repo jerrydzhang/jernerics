@@ -30,7 +30,7 @@ def cache_dir() -> Path:
 
         ~/.cache/jernerics/<project_name>/
           optuna/<study>.journal
-          tracking/<study>/0.pb
+          tracking/<study>/0.jsonl
           jobs/<job_id>.json
     """
     project_dir = find_pyproject_dir()
