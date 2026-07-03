@@ -394,7 +394,7 @@ wheels = [
 [[package]]
 name = "jernerics"
 version = "1.1.0"
-source = { virtual = "packages/jernerics" }
+source = { editable = "packages/jernerics" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "httpx" },
