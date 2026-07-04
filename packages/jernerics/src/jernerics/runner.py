@@ -23,12 +23,14 @@ def run_trial(
     project_name: str | None = None,
     server_addr: str | None = None,
     heartbeat_interval_s: float = 60.0,
+    git_hash: str | None = None,
 ) -> None:
     trial_dir = Path(trial_file).parent
     if str(trial_dir) not in sys.path:
         sys.path.insert(0, str(trial_dir))
 
     sweep = load_config(config_file)
+    sweep_config_text = Path(config_file).read_text()
     module = runpy.run_path(trial_file)
     if "trial" not in module or not callable(module["trial"]):
         raise RuntimeError(
@@ -49,6 +51,8 @@ def run_trial(
             trial_number=trial.number,
             server_addr=server_addr,
             heartbeat_interval_s=heartbeat_interval_s,
+            git_hash=git_hash,
+            sweep_config=sweep_config_text,
         ) as env:
             params: dict[str, Any] = (
                 sweep.search_space(trial) if sweep.search_space else {}
@@ -64,7 +68,11 @@ def run_trial(
 
             config = {**sweep.base, **params, "config_index": trial.number}
 
-            results = trial_fn(config, env.tracker)
+            try:
+                results = trial_fn(config, env.tracker)
+            except Exception as exc:
+                print(f"Trial {trial.number + 1} failed: {exc}", file=sys.stderr)
+                raise _TaskFailure from exc
 
             print(f"Trial {trial.number + 1} completed", file=sys.stderr)
 
@@ -90,6 +98,7 @@ if __name__ == "__main__":
     parser.add_argument("--project-name", default=None)
     parser.add_argument("--server-addr", default=None)
     parser.add_argument("--heartbeat-interval", type=float, default=60.0)
+    parser.add_argument("--git-hash", default=None)
     args = parser.parse_args()
 
     run_trial(
@@ -101,4 +110,5 @@ if __name__ == "__main__":
         project_name=args.project_name,
         server_addr=args.server_addr,
         heartbeat_interval_s=args.heartbeat_interval,
+        git_hash=args.git_hash,
     )

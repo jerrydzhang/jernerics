@@ -48,6 +48,29 @@ def _validate_relpath(path: str, desc: str) -> str:
     return path
 
 
+def _capture_git_hash(cwd: Path | None) -> str | None:
+    """Best-effort git commit hash for sweep provenance; None if not a git repo."""
+    if cwd is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(cwd),
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=5,
+        )
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+        OSError,
+    ):
+        return None
+    return result.stdout.strip() or None
+
+
 def _get_backend(backend_name: str) -> tuple[Backend, str, Path]:
     """Load a backend by name. Returns (backend, project_name, project_dir)."""
     from .backend.factory import make_backend
@@ -111,6 +134,7 @@ def run_local(
     project_dir = find_pyproject_dir()
     project_name = get_project_name(project_dir) if project_dir else None
     tracking_server = load_tracking_server(project_dir) if project_dir else None
+    git_hash = _capture_git_hash(project_dir or trial_path.parent)
 
     project_cache = cache_dir()
     optuna_dir = project_cache / "optuna"
@@ -128,6 +152,7 @@ def run_local(
         project_name=project_name,
         server_addr=tracking_server,
         grid=sweep.grid,
+        git_hash=git_hash,
     )
 
     backend = LocalBackend(tracking_server=tracking_server)
@@ -200,6 +225,7 @@ def run_remote(
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     study_name = f"{project_name}_{config_path.stem}_{timestamp}"
     storage_url = backend.storage_path(study_name)
+    git_hash = _capture_git_hash(project_dir)
 
     spec = SweepSubmission(
         trial_path=trial_path,
@@ -212,6 +238,7 @@ def run_remote(
         project_name=project_name,
         server_addr=backend.tracking_server,
         grid=sweep.grid,
+        git_hash=git_hash,
     )
 
     try:

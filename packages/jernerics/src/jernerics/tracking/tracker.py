@@ -14,6 +14,7 @@ class Tracker(Protocol):
     def log_metric(self, key: str, value: float, step: int | None = None) -> None: ...
     def log_result(self, key: str, value: Any) -> None: ...
     def log_artifact(self, key: str, local_path: str) -> None: ...
+    def log_sweep_meta(self, git_hash: str | None, config: str) -> None: ...
     def close(self) -> None: ...
 
 
@@ -83,6 +84,11 @@ class JsonlTracker:
         env["result"] = {"key": key, "value": json.dumps(value)}
         self.writer.write_envelope(env)
 
+    def log_sweep_meta(self, git_hash: str | None, config: str) -> None:
+        env = self._make_envelope()
+        env["sweep_meta"] = {"git_hash": git_hash, "config": config}
+        self.writer.write_envelope(env)
+
     def log_artifact(self, key: str, local_path: str) -> None:
         env = self._make_envelope()
         env["artifact"] = {"key": key, "filename": Path(local_path).name}
@@ -115,6 +121,9 @@ class NullTracker:
         pass
 
     def log_artifact(self, key: str, local_path: str) -> None:
+        pass
+
+    def log_sweep_meta(self, git_hash: str | None, config: str) -> None:
         pass
 
     def close(self) -> None:

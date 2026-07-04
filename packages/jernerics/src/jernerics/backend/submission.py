@@ -155,6 +155,7 @@ def submit_sweep(
         project_dir=infra.paths.work_prefix,
         project_name=project_name,
         host_home=host.home,
+        git_hash=spec.git_hash or "",
         ctx_path=retry_ctx_path,
         chain_depth=chain_depth,
     )
@@ -168,6 +169,7 @@ def submit_sweep(
         direction=direction,
         tracking_server=tracking_server,
         heartbeat_interval_s=heartbeat_interval_s,
+        git_hash=spec.git_hash,
         multiline=not dry_run,
         retry_ctx_path=retry_ctx_path,
         chain_depth=chain_depth,

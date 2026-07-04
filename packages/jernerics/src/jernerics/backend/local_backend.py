@@ -64,6 +64,7 @@ class LocalBackend:
                     tracking_dir=str(tracker_dir),
                     project_name=spec.project_name,
                     server_addr=spec.server_addr or self.tracking_server,
+                    git_hash=spec.git_hash,
                 )
             except SystemExit as e:
                 if e.code != 0:

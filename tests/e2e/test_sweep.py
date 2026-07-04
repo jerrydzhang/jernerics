@@ -141,6 +141,7 @@ class TestTrackingReplayRoundTrip:
         assert con.execute("SELECT COUNT(*) FROM metrics").fetchone()[0] == 2
         assert con.execute("SELECT COUNT(*) FROM results").fetchone()[0] == 2
         assert con.execute("SELECT COUNT(*) FROM trial_end").fetchone()[0] == 2
+        assert con.execute("SELECT COUNT(*) FROM sweep_meta").fetchone()[0] == 2
         con.close()
 
 

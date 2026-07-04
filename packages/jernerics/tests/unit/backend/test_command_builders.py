@@ -139,6 +139,29 @@ class TestBuildSweepCommandsBasics:
         )
         assert "--heartbeat-interval 30.0" in trial
 
+    def test_git_hash_passed_to_trial(self):
+        spec = _make_spec()
+        paths = _make_paths()
+        _, trial, _ = build_sweep_commands(
+            spec=spec,
+            container=NoContainer(),
+            paths=paths,
+            direction="minimize",
+            git_hash="abc123def4567890abc123def4567890abc123de",
+        )
+        assert "--git-hash abc123def4567890abc123def4567890abc123de" in trial
+
+    def test_git_hash_omitted_when_none(self):
+        spec = _make_spec()
+        paths = _make_paths()
+        _, trial, _ = build_sweep_commands(
+            spec=spec,
+            container=NoContainer(),
+            paths=paths,
+            direction="minimize",
+        )
+        assert "--git-hash" not in trial
+
 
 class TestBuildSweepCommandsAlwaysPostHook:
     """build_sweep_commands always returns a post-hook command."""

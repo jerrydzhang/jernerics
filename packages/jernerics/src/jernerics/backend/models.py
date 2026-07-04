@@ -17,6 +17,7 @@ class SweepSubmission:
     max_parallel: int | None = None
     backend_overrides: dict[str, str] = field(default_factory=dict)
     grid: dict[str, list] | None = None
+    git_hash: str | None = None
 
 
 @dataclass

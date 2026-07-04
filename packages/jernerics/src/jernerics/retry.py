@@ -40,6 +40,7 @@ class RetryContext:
     project_dir: str = "/work"
     project_name: str | None = None
     host_home: str = ""
+    git_hash: str = ""
 
     # Set at submission time, not serialized
     ctx_path: str = ""

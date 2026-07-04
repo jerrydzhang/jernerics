@@ -38,8 +38,8 @@ def run_pipeline(
         ctx = RetryContext.from_json(Path(ctx_path).read_text())
 
     if upload_fn is not None:
-        s3_key = f"{ctx.project_name}/{ctx.study_name}/optuna.journal"
-        upload_fn(s3_key, storage_path)
+        artifact_key = f"{ctx.project_name}/{ctx.study_name}/optuna.journal"
+        upload_fn(artifact_key, storage_path)
 
     if base_url is not None:
         tracking_dir_path = Path(tracking_dir)

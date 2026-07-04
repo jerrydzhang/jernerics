@@ -98,6 +98,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         trial_relpath=ctx.trial_relpath,
         config_relpath=ctx.config_relpath,
         project_name=ctx.project_name,
+        git_hash=ctx.git_hash or None,
     )
 
     submit_sweep(
