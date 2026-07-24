@@ -1,4 +1,5 @@
 import itertools
+import traceback
 from pathlib import Path
 
 import optuna
@@ -70,6 +71,7 @@ class LocalBackend:
                 if e.code != 0:
                     any_failed = True
             except Exception:
+                traceback.print_exc()
                 any_failed = True
 
         if any_failed:

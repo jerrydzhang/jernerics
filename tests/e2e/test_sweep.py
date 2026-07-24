@@ -119,8 +119,8 @@ class TestTrackingReplayRoundTrip:
             trial_file,
             'lr = config["lr"]\n'
             "    tracker.log_param('lr', lr)\n"
-            "    tracker.log_metric('loss', lr * 2, step=1)\n"
-            "    tracker.log_result('summary', {'accuracy': 0.95})\n"
+            "    tracker.log_value('loss', lr * 2, step=1)\n"
+            "    tracker.log_json('summary', {'accuracy': 0.95})\n"
             '    return {"loss": lr * 2}',
         )
         _write_config(config_file, objective_expr='results["loss"]')
@@ -138,8 +138,7 @@ class TestTrackingReplayRoundTrip:
         # Verify all event types in SQLite
         con = sqlite3.connect(str(db_path))
         assert con.execute("SELECT COUNT(*) FROM params").fetchone()[0] == 2
-        assert con.execute("SELECT COUNT(*) FROM metrics").fetchone()[0] == 2
-        assert con.execute("SELECT COUNT(*) FROM results").fetchone()[0] == 2
+        assert con.execute("SELECT COUNT(*) FROM tracked_values").fetchone()[0] == 4
         assert con.execute("SELECT COUNT(*) FROM trial_end").fetchone()[0] == 2
         assert con.execute("SELECT COUNT(*) FROM sweep_meta").fetchone()[0] == 2
         con.close()

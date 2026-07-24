@@ -65,9 +65,6 @@ The batch path: after trials finish, any `.jsonl` files not fully shipped live a
 **Query endpoint**:
 An HTTP endpoint (`POST /query`) on the tracking server that accepts read-only SQL and returns JSON rows. The thin interface between analytical clients (notebooks, ad-hoc tools) and the SQLite store.
 
-**Dashboard**:
-A React SPA that renders sweep comparison views. Lives in a separate repo (`jernerics-dashboard`). Currently set aside — not wired into the tracking server, and no longer shipped via a `dashboardPackage` option in the NixOS module. Will be revisited once the observability read-surface is redesigned off real need.
-
 **Tracking server**:
 A single HTTP process. Ingests trial events (`POST /ingest`), serves them via SQL (`POST /query`), and serves/stores artifact files (`GET`/`POST /artifact/...`) on its own disk. Owns the SQLite file exclusively. Authenticated via a bearer API key in the `Authorization` header. No external object storage — artifacts live on the server's disk.
 
@@ -96,15 +93,7 @@ _Avoid_: checker (that's the current implementation name — it will grow beyond
 ## Relationships
 
 - **PathResolver** is the single source of truth for path resolution. All orchestration code (build, submit, retry) uses it to get `work_prefix`, `cache_prefix`, and `storage_path`. No `isinstance(container, NoContainer)` checks in orchestration code.
-
-- A **Project** has many **Sweeps**.
-- A **Sweep** has many **Trials**.
-- Each **Trial** is one invocation of the user's `trial(config, tracker)` function with a specific parameter combination.
-- The **Runner script** (`runner.py`) is invoked inside the execution environment to run a single trial — it loads the Optuna study, calls `trial(config, tracker)`, and handles tracking.
-- An **Orchestrator** composes the deploy sequence. It builds command strings and delegates scheduling to a **Scheduler Adapter**.
 - A **Scheduler Adapter** receives pre-wrapped command strings (setup, trial, post-hook) and decides how to compose them on its scheduler (e.g. Slurm uses `--dependency`, Pueue uses inline `wait`).
-- A **Deploy** (sync → build → submit) sends a **Sweep** to a **Backend** via the **Orchestrator**.
-- A **Post-hook** runs after all trials finish: retry detection, optuna journal upload, tracking replay, and artifact sync.
 - Heartbeat and retry are separate subsystems — heartbeat detects staleness, retry acts on it — but they belong to the same domain (auto-retry).
 
 **Container runtime**:
