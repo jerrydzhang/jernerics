@@ -27,14 +27,14 @@ def _param_envelope(seq: int, key: str, value: float) -> dict:
     }
 
 
-def _metric_envelope(seq: int, key: str, value: float, step: int) -> dict:
+def _value_envelope(seq: int, key: str, value: float, step: int) -> dict:
     return {
         "project": "p",
         "study_name": "s",
         "trial_id": 0,
         "timestamp_ns": 1000 + seq,
         "seq": seq,
-        "metric": {"key": key, "value": value, "step": step},
+        "value": {"key": key, "value": value, "step": step, "context": "{}"},
     }
 
 
@@ -138,7 +138,7 @@ class TestReplayFile:
         events_file = tmp_path / "0.jsonl"
         events = [
             _param_envelope(0, "lr", 0.01),
-            _metric_envelope(1, "loss", 0.5, 10),
+            _value_envelope(1, "loss", 0.5, 10),
             _trial_end_envelope(2),
         ]
         _write_events(events_file, events)
@@ -186,7 +186,7 @@ class TestReplayFile:
         events_file = tmp_path / "0.jsonl"
         _write_events(
             events_file,
-            [_param_envelope(0, "lr", 0.01), _metric_envelope(1, "loss", 0.5, 10)],
+            [_param_envelope(0, "lr", 0.01), _value_envelope(1, "loss", 0.5, 10)],
         )
 
         with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
@@ -208,7 +208,7 @@ class TestReplayTracking:
         events_dir.mkdir(parents=True)
 
         _write_events(events_dir / "0.jsonl", [_param_envelope(0, "lr", 0.01)])
-        _write_events(events_dir / "1.jsonl", [_metric_envelope(0, "loss", 0.5, 10)])
+        _write_events(events_dir / "1.jsonl", [_value_envelope(0, "loss", 0.5, 10)])
 
         result = replay_tracking(tracking, BASE_URL, max_workers=2, max_retries=3)
 

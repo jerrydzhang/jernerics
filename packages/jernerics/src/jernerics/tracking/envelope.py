@@ -1,10 +1,3 @@
-"""JSON envelope shapes written to the local JSONL buffer and POSTed to /ingest.
-
-One payload key (metric | param | result | artifact | sweep_meta | trial_end)
-is present per envelope. These TypedDicts mirror the original tracking.proto
-schema and are for documentation/type-checking; the runtime data is plain dict.
-"""
-
 from typing import TypedDict
 
 
@@ -20,20 +13,18 @@ class ParamEvent(TypedDict):
     value: ParamValue
 
 
-class MetricEvent(TypedDict, total=False):
+class ValueEvent(TypedDict, total=False):
     key: str
     value: float
+    value_json: str
     step: int
+    context: dict
 
 
-class ResultEvent(TypedDict):
-    key: str
-    value: str
-
-
-class ArtifactEvent(TypedDict):
+class ArtifactEvent(TypedDict, total=False):
     key: str
     filename: str
+    context: dict
 
 
 class SweepMetaEvent(TypedDict, total=False):
@@ -49,11 +40,11 @@ class Envelope(TypedDict, total=False):
     project: str
     study_name: str
     trial_id: int
+    run_id: int
     timestamp_ns: int
     seq: int
-    metric: MetricEvent
+    value: ValueEvent
     param: ParamEvent
-    result: ResultEvent
     artifact: ArtifactEvent
     sweep_meta: SweepMetaEvent
     trial_end: TrialEndEvent

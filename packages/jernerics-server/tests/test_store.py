@@ -1,3 +1,6 @@
+import sqlite3
+
+import pytest
 from jernerics_server.store import Store
 
 
@@ -12,6 +15,7 @@ def _env(
     project: str = "p",
     study: str = "s",
     trial: int = 0,
+    run_id: int = 0,
     ts: int = 0,
     seq: int = 0,
 ) -> dict:
@@ -20,6 +24,7 @@ def _env(
         "project": project,
         "study_name": study,
         "trial_id": trial,
+        "run_id": run_id,
         "timestamp_ns": _ts(ts),
         "seq": seq,
         payload_key: payload,
@@ -77,34 +82,81 @@ class TestInsertParam:
             assert bool_val is None
 
 
-class TestInsertMetric:
+class TestInsertValueScalar:
     def test_with_step(self, tmp_path):
         with Store(tmp_path / "test.sqlite") as store:
             store.insert_event(
-                _env("metric", {"key": "loss", "value": 0.5, "step": 100})
+                _env(
+                    "value",
+                    {"key": "loss", "value": 0.5, "step": 100, "context": "{}"},
+                )
             )
 
-            _, rows = store.query("SELECT project, key, value, step FROM metrics")
-            assert rows == [("p", "loss", 0.5, 100)]
+            _, rows = store.query(
+                "SELECT key, value_type, scalar_val, text_val, step FROM tracked_values"
+            )
+            assert rows == [("loss", "scalar", 0.5, None, 100)]
 
     def test_without_step_stores_null(self, tmp_path):
         with Store(tmp_path / "test.sqlite") as store:
-            store.insert_event(_env("metric", {"key": "loss", "value": 0.5}))
+            store.insert_event(
+                _env("value", {"key": "loss", "value": 0.5, "step": None})
+            )
 
-            _, rows = store.query("SELECT step FROM metrics")
+            _, rows = store.query("SELECT step FROM tracked_values")
             assert len(rows) == 1
             assert rows[0][0] is None
 
+    def test_context_stored(self, tmp_path):
+        with Store(tmp_path / "test.sqlite") as store:
+            store.insert_event(
+                _env(
+                    "value",
+                    {"key": "loss", "value": 0.5, "context": '{"seed":3}'},
+                )
+            )
 
-class TestInsertResult:
+            _, rows = store.query("SELECT context FROM tracked_values")
+            assert rows == [('{"seed":3}',)]
+
+    def test_nan_value_stored_as_null(self, tmp_path):
+        with Store(tmp_path / "test.sqlite") as store:
+            store.insert_event(
+                _env("value", {"key": "loss", "value": None, "step": 10})
+            )
+
+            _, rows = store.query(
+                "SELECT value_type, scalar_val, text_val FROM tracked_values"
+            )
+            assert rows == [("scalar", None, None)]
+
+
+class TestInsertValueJson:
     def test_json_string(self, tmp_path):
         with Store(tmp_path / "test.sqlite") as store:
             store.insert_event(
-                _env("result", {"key": "confusion", "value": '{"tp": 90}'})
+                _env(
+                    "value",
+                    {"key": "confusion", "value_json": '{"tp": 90}', "step": None},
+                )
             )
 
-            _, rows = store.query("SELECT project, key, value FROM results")
-            assert rows == [("p", "confusion", '{"tp": 90}')]
+            _, rows = store.query(
+                "SELECT key, value_type, scalar_val, text_val FROM tracked_values"
+            )
+            assert rows == [("confusion", "json", None, '{"tp": 90}')]
+
+
+class TestCheckConstraint:
+    def test_scalar_and_json_are_mutually_exclusive(self, tmp_path):
+        with (
+            Store(tmp_path / "test.sqlite") as store,
+            pytest.raises(sqlite3.IntegrityError),
+        ):
+            store._con.execute(
+                "INSERT INTO tracked_values VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                ["p", "s", 0, 0, 1, 0, "k", None, "{}", "scalar", 0.5, "x"],
+            )
 
 
 class TestInsertArtifact:
@@ -132,6 +184,18 @@ class TestInsertArtifact:
             assert len(rows) == 1
             assert rows[0][0] == ""
 
+    def test_context_stored(self, tmp_path):
+        with Store(tmp_path / "test.sqlite") as store:
+            store.insert_event(
+                _env(
+                    "artifact",
+                    {"key": "model", "filename": "m.pt", "context": '{"seed":3}'},
+                )
+            )
+
+            _, rows = store.query("SELECT context FROM artifacts")
+            assert rows == [('{"seed":3}',)]
+
 
 class TestInsertSweepMeta:
     def test_git_hash_and_config(self, tmp_path):
@@ -155,25 +219,113 @@ class TestInsertTrialEnd:
             assert rows == [("p", "s", 0, 0)]
 
 
+class TestRunIdUniqueness:
+    def test_same_seq_different_run_id_both_accepted(self, tmp_path):
+        with Store(tmp_path / "test.sqlite") as store:
+            store.insert_event(
+                _env(
+                    "value",
+                    {"key": "loss", "value": 0.1, "step": None},
+                    run_id=1,
+                    seq=0,
+                )
+            )
+            store.insert_event(
+                _env(
+                    "value",
+                    {"key": "loss", "value": 0.2, "step": None},
+                    run_id=2,
+                    seq=0,
+                )
+            )
+
+            _, rows = store.query(
+                "SELECT run_id, scalar_val FROM tracked_values ORDER BY run_id"
+            )
+            assert rows == [(1, 0.1), (2, 0.2)]
+
+
+class TestParamUpsert:
+    def test_same_key_replaces(self, tmp_path):
+        with Store(tmp_path / "test.sqlite") as store:
+            store.insert_event(
+                _env("param", {"key": "lr", "value": {"float_val": 0.01}}, seq=0)
+            )
+            store.insert_event(
+                _env("param", {"key": "lr", "value": {"float_val": 0.1}}, seq=1)
+            )
+
+            _, rows = store.query("SELECT COUNT(*) FROM params")
+            assert rows[0][0] == 1
+            _, rows = store.query("SELECT float_val FROM params")
+            assert rows == [(0.1,)]
+
+    def test_different_key_accepted(self, tmp_path):
+        with Store(tmp_path / "test.sqlite") as store:
+            store.insert_event(
+                _env("param", {"key": "lr", "value": {"float_val": 0.01}}, seq=0)
+            )
+            store.insert_event(
+                _env("param", {"key": "wd", "value": {"float_val": 0.1}}, seq=1)
+            )
+
+            _, rows = store.query("SELECT COUNT(*) FROM params")
+            assert rows[0][0] == 2
+
+
 class TestIdempotency:
     def test_duplicate_seq_ignored(self, tmp_path):
         with Store(tmp_path / "test.sqlite") as store:
-            env = _env("param", {"key": "lr", "value": {"float_val": 0.01}})
+            env = _env("value", {"key": "loss", "value": 0.5, "step": None})
             store.insert_event(env)
             store.insert_event(env)
 
-            _, rows = store.query("SELECT COUNT(*) FROM params")
+            _, rows = store.query("SELECT COUNT(*) FROM tracked_values")
             assert rows[0][0] == 1
 
     def test_different_seq_accepted(self, tmp_path):
         with Store(tmp_path / "test.sqlite") as store:
-            env0 = _env("param", {"key": "lr", "value": {"float_val": 0.01}}, seq=0)
-            env1 = _env("param", {"key": "lr", "value": {"float_val": 0.1}}, seq=1)
+            env0 = _env("value", {"key": "loss", "value": 0.5, "step": None}, seq=0)
+            env1 = _env("value", {"key": "loss", "value": 0.3, "step": None}, seq=1)
             store.insert_event(env0)
             store.insert_event(env1)
 
-            _, rows = store.query("SELECT seq, float_val FROM params ORDER BY seq")
-            assert rows == [(0, 0.01), (1, 0.1)]
+            _, rows = store.query(
+                "SELECT seq, scalar_val FROM tracked_values ORDER BY seq"
+            )
+            assert rows == [(0, 0.5), (1, 0.3)]
+
+
+class TestMigration:
+    def test_old_schema_dropped_on_open(self, tmp_path):
+        db = tmp_path / "old.sqlite"
+        con = sqlite3.connect(str(db))
+        con.execute(
+            "CREATE TABLE metrics (project TEXT, study_name TEXT, "
+            "trial_id INTEGER, timestamp_ns INTEGER, seq INTEGER, "
+            "key TEXT, value REAL, step INTEGER) STRICT"
+        )
+        con.execute('INSERT INTO metrics VALUES ("p","s",0,1,0,"loss",0.5,10)')
+        con.execute(
+            "CREATE TABLE results (project TEXT, study_name TEXT, trial_id INTEGER, "
+            "timestamp_ns INTEGER, seq INTEGER, key TEXT, value TEXT) STRICT"
+        )
+        con.commit()
+        con.close()
+
+        with Store(db) as store:
+            _, tables = store.query("SELECT name FROM sqlite_master WHERE type='table'")
+            names = {r[0] for r in tables}
+            assert "metrics" not in names
+            assert "results" not in names
+            assert "tracked_values" in names
+            _, version = store.query("PRAGMA user_version")
+            assert version[0][0] == 2
+
+    def test_fresh_db_gets_version_two(self, tmp_path):
+        with Store(tmp_path / "fresh.sqlite") as store:
+            _, version = store.query("PRAGMA user_version")
+            assert version[0][0] == 2
 
 
 class TestInsertMultiple:
@@ -191,8 +343,8 @@ class TestInsertMultiple:
             )
             store.insert_event(
                 _env(
-                    "metric",
-                    {"key": "loss", "value": 0.5, "step": 10},
+                    "value",
+                    {"key": "loss", "value": 0.5, "step": 10, "context": "{}"},
                     project="p",
                     study="exp1",
                     trial=0,
@@ -212,7 +364,7 @@ class TestInsertMultiple:
 
             _, rows = store.query("SELECT COUNT(*) FROM params")
             assert rows[0][0] == 2
-            _, rows = store.query("SELECT COUNT(*) FROM metrics")
+            _, rows = store.query("SELECT COUNT(*) FROM tracked_values")
             assert rows[0][0] == 1
 
             _, rows = store.query(
@@ -220,3 +372,15 @@ class TestInsertMultiple:
                 " WHERE key = 'lr' ORDER BY trial_id"
             )
             assert rows == [(0, 0.01), (1, 0.1)]
+
+
+class TestSecondaryIndexes:
+    def test_indexes_exist(self, tmp_path):
+        with Store(tmp_path / "test.sqlite") as store:
+            _, rows = store.query(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+                " AND tbl_name='tracked_values'"
+            )
+            names = {r[0] for r in rows}
+            assert "idx_values_study_key" in names
+            assert "idx_values_study_key_step" in names

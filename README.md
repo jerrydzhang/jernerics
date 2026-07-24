@@ -34,12 +34,12 @@ def trial(config, tracker):
     data = load_data(config["seed"])
     model = train(data, lr=config["lr"])
     accuracy = evaluate(model)
-    tracker.log_metric("accuracy", accuracy)
+    tracker.log_value("accuracy", accuracy)
     tracker.log_artifact("model", "model.pt")
     return {"loss": 1.0 - accuracy}
 ```
 
-`config` holds the current hyperparameters (`base` merged with sampled `search_space`). Use `tracker.log_metric` / `log_param` / `log_result` / `log_artifact` to record what matters. Return a dict; the `objective` lambda reads it.
+`config` holds the current hyperparameters (`base` merged with sampled `search_space`). Use `tracker.log_value` / `log_param` / `log_json` / `log_artifact` to record what matters. Return a dict; the `objective` lambda reads it.
 
 ### 3. Create a config
 
@@ -198,15 +198,15 @@ def trial(config, tracker):
     model = train(lr=config["lr"], seed=config["seed"])
     accuracy = evaluate(model)
 
-    tracker.log_metric("accuracy", accuracy, step=config["config_index"])
+    tracker.log_value("accuracy", accuracy, step=config["config_index"])
     tracker.log_param("lr", config["lr"])
-    tracker.log_result("summary", {"accuracy": accuracy, "lr": config["lr"]})
+    tracker.log_json("summary", {"accuracy": accuracy, "lr": config["lr"]})
     tracker.log_artifact("model", "model.pt")
 
     return {"loss": 1.0 - accuracy}
 ```
 
-The returned dict is passed to the config's `objective` lambda (e.g. `lambda results: results["loss"]`). For a long run, call `tracker.log_metric(..., step=n)` repeatedly — metrics stream live to the server.
+The returned dict is passed to the config's `objective` lambda (e.g. `lambda results: results["loss"]`). For a long run, call `tracker.log_value(..., step=n)` repeatedly — values stream live to the server.
 
 ## Features
 

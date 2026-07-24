@@ -1,5 +1,6 @@
 import runpy
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,7 @@ def run_trial(
         study_name=study_name,
         storage=JournalStorage(JournalFileBackend(storage_url)),
     )
+    run_id = int(time.time())
 
     def objective(trial: optuna.trial.Trial) -> float:
         with TrialEnvironment(
@@ -53,6 +55,7 @@ def run_trial(
             heartbeat_interval_s=heartbeat_interval_s,
             git_hash=git_hash,
             sweep_config=sweep_config_text,
+            run_id=run_id,
         ) as env:
             params: dict[str, Any] = (
                 sweep.search_space(trial) if sweep.search_space else {}

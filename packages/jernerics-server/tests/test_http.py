@@ -142,45 +142,47 @@ class TestHealthEndpoint:
         assert response.json() == {"ok": True}
 
 
-def _metric_envelope(seq: int = 0) -> dict:
+def _value_envelope(seq: int = 0) -> dict:
     return {
         "project": "p",
         "study_name": "s",
         "trial_id": 0,
         "timestamp_ns": 1,
         "seq": seq,
-        "metric": {"key": "loss", "value": 0.5, "step": 10},
+        "value": {"key": "loss", "value": 0.5, "step": 10, "context": "{}"},
     }
 
 
 class TestIngestEndpoint:
-    def test_metric_round_trips_through_query(self, client):
-        response = client.post("/ingest", json=_metric_envelope())
+    def test_value_round_trips_through_query(self, client):
+        response = client.post("/ingest", json=_value_envelope())
         assert response.status_code == 200
         assert response.json() == {"ok": True}
 
-        q = client.post("/query", json={"sql": "SELECT key, value FROM metrics"})
+        q = client.post(
+            "/query", json={"sql": "SELECT key, scalar_val FROM tracked_values"}
+        )
         assert q.status_code == 200
         body = q.json()
-        assert body["columns"] == ["key", "value"]
+        assert body["columns"] == ["key", "scalar_val"]
         assert body["rows"] == [["loss", 0.5]]
 
     def test_duplicate_seq_is_idempotent(self, client):
-        envelope = _metric_envelope()
+        envelope = _value_envelope()
         assert client.post("/ingest", json=envelope).status_code == 200
         assert client.post("/ingest", json=envelope).status_code == 200
 
-        q = client.post("/query", json={"sql": "SELECT COUNT(*) FROM metrics"})
+        q = client.post("/query", json={"sql": "SELECT COUNT(*) FROM tracked_values"})
         assert q.json()["rows"] == [[1]]
 
     def test_missing_auth_returns_401(self, auth_client):
-        response = auth_client.post("/ingest", json=_metric_envelope())
+        response = auth_client.post("/ingest", json=_value_envelope())
         assert response.status_code == 401
 
     def test_invalid_key_returns_401(self, auth_client):
         response = auth_client.post(
             "/ingest",
-            json=_metric_envelope(),
+            json=_value_envelope(),
             headers={"Authorization": "Bearer wrong"},
         )
         assert response.status_code == 401
@@ -188,7 +190,7 @@ class TestIngestEndpoint:
     def test_valid_bearer_passes(self, auth_client):
         response = auth_client.post(
             "/ingest",
-            json=_metric_envelope(),
+            json=_value_envelope(),
             headers={"Authorization": "Bearer secret123"},
         )
         assert response.status_code == 200

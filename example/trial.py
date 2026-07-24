@@ -12,10 +12,10 @@ def trial(config, tracker: Tracker) -> dict:
     try:
         import torch
     except ImportError:
-        tracker.log_metric("cuda_available", 0.0)
+        tracker.log_value("cuda_available", 0.0)
     else:
         cuda = torch.cuda.is_available()
-        tracker.log_metric("cuda_available", float(cuda))
+        tracker.log_value("cuda_available", float(cuda))
 
     # generate_data
     tracker.log_param("seed", config["seed"])
@@ -48,7 +48,7 @@ def trial(config, tracker: Tracker) -> dict:
         f"accuracy={accuracy:.4f}\n"
     )
     tracker.log_artifact(f"summary-{trial_idx}.txt", str(summary_file))
-    tracker.log_result(
+    tracker.log_json(
         "summary",
         {
             "loss": loss,

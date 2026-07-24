@@ -2,8 +2,8 @@ from pathlib import Path
 
 from jernerics.tracking.jsonl_io import TrackingReader, TrackingWriter
 
-# The six payload variants a JSONL envelope may carry (exactly one per line).
-PAYLOAD_KEYS = {"param", "metric", "result", "artifact", "sweep_meta", "trial_end"}
+# The payload variants a JSONL envelope may carry (exactly one per line).
+PAYLOAD_KEYS = {"param", "value", "artifact", "sweep_meta", "trial_end"}
 
 
 def read_all(path: Path) -> list[dict]:
@@ -14,7 +14,7 @@ def read_all(path: Path) -> list[dict]:
 class TestRoundTrip:
     def test_single_dict(self, tmp_path: Path) -> None:
         p = tmp_path / "events.jsonl"
-        env = {"project": "p", "seq": 0, "metric": {"key": "loss", "value": 0.5}}
+        env = {"project": "p", "seq": 0, "value": {"key": "loss", "value": 0.5}}
 
         with TrackingWriter(p) as writer:
             writer.write_envelope(env)
@@ -41,9 +41,18 @@ class TestRoundTrip:
             {
                 "project": "p",
                 "seq": 1,
-                "metric": {"key": "loss", "value": 0.5, "step": 10},
+                "value": {"key": "loss", "value": 0.5, "step": 10, "context": "{}"},
             },
-            {"project": "p", "seq": 2, "result": {"key": "pareto", "value": "[1, 2]"}},
+            {
+                "project": "p",
+                "seq": 2,
+                "value": {
+                    "key": "pareto",
+                    "value_json": "[1, 2]",
+                    "step": None,
+                    "context": "{}",
+                },
+            },
             {
                 "project": "p",
                 "seq": 3,
@@ -64,7 +73,7 @@ class TestRoundTrip:
         results = read_all(p)
         # Deep equality proves every dict shape survives the json round-trip.
         assert results == envs
-        # Invariant carried over from the proto oneof: exactly one payload key.
+        # Invariant: exactly one payload key per envelope.
         for env in results:
             assert len(PAYLOAD_KEYS & env.keys()) == 1
 
@@ -90,7 +99,7 @@ class TestTryReadEnvelope:
         p = tmp_path / "partial.jsonl"
         with TrackingWriter(p) as writer:
             writer.write_envelope(
-                {"project": "p", "seq": 0, "metric": {"key": "loss", "value": 0.5}}
+                {"project": "p", "seq": 0, "value": {"key": "loss", "value": 0.5}}
             )
         # Simulate a writer mid-flush / crash: incomplete JSON, no trailing newline.
         with open(p, "a") as f:
@@ -125,13 +134,13 @@ class TestAppendMode:
 
         with TrackingWriter(p) as writer:
             writer.write_envelope(
-                {"project": "p", "seq": 1, "metric": {"key": "loss", "value": 0.5}}
+                {"project": "p", "seq": 1, "value": {"key": "loss", "value": 0.5}}
             )
 
         results = read_all(p)
         assert len(results) == 2
         assert results[0]["param"]["key"] == "lr"
-        assert results[1]["metric"]["key"] == "loss"
+        assert results[1]["value"]["key"] == "loss"
 
 
 class TestOrder:
@@ -144,13 +153,13 @@ class TestOrder:
                     {
                         "project": "p",
                         "seq": i,
-                        "metric": {"key": "loss", "value": float(i)},
+                        "value": {"key": "loss", "value": float(i)},
                     }
                 )
 
         results = read_all(p)
         assert [r["seq"] for r in results] == list(range(50))
-        assert [r["metric"]["value"] for r in results] == [float(i) for i in range(50)]
+        assert [r["value"]["value"] for r in results] == [float(i) for i in range(50)]
 
 
 class TestMixedPayloadTypes:
@@ -165,7 +174,7 @@ class TestMixedPayloadTypes:
             {
                 "project": "p",
                 "seq": 1,
-                "metric": {"key": "loss", "value": 0.5, "step": 10},
+                "value": {"key": "loss", "value": 0.5, "step": 10, "context": "{}"},
             },
             {
                 "project": "p",
@@ -175,7 +184,12 @@ class TestMixedPayloadTypes:
             {
                 "project": "p",
                 "seq": 3,
-                "result": {"key": "pareto", "value": "[1, 2, 3]"},
+                "value": {
+                    "key": "pareto",
+                    "value_json": "[1, 2, 3]",
+                    "step": None,
+                    "context": "{}",
+                },
             },
         ]
 
@@ -187,6 +201,6 @@ class TestMixedPayloadTypes:
         assert len(results) == 4
         assert results == envs
         assert list(results[0].keys() & PAYLOAD_KEYS) == ["param"]
-        assert list(results[1].keys() & PAYLOAD_KEYS) == ["metric"]
+        assert list(results[1].keys() & PAYLOAD_KEYS) == ["value"]
         assert list(results[2].keys() & PAYLOAD_KEYS) == ["artifact"]
-        assert list(results[3].keys() & PAYLOAD_KEYS) == ["result"]
+        assert list(results[3].keys() & PAYLOAD_KEYS) == ["value"]

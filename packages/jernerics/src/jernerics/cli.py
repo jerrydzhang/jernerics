@@ -482,7 +482,7 @@ def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> 
 
 
 _TRIAL_SCAFFOLD = """def trial(config, tracker):
-    tracker.log_metric("loss", config.get("loss", 0.5))
+    tracker.log_value("loss", config.get("loss", 0.5))
     return {"loss": config.get("loss", 0.5)}
 """
 

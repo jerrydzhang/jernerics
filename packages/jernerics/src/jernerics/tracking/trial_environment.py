@@ -25,6 +25,7 @@ class TrialEnvironment:
         heartbeat_interval_s: float = 60.0,
         git_hash: str | None = None,
         sweep_config: str | None = None,
+        run_id: int = 0,
     ) -> None:
         self._tracking_dir = tracking_dir
         self._project_name = project_name
@@ -34,6 +35,7 @@ class TrialEnvironment:
         self._heartbeat_interval_s = heartbeat_interval_s
         self._git_hash = git_hash
         self._sweep_config = sweep_config
+        self._run_id = run_id
 
         self._sync_client: StreamClient | None = None
         self._artifact_uploader: ArtifactUploader | None = None
@@ -58,12 +60,14 @@ class TrialEnvironment:
         from jernerics.tracking.tracker import JsonlTracker
 
         events_path = events_dir / f"{self._trial_number}.jsonl"
+
         tracker = JsonlTracker(
             self._project_name,
             self._study_name,
             self._trial_number,
             events_path,
             manifest_path=manifest_path,
+            run_id=self._run_id,
         )
         if self._sweep_config is not None:
             tracker.log_sweep_meta(self._git_hash, self._sweep_config)

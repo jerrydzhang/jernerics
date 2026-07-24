@@ -21,14 +21,14 @@ def _param_envelope(seq: int, key: str, value: float) -> dict:
     }
 
 
-def _metric_envelope(seq: int, key: str, value: float, step: int) -> dict:
+def _value_envelope(seq: int, key: str, value: float, step: int) -> dict:
     return {
         "project": "p",
         "study_name": "s",
         "trial_id": 0,
         "timestamp_ns": 1000 + seq,
         "seq": seq,
-        "metric": {"key": key, "value": value, "step": step},
+        "value": {"key": key, "value": value, "step": step, "context": "{}"},
     }
 
 
@@ -61,7 +61,7 @@ class TestHappyPath:
         events_file = tmp_path / "0.jsonl"
         envelopes = [
             _param_envelope(0, "lr", 0.01),
-            _metric_envelope(1, "loss", 0.5, 10),
+            _value_envelope(1, "loss", 0.5, 10),
             _trial_end_envelope(2),
         ]
         _write_envelopes(events_file, envelopes)
