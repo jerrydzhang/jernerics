@@ -76,8 +76,8 @@ class ArtifactUploader:
 
             entry = entries[lines_consumed]
             filename = Path(entry["path"]).name
-            s3_key = f"{self.project}/{self.study}/{self.trial_id}/{entry['key']}"
-            self.upload_fn(s3_key, entry["path"])
+            artifact_key = f"{self.project}/{self.study}/{self.trial_id}/{entry['key']}"
+            self.upload_fn(artifact_key, entry["path"])
 
             new_offset = start + len(line) + 1
             manifest.advance_cursor(new_offset)

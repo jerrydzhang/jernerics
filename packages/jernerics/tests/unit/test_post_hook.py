@@ -63,8 +63,8 @@ class TestRunPipeline:
 
         uploads = []
 
-        def mock_upload(s3_key, local_path):
-            uploads.append((s3_key, local_path))
+        def mock_upload(artifact_key, local_path):
+            uploads.append((artifact_key, local_path))
 
         result = run_pipeline(
             ctx_path=str(ctx_path),

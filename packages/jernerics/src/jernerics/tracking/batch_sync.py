@@ -202,8 +202,8 @@ def sync_artifacts(
             local_path = entry["path"]
             # Derive trial_id from manifest filename (e.g. "0.manifest" -> 0)
             manifest_trial = int(manifest_path.stem)
-            s3_key = f"{project}/{study}/{manifest_trial}/{key}"
-            upload_fn(s3_key, local_path)
+            artifact_key = f"{project}/{study}/{manifest_trial}/{key}"
+            upload_fn(artifact_key, local_path)
 
         # Advance cursor to end of file after successful upload
         if entries and manifest_path.exists():

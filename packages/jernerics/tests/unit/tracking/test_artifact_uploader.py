@@ -79,7 +79,7 @@ class TestArtifactUploader:
 
         assert mock_uploader.call_count == 0
 
-    def test_s3_key_format(self, tmp_path: Path):
+    def test_artifact_key_format(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"
         cursor_path = tmp_path / "0.cursor"
         manifest = ArtifactManifest(manifest_path, cursor_path=cursor_path)
@@ -99,5 +99,5 @@ class TestArtifactUploader:
         uploader.start()
         uploader.join(timeout=5)
 
-        s3_key = mock_uploader.call_args[0][0]
-        assert s3_key == "my-proj/my-study/42/ckpt"
+        artifact_key = mock_uploader.call_args[0][0]
+        assert artifact_key == "my-proj/my-study/42/ckpt"

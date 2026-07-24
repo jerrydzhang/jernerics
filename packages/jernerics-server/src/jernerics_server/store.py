@@ -6,11 +6,11 @@ cannot hold concurrent read-only and read-write connections to one file, so the
 in WAL mode allows concurrent readers that do not block the writer (and vice
 versa).
 
-- Single write connection guarded by a threading.Lock: the gRPC server's
-  ThreadPoolExecutor calls insert_event concurrently; the lock serializes fast
-  single-row INSERTs. SendEvent is synchronous (acks after INSERT), so there is
-  no write queue -- a queue would either sacrifice durability (fire-and-forget)
-  or add latency (wait-for-ack) for no throughput gain.
+- Single write connection guarded by a threading.Lock: the HTTP server's
+  request handler calls insert_event concurrently; the lock serializes fast
+  single-row INSERTs. POST /ingest is synchronous (acks after INSERT), so
+  there is no write queue -- a queue would either sacrifice durability
+  (fire-and-forget) or add latency (wait-for-ack) for no throughput gain.
 - Per-request read-only connections serve HTTP queries.
 - STRICT tables preserve DuckDB-equivalent type discipline; SQLite's default
   type affinity would accept a string in a REAL column.
