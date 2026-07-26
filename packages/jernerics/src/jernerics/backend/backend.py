@@ -4,12 +4,51 @@ import shlex
 from pathlib import Path
 from typing import Any
 
+import tomllib
+
 from jernerics.backend.build_marker import needs_rebuild
 from jernerics.backend.host import SSHHost
 from jernerics.backend.job_meta import save_job_meta
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
 from jernerics.backend.submission import SweepInfrastructure, submit_sweep
 from jernerics.config import ARTIFACT_ENV_VARS
+
+
+def _check_path_dependencies(project_dir: Path) -> None:
+    """Fail fast if pyproject.toml declares local path deps in [tool.uv.sources].
+
+    Path dependencies reference files outside the project tree that are not
+    available inside the container build context, so `uv sync --frozen` fails.
+    """
+    pyproject_path = project_dir / "pyproject.toml"
+    if not pyproject_path.exists():
+        return
+
+    with open(pyproject_path, "rb") as f:
+        data = tomllib.load(f)
+
+    sources = data.get("tool", {}).get("uv", {}).get("sources", {})
+    path_deps = [
+        (name, src["path"])
+        for name, src in sources.items()
+        if isinstance(src, dict) and "path" in src
+    ]
+    if not path_deps:
+        return
+
+    lines = ["Path dependencies detected and cannot be used in container builds:"]
+    for name, path in path_deps:
+        lines.append(f"  {name} -> {path}")
+    lines.append("")
+    lines.append(
+        "The referenced path is not available inside the container build context."
+    )
+    lines.append("Use a git dependency instead. Example:")
+    first_name = path_deps[0][0]
+    lines.append(f"  [tool.uv.sources.{first_name}]")
+    lines.append('  git = "https://github.com/<user>/<repo>.git"')
+    lines.append(f'  subdirectory = "packages/{first_name}"')
+    raise RuntimeError("\n".join(lines))
 
 
 class Backend:
@@ -182,6 +221,8 @@ class Backend:
 
             container_def_path.write_text(generate_container_def("python"))
             print("Created: container.def")
+
+        _check_path_dependencies(project_dir)
 
         cache_host = self.paths.resolve_cache()
         marker_path = f"{cache_host}/.build_marker"

@@ -296,6 +296,115 @@ class TestBuild:
         assert meta_file.exists()
 
 
+class TestPathDependencyCheck:
+    def _write_pyproject(self, tmp_path, sources_body=""):
+        (tmp_path / "uv.lock").write_text("")
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\n"
+            'name = "proj"\n'
+            'version = "0.1.0"\n'
+            f"\n[tool.uv.sources]\n{sources_body}"
+        )
+
+    def test_raises_on_path_dependency(self, tmp_path):
+        self._write_pyproject(
+            tmp_path,
+            'jernerics = { path = "../jernerics/packages/jernerics", '
+            "editable = true }\n",
+        )
+        backend = _make_backend()
+
+        with pytest.raises(
+            RuntimeError, match="Path dependencies detected"
+        ) as exc_info:
+            backend.build(tmp_path, project_name="proj", force=True)
+
+        msg = str(exc_info.value)
+        assert 'jernerics -> "../jernerics/packages/jernerics"' in msg or (
+            "jernerics -> ../jernerics/packages/jernerics" in msg
+        )
+        assert "git dependency" in msg
+        assert "[tool.uv.sources.jernerics]" in msg
+
+    def test_multiple_path_deps_all_listed(self, tmp_path):
+        self._write_pyproject(
+            tmp_path,
+            'jernerics = { path = "../jernerics/packages/jernerics" }\n'
+            "jernerics-server = { path = "
+            '"../jernerics/packages/jernerics-server" }\n',
+        )
+        backend = _make_backend()
+
+        with pytest.raises(
+            RuntimeError, match="Path dependencies detected"
+        ) as exc_info:
+            backend.build(tmp_path, project_name="proj", force=True)
+
+        msg = str(exc_info.value)
+        assert "jernerics -> " in msg
+        assert "jernerics-server -> " in msg
+
+    def test_git_source_does_not_raise(self, tmp_path):
+        self._write_pyproject(
+            tmp_path,
+            "[tool.uv.sources.jernerics]\n"
+            'git = "https://github.com/jerrydzhang/jernerics.git"\n'
+            'branch = "main"\n'
+            'subdirectory = "packages/jernerics"\n',
+        )
+        adapter = MagicMock()
+        adapter.submit_job.return_value = "456"
+        container = MagicMock()
+        container.build_command.return_value = ["docker", "build", "-t", "img", "."]
+        backend = _make_backend(adapter=adapter, container=container)
+
+        backend.build(tmp_path, project_name="proj", force=True)
+
+        adapter.submit_job.assert_called_once()
+
+    def test_index_source_does_not_raise(self, tmp_path):
+        self._write_pyproject(
+            tmp_path,
+            'torch = { index = "pytorch-cu124" }\n',
+        )
+        adapter = MagicMock()
+        adapter.submit_job.return_value = "456"
+        container = MagicMock()
+        container.build_command.return_value = ["docker", "build", "-t", "img", "."]
+        backend = _make_backend(adapter=adapter, container=container)
+
+        backend.build(tmp_path, project_name="proj", force=True)
+
+        adapter.submit_job.assert_called_once()
+
+    def test_no_pyproject_does_not_raise(self, tmp_path):
+        (tmp_path / "uv.lock").write_text("")
+        adapter = MagicMock()
+        adapter.submit_job.return_value = "456"
+        container = MagicMock()
+        container.build_command.return_value = ["docker", "build", "-t", "img", "."]
+        backend = _make_backend(adapter=adapter, container=container)
+
+        backend.build(tmp_path, project_name="proj", force=True)
+
+        adapter.submit_job.assert_called_once()
+
+    def test_no_sources_section_does_not_raise(self, tmp_path):
+        (tmp_path / "uv.lock").write_text("")
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\nname = 'proj'\nversion = '0.1.0'\n"
+        )
+        adapter = MagicMock()
+        adapter.submit_job.return_value = "456"
+        container = MagicMock()
+        container.build_command.return_value = ["docker", "build", "-t", "img", "."]
+        backend = _make_backend(adapter=adapter, container=container)
+
+        backend.build(tmp_path, project_name="proj", force=True)
+
+        adapter.submit_job.assert_called_once()
+
+
 class TestDelegatedMethods:
     def test_list_jobs(self):
         from jernerics.backend.models import JobInfo
