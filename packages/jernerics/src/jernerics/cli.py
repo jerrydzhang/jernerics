@@ -261,6 +261,18 @@ def run_remote(
         print("\nMonitor progress:")
         job_id = result.submissions[0].job_id
         print(f"  jernerics logs --backend {backend_name} {job_id} --follow")
+        print(f"  jernerics wait --backend {backend_name} {job_id}")
+
+        tracking_server = load_tracking_server(project_dir)
+        if tracking_server:
+            query_hint = (
+                f"  curl -X POST {tracking_server}/query"
+                ' -H "Content-Type: application/json"'
+                ' -d \'{"sql": "SELECT * FROM tracked_values'
+                " ORDER BY timestamp_ns DESC LIMIT 5\"}'"
+            )
+            print("\nQuery metrics:")
+            print(query_hint)
 
 
 # ── build ────────────────────────────────────────────────────────────────────
@@ -422,6 +434,50 @@ def logs(
     except Exception as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+
+# ── wait ─────────────────────────────────────────────────────────────────────
+
+
+@app.command("wait")
+def wait(
+    job_id: Annotated[str, typer.Argument(help="Job ID")],
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
+    timeout: Annotated[
+        int | None,
+        typer.Option(
+            "--timeout",
+            "-t",
+            help="Maximum seconds to wait (omit to wait forever)",
+        ),
+    ] = None,
+    poll_interval: Annotated[
+        int,
+        typer.Option("--poll-interval", "-p", help="Seconds between status polls"),
+    ] = 10,
+):
+    backend, _, _ = _get_backend(backend_name)
+
+    try:
+        success = backend.wait_for_completion(
+            job_id, poll_interval=poll_interval, timeout=timeout
+        )
+    except TimeoutError:
+        print(f"Job {job_id} still running after {timeout}s")
+        raise SystemExit(2) from None
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if success:
+        print(f"Job {job_id} completed successfully")
+    else:
+        print(f"Job {job_id} finished with non-success status")
+        raise SystemExit(1)
 
 
 # ── clean ────────────────────────────────────────────────────────────────────

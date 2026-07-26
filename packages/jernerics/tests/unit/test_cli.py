@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -185,3 +186,79 @@ class TestMainFunction:
         with patch("jernerics.cli.app") as mock_app:
             main()
             mock_app.assert_called_once()
+
+
+class TestWaitCommand:
+    def test_wait_calls_backend_with_correct_args(self, capsys):
+        from jernerics.cli import wait
+
+        mock_backend = MagicMock()
+        mock_backend.wait_for_completion.return_value = True
+
+        with patch(
+            "jernerics.cli._get_backend",
+            return_value=(mock_backend, "proj", Path("/tmp")),
+        ):
+            wait("job-123", backend_name="hpc", timeout=None, poll_interval=10)
+
+        mock_backend.wait_for_completion.assert_called_once_with(
+            "job-123", poll_interval=10, timeout=None
+        )
+        out = capsys.readouterr().out
+        assert "completed successfully" in out
+
+    def test_wait_exit_zero_on_success(self, capsys):
+        from jernerics.cli import wait
+
+        mock_backend = MagicMock()
+        mock_backend.wait_for_completion.return_value = True
+
+        with patch(
+            "jernerics.cli._get_backend",
+            return_value=(mock_backend, "proj", Path("/tmp")),
+        ):
+            wait("job-123", backend_name="hpc", timeout=None, poll_interval=10)
+
+        out = capsys.readouterr().out
+        assert "Job job-123 completed successfully" in out
+
+    def test_wait_exit_one_on_failure(self, capsys):
+        from jernerics.cli import wait
+
+        mock_backend = MagicMock()
+        mock_backend.wait_for_completion.return_value = False
+
+        with (
+            patch(
+                "jernerics.cli._get_backend",
+                return_value=(mock_backend, "proj", Path("/tmp")),
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            wait("job-123", backend_name="hpc", timeout=None, poll_interval=10)
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert "finished with non-success status" in out
+
+    def test_wait_exit_two_on_timeout(self, capsys):
+        from jernerics.cli import wait
+
+        mock_backend = MagicMock()
+        mock_backend.wait_for_completion.side_effect = TimeoutError("timed out")
+
+        with (
+            patch(
+                "jernerics.cli._get_backend",
+                return_value=(mock_backend, "proj", Path("/tmp")),
+            ),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            wait("job-123", backend_name="hpc", timeout=30, poll_interval=5)
+
+        assert exc_info.value.code == 2
+        out = capsys.readouterr().out
+        assert "still running after 30s" in out
+        mock_backend.wait_for_completion.assert_called_once_with(
+            "job-123", poll_interval=5, timeout=30
+        )

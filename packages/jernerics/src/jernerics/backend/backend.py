@@ -298,7 +298,9 @@ class Backend:
                 local_cache_dir=local_cache_dir,
             )
 
-        print(f"Build job submitted: {job_id}")
+        print(f"\nBuild job submitted: {job_id}")
+        print("Monitor build with:")
+        print(f"  jernerics logs --backend <name> {job_id}")
 
     def clean(
         self,
