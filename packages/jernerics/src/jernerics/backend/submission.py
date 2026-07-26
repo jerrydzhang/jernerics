@@ -156,6 +156,7 @@ def submit_sweep(
         project_name=project_name,
         host_home=host.home,
         git_hash=spec.git_hash or "",
+        server_addr=tracking_server or "",
         ctx_path=retry_ctx_path,
         chain_depth=chain_depth,
     )

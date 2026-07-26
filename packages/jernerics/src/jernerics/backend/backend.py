@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shlex
 from pathlib import Path
@@ -188,7 +189,7 @@ class Backend:
         if (
             not dry_run
             and not force
-            and not needs_rebuild(self.host, marker_path, lock_path)
+            and not needs_rebuild(self.host, marker_path, lock_path, container_def_path)
         ):
             print("Container is up to date. Use --force to rebuild.")
             return
@@ -216,6 +217,12 @@ class Backend:
         cmd_str = " ".join(shlex.quote(c) for c in build_cmd)
         build_dir = self.paths.resolve_build_dir(project_name)
 
+        def_hash = (
+            hashlib.sha256(container_def_path.read_bytes()).hexdigest()
+            if container_def_path.exists()
+            else ""
+        )
+
         if build_dir is not None:
             build_script = (
                 f"set -e\n"
@@ -225,7 +232,7 @@ class Backend:
                 f"{cmd_str}\n"
                 f"rm -rf {build_dir}\n"
                 f"mkdir -p {Path(marker_path).parent}\n"
-                f"touch {marker_path}\n"
+                f"echo '{def_hash}' > {marker_path}\n"
             )
         else:
             build_script = (
@@ -233,7 +240,7 @@ class Backend:
                 f"cd {self.paths.remote_dir}\n"
                 f"{cmd_str}\n"
                 f"mkdir -p {Path(marker_path).parent}\n"
-                f"touch {marker_path}\n"
+                f"echo '{def_hash}' > {marker_path}\n"
             )
 
         job_id = self.adapter.submit_job(

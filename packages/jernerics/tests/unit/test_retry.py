@@ -555,3 +555,38 @@ class TestRetryContextHostHome:
         )
         restored = RetryContext.from_json(ctx.to_json())
         assert restored.host_home == ""
+
+
+class TestRetryContextServerAddr:
+    def test_server_addr_survives_serialization_roundtrip(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+            server_addr="http://gpu-01:8080",
+        )
+        json_str = ctx.to_json()
+        assert '"server_addr": "http://gpu-01:8080"' in json_str
+        restored = RetryContext.from_json(json_str)
+        assert restored.server_addr == "http://gpu-01:8080"
+
+    def test_server_addr_defaults_to_empty(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+        )
+        assert ctx.server_addr == ""
+
+    def test_server_addr_empty_survives_roundtrip(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+            server_addr="",
+        )
+        restored = RetryContext.from_json(ctx.to_json())
+        assert restored.server_addr == ""

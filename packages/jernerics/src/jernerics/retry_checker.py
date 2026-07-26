@@ -75,7 +75,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         backend_config, host=host, project_name=ctx.project_name or ""
     )
 
-    tracking_server = load_tracking_server(project_dir)
+    tracking_server = ctx.server_addr or load_tracking_server(project_dir)
 
     # Prepare overrides: experiment from sweep config, CLI from retry context
     experiment_overrides = {

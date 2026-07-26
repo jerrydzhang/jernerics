@@ -11,6 +11,7 @@ class Host(Protocol):
     def mkdir(self, remote_path: str) -> None: ...
     def file_exists(self, remote_path: str) -> bool: ...
     def getmtime(self, remote_path: str) -> float | None: ...
+    def read_file(self, remote_path: str) -> str | None: ...
     def remove_file(self, remote_path: str) -> None: ...
     def write_file(self, remote_path: str, content: str) -> None: ...
 
@@ -32,6 +33,12 @@ class LocalHost:
         path = Path(remote_path)
         if path.is_file():
             return path.stat().st_mtime
+        return None
+
+    def read_file(self, remote_path: str) -> str | None:
+        path = Path(remote_path)
+        if path.is_file():
+            return path.read_text()
         return None
 
     def remove_file(self, remote_path: str) -> None:
@@ -68,6 +75,9 @@ class StdoutHost:
         return False
 
     def getmtime(self, remote_path: str) -> float | None:
+        return None
+
+    def read_file(self, remote_path: str) -> str | None:
         return None
 
     def remove_file(self, remote_path: str) -> None:
@@ -123,6 +133,17 @@ class SSHHost(Host):
         )
         if result.returncode == 0:
             return float(result.stdout.strip())
+        return None
+
+    def read_file(self, remote_path: str) -> str | None:
+        result = self.run(
+            ["cat", remote_path],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return result.stdout
         return None
 
     def remove_file(self, remote_path: str) -> None:
