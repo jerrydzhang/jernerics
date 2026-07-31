@@ -13,6 +13,8 @@ from jernerics.observability import (
     compute_metric_analysis,
     compute_slope,
     get_all_runs,
+    get_metric_keys,
+    get_metric_series,
     get_run_diff,
     get_run_summary,
     run_exists,
@@ -230,3 +232,77 @@ class TestRunExists:
     def test_trial_end_counts(self, store):
         store.insert_event(_env(1, "s", 0, "trial_end", {}))
         assert run_exists(store, PROJECT, "s", 0) is True
+
+
+def _text_series(store, study, trial, key, values, start_seq=100, start_ts=100):
+    """Log text values as one json metric point per integer step 0..n-1."""
+    for i, v in enumerate(values):
+        store.insert_event(
+            _env(
+                start_seq + i,
+                study,
+                trial,
+                "value",
+                {"key": key, "value_json": v, "step": i},
+                ts=start_ts + i,
+            )
+        )
+
+
+class TestGetMetricSeries:
+    def test_scalar_returns_values_ordered_by_seq(self, store):
+        _series(store, "s", 0, "loss", [9.0, 3.0, 0.8, 0.05, 0.03])
+        result = get_metric_series(store, PROJECT, "s", 0, "loss")
+        assert result is not None
+        assert result["value_type"] == "scalar"
+        series = result["series"]
+        assert len(series) == 5
+        assert [p["value"] for p in series] == pytest.approx(
+            [9.0, 3.0, 0.8, 0.05, 0.03]
+        )
+        assert [p["step"] for p in series] == [0, 1, 2, 3, 4]
+        assert [p["seq"] for p in series] == [100, 101, 102, 103, 104]
+
+    def test_text_returns_text_values(self, store):
+        _text_series(store, "s", 0, "pred_expr", ["<BOS>", "mul add", "final"])
+        result = get_metric_series(store, PROJECT, "s", 0, "pred_expr")
+        assert result is not None
+        assert result["value_type"] == "json"
+        series = result["series"]
+        assert len(series) == 3
+        assert [p["value"] for p in series] == ["<BOS>", "mul add", "final"]
+        assert [p["step"] for p in series] == [0, 1, 2]
+
+    def test_nonexistent_metric_returns_none(self, store):
+        _series(store, "s", 0, "loss", [1.0])
+        result = get_metric_series(store, PROJECT, "s", 0, "ghost_metric")
+        assert result is None
+
+    def test_nonexistent_run_returns_none(self, store):
+        result = get_metric_series(store, PROJECT, "ghost", 0, "loss")
+        assert result is None
+
+    def test_includes_timestamp_ns(self, store):
+        _series(store, "s", 0, "loss", [1.0, 0.5], start_ts=200)
+        result = get_metric_series(store, PROJECT, "s", 0, "loss")
+        assert result is not None
+        assert result["series"][0]["timestamp_ns"] == 1_000_000_200
+        assert result["series"][1]["timestamp_ns"] == 1_000_000_201
+
+
+class TestGetMetricKeys:
+    def test_returns_scalar_and_text_keys(self, store):
+        _series(store, "s", 0, "loss", [1.0, 2.0], start_seq=100)
+        _text_series(store, "s", 0, "pred_expr", ["a", "b"], start_seq=200)
+        keys = get_metric_keys(store, PROJECT, "s", 0)
+        assert len(keys) == 2
+        loss_entry = next(k for k in keys if k["key"] == "loss")
+        assert loss_entry["value_type"] == "scalar"
+        assert loss_entry["count"] == 2
+        pred_entry = next(k for k in keys if k["key"] == "pred_expr")
+        assert pred_entry["value_type"] == "json"
+        assert pred_entry["count"] == 2
+
+    def test_nonexistent_run_returns_empty(self, store):
+        keys = get_metric_keys(store, PROJECT, "ghost", 0)
+        assert keys == []

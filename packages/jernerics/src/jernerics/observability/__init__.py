@@ -12,6 +12,8 @@ from jernerics.observability.analysis import (
     compute_metric_analysis,
     compute_slope,
     get_all_runs,
+    get_metric_keys,
+    get_metric_series,
     get_run_diff,
     get_run_summary,
     run_exists,
@@ -21,6 +23,7 @@ from jernerics.observability.render import (
     render_diff,
     render_runs,
     render_summary,
+    render_trace,
 )
 
 __all__ = [
@@ -30,10 +33,13 @@ __all__ = [
     "compute_metric_analysis",
     "compute_slope",
     "get_all_runs",
+    "get_metric_keys",
+    "get_metric_series",
     "get_run_diff",
     "get_run_summary",
     "render_diff",
     "render_runs",
     "render_summary",
+    "render_trace",
     "run_exists",
 ]

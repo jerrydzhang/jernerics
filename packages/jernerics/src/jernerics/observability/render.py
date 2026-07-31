@@ -247,3 +247,34 @@ def _step_count_from_max(max_step: int | None) -> str:
     if max_step is None:
         return "?"
     return str(max_step + 1)
+
+
+def render_trace(
+    label: str,
+    metric: str,
+    series: list[dict[str, Any]],
+    console: Console,
+) -> None:
+    """Human-readable trace: one line per step/value pair."""
+    if not series:
+        console.print(f"Trace: {label} / {metric} — no data")
+        return
+
+    console.print(f"Trace: {label} / {metric} ({len(series)} points)")
+    max_step = max(
+        (p["step"] for p in series if p["step"] is not None), default=None
+    )
+    step_width = len(str(max_step)) if max_step is not None else 1
+
+    for p in series:
+        step = p["step"]
+        value = p["value"]
+        if step is None:
+            step_str = " " * step_width + "-"
+        else:
+            step_str = f"{step:>{step_width}}"
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value_str = _format_number(value)
+        else:
+            value_str = str(value)
+        console.print(f"  step {step_str}: {value_str}")

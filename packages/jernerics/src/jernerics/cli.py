@@ -32,11 +32,14 @@ from .container.templates import get_starter, list_starters
 from .observability import (
     RemoteStore,
     get_all_runs,
+    get_metric_keys,
+    get_metric_series,
     get_run_diff,
     get_run_summary,
     render_diff,
     render_runs,
     render_summary,
+    render_trace,
     run_exists,
 )
 from .paths import cache_dir
@@ -776,6 +779,66 @@ def diff(
         print(json.dumps(data, indent=2))
         return
     render_diff(data, Console())
+
+
+@app.command("trace")
+def trace(
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Run id: study_name or study_name:trial_id"),
+    ],
+    metric: Annotated[
+        str | None,
+        typer.Argument(help="Metric key to trace"),
+    ] = None,
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+) -> None:
+    store, project = _get_tracking_store()
+    study_name, trial_id = _parse_run_id(run_id)
+    try:
+        if not run_exists(store, project, study_name, trial_id):
+            print(f"Error: Run '{run_id}' not found.")
+            raise SystemExit(ExitCode.GENERAL_ERROR)
+
+        if metric is None:
+            keys = get_metric_keys(store, project, study_name, trial_id)
+            if not keys:
+                print(f"No metrics found for run '{run_id}'.")
+                return
+            if json_output:
+                print(json.dumps(keys, indent=2))
+                return
+            print(f"Available metrics for '{run_id}':")
+            for entry in keys:
+                print(f"  {entry['key']:30s} ({entry['value_type']}, {entry['count']} points)")
+            return
+
+        data = get_metric_series(store, project, study_name, trial_id, metric)
+    except (RuntimeError, httpx.HTTPError) as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if data is None:
+        print(f"Error: Metric '{metric}' not found for run '{run_id}'.")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "study_name": study_name,
+                    "trial_id": trial_id,
+                    "metric": metric,
+                    "value_type": data["value_type"],
+                    "series": data["series"],
+                },
+                indent=2,
+            )
+        )
+        return
+
+    label = study_name if trial_id == 0 else f"{study_name}:{trial_id}"
+    render_trace(label, metric, data["series"], Console())
 
 
 def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:

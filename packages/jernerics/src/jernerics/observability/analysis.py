@@ -384,6 +384,58 @@ def get_run_diff(
     }
 
 
+def get_metric_series(
+    store: Queryable, project: str, study_name: str, trial_id: int, key: str
+) -> dict[str, Any] | None:
+    """Raw step/value series for one metric, regardless of value_type.
+
+    Returns ``None`` when the key does not exist for the run. Otherwise
+    returns a dict with ``value_type`` ('scalar' or 'json') and ``series``
+    — a list ordered by ``seq`` of ``{step, value, seq, timestamp_ns}``.
+
+    For scalar metrics ``value`` is a float; for text/json metrics it is
+    a string.
+    """
+    _, rows = store.query(
+        "SELECT seq, step, value_type, scalar_val, text_val, timestamp_ns "
+        "FROM tracked_values "
+        "WHERE project = ? AND study_name = ? AND trial_id = ? "
+        "AND key = ? ORDER BY seq",
+        [project, study_name, trial_id, key],
+    )
+    if not rows:
+        return None
+
+    value_type = rows[0][2]
+    series: list[dict[str, Any]] = []
+    for seq, step, _vtype, scalar_val, text_val, ts in rows:
+        value = float(scalar_val) if value_type == "scalar" else text_val
+        series.append(
+            {
+                "step": int(step) if step is not None else None,
+                "value": value,
+                "seq": int(seq),
+                "timestamp_ns": int(ts),
+            }
+        )
+    return {"value_type": value_type, "series": series}
+
+
+def get_metric_keys(
+    store: Queryable, project: str, study_name: str, trial_id: int
+) -> list[dict[str, Any]]:
+    """All metric keys for a run with value_type and point counts."""
+    _, rows = store.query(
+        "SELECT key, value_type, COUNT(*) FROM tracked_values "
+        "WHERE project = ? AND study_name = ? AND trial_id = ? "
+        "GROUP BY key, value_type ORDER BY key",
+        [project, study_name, trial_id],
+    )
+    return [
+        {"key": r[0], "value_type": r[1], "count": int(r[2])} for r in rows
+    ]
+
+
 def run_exists(store: Queryable, project: str, study_name: str, trial_id: int) -> bool:
     """True if the run has any tracked data (value, param, artifact, or
     completion marker)."""

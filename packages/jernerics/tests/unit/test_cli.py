@@ -600,3 +600,175 @@ class TestJobsCommand:
 
         data = json.loads(capsys.readouterr().out)
         assert data[0]["study_name"] == "overfit_seed42"
+
+
+class TestTraceCommand:
+    def test_trace_json_scalar(self, capsys):
+        from jernerics.cli import trace
+
+        canned = {
+            "value_type": "scalar",
+            "series": [
+                {"step": 0, "value": 9.0, "seq": 100, "timestamp_ns": 100},
+                {"step": 1, "value": 0.5, "seq": 101, "timestamp_ns": 101},
+            ],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_metric_series", return_value=canned),
+        ):
+            trace("s", "loss", json_output=True)
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["metric"] == "loss"
+        assert out["value_type"] == "scalar"
+        assert len(out["series"]) == 2
+        assert out["series"][0]["value"] == 9.0
+
+    def test_trace_json_text(self, capsys):
+        from jernerics.cli import trace
+
+        canned = {
+            "value_type": "json",
+            "series": [
+                {"step": 0, "value": "<BOS>", "seq": 100, "timestamp_ns": 100},
+                {"step": 1, "value": "mul add", "seq": 101, "timestamp_ns": 101},
+            ],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_metric_series", return_value=canned),
+        ):
+            trace("s", "pred_expr", json_output=True)
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["value_type"] == "json"
+        assert out["series"][0]["value"] == "<BOS>"
+
+    def test_trace_text_scalar_output(self, capsys):
+        from jernerics.cli import trace
+
+        canned = {
+            "value_type": "scalar",
+            "series": [
+                {"step": 0, "value": 9.738, "seq": 2, "timestamp_ns": 100},
+                {"step": 199, "value": 0.032, "seq": 5, "timestamp_ns": 200},
+            ],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_metric_series", return_value=canned),
+        ):
+            trace("s", "loss")
+
+        out = capsys.readouterr().out
+        assert "Trace:" in out
+        assert "loss" in out
+        assert "9.738" in out or "9.738" in out
+        assert "0.032" in out
+
+    def test_trace_text_text_output(self, capsys):
+        from jernerics.cli import trace
+
+        canned = {
+            "value_type": "json",
+            "series": [
+                {"step": 0, "value": "<BOS>", "seq": 2, "timestamp_ns": 100},
+            ],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_metric_series", return_value=canned),
+        ):
+            trace("s", "pred_expr")
+
+        out = capsys.readouterr().out
+        assert "pred_expr" in out
+        assert "<BOS>" in out
+
+    def test_trace_missing_metric_exits(self, capsys):
+        from jernerics.cli import trace
+
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_metric_series", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            trace("s", "ghost", json_output=False)
+
+        assert exc_info.value.code == 1
+        assert "ghost" in capsys.readouterr().out
+
+    def test_trace_missing_run_exits(self, capsys):
+        from jernerics.cli import trace
+
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=False),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            trace("ghost", "loss", json_output=False)
+
+        assert exc_info.value.code == 1
+
+    def test_trace_no_metric_lists_available(self, capsys):
+        from jernerics.cli import trace
+
+        canned_keys = [
+            {"key": "loss", "value_type": "scalar", "count": 5},
+            {"key": "pred_expr", "value_type": "json", "count": 3},
+        ]
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_metric_keys", return_value=canned_keys),
+        ):
+            trace("s")
+
+        out = capsys.readouterr().out
+        assert "loss" in out
+        assert "pred_expr" in out
+        assert "scalar" in out
+        assert "json" in out
+
+    def test_trace_no_metric_no_metrics_message(self, capsys):
+        from jernerics.cli import trace
+
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_metric_keys", return_value=[]),
+        ):
+            trace("s")
+
+        out = capsys.readouterr().out
+        assert "No metrics" in out
