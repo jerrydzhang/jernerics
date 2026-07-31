@@ -123,31 +123,66 @@ class BackendConfig:
     container: ApptainerConfig | DockerConfig | None = None
 
 
-def _load_tool_config(project_dir: str | Path) -> dict:
-    project_path = Path(project_dir)
-    pyproject_path = project_path / "pyproject.toml"
-
-    if not pyproject_path.exists():
-        raise ConfigNotFound(f"No pyproject.toml found in {project_dir}")
-
+def _read_pyproject(path: Path) -> dict:
     try:
-        with open(pyproject_path, "rb") as f:
-            data = tomllib.load(f)
+        with open(path, "rb") as f:
+            return tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
         raise ConfigNotFound(f"Malformed pyproject.toml: {e}") from e
 
+
+def _jernerics_section(data: dict) -> dict:
     return data.get("tool", {}).get("jernerics", {})
 
 
-def load_tracking_server(project_dir: str | Path) -> str | None:
-    tool_config = _load_tool_config(project_dir)
+def _pyproject_dirs(start_dir: str | Path) -> list[Path]:
+    current = Path(start_dir).resolve()
+    dirs: list[Path] = []
+    while True:
+        if (current / "pyproject.toml").exists():
+            dirs.append(current)
+        if current == current.parent:
+            break
+        current = current.parent
+    dirs.reverse()
+    return dirs
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _resolve_tool_config(start_dir: str | Path) -> dict:
+    merged: dict = {}
+    for directory in _pyproject_dirs(start_dir):
+        data = _read_pyproject(directory / "pyproject.toml")
+        section = _jernerics_section(data)
+        if section:
+            merged = _deep_merge(merged, section)
+    return merged
+
+
+def load_tracking_server(start_dir: str | Path | None = None) -> str | None:
+    start = Path.cwd() if start_dir is None else Path(start_dir)
+    tool_config = _resolve_tool_config(start)
     return os.environ.get("JERNERICS_TRACKING_SERVER") or tool_config.get(
         "tracking_server"
     )
 
 
-def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
-    tool_config = _load_tool_config(project_dir)
+def load_backend_config(
+    name: str, start_dir: str | Path | None = None
+) -> BackendConfig:
+    start = Path.cwd() if start_dir is None else Path(start_dir)
+    if not _pyproject_dirs(start):
+        raise ConfigNotFound(f"No pyproject.toml found in {start}")
+    tool_config = _resolve_tool_config(start)
     backends = tool_config.get("backends", {})
 
     if name not in backends:
@@ -212,16 +247,25 @@ def load_backend_config(name: str, project_dir: str | Path) -> BackendConfig:
 
 
 def find_pyproject_dir(start_dir: str | Path | None = None) -> Path | None:
-    start_dir = Path.cwd() if start_dir is None else Path(start_dir)
-
-    current = start_dir.resolve()
-    while current != current.parent:
+    start = Path.cwd() if start_dir is None else Path(start_dir)
+    current = start.resolve()
+    jernerics_root: Path | None = None
+    nearest: Path | None = None
+    while True:
         pyproject = current / "pyproject.toml"
         if pyproject.exists():
-            return current
+            if nearest is None:
+                nearest = current
+            try:
+                data = _read_pyproject(pyproject)
+            except ConfigNotFound:
+                data = {}
+            if _jernerics_section(data):
+                jernerics_root = current
+        if current == current.parent:
+            break
         current = current.parent
-
-    return None
+    return jernerics_root or nearest
 
 
 def get_project_name(project_dir: str | Path) -> str:

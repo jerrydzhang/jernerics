@@ -10,12 +10,15 @@ from jernerics.config import (
     SharedConfig,
     SlurmConfig,
     SweepConfig,
+    _deep_merge,
     find_pyproject_dir,
+    get_project_name,
     is_tty,
     load_backend_config,
     load_config,
     load_tracking_server,
 )
+from jernerics.paths import cache_dir
 
 
 class TestExitCode:
@@ -338,6 +341,158 @@ class TestFindPyprojectDir:
 
         result = find_pyproject_dir(subdir)
         assert result == tmp_project
+
+
+class TestHierarchicalConfig:
+    ROOT_PYPROJECT = """
+[project]
+name = "symlab"
+version = "0.1.0"
+
+[tool.jernerics]
+tracking_server = "root-host:5000"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+remote_dir = "~/experiments/{project_name}"
+
+[tool.jernerics.backends.hpc.slurm]
+partition = "priority"
+time = "1:00:00"
+mem = "16G"
+cpus = 4
+"""
+
+    def _workspace(self, tmp_path):
+        root = tmp_path / "symlab"
+        root.mkdir()
+        (root / "pyproject.toml").write_text(self.ROOT_PYPROJECT)
+        return root
+
+    def test_walks_past_pyproject_without_jernerics(self, tmp_path):
+        root = self._workspace(tmp_path)
+        nested = root / "experiments" / "probe"
+        nested.mkdir(parents=True)
+        (nested / "pyproject.toml").write_text(
+            '[project]\nname = "probe"\nversion = "0.1.0"\n'
+        )
+
+        root_found = find_pyproject_dir(nested)
+        assert root_found is not None
+        assert root_found == root.resolve()
+        assert get_project_name(root_found) == "symlab"
+
+    def test_topmost_jernerics_wins_as_root(self, tmp_path):
+        root = self._workspace(tmp_path)
+        nested = root / "experiments" / "probe"
+        nested.mkdir(parents=True)
+        (nested / "pyproject.toml").write_text(
+            '[project]\nname = "probe"\n'
+            '[tool.jernerics]\ntracking_server = "nested-host:5000"\n'
+        )
+
+        root_found = find_pyproject_dir(nested)
+        assert root_found is not None
+        assert root_found == root.resolve()
+        assert get_project_name(root_found) == "symlab"
+
+    def test_deep_merge_nested_overrides_root(self, tmp_path):
+        root = self._workspace(tmp_path)
+        nested = root / "experiments" / "probe"
+        nested.mkdir(parents=True)
+        (nested / "pyproject.toml").write_text(
+            '[project]\nname = "probe"\n'
+            "[tool.jernerics.backends.hpc]\n"
+            'remote_dir = "~/probe/{project_name}"\n'
+            "[tool.jernerics.backends.hpc.slurm]\n"
+            'partition = "gpu"\n'
+        )
+
+        config = load_backend_config("hpc", nested)
+
+        assert config.shared.host == "user@hpc.example.edu"
+        assert config.shared.remote_dir == "~/probe/{project_name}"
+        assert isinstance(config.backend, SlurmConfig)
+        assert config.backend.partition == "gpu"
+        assert config.backend.time == "1:00:00"
+        assert config.backend.mem == "16G"
+
+    def test_tracking_server_nested_overrides_root(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JERNERICS_TRACKING_SERVER", raising=False)
+        root = self._workspace(tmp_path)
+        nested = root / "experiments" / "probe"
+        nested.mkdir(parents=True)
+        (nested / "pyproject.toml").write_text(
+            '[project]\nname = "probe"\n'
+            '[tool.jernerics]\ntracking_server = "nested-host:9000"\n'
+        )
+
+        assert load_tracking_server(nested) == "nested-host:9000"
+        assert load_tracking_server(root) == "root-host:5000"
+
+    def test_no_nested_pyproject_backward_compat(self, tmp_path):
+        root = self._workspace(tmp_path)
+
+        assert find_pyproject_dir(root) == root.resolve()
+        assert get_project_name(root) == "symlab"
+
+        config = load_backend_config("hpc", root)
+        assert config.shared.host == "user@hpc.example.edu"
+        assert isinstance(config.backend, SlurmConfig)
+        assert config.backend.partition == "priority"
+
+    def test_root_detected_from_deeply_nested_dir(self, tmp_path):
+        root = self._workspace(tmp_path)
+        deep = root / "a" / "b" / "c" / "d"
+        deep.mkdir(parents=True)
+
+        assert find_pyproject_dir(deep) == root.resolve()
+
+
+class TestDeepMerge:
+    def test_nested_dict_merged_recursively(self):
+        base = {"backends": {"hpc": {"host": "h", "partition": "p"}}}
+        override = {"backends": {"hpc": {"partition": "gpu"}}}
+        assert _deep_merge(base, override) == {
+            "backends": {"hpc": {"host": "h", "partition": "gpu"}}
+        }
+
+    def test_scalar_overrides(self):
+        assert _deep_merge({"a": 1}, {"a": 2}) == {"a": 2}
+
+    def test_list_replaced_not_concatenated(self):
+        assert _deep_merge({"x": [1, 2]}, {"x": [3]}) == {"x": [3]}
+
+    def test_does_not_mutate_inputs(self):
+        base = {"a": {"b": 1}}
+        _deep_merge(base, {"a": {"c": 2}})
+        assert base == {"a": {"b": 1}}
+
+
+class TestCacheDirIntegration:
+    ROOT_PYPROJECT = """
+[project]
+name = "symlab"
+version = "0.1.0"
+
+[tool.jernerics]
+tracking_server = "root-host:5000"
+"""
+
+    def test_cache_dir_uses_root_name_from_nested_cwd(self, tmp_path, monkeypatch):
+        root = tmp_path / "symlab"
+        root.mkdir()
+        (root / "pyproject.toml").write_text(self.ROOT_PYPROJECT)
+
+        nested = root / "experiments" / "probe"
+        nested.mkdir(parents=True)
+        (nested / "pyproject.toml").write_text('[project]\nname = "probe"\n')
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.chdir(nested)
+
+        assert cache_dir() == tmp_path / ".cache" / "jernerics" / "symlab"
 
 
 class TestLoadConfig:

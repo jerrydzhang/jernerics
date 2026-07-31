@@ -93,13 +93,13 @@ def _get_backend(backend_name: str) -> tuple[Backend, str, Path]:
         raise SystemExit(ExitCode.CONFIG_ERROR)
 
     try:
-        config = load_backend_config(backend_name, project_dir)
+        config = load_backend_config(backend_name)
     except ConfigNotFound as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
     project_name = get_project_name(project_dir)
-    tracking_server = load_tracking_server(project_dir)
+    tracking_server = load_tracking_server()
 
     remote_dir = config.shared.remote_dir.replace("{project_name}", project_name)
     remote_dir = remote_dir.replace("{project-name}", project_name)
@@ -145,7 +145,7 @@ def run_local(
 
     project_dir = find_pyproject_dir()
     project_name = get_project_name(project_dir) if project_dir else None
-    tracking_server = load_tracking_server(project_dir) if project_dir else None
+    tracking_server = load_tracking_server() if project_dir else None
     git_hash = _capture_git_hash(project_dir or trial_path.parent)
 
     project_cache = cache_dir()
@@ -275,7 +275,7 @@ def run_remote(
         print(f"  jernerics logs --backend {backend_name} {job_id} --follow")
         print(f"  jernerics wait --backend {backend_name} {job_id}")
 
-        tracking_server = load_tracking_server(project_dir)
+        tracking_server = load_tracking_server()
         if tracking_server:
             query_hint = (
                 f"  curl -X POST {tracking_server}/query"
@@ -545,7 +545,7 @@ def _get_tracking_store() -> tuple[RemoteStore, str]:
         print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
         raise SystemExit(ExitCode.CONFIG_ERROR)
     project_name = get_project_name(project_dir)
-    server_url = load_tracking_server(project_dir)
+    server_url = load_tracking_server()
     if not server_url:
         print(
             "Error: No tracking server configured. Set JERNERICS_TRACKING_SERVER "
