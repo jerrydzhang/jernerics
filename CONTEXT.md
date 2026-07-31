@@ -65,6 +65,24 @@ The batch path: after trials finish, any `.jsonl` files not fully shipped live a
 **Query endpoint**:
 An HTTP endpoint (`POST /query`) on the tracking server that accepts read-only SQL and returns JSON rows. The thin interface between analytical clients (notebooks, ad-hoc tools) and the SQLite store.
 
+**Run**:
+A single (study_name, trial_id) pair in the tracking store. Every tracked event belongs to a run. Referenced in the CLI as `study_name` or `study_name:trial_id`.
+
+**Observability CLI**:
+The read surface over tracking data: `runs` (list studies), `summary` (metrics + params overview), `diff` (compare two runs), `trace` (raw step/value series for any metric), `replay` (sync unsynced local events to server). All commands support `--json` for agent consumption.
+
+**Trace**:
+The raw `[step, value]` series for a single metric in a run — both scalar (loss, token_acc) and text/json (pred_expr). Surfaced without interpretation; the CLI does not summarize or visualize it. For humans: a step-by-step listing. For agents: `--json` returns the full series for reasoning.
+
+**Scalar metric**:
+A tracked value with `value_type='scalar'` — a float logged over training steps (loss, lr, grad_norm, ce_loss, token_acc, val_r2, etc.). Summary renders these with first/last/change and early/recent slopes.
+
+**Text metric**:
+A tracked value with `value_type='json'` — a string logged over steps (e.g. `pred_expr`, the model's predicted symbolic expression). Summary lists these by name + point count but does not summarize them; use `trace` to see the full series.
+
+**Dashboard**:
+The deferred web UI for deep-dive experiment analysis (curve visualization, structured metric views, cross-run exploration). The CLI handles quick check-ins; the dashboard handles the rest. Does not exist yet.
+
 **Tracking server**:
 A single HTTP process. Ingests trial events (`POST /ingest`), serves them via SQL (`POST /query`), and serves/stores artifact files (`GET`/`POST /artifact/...`) on its own disk. Owns the SQLite file exclusively. Authenticated via a bearer API key in the `Authorization` header. No external object storage — artifacts live on the server's disk.
 

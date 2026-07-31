@@ -74,20 +74,14 @@ Near-term, three thrusts:
 
 - **Robustness** — make the system as reliable as the work it runs demands.
   Retry/heartbeat and the post-hook are the sharp edges.
-- **Observability** — re-build the read surface, this time driven by real need
-  rather than speculation. (The speculative observability layer was stripped;
-  what comes back earns its place.)
+- **Observability** — the read surface is now driven by real need. The CLI
+  (`runs`, `summary`, `diff`, `trace`, `replay`) serves two audiences: humans
+  doing quick check-ins, and agents reasoning about data (via `--json`). It
+  surfaces data without interpreting it — visualization and structured analysis
+  views are deferred to a dashboard. What's there now earned its place through
+  dogfooding against real experiment data.
 - **Ergonomics** — make the CLI and trial-authoring UX as smooth as the
   mechanical parts of research allow.
-
-Long-term:
-
-- **Decouple a scheduler job from a single parameter set.** Today one job = one
-  Optuna sample. The goal is job-level DAG composition: one scheduler job should
-  be able to express richer structure — e.g. optimize the outer parameters while
-  fanning out N seeds *inside* one job to test robustness, where the seed is
-  structural, not optimized. This builds on the existing DAG executor and lifts
-  it from within a trial to the scheduler-job level.
 
 ## Related docs
 
