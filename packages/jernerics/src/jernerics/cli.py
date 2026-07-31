@@ -345,12 +345,13 @@ def jobs(
     ] = False,
 ):
     backend, _, _ = _get_backend(backend_name)
-    job_list = backend.list_jobs(include_completed=all)
+    job_list = backend.list_jobs(include_completed=all, local_cache_dir=cache_dir())
 
     if json_output:
         data = [
             {
                 "job_id": job.job_id,
+                "study_name": job.study_name,
                 "name": job.name,
                 "status": job.status,
             }
@@ -365,11 +366,11 @@ def jobs(
 
     table = Table(show_header=True, header_style="bold")
     table.add_column("JOB_ID")
-    table.add_column("NAME", max_width=20)
+    table.add_column("STUDY", max_width=30)
     table.add_column("STATUS")
 
     for job in job_list:
-        table.add_row(job.job_id, job.name, job.status)
+        table.add_row(job.job_id, job.study_name or "—", job.status)
 
     Console().print(table)
 
