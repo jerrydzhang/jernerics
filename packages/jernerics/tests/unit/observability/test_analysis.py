@@ -189,6 +189,71 @@ class TestRunSummary:
         assert s["artifacts"] == ["model.pt"]
 
 
+class TestRunSummaryGitHash:
+    def test_returns_git_hash_from_sweep_meta(self, store):
+        _param(store, "s", 0, "lr", 0.1, seq=1)
+        store.insert_event(
+            _env(
+                10,
+                "s",
+                0,
+                "sweep_meta",
+                {"git_hash": "4a5e1097211230273aa1888d482bab2885990fb5", "config": ""},
+                ts=10,
+            )
+        )
+        s = get_run_summary(store, PROJECT, "s", 0)
+        assert s["git_hash"] == "4a5e1097211230273aa1888d482bab2885990fb5"
+
+    def test_returns_none_when_no_sweep_meta(self, store):
+        _param(store, "s", 0, "lr", 0.1, seq=1)
+        s = get_run_summary(store, PROJECT, "s", 0)
+        assert s["git_hash"] is None
+
+    def test_returns_none_when_git_hash_null(self, store):
+        _param(store, "s", 0, "lr", 0.1, seq=1)
+        store.insert_event(
+            _env(10, "s", 0, "sweep_meta", {"git_hash": None, "config": ""}, ts=10)
+        )
+        s = get_run_summary(store, PROJECT, "s", 0)
+        assert s["git_hash"] is None
+
+
+class TestRunSummaryTextMetrics:
+    def test_lists_keys_and_counts(self, store):
+        _series(store, "s", 0, "loss", [1.0, 0.5])
+        for i in range(5):
+            store.insert_event(
+                _env(
+                    200 + i,
+                    "s",
+                    0,
+                    "value",
+                    {"key": "pred_expr", "value_json": f'"expr{i}"', "step": i},
+                    ts=200 + i,
+                )
+            )
+        for i in range(3):
+            store.insert_event(
+                _env(
+                    300 + i,
+                    "s",
+                    0,
+                    "value",
+                    {"key": "confusion", "value_json": '{"tp": 1}', "step": i},
+                    ts=300 + i,
+                )
+            )
+        s = get_run_summary(store, PROJECT, "s", 0)
+        text_metrics = {tm["key"]: tm["n_points"] for tm in s["text_metrics"]}
+        assert text_metrics == {"pred_expr": 5, "confusion": 3}
+
+    def test_empty_when_no_json_values(self, store):
+        _series(store, "s", 0, "loss", [1.0, 0.5])
+        s = get_run_summary(store, PROJECT, "s", 0)
+        assert s["text_metrics"] == []
+
+
 class TestRunDiff:
     def test_different_metric_sets(self, store):
         # alpha has loss + acc; beta has loss only. Distinct seq ranges so

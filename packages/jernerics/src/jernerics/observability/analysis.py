@@ -249,6 +249,30 @@ def _priority_metric(
     return None, None
 
 
+def _run_git_hash(
+    store: Queryable, project: str, study_name: str, trial_id: int
+) -> str | None:
+    _, rows = store.query(
+        "SELECT git_hash FROM sweep_meta "
+        "WHERE project = ? AND study_name = ? AND trial_id = ? "
+        "AND git_hash IS NOT NULL ORDER BY seq LIMIT 1",
+        [project, study_name, trial_id],
+    )
+    return rows[0][0] if rows else None
+
+
+def _run_text_metrics(
+    store: Queryable, project: str, study_name: str, trial_id: int
+) -> list[dict[str, Any]]:
+    _, rows = store.query(
+        "SELECT key, COUNT(*) FROM tracked_values "
+        "WHERE project = ? AND study_name = ? AND trial_id = ? "
+        "AND value_type = 'json' GROUP BY key ORDER BY key",
+        [project, study_name, trial_id],
+    )
+    return [{"key": r[0], "n_points": int(r[1])} for r in rows]
+
+
 def get_all_runs(store: Queryable, project: str) -> list[dict[str, Any]]:
     """One summary dict per ``(study_name, trial_id)`` known to the store."""
     _, rows = store.query(
@@ -312,6 +336,8 @@ def get_run_summary(
         "params": _run_params(store, project, study_name, trial_id),
         "metrics": metrics,
         "artifacts": _run_artifacts(store, project, study_name, trial_id),
+        "git_hash": _run_git_hash(store, project, study_name, trial_id),
+        "text_metrics": _run_text_metrics(store, project, study_name, trial_id),
     }
 
 
