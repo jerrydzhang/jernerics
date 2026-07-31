@@ -366,6 +366,97 @@ class TestSummaryCommand:
 
         assert exc_info.value.code == 1
 
+    def test_summary_text_renders_git_hash(self, capsys):
+        from jernerics.cli import summary
+
+        canned = {
+            "study_name": "s",
+            "trial_id": 0,
+            "label": "s",
+            "status": "completed",
+            "min_step": 0,
+            "max_step": 4999,
+            "duration_s": 239.1,
+            "params": {},
+            "metrics": {},
+            "artifacts": [],
+            "git_hash": "4a5e1097211230273aa1888d482bab2885990fb5",
+            "text_metrics": [],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_run_summary", return_value=canned),
+        ):
+            summary("s", json_output=False)
+
+        out = capsys.readouterr().out
+        assert "git: 4a5e109" in out
+
+    def test_summary_text_renders_text_metrics_section(self, capsys):
+        from jernerics.cli import summary
+
+        canned = {
+            "study_name": "s",
+            "trial_id": 0,
+            "label": "s",
+            "status": "running",
+            "min_step": 0,
+            "max_step": 9,
+            "duration_s": None,
+            "params": {},
+            "metrics": {},
+            "artifacts": [],
+            "git_hash": None,
+            "text_metrics": [{"key": "pred_expr", "n_points": 5}],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_run_summary", return_value=canned),
+        ):
+            summary("s", json_output=False)
+
+        out = capsys.readouterr().out
+        assert "Text metrics:" in out
+        assert "pred_expr (5 points)" in out
+
+    def test_summary_text_omits_text_metrics_when_absent(self, capsys):
+        from jernerics.cli import summary
+
+        canned = {
+            "study_name": "s",
+            "trial_id": 0,
+            "label": "s",
+            "status": "running",
+            "min_step": 0,
+            "max_step": 9,
+            "duration_s": None,
+            "params": {},
+            "metrics": {},
+            "artifacts": [],
+            "git_hash": None,
+            "text_metrics": [],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_run_summary", return_value=canned),
+        ):
+            summary("s", json_output=False)
+
+        out = capsys.readouterr().out
+        assert "Text metrics:" not in out
+
 
 class TestDiffCommand:
     def test_diff_json_outputs_analysis(self, capsys):

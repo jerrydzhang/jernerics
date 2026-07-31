@@ -141,9 +141,11 @@ def render_summary(summary: dict[str, Any], console: Console) -> None:
     step_range = f"{lo}-{hi}" if lo is not None and hi is not None else "-"
 
     console.print(f"[bold]Run {label}[/bold]")
+    git_hash = summary.get("git_hash")
+    git_segment = f"    git: {git_hash[:7]}" if git_hash else ""
     console.print(
         f"  status: {summary['status']}    steps: {step_range}    "
-        f"duration: {_format_duration_seconds(duration)}"
+        f"duration: {_format_duration_seconds(duration)}{git_segment}"
     )
 
     params = summary["params"]
@@ -178,6 +180,12 @@ def render_summary(summary: dict[str, Any], console: Console) -> None:
                 _format_slope(m["recent_slope"]),
             )
         console.print(table)
+
+    text_metrics = summary.get("text_metrics") or []
+    if text_metrics:
+        console.print("\nText metrics:")
+        for tm in text_metrics:
+            console.print(f"  {tm['key']} ({tm['n_points']} points)")
 
     artifacts = summary["artifacts"]
     if artifacts:
