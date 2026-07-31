@@ -159,6 +159,7 @@ class TestPrepareAndSubmit:
         assert meta_file.exists()
         meta = json.loads(meta_file.read_text())
         assert meta["n_trials"] == 5
+        assert meta["study_name"] == "mystudy"
 
     def test_constructs_post_hook_with_retry(self, tmp_path):
         adapter = MagicMock()
@@ -418,6 +419,58 @@ class TestDelegatedMethods:
         jobs = backend.list_jobs()
         assert len(jobs) == 1
         adapter.list_jobs.assert_called_once()
+
+    def test_list_jobs_enriches_study_name(self, tmp_path):
+        from jernerics.backend.job_meta import save_job_meta
+        from jernerics.backend.models import JobInfo
+
+        save_job_meta(
+            job_id="1",
+            remote_dir="/scratch/proj",
+            n_trials=5,
+            local_cache_dir=tmp_path,
+            study_name="overfit_seed42",
+        )
+        adapter = MagicMock()
+        adapter.list_jobs.return_value = [
+            JobInfo(job_id="1", name="job", status="RUNNING")
+        ]
+        backend = _make_backend(adapter=adapter)
+
+        jobs = backend.list_jobs(local_cache_dir=tmp_path)
+        assert jobs[0].study_name == "overfit_seed42"
+
+    def test_list_jobs_resolves_array_task_id(self, tmp_path):
+        from jernerics.backend.job_meta import save_job_meta
+        from jernerics.backend.models import JobInfo
+
+        save_job_meta(
+            job_id="100",
+            remote_dir="/scratch/proj",
+            n_trials=5,
+            local_cache_dir=tmp_path,
+            study_name="overfit_seed42",
+        )
+        adapter = MagicMock()
+        adapter.list_jobs.return_value = [
+            JobInfo(job_id="100_3", name="job", status="RUNNING")
+        ]
+        backend = _make_backend(adapter=adapter)
+
+        jobs = backend.list_jobs(local_cache_dir=tmp_path)
+        assert jobs[0].study_name == "overfit_seed42"
+
+    def test_list_jobs_without_cache_dir_leaves_study_blank(self):
+        from jernerics.backend.models import JobInfo
+
+        adapter = MagicMock()
+        adapter.list_jobs.return_value = [
+            JobInfo(job_id="1", name="job", status="RUNNING")
+        ]
+        backend = _make_backend(adapter=adapter)
+
+        jobs = backend.list_jobs()
+        assert jobs[0].study_name == ""
 
     def test_cancel(self):
         adapter = MagicMock()

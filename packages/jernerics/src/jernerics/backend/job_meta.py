@@ -8,6 +8,7 @@ def save_job_meta(
     remote_dir: str,
     n_trials: int,
     local_cache_dir: Path,
+    study_name: str | None = None,
     backend: str | None = None,
     output_pattern: str | None = None,
     error_pattern: str | None = None,
@@ -17,6 +18,8 @@ def save_job_meta(
         "remote_dir": remote_dir,
         "n_trials": n_trials,
     }
+    if study_name is not None:
+        job_meta["study_name"] = study_name
     if backend is not None:
         job_meta["backend"] = backend
     if output_pattern is not None:
@@ -28,3 +31,20 @@ def save_job_meta(
     meta_dir.mkdir(parents=True, exist_ok=True)
     meta_file = meta_dir / f"{job_id}.json"
     meta_file.write_text(json.dumps(job_meta, indent=2))
+
+
+def load_job_studies(local_cache_dir: Path) -> dict[str, str]:
+    meta_dir = local_cache_dir / "jobs"
+    if not meta_dir.is_dir():
+        return {}
+    studies: dict[str, str] = {}
+    for meta_file in meta_dir.glob("*.json"):
+        try:
+            meta = json.loads(meta_file.read_text())
+        except (OSError, ValueError):
+            continue
+        job_id = meta.get("job_id")
+        study_name = meta.get("study_name")
+        if job_id and study_name:
+            studies[job_id] = study_name
+    return studies

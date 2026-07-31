@@ -8,7 +8,7 @@ import tomllib
 
 from jernerics.backend.build_marker import needs_rebuild
 from jernerics.backend.host import SSHHost
-from jernerics.backend.job_meta import save_job_meta
+from jernerics.backend.job_meta import load_job_studies, save_job_meta
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
 from jernerics.backend.submission import SweepInfrastructure, submit_sweep
 from jernerics.config import ARTIFACT_ENV_VARS
@@ -190,6 +190,7 @@ class Backend:
             for sub in result.submissions:
                 save_job_meta(
                     job_id=sub.job_id,
+                    study_name=spec.study_name,
                     output_pattern=str(sub.output_pattern or effective_output),
                     error_pattern=str(sub.error_pattern or effective_error),
                     remote_dir=self.paths.remote_dir,
@@ -491,8 +492,21 @@ class Backend:
 
     # Delegated to adapter
 
-    def list_jobs(self, include_completed: bool = False) -> list[JobInfo]:
-        return self.adapter.list_jobs(include_completed=include_completed)
+    def list_jobs(
+        self,
+        include_completed: bool = False,
+        *,
+        local_cache_dir: Path | None = None,
+    ) -> list[JobInfo]:
+        jobs = self.adapter.list_jobs(include_completed=include_completed)
+        if local_cache_dir is not None:
+            studies = load_job_studies(local_cache_dir)
+            for job in jobs:
+                study = studies.get(job.job_id)
+                if study is None and "_" in job.job_id:
+                    study = studies.get(job.job_id.split("_")[0])
+                job.study_name = study or ""
+        return jobs
 
     def cancel(self, job_id: str) -> bool:
         return self.adapter.cancel(job_id)

@@ -551,3 +551,52 @@ class TestReplayCommand:
 
         assert json.loads(capsys.readouterr().out) == []
         store.query.assert_not_called()
+
+
+class TestJobsCommand:
+    def test_jobs_table_renders_study_column(self, capsys, tmp_path):
+        from jernerics.backend.models import JobInfo
+        from jernerics.cli import jobs
+
+        backend = MagicMock()
+        backend.list_jobs.return_value = [
+            JobInfo(
+                job_id="26887165",
+                name="job",
+                status="RUNNING",
+                study_name="overfit_seed42",
+            ),
+            JobInfo(job_id="26887168", name="build", status="RUNNING"),
+        ]
+        with (
+            patch("jernerics.cli._get_backend", return_value=(backend, "p", tmp_path)),
+            patch("jernerics.cli.cache_dir", return_value=tmp_path),
+        ):
+            jobs(backend_name="hpc")
+
+        out = capsys.readouterr().out
+        assert "STUDY" in out
+        assert "overfit_seed42" in out
+        assert "—" in out
+
+    def test_jobs_json_includes_study_name(self, capsys, tmp_path):
+        from jernerics.backend.models import JobInfo
+        from jernerics.cli import jobs
+
+        backend = MagicMock()
+        backend.list_jobs.return_value = [
+            JobInfo(
+                job_id="1",
+                name="job",
+                status="RUNNING",
+                study_name="overfit_seed42",
+            ),
+        ]
+        with (
+            patch("jernerics.cli._get_backend", return_value=(backend, "p", tmp_path)),
+            patch("jernerics.cli.cache_dir", return_value=tmp_path),
+        ):
+            jobs(backend_name="hpc", json_output=True)
+
+        data = json.loads(capsys.readouterr().out)
+        assert data[0]["study_name"] == "overfit_seed42"

@@ -55,3 +55,4 @@ class JobInfo:
     job_id: str
     name: str
     status: str
+    study_name: str = ""
