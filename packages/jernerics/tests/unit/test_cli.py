@@ -7,6 +7,8 @@ from jernerics.cli import (
     _create_minimal_pyproject,
     _get_default_jernerics_config,
 )
+from jernerics.tracking.batch_sync import ReplayResult
+from jernerics.tracking.jsonl_io import TrackingWriter
 
 
 class TestGetDefaultJernericsConfig:
@@ -403,3 +405,149 @@ class TestDiffCommand:
             diff("a", "b", json_output=False)
 
         assert exc_info.value.code == 1
+
+
+def _value_envelope(seq: int, study: str = "sweep1") -> dict:
+    return {
+        "project": "p",
+        "study_name": study,
+        "trial_id": 0,
+        "run_id": 0,
+        "timestamp_ns": 1000 + seq,
+        "seq": seq,
+        "value": {"key": "loss", "value": 0.5, "step": 0, "context": "{}"},
+    }
+
+
+def _write_jsonl(path: Path, n: int, study: str = "sweep1") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with TrackingWriter(path) as writer:
+        for i in range(n):
+            writer.write_envelope(_value_envelope(i, study))
+
+
+class TestReplayCommand:
+    def test_passes_resolved_server_and_dir_to_replay(self):
+        from jernerics.cli import replay
+
+        with patch(
+            "jernerics.cli.replay_tracking", return_value=ReplayResult()
+        ) as mock_rt:
+            replay(server="http://srv:8000", tracking_dir=Path("/tmp/trk"))
+
+        kwargs = mock_rt.call_args.kwargs
+        assert kwargs["base_url"] == "http://srv:8000"
+        assert kwargs["tracking_dir"] == Path("/tmp/trk")
+        assert kwargs["study"] is None
+
+    def test_resolves_tracking_dir_from_cache_when_unset(self, tmp_path):
+        from jernerics.cli import replay
+
+        with (
+            patch(
+                "jernerics.cli.replay_tracking", return_value=ReplayResult()
+            ) as mock_rt,
+            patch("jernerics.cli.cache_dir", return_value=tmp_path),
+        ):
+            replay(server="http://srv:8000")
+
+        assert mock_rt.call_args.kwargs["tracking_dir"] == tmp_path / "tracking"
+
+    def test_json_output_emits_result(self, capsys):
+        from jernerics.cli import replay
+
+        result = ReplayResult(files_processed=1, events_sent=3, errors=["boom"])
+        with patch("jernerics.cli.replay_tracking", return_value=result):
+            replay(
+                server="http://srv:8000",
+                tracking_dir=Path("/tmp/trk"),
+                json_output=True,
+            )
+
+        out = json.loads(capsys.readouterr().out)
+        assert out["files_processed"] == 1
+        assert out["events_sent"] == 3
+        assert out["errors"] == ["boom"]
+
+    def test_no_server_configured_exits(self):
+        from jernerics.cli import replay
+        from jernerics.config import ExitCode
+
+        with (
+            patch("jernerics.cli.load_tracking_server", return_value=None),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            replay()
+
+        assert exc_info.value.code == ExitCode.CONFIG_ERROR
+
+    def test_dry_run_computes_delta_json(self, tmp_path, capsys):
+        from jernerics.cli import replay
+
+        _write_jsonl(tmp_path / "sweep1" / "events" / "0.jsonl", 10)
+        store = MagicMock()
+        store.query.return_value = (["COUNT(*)"], [(1,)])
+
+        with patch("jernerics.cli.RemoteStore", return_value=store):
+            replay(
+                server="http://srv:8000",
+                tracking_dir=tmp_path,
+                dry_run=True,
+                json_output=True,
+            )
+
+        report = json.loads(capsys.readouterr().out)
+        assert report == [{"study": "sweep1", "local": 10, "synced": 5, "new": 5}]
+
+    def test_dry_run_scoped_to_study(self, tmp_path, capsys):
+        from jernerics.cli import replay
+
+        _write_jsonl(tmp_path / "alpha" / "events" / "0.jsonl", 4)
+        _write_jsonl(tmp_path / "beta" / "events" / "0.jsonl", 6)
+        store = MagicMock()
+        store.query.return_value = (["COUNT(*)"], [(0,)])
+
+        with patch("jernerics.cli.RemoteStore", return_value=store):
+            replay(
+                server="http://srv:8000",
+                tracking_dir=tmp_path,
+                study="beta",
+                dry_run=True,
+                json_output=True,
+            )
+
+        report = json.loads(capsys.readouterr().out)
+        assert report == [{"study": "beta", "local": 6, "synced": 0, "new": 6}]
+
+    def test_dry_run_text_output(self, tmp_path, capsys):
+        from jernerics.cli import replay
+
+        _write_jsonl(tmp_path / "sweep1" / "events" / "0.jsonl", 10)
+        store = MagicMock()
+        store.query.return_value = (["COUNT(*)"], [(3,)])
+
+        with patch("jernerics.cli.RemoteStore", return_value=store):
+            replay(
+                server="http://srv:8000",
+                tracking_dir=tmp_path,
+                dry_run=True,
+            )
+
+        out = capsys.readouterr().out
+        assert "sweep1: 10 local, 15 synced, 0 would be new" in out
+        assert "dry run" in out
+
+    def test_dry_run_no_local_events(self, tmp_path, capsys):
+        from jernerics.cli import replay
+
+        store = MagicMock()
+        with patch("jernerics.cli.RemoteStore", return_value=store):
+            replay(
+                server="http://srv:8000",
+                tracking_dir=tmp_path,
+                dry_run=True,
+                json_output=True,
+            )
+
+        assert json.loads(capsys.readouterr().out) == []
+        store.query.assert_not_called()
