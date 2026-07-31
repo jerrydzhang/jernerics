@@ -89,6 +89,33 @@ class TestQueryEndpoint:
         body = response.json()
         assert "error" in body
 
+    def test_query_binds_params(self, client):
+        client.post(
+            "/ingest",
+            json={
+                "project": "p",
+                "study_name": "s",
+                "trial_id": 0,
+                "timestamp_ns": 1,
+                "seq": 1,
+                "param": {"key": "lr", "value": {"float_val": 0.1}},
+            },
+        )
+        response = client.post(
+            "/query",
+            json={
+                "sql": "SELECT key FROM params WHERE project = ?",
+                "params": ["p"],
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["rows"] == [["lr"]]
+
+    def test_query_without_params_still_works(self, client):
+        response = client.post("/query", json={"sql": "SELECT 1 AS n"})
+        assert response.status_code == 200
+        assert response.json()["rows"] == [[1]]
+
 
 class TestQueryAuth:
     def test_valid_bearer_passes(self, auth_client):

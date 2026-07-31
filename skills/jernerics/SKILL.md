@@ -9,6 +9,7 @@ description: |
   Optuna sweeps, HTTP tracking server, artifact upload, and retry system.
   Trigger on "sweep", "backend", "trial", "container", "tracking",
   "optuna", "apptainer", "docker", "slurm", "pueue", "artifact", "retry",
+  "observability", "runs", "summary", "diff",
   or when working with trial.py / config.py files in a jernerics project.
 ---
 
@@ -51,9 +52,12 @@ from training data.
 | `jernerics logs -b <name> <id>` | View logs |
 | `jernerics clean -b <name>` | Delete remote artifacts |
 | `jernerics sync -b <name>` | Replay tracking data from remote |
+| `jernerics runs` | List runs from the tracking server |
+| `jernerics summary <run>` | Per-metric analysis of one run |
+| `jernerics diff <a> <b>` | Compare two runs (params + final metrics) |
 
 Common flags: `--dry-run` (run/build), `--force` (init/build/clean),
-`--follow` (logs), `--set KEY=VALUE` (run), `--study` (sync).
+`--follow` (logs), `--set KEY=VALUE` (run), `--study` (sync), `--json` (runs/summary/diff).
 
 ## Reference docs
 
@@ -67,5 +71,7 @@ Load these before relevant activities:
   build/sync/clean commands, SSH hosts.
 - **`references/tracking.md`** — Tracking server, artifact storage,
   environment variables, replay/sync.
+- **`references/observability.md`** — `runs`/`summary`/`diff` commands,
+  metric analysis (slopes), and when to use them vs raw SQL.
 - **`references/retry.md`** — Heartbeat, retry detection, retry
   config, failure modes, post-hook pipeline.

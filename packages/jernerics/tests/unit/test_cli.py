@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -262,3 +263,143 @@ class TestWaitCommand:
         mock_backend.wait_for_completion.assert_called_once_with(
             "job-123", poll_interval=5, timeout=30
         )
+
+
+class TestRunsCommand:
+    def test_runs_json_outputs_analysis(self, capsys):
+        from jernerics.cli import runs
+
+        canned = [{"study_name": "s", "trial_id": 0, "status": "running"}]
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.get_all_runs", return_value=canned),
+        ):
+            runs(json_output=True)
+
+        assert json.loads(capsys.readouterr().out) == canned
+
+    def test_runs_text_renders_without_error(self, capsys):
+        from jernerics.cli import runs
+
+        canned = [
+            {
+                "study_name": "s",
+                "trial_id": 0,
+                "label": "s",
+                "status": "completed",
+                "min_step": 0,
+                "max_step": 9,
+                "duration_s": 12.0,
+                "created_ns": None,
+                "params": {"lr": 0.1},
+                "priority_key": "loss",
+                "priority_value": 0.5,
+            }
+        ]
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.get_all_runs", return_value=canned),
+        ):
+            runs(json_output=False)
+
+        out = capsys.readouterr().out
+        assert "s" in out
+        assert "completed" in out
+
+    def test_runs_empty_message(self, capsys):
+        from jernerics.cli import runs
+
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.get_all_runs", return_value=[]),
+        ):
+            runs(json_output=False)
+
+        assert "No runs found" in capsys.readouterr().out
+
+
+class TestSummaryCommand:
+    def test_summary_json_outputs_analysis(self, capsys):
+        from jernerics.cli import summary
+
+        canned = {
+            "study_name": "s",
+            "metrics": {},
+            "params": {},
+            "artifacts": [],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_run_summary", return_value=canned),
+        ):
+            summary("s", json_output=True)
+
+        assert json.loads(capsys.readouterr().out) == canned
+
+    def test_summary_missing_run_exits(self, capsys):
+        from jernerics.cli import summary
+
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=False),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            summary("ghost", json_output=False)
+
+        assert exc_info.value.code == 1
+
+
+class TestDiffCommand:
+    def test_diff_json_outputs_analysis(self, capsys):
+        from jernerics.cli import diff
+
+        canned = {
+            "run_a": {"label": "a"},
+            "run_b": {"label": "b"},
+            "param_diff": [],
+            "param_match_count": 0,
+            "param_match": [],
+            "metric_diff": [],
+        }
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=True),
+            patch("jernerics.cli.get_run_diff", return_value=canned),
+        ):
+            diff("a", "b", json_output=True)
+
+        assert json.loads(capsys.readouterr().out) == canned
+
+    def test_diff_missing_run_exits(self, capsys):
+        from jernerics.cli import diff
+
+        with (
+            patch(
+                "jernerics.cli._get_tracking_store",
+                return_value=(MagicMock(), "p"),
+            ),
+            patch("jernerics.cli.run_exists", return_value=False),
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            diff("a", "b", json_output=False)
+
+        assert exc_info.value.code == 1

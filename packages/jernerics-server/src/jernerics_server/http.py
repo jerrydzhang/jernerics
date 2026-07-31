@@ -23,6 +23,7 @@ def _write_chunk(f: IO[bytes], chunk: bytes) -> None:
 
 class QueryRequest(BaseModel):
     sql: str
+    params: list | None = None
 
 
 def _is_read_only(sql: str) -> bool:
@@ -57,7 +58,7 @@ def create_app(
                 content={"error": "Only SELECT queries are allowed"},
             )
         try:
-            columns, rows = store.query(req.sql)
+            columns, rows = store.query(req.sql, req.params)
         except Exception as e:
             return JSONResponse(
                 status_code=400,

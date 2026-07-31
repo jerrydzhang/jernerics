@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -6,6 +7,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 
+import httpx
 import tomli_w
 import tomllib
 import typer
@@ -27,6 +29,16 @@ from .config import (
     load_tracking_server,
 )
 from .container.templates import get_starter, list_starters
+from .observability import (
+    RemoteStore,
+    get_all_runs,
+    get_run_diff,
+    get_run_summary,
+    render_diff,
+    render_runs,
+    render_summary,
+    run_exists,
+)
 from .paths import cache_dir
 
 app = typer.Typer(help="A modern toolkit for building and evaluating ML models.")
@@ -522,6 +534,106 @@ def sync(
     backend, _, project_dir = _get_backend(backend_name)
     project_name = get_project_name(project_dir)
     backend.sync(project_name, study=study)
+
+
+# ── observability ────────────────────────────────────────────────────────────
+
+
+def _get_tracking_store() -> tuple[RemoteStore, str]:
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+    project_name = get_project_name(project_dir)
+    server_url = load_tracking_server(project_dir)
+    if not server_url:
+        print(
+            "Error: No tracking server configured. Set JERNERICS_TRACKING_SERVER "
+            "or [tool.jernerics] tracking_server in pyproject.toml."
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+    api_key = os.environ.get("JERNERICS_API_KEY")
+    return RemoteStore(server_url, api_key=api_key), project_name
+
+
+def _parse_run_id(run_id: str) -> tuple[str, int]:
+    if ":" in run_id:
+        study, _, tid = run_id.partition(":")
+        try:
+            trial_id = int(tid)
+        except ValueError:
+            print(
+                f"Error: Invalid trial id in '{run_id}': expected an integer after ':'"
+            )
+            raise SystemExit(ExitCode.CONFIG_ERROR) from None
+        return study, trial_id
+    return run_id, 0
+
+
+@app.command("runs")
+def runs(
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+) -> None:
+    store, project = _get_tracking_store()
+    try:
+        data = get_all_runs(store, project)
+    except (RuntimeError, httpx.HTTPError) as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(data, indent=2))
+        return
+    render_runs(data, Console())
+
+
+@app.command("summary")
+def summary(
+    run_id: Annotated[
+        str,
+        typer.Argument(help="Run id: study_name or study_name:trial_id"),
+    ],
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+) -> None:
+    store, project = _get_tracking_store()
+    study_name, trial_id = _parse_run_id(run_id)
+    try:
+        if not run_exists(store, project, study_name, trial_id):
+            print(f"Error: Run '{run_id}' not found.")
+            raise SystemExit(ExitCode.GENERAL_ERROR)
+        data = get_run_summary(store, project, study_name, trial_id)
+    except (RuntimeError, httpx.HTTPError) as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(data, indent=2))
+        return
+    render_summary(data, Console())
+
+
+@app.command("diff")
+def diff(
+    run_a: Annotated[str, typer.Argument(help="First run id (study_name[:trial_id])")],
+    run_b: Annotated[str, typer.Argument(help="Second run id (study_name[:trial_id])")],
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+) -> None:
+    store, project = _get_tracking_store()
+    try:
+        for spec in (run_a, run_b):
+            name, tid = _parse_run_id(spec)
+            if not run_exists(store, project, name, tid):
+                print(f"Error: Run '{spec}' not found.")
+                raise SystemExit(ExitCode.GENERAL_ERROR)
+        data = get_run_diff(store, project, run_a, run_b)
+    except (RuntimeError, httpx.HTTPError) as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if json_output:
+        print(json.dumps(data, indent=2))
+        return
+    render_diff(data, Console())
 
 
 def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> None:
