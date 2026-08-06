@@ -73,6 +73,7 @@ class SharedConfig:
     grace_period_s: int = 120
     max_retries: int = 3
     chain_depth_cap: int = 20
+    fast_fail_threshold_s: int = 30
 
 
 @dataclass
@@ -210,6 +211,7 @@ def load_backend_config(
         grace_period_s=bc.get("grace_period_s", 120),
         max_retries=bc.get("max_retries", 3),
         chain_depth_cap=bc.get("chain_depth_cap", 20),
+        fast_fail_threshold_s=bc.get("fast_fail_threshold_s", 30),
     )
 
     backend_specific: SlurmConfig | PueueConfig | None = None

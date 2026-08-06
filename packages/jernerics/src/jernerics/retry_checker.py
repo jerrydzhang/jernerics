@@ -51,6 +51,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         stale_after=backend_config.shared.stale_after_s,
         max_retries=backend_config.shared.max_retries,
         now=time.time(),
+        fast_fail_threshold_s=backend_config.shared.fast_fail_threshold_s,
     )
 
     if plan.is_complete:
@@ -64,6 +65,8 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         study.enqueue_trial(study.trials[trial_id].params)
 
     for trial_id in plan.exhausted_trial_ids:
+        study.tell(trial_id, state=TrialState.FAIL)
+    for trial_id in plan.fast_failed_trial_ids:
         study.tell(trial_id, state=TrialState.FAIL)
 
     write_ledger(ledger_path, plan.retry_counts)

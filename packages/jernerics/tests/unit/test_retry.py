@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -6,11 +7,17 @@ from jernerics.retry import RetryContext, param_key, plan_retry
 from optuna.trial import FrozenTrial, TrialState
 
 
-def _make_trial(number: int, state: int, params: dict | None = None) -> FrozenTrial:
+def _make_trial(
+    number: int,
+    state: int,
+    params: dict | None = None,
+    datetime_start: datetime | None = None,
+) -> FrozenTrial:
     trial = MagicMock(spec=FrozenTrial)
     trial.number = number
     trial.state = state
     trial.params = params if params is not None else {"lr": 0.01}
+    trial.datetime_start = datetime_start or datetime.fromtimestamp(0, tz=timezone.utc)
     return trial
 
 
@@ -285,6 +292,127 @@ class TestPlanRetryStaleRunning:
         # params_a exhausted (count=3), params_b still retryable
         assert 3 not in plan.stale_trial_ids
         assert 7 in plan.stale_trial_ids
+
+
+class TestPlanRetryFastFail:
+    def test_short_runtime_goes_to_fast_failed(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        _write_heartbeat(hb_dir, 5, age=200, now=now)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                {"lr": 0.01},
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+        )
+        assert 5 in plan.fast_failed_trial_ids
+        assert 5 not in plan.stale_trial_ids
+        assert 5 not in plan.exhausted_trial_ids
+
+    def test_long_runtime_goes_to_stale(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        _write_heartbeat(hb_dir, 5, age=200, now=now)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                {"lr": 0.01},
+                datetime_start=datetime.fromtimestamp(now - 600, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+        )
+        assert 5 in plan.stale_trial_ids
+        assert 5 not in plan.fast_failed_trial_ids
+
+    def test_short_runtime_takes_precedence_over_exhausted(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        params = {"lr": 0.01}
+        pkey = param_key(params)
+        _write_heartbeat(hb_dir, 5, age=200, now=now)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                params,
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={pkey: 3},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+        )
+        assert 5 in plan.fast_failed_trial_ids
+        assert 5 not in plan.exhausted_trial_ids
+        assert plan.retry_counts.get(pkey, 0) == 3
+
+    def test_fast_failed_not_counted_in_ledger(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        params = {"lr": 0.01}
+        pkey = param_key(params)
+        _write_heartbeat(hb_dir, 5, age=200, now=now)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                params,
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+        )
+        assert 5 in plan.fast_failed_trial_ids
+        assert plan.retry_counts.get(pkey, 0) == 0
+        assert plan.total_array_size == 5
 
 
 class TestPlanRetryFreshRunning:
