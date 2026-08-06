@@ -50,14 +50,16 @@ from training data.
 | `jernerics jobs -b <name>` | List jobs |
 | `jernerics cancel -b <name> [id]` | Cancel jobs |
 | `jernerics logs -b <name> <id>` | View logs |
+| `jernerics wait -b <name> <id>` | Block until job completes |
 | `jernerics clean -b <name>` | Delete remote artifacts |
 | `jernerics sync -b <name>` | Replay tracking data from remote |
+| `jernerics replay [--study <s>]` | Replay unsynced tracking data to server |
 | `jernerics runs` | List runs from the tracking server |
 | `jernerics summary <run>` | Per-metric analysis of one run |
 | `jernerics diff <a> <b>` | Compare two runs (params + final metrics) |
+| `jernerics trace <run> [metric]` | Show raw metric series for a run |
 
-Common flags: `--dry-run` (run/build), `--force` (init/build/clean),
-`--follow` (logs), `--set KEY=VALUE` (run), `--study` (sync), `--json` (runs/summary/diff).
+Common flags: `--dry-run` (run/build), `--force` (init/build/clean), `--follow` (logs), `--set KEY=VALUE` (run), `--study` (sync), `--json` (runs/summary/diff/trace).
 
 ## Reference docs
 
