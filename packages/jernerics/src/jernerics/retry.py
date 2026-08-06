@@ -26,6 +26,7 @@ class RetryPlan:
     total_array_size: int
     is_complete: bool
     retry_counts: dict[str, int] = field(default_factory=dict)
+    fast_failed_trial_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -71,6 +72,7 @@ def plan_retry(
     stale_after: float,
     max_retries: int,
     now: float,
+    fast_fail_threshold_s: int = 30,
 ) -> RetryPlan:
     complete = 0
     fresh_running = 0
@@ -78,6 +80,7 @@ def plan_retry(
     stale_trial_ids: list[int] = []
     stale_param_keys: list[str] = []
     exhausted_trial_ids: list[int] = []
+    fast_failed_trial_ids: list[int] = []
 
     for trial in trials:
         if trial.state == TrialState.COMPLETE or trial.state == TrialState.PRUNED:
@@ -95,13 +98,21 @@ def plan_retry(
                     is_stale = True
 
             if is_stale:
-                pkey = param_key(trial.params)
-                current_retries = ledger.get(pkey, 0)
-                if current_retries < max_retries:
-                    stale_trial_ids.append(trial.number)
-                    stale_param_keys.append(pkey)
+                started = trial.datetime_start
+                is_fast_fail = (
+                    started is not None
+                    and now - started.timestamp() < fast_fail_threshold_s + stale_after
+                )
+                if is_fast_fail:
+                    fast_failed_trial_ids.append(trial.number)
                 else:
-                    exhausted_trial_ids.append(trial.number)
+                    pkey = param_key(trial.params)
+                    current_retries = ledger.get(pkey, 0)
+                    if current_retries < max_retries:
+                        stale_trial_ids.append(trial.number)
+                        stale_param_keys.append(pkey)
+                    else:
+                        exhausted_trial_ids.append(trial.number)
             else:
                 fresh_running += 1
 
@@ -123,6 +134,7 @@ def plan_retry(
         total_array_size=total_array_size,
         is_complete=is_complete,
         retry_counts=updated_ledger,
+        fast_failed_trial_ids=fast_failed_trial_ids,
     )
 
 

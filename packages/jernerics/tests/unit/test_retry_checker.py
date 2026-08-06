@@ -1,6 +1,7 @@
 """Tests for the retry_checker using assemble_infrastructure + submit_sweep."""
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -8,11 +9,17 @@ from jernerics.retry import RetryContext
 from optuna.trial import FrozenTrial, TrialState
 
 
-def _make_trial(number: int, state: int, params: dict | None = None) -> FrozenTrial:
+def _make_trial(
+    number: int,
+    state: int,
+    params: dict | None = None,
+    datetime_start: datetime | None = None,
+) -> FrozenTrial:
     trial = MagicMock(spec=FrozenTrial)
     trial.number = number
     trial.state = state
     trial.params = params if params is not None else {"lr": 0.01}
+    trial.datetime_start = datetime_start or datetime.fromtimestamp(0, tz=timezone.utc)
     return trial
 
 
@@ -436,3 +443,124 @@ class TestRetryCheckerUsesSubmitSweep:
 
         call_kwargs = mock_submit.call_args
         assert call_kwargs[1]["tracking_server"] == "https://track.example.com"
+
+
+class TestRetryCheckerFastFail:
+    """A trial that dies within the fast-fail threshold is told FAIL, not retried."""
+
+    @patch("jernerics.retry_checker.submit_sweep")
+    @patch("jernerics.retry_checker.assemble_infrastructure")
+    @patch("jernerics.retry_checker.load_config")
+    @patch("jernerics.retry_checker.load_backend_config")
+    def test_fast_failed_trial_told_fail_not_enqueued(
+        self,
+        mock_load_backend,
+        mock_load_config,
+        mock_assemble,
+        mock_submit,
+        tmp_path,
+    ):
+        from jernerics.retry_checker import run_checker
+
+        now = 1000.0
+        study = MagicMock()
+        study.trials = _make_trials_list(
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                {"lr": 0.01},
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            ),
+        )
+
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+        _write_heartbeat(tracking_dir, 5, age=200, now=now)
+
+        storage_path = str(tmp_path / "optuna" / "mystudy.journal")
+        Path(storage_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(storage_path).touch()
+
+        ctx = RetryContext(
+            study_name="mystudy",
+            backend_name="hpc",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+            storage_path=storage_path,
+            tracking_dir=str(tracking_dir),
+            project_dir=str(tmp_path),
+            project_name="proj",
+            host_home="/home/user",
+        )
+        ctx_path = _write_ctx(tmp_path, ctx)
+
+        from jernerics.config import SharedConfig
+
+        shared = SharedConfig(
+            name="hpc",
+            type="slurm",
+            remote_dir="/scratch/proj",
+            container_type="apptainer",
+            grace_period_s=0,
+            stale_after_s=120,
+            max_retries=3,
+            chain_depth_cap=20,
+        )
+        backend_config = MagicMock()
+        backend_config.shared = shared
+        backend_config.backend = MagicMock()
+        backend_config.container = MagicMock()
+        mock_load_backend.return_value = backend_config
+
+        sweep = MagicMock()
+        sweep.n_trials = 6
+        sweep.direction = "minimize"
+        sweep.backend_overrides = {}
+        sweep.sampler = None
+        mock_load_config.return_value = sweep
+
+        adapter = MagicMock()
+        from jernerics.backend.models import JobSubmission, SubmitResult
+
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="123", n_trials=5)]
+        )
+
+        from jernerics.backend.container import NoContainer
+        from jernerics.backend.path_resolver import PathResolver
+        from jernerics.backend.submission import SweepInfrastructure
+
+        infra = SweepInfrastructure(
+            adapter=adapter,
+            container=NoContainer(),
+            paths=PathResolver(
+                remote_dir="/scratch/proj",
+                cache_dir="/scratch/cache",
+                container=NoContainer(),
+                project_name="proj",
+            ),
+        )
+        mock_assemble.return_value = infra
+        mock_submit.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="123", n_trials=5)]
+        )
+
+        with (
+            patch("jernerics.retry_checker.optuna") as mock_optuna,
+            patch("jernerics.retry_checker.time") as mock_time,
+            patch("jernerics.retry_checker.read_ledger", return_value={}),
+            patch("jernerics.retry_checker.write_ledger"),
+            patch("jernerics.retry_checker.load_tracking_server", return_value=None),
+        ):
+            mock_time.time.return_value = now
+            mock_time.sleep = MagicMock()
+            mock_optuna.load_study.return_value = study
+            mock_optuna.trial.TrialState = TrialState
+            mock_optuna.storages.journal.JournalFileBackend.return_value = MagicMock()
+            mock_optuna.storages.journal.JournalStorage.return_value = MagicMock()
+
+            run_checker(ctx_path=ctx_path, chain_depth=0)
+
+        study.tell.assert_any_call(5, state=TrialState.FAIL)
+        study.enqueue_trial.assert_not_called()
+        mock_submit.assert_called_once()
