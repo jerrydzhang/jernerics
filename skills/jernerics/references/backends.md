@@ -64,9 +64,9 @@ jernerics build -b <name> --force    # Force rebuild
 jernerics build -b <name> --dry-run  # Preview
 
 # Submit sweep
-jernerics run -b <name> dag.py config.py
-jernerics run -b <name> dag.py config.py --dry-run
-jernerics run -b <name> dag.py config.py --set time=4:00:00
+jernerics run -b <name> trial.py config.py
+jernerics run -b <name> trial.py config.py --dry-run
+jernerics run -b <name> trial.py config.py --set time=4:00:00
 
 # Monitor
 jernerics jobs -b <name>
@@ -76,7 +76,13 @@ jernerics logs -b <name> <id> --follow
 # Cancel
 jernerics cancel -b <name> <id>
 jernerics cancel -b <name> --all
+```
 
+> **Warning:** `cancel` cancels the main array job but leaves the checker dependency
+> job pending. Clean up with `jernerics cancel -b <name> --all` or manually `scancel`
+> all pending jobs for your user.
+
+```bash
 # Clean remote artifacts
 jernerics clean -b <name>
 jernerics clean -b <name> --full --force
@@ -98,3 +104,9 @@ For Pueue: the adapter runs `pueue` CLI commands via SSH.
 
 - SSH commands: `~` expands. Use directly.
 - Slurm directives, quoted strings: `~` does NOT expand. Use `$HOME`.
+
+## Non-tracked files
+
+jernerics syncs git-tracked files to the remote automatically. Gitignored files
+(e.g. `.pkl` data pools) must be synced manually via `scp`. If a referenced file
+doesn't exist on the remote, jobs fail instantly and retry indefinitely.
