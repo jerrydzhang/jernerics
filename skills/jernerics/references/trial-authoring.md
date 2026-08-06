@@ -27,6 +27,43 @@ The runner builds `config = {**base, **search_space(trial), "config_index": n}` 
 
 Access values by key: `config["lr"]`, `config["seed"]`, `config["config_index"]`.
 
+## Sweep Configuration
+
+Define the sweep at the `config.py` level. Two modes:
+
+**`grid`** — a dict of lists, for deterministic grid sweeps:
+
+```python
+grid = {
+    "pool_file": ["pools/a.pkl", "pools/b.pkl"],
+    "lr": [0.01, 0.001],
+}
+```
+
+Jernerics computes the cartesian product and adjusts `n_trials` automatically.
+Each combination is tried exactly once. No Optuna randomness.
+
+**`search_space`** — a callable receiving an Optuna trial, for sampled sweeps:
+
+```python
+def search_space(trial):
+    return {
+        "lr": trial.suggest_categorical("lr", [0.01, 0.001]),
+    }
+```
+
+Called once per trial. Use when you want Optuna's sampler to guide the search.
+
+A common mistake is assigning a plain dict to `search_space`:
+
+```python
+# WRONG — plain dict crashes (TypeError: 'dict' object is not callable)
+search_space = {"lr": [0.01, 0.001]}
+
+# RIGHT — use grid for dict-of-lists
+grid = {"lr": [0.01, 0.001]}
+```
+
 ## Tracker protocol
 
 `tracker` records what matters during the run:
