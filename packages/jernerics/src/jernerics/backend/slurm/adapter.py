@@ -140,6 +140,7 @@ def _format_checker_script(
         "#SBATCH --mem=1G",
         f"#SBATCH --output={cache_host}/logs/checker_%j.out",
         f"#SBATCH --error={cache_host}/logs/checker_%j.err",
+        "#SBATCH --kill-on-dep-invalid=yes",
     ]
     if dependency_job_id is not None:
         lines.append(f"#SBATCH --dependency=afterany:{dependency_job_id}")
