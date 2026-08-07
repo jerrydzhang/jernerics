@@ -718,7 +718,7 @@ class TestTraceCommand:
         assert out["metric"] == "loss"
         assert out["value_type"] == "scalar"
         assert len(out["series"]) == 2
-        assert out["series"][0]["value"] == 9.0
+        assert out["series"][0]["value"] == pytest.approx(9.0)
 
     def test_trace_json_text(self, capsys):
         from jernerics.cli import trace

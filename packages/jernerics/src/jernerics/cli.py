@@ -810,7 +810,8 @@ def trace(
                 return
             print(f"Available metrics for '{run_id}':")
             for entry in keys:
-                print(f"  {entry['key']:30s} ({entry['value_type']}, {entry['count']} points)")
+                key = f"{entry['key']:30s}"
+                print(f"  {key} ({entry['value_type']}, {entry['count']} points)")
             return
 
         data = get_metric_series(store, project, study_name, trial_id, metric)

@@ -457,9 +457,7 @@ def get_metric_keys(
         "GROUP BY key, value_type ORDER BY key",
         [project, study_name, trial_id],
     )
-    return [
-        {"key": r[0], "value_type": r[1], "count": int(r[2])} for r in rows
-    ]
+    return [{"key": r[0], "value_type": r[1], "count": int(r[2])} for r in rows]
 
 
 def run_exists(store: Queryable, project: str, study_name: str, trial_id: int) -> bool:
