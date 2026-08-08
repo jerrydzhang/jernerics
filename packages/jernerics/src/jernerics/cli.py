@@ -47,6 +47,12 @@ from .observability import (
     run_exists,
 )
 from .paths import cache_dir
+from .sync.mutagen_sync import (
+    MutagenError,
+    MutagenNotFound,
+    MutagenSync,
+    session_name,
+)
 from .tracking.batch_sync import discover_jsonl_files, replay_tracking
 from .tracking.jsonl_io import TrackingReader
 
@@ -306,7 +312,7 @@ def _build_interactive_session(
     gpus: int | None,
     partition: str | None,
     constraint: str | None,
-) -> InteractiveSession:
+) -> tuple[InteractiveSession, Path, str]:
     """Resolve config + CLI flags into an :class:`InteractiveSession`."""
     project_dir = find_pyproject_dir()
     if project_dir is None:
@@ -351,7 +357,7 @@ def _build_interactive_session(
     login_target = config.shared.host
     user = login_target.split("@", 1)[0] if "@" in login_target else None
 
-    return InteractiveSession(
+    session = InteractiveSession(
         host=host,
         job_name=f"jernerics-interactive-{project_name}",
         remote_dir=remote_dir,
@@ -367,6 +373,92 @@ def _build_interactive_session(
         login_target=login_target,
         user=user,
     )
+    return session, project_dir, project_name
+
+
+def _warn_sync_orphans(project_name: str, *, alive: bool) -> None:
+    """Warn about jernerics sync sessions whose allocation is gone."""
+    if not MutagenSync.available():
+        return
+    alive_names = {session_name(project_name)} if alive else set()
+    try:
+        orphans = MutagenSync().find_orphans(alive_names=alive_names)
+    except MutagenError as e:
+        print(f"Warning: could not list sync sessions ({e}).")
+        return
+    if not orphans:
+        return
+    print(f"Warning: {len(orphans)} stale sync session(s) with no live allocation:")
+    for orphan in orphans:
+        print(f"  - {orphan.name}")
+    print("  Remove with: mutagen sync terminate <name>")
+
+
+def _terminate_interactive_sync(project_name: str) -> None:
+    """Stop the mutagen sync session for ``project_name`` (idempotent)."""
+    if not MutagenSync.available():
+        return
+    name = session_name(project_name)
+    try:
+        MutagenSync().terminate(name)
+        print(f"Stopped code sync ({name}).")
+    except MutagenError as e:
+        print(f"Warning: could not stop sync session {name} ({e}).")
+
+
+def _oneshot_sync(session: InteractiveSession, project_dir: Path) -> None:
+    """Push project source to the remote once via tar/scp (mutagen fallback)."""
+    try:
+        ProjectSync(session.host, session.remote_dir).sync_project(project_dir)
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        print(f"Warning: one-shot project sync failed ({e}).")
+
+
+def _ensure_interactive_sync(
+    session: InteractiveSession,
+    project_dir: Path,
+    project_name: str,
+    *,
+    reconnect: bool,
+) -> None:
+    """Start or resume continuous code sync before attaching to the shell.
+
+    A fresh allocation creates and waits on a new sync session. A reconnect
+    leaves a still-live session in place and restarts a dead one. When mutagen
+    is missing or fails, falls back to a single ProjectSync push so the remote
+    starts with current source (no continuous sync).
+    """
+    remote_host = session.login_target
+    if not remote_host:
+        return
+
+    if not MutagenSync.available():
+        print("Warning: mutagen not found; using one-shot project sync.")
+        print("         Code edits will not propagate until you re-run this command.")
+        _oneshot_sync(session, project_dir)
+        return
+
+    name = session_name(project_name)
+    sync = MutagenSync()
+    try:
+        has_session = any(s.name == name for s in sync.list_sessions())
+        if reconnect and has_session:
+            print(f"Continuous code sync already running ({name}).")
+            return
+        if has_session:
+            # No live allocation backs it (fresh allocation path): the lingering
+            # session is stale. Clear it so ``create`` does not collide on name.
+            print(f"Replacing stale sync session ({name})...")
+            sync.terminate(name)
+        elif reconnect:
+            print(f"Sync session {name} was lost; restarting...")
+        else:
+            print(f"Starting continuous code sync ({name})...")
+        sync.start(project_dir, remote_host, session.remote_dir, name=name)
+        print("Code sync is live: edits propagate in both directions within seconds.")
+    except (MutagenError, MutagenNotFound) as e:
+        print(f"Warning: continuous sync unavailable ({e}); using one-shot sync.")
+        _oneshot_sync(session, project_dir)
 
 
 def _interactive_connect(
@@ -374,10 +466,13 @@ def _interactive_connect(
     node: str,
     backend_name: str,
     *,
+    project_dir: Path,
+    project_name: str,
+    reconnect: bool = False,
     job_id: str | None = None,
 ) -> None:
-    """Attach to the allocation; print a reconnect/teardown hint on exit."""
-    # Sync hook: continuous code sync (mutagen) plugs in here (task uyy.2).
+    """Ensure code sync is live, then attach to the allocation."""
+    _ensure_interactive_sync(session, project_dir, project_name, reconnect=reconnect)
     session.connect(node)
     if job_id is None:
         info = session.find_existing()
@@ -419,10 +514,11 @@ def interactive(
     """Open a reconnectable shell on an allocated GPU node.
 
     Allocates a GPU via a reservation job that survives SSH disconnect, then
-    drops you into a tmux session inside the container. Re-run to reconnect to
-    an existing session; use --end to release the allocation.
+    drops you into a tmux session inside the container. Continuous code sync
+    (mutagen) mirrors edits in both directions while the allocation runs.
+    Re-run to reconnect to an existing session; use --end to release it.
     """
-    session = _build_interactive_session(
+    session, project_dir, project_name = _build_interactive_session(
         backend_name, time=time, gpus=gpus, partition=partition, constraint=constraint
     )
 
@@ -449,22 +545,39 @@ def interactive(
         if existing is None:
             print(f"No active interactive session for backend '{backend_name}'.")
             return
+        _terminate_interactive_sync(project_name)
         session.end()
         print(f"Cancelled interactive job {existing.job_id} (was {existing.state}).")
         return
 
+    _warn_sync_orphans(project_name, alive=existing is not None)
+
     if existing is not None:
         if existing.state == "RUNNING" and existing.node:
             print(f"Reconnecting to job {existing.job_id} on {existing.node}...")
-            _interactive_connect(session, existing.node, backend_name)
+            _interactive_connect(
+                session,
+                existing.node,
+                backend_name,
+                project_dir=project_dir,
+                project_name=project_name,
+                reconnect=True,
+            )
             return
         print(
             f"Existing session job {existing.job_id} is {existing.state};"
             " waiting for it to start..."
         )
         node = session.wait_for_running(existing.job_id)
-        print(f"Allocation running on {node}. Connecting...")
-        _interactive_connect(session, node, backend_name)
+        print(f"Allocation running on {node}.")
+        _interactive_connect(
+            session,
+            node,
+            backend_name,
+            project_dir=project_dir,
+            project_name=project_name,
+            reconnect=True,
+        )
         return
 
     readiness = session.host.run(["test", "-f", session.container_image], check=False)
@@ -481,8 +594,16 @@ def interactive(
     job_id = session.submit()
     print(f"Submitted job {job_id}. Waiting for it to start...")
     node = session.wait_for_running(job_id)
-    print(f"Allocation running on {node}. Connecting...")
-    _interactive_connect(session, node, backend_name, job_id=job_id)
+    print(f"Allocation running on {node}.")
+    _interactive_connect(
+        session,
+        node,
+        backend_name,
+        project_dir=project_dir,
+        project_name=project_name,
+        reconnect=False,
+        job_id=job_id,
+    )
 
 
 # ── build ────────────────────────────────────────────────────────────────────

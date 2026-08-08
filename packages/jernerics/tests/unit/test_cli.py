@@ -863,3 +863,268 @@ class TestTraceCommand:
 
         out = capsys.readouterr().out
         assert "No metrics" in out
+
+
+def _interactive_session_stub(existing):
+    sess = MagicMock()
+    sess.login_target = "jez@hpc"
+    sess.remote_dir = "/home/jez/proj"
+    sess.cache_host = "/home/jez/.cache/jernerics"
+    sess.container_image = "/home/jez/proj/container.sif"
+    sess.gpus = 1
+    sess.partition = "gpu"
+    sess.time_limit = "1:00:00"
+    sess.find_existing.return_value = existing
+    sess.host.run.return_value = MagicMock(returncode=0)
+    return sess
+
+
+class TestEnsureInteractiveSync:
+    """``_ensure_interactive_sync``: start, resume, restart, and fallback."""
+
+    def _session(self, login_target="jez@hpc", remote_dir="/home/jez/proj"):
+        sess = MagicMock()
+        sess.login_target = login_target
+        sess.remote_dir = remote_dir
+        sess.host = MagicMock()
+        return sess
+
+    def test_new_session_creates_sync(self):
+        from jernerics.cli import _ensure_interactive_sync
+
+        sess = self._session()
+        with (
+            patch("jernerics.cli.MutagenSync") as ms,
+            patch("jernerics.cli.ProjectSync") as ps,
+        ):
+            ms.available.return_value = True
+            ms.return_value.list_sessions.return_value = []
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
+            called = ms.return_value.start.call_args
+            assert called.args[0] == Path("/proj")
+            assert called.args[1] == "jez@hpc"
+            assert called.args[2] == "/home/jez/proj"
+            assert called.kwargs["name"] == "jernerics-interactive-proj"
+            ps.assert_not_called()
+
+    def test_new_session_replaces_stale_session(self, capsys):
+        from jernerics.cli import _ensure_interactive_sync
+
+        sess = self._session()
+        stale = MagicMock()
+        stale.name = "jernerics-interactive-proj"
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = True
+            ms.return_value.list_sessions.return_value = [stale]
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
+            ms.return_value.terminate.assert_called_once_with(
+                "jernerics-interactive-proj"
+            )
+            ms.return_value.start.assert_called_once()
+        assert "Replacing stale" in capsys.readouterr().out
+
+    def test_reconnect_keeps_live_session(self, capsys):
+        from jernerics.cli import _ensure_interactive_sync
+
+        sess = self._session()
+        live = MagicMock()
+        live.name = "jernerics-interactive-proj"
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = True
+            ms.return_value.list_sessions.return_value = [live]
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=True)
+            ms.return_value.start.assert_not_called()
+        assert "already running" in capsys.readouterr().out
+
+    def test_reconnect_restarts_dead_session(self, capsys):
+        from jernerics.cli import _ensure_interactive_sync
+
+        sess = self._session()
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = True
+            ms.return_value.list_sessions.return_value = []
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=True)
+            ms.return_value.start.assert_called_once()
+        assert "was lost" in capsys.readouterr().out
+
+    def test_fallback_when_mutagen_missing(self, capsys):
+        from jernerics.cli import _ensure_interactive_sync
+
+        sess = self._session()
+        with (
+            patch("jernerics.cli.MutagenSync") as ms,
+            patch("jernerics.cli.ProjectSync") as ps,
+        ):
+            ms.available.return_value = False
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
+            ms.return_value.start.assert_not_called()
+            ps.assert_called_once_with(sess.host, "/home/jez/proj")
+            ps.return_value.sync_project.assert_called_once_with(Path("/proj"))
+        assert "mutagen not found" in capsys.readouterr().out
+
+    def test_start_failure_falls_back_to_oneshot(self):
+        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.sync.mutagen_sync import MutagenError
+
+        sess = self._session()
+        with (
+            patch("jernerics.cli.MutagenSync") as ms,
+            patch("jernerics.cli.ProjectSync") as ps,
+        ):
+            ms.available.return_value = True
+            ms.return_value.start.side_effect = MutagenError("boom")
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
+            ps.return_value.sync_project.assert_called_once()
+
+    def test_no_host_is_noop(self):
+        from jernerics.cli import _ensure_interactive_sync
+
+        sess = self._session(login_target=None)
+        with patch("jernerics.cli.MutagenSync") as ms:
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
+            ms.available.assert_not_called()
+
+
+class TestTerminateInteractiveSync:
+    def test_terminates_named_session(self, capsys):
+        from jernerics.cli import _terminate_interactive_sync
+
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = True
+            _terminate_interactive_sync("proj")
+            ms.return_value.terminate.assert_called_once_with(
+                "jernerics-interactive-proj"
+            )
+        assert "Stopped code sync" in capsys.readouterr().out
+
+    def test_noop_when_mutagen_missing(self):
+        from jernerics.cli import _terminate_interactive_sync
+
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = False
+            _terminate_interactive_sync("proj")
+            ms.return_value.terminate.assert_not_called()
+
+    def test_swallows_terminate_error(self):
+        from jernerics.cli import _terminate_interactive_sync
+        from jernerics.sync.mutagen_sync import MutagenError
+
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = True
+            ms.return_value.terminate.side_effect = MutagenError("nope")
+            _terminate_interactive_sync("proj")
+
+
+class TestWarnSyncOrphans:
+    def test_warns_about_orphans(self, capsys):
+        from jernerics.cli import _warn_sync_orphans
+
+        orphan = MagicMock()
+        orphan.name = "jernerics-interactive-dead"
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = True
+            ms.return_value.find_orphans.return_value = [orphan]
+            _warn_sync_orphans("proj", alive=False)
+        out = capsys.readouterr().out
+        assert "stale sync session" in out
+        assert "jernerics-interactive-dead" in out
+
+    def test_silent_when_no_orphans(self, capsys):
+        from jernerics.cli import _warn_sync_orphans
+
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = True
+            ms.return_value.find_orphans.return_value = []
+            _warn_sync_orphans("proj", alive=False)
+        assert "stale" not in capsys.readouterr().out
+
+    def test_alive_marks_current_as_live(self):
+        from jernerics.cli import _warn_sync_orphans
+
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = True
+            ms.return_value.find_orphans.return_value = []
+            _warn_sync_orphans("proj", alive=True)
+            ms.return_value.find_orphans.assert_called_once_with(
+                alive_names={"jernerics-interactive-proj"}
+            )
+
+    def test_noop_when_mutagen_missing(self):
+        from jernerics.cli import _warn_sync_orphans
+
+        with patch("jernerics.cli.MutagenSync") as ms:
+            ms.available.return_value = False
+            _warn_sync_orphans("proj", alive=False)
+            ms.return_value.find_orphans.assert_not_called()
+
+
+class TestInteractiveSyncWiring:
+    """The ``interactive`` command threads sync through every lifecycle path."""
+
+    def test_end_terminates_sync_before_scancel(self):
+        from jernerics.cli import interactive
+
+        existing = MagicMock(job_id="123", state="RUNNING", node="gpu1")
+        sess = _interactive_session_stub(existing)
+        order: list[str] = []
+
+        def record_terminate(*args, **kwargs):
+            order.append("terminate")
+
+        def record_end(*args, **kwargs):
+            order.append("end")
+            return existing
+
+        with (
+            patch(
+                "jernerics.cli._build_interactive_session",
+                return_value=(sess, Path("/proj"), "proj"),
+            ),
+            patch("jernerics.cli._terminate_interactive_sync") as term,
+        ):
+            term.side_effect = record_terminate
+            sess.end.side_effect = record_end
+            interactive(backend_name="hpc", end=True)
+
+        assert order == ["terminate", "end"]
+
+    def test_new_session_starts_sync_then_connects(self):
+        from jernerics.cli import interactive
+
+        sess = _interactive_session_stub(None)
+        sess.submit.return_value = "123"
+        sess.wait_for_running.return_value = "gpu1"
+
+        with (
+            patch(
+                "jernerics.cli._build_interactive_session",
+                return_value=(sess, Path("/proj"), "proj"),
+            ),
+            patch("jernerics.cli._warn_sync_orphans") as warn,
+            patch("jernerics.cli._ensure_interactive_sync") as ensure,
+        ):
+            interactive(backend_name="hpc")
+
+        ensure.assert_called_once_with(sess, Path("/proj"), "proj", reconnect=False)
+        sess.connect.assert_called_once_with("gpu1")
+        warn.assert_called_once_with("proj", alive=False)
+
+    def test_reconnect_running_uses_reconnect_sync(self):
+        from jernerics.cli import interactive
+
+        existing = MagicMock(job_id="123", state="RUNNING", node="gpu1")
+        sess = _interactive_session_stub(existing)
+
+        with (
+            patch(
+                "jernerics.cli._build_interactive_session",
+                return_value=(sess, Path("/proj"), "proj"),
+            ),
+            patch("jernerics.cli._warn_sync_orphans") as warn,
+            patch("jernerics.cli._ensure_interactive_sync") as ensure,
+        ):
+            interactive(backend_name="hpc")
+
+        ensure.assert_called_once_with(sess, Path("/proj"), "proj", reconnect=True)
+        sess.connect.assert_called_once_with("gpu1")
+        warn.assert_called_once_with("proj", alive=True)
