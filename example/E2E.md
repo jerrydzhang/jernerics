@@ -1,8 +1,7 @@
 # E2E Test Guide
 
 Automated verification of the full jernerics pipeline across three
-backend+container combinations, exercising DAG execution, Optuna sweeps,
-tracking streams, artifact storage, GPU detection, and retry logic.
+backend+container combinations, exercising Optuna sweeps, tracking streams, artifact storage, GPU detection, and retry logic.
 
 Run all commands from `example/`.
 
@@ -68,13 +67,13 @@ If any prerequisite fails, **stop and report the failure**.
 
 ## Test 1: Local sweep (no backend, no container)
 
-Tests the in-process path end-to-end: DAG execution → Optuna → tracking
+Tests the in-process path end-to-end: Optuna sweep → tracking
 stream → artifact manifests → post-hook pipeline (replay + sync).
 
 ### 1a. Run basic sweep
 
 ```bash
-jernerics local dag.py config.py
+jernerics local trial.py config.py
 ```
 
 **Pass:** Prints 5 "Running trial N/5" lines, exits 0.
@@ -144,7 +143,7 @@ name), not `container.sif`.
 ### 2b. Dry run — verify env var passthrough
 
 ```bash
-jernerics run --backend pueue-remote dag.py config.py --dry-run
+jernerics run --backend pueue-remote trial.py config.py --dry-run
 ```
 
 **Verify the generated script contains:**
@@ -159,7 +158,7 @@ post-hook command wrap.
 ### 2c. Submit sweep
 
 ```bash
-jernerics run --backend pueue-remote dag.py config.py
+jernerics run --backend pueue-remote trial.py config.py
 ```
 
 **Pass:** Prints sweep submission confirmation with task group name.
@@ -175,8 +174,7 @@ Wait until all tasks show "Done", then check logs:
 jernerics logs --backend pueue-remote <task_id>
 ```
 
-**Pass:** Shows 5 trial outputs with DAG execution (generate → train →
-evaluate). No gRPC connection errors.
+**Pass:** Shows 5 trial outputs (generate → train → evaluate). No gRPC connection errors.
 
 ### 2e. Verify tracking data on server
 
@@ -231,7 +229,7 @@ ssh jez21005@hpc2.storrs.hpc.uconn.edu "ls ~/projects/jernerics-examples/sweep-e
 ### 3b. Dry run — verify env var passthrough
 
 ```bash
-jernerics run --backend hpc dag.py config.py --dry-run
+jernerics run --backend hpc trial.py config.py --dry-run
 ```
 
 **Verify the generated script contains:**
@@ -250,7 +248,7 @@ Also verify the script contains:
 ### 3c. Submit sweep
 
 ```bash
-jernerics run --backend hpc dag.py config.py
+jernerics run --backend hpc trial.py config.py
 ```
 
 **Pass:** Prints syncing, then "Job submitted: <id>". Record the job ID.
@@ -295,7 +293,7 @@ Tests the passthrough path with no container isolation.
 ### 4a. Submit sweep
 
 ```bash
-jernerics run --backend pueue-local dag.py config.py
+jernerics run --backend pueue-local trial.py config.py
 ```
 
 **Pass:** Prints "Sweep submitted: group <name>".
@@ -311,7 +309,7 @@ Wait for all tasks to complete, then:
 jernerics logs --backend pueue-local <task_id>
 ```
 
-**Pass:** Shows trial output with DAG execution.
+**Pass:** Shows trial execution output.
 
 ### 4c. Clean up pueue state
 
@@ -330,7 +328,7 @@ On pueue-remote the workstation always has GPU access.
 ### 5a. Local GPU check
 
 ```bash
-jernerics local dag.py config_gpu.py
+jernerics local trial.py config_gpu.py
 ```
 
 **Pass:** Exits 0. Trial output includes `detect_gpu` result showing
@@ -340,7 +338,7 @@ regardless of CUDA availability.
 ### 5b. HPC with GPU
 
 ```bash
-jernerics run --backend hpc dag.py config_gpu.py
+jernerics run --backend hpc trial.py config_gpu.py
 ```
 
 **Pass:** Job submitted to `priority-gpu` partition. Trial output
@@ -349,7 +347,7 @@ should show `cuda_available: True` and a GPU device name.
 ### 5c. pueue-remote (always has GPU)
 
 ```bash
-jernerics run --backend pueue-remote dag.py config_gpu.py
+jernerics run --backend pueue-remote trial.py config_gpu.py
 ```
 
 **Pass:** Trial output shows `cuda_available: True`.
@@ -366,7 +364,7 @@ trials complete normally.
 ### 6a. Run locally
 
 ```bash
-jernerics local dag.py config_retry_app.py
+jernerics local trial.py config_retry_app.py
 ```
 
 **Pass:** Exits 0. Trials 1 and 4 show RuntimeError in output.
@@ -375,7 +373,7 @@ Other 4 trials complete normally with loss values.
 ### 6b. Run on HPC
 
 ```bash
-jernerics run --backend hpc dag.py config_retry_app.py
+jernerics run --backend hpc trial.py config_retry_app.py
 ```
 
 **Pass:** Array job with 6 tasks. Failed trials visible in logs.
@@ -393,7 +391,7 @@ resubmit dead trials.
 ### 7a. Run on HPC
 
 ```bash
-jernerics run --backend hpc dag.py config_retry_node.py
+jernerics run --backend hpc trial.py config_retry_node.py
 ```
 
 **Pass:** Array job submitted. Dead trials (1, 4) are detected by
@@ -412,7 +410,7 @@ die again until max_retries is exhausted.
 ### 8a. Run locally
 
 ```bash
-jernerics local dag.py config_retry_persistent.py
+jernerics local trial.py config_retry_persistent.py
 ```
 
 **Pass:** Trial with `lr=1e-4` exhausts retries and is marked failed.

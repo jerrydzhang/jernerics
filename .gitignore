@@ -31,3 +31,6 @@ result
 
 # ai stuff
 .ralph
+
+# bv (beads viewer) local config and caches
+.bv/
