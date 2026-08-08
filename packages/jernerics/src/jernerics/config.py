@@ -98,6 +98,23 @@ class PueueConfig:
 
 
 @dataclass
+class InteractiveConfig:
+    """Options for ``jernerics interactive`` GPU sessions.
+
+    Fields left ``None`` inherit from the backend's ``SlurmConfig`` at resolve
+    time so interactive defaults track the batch configuration.
+    """
+
+    time: str | None = None
+    gpus: int = 1
+    partition: str | None = None
+    constraint: str | None = None
+    mem: str | None = None
+    cpus: int | None = None
+    tmux_session: str = "jernerics"
+
+
+@dataclass
 class ApptainerConfig:
     """Container options for ``container_type = "apptainer"``.
 
@@ -122,6 +139,7 @@ class BackendConfig:
     shared: SharedConfig
     backend: SlurmConfig | PueueConfig | None = None  # None for LocalBackend
     container: ApptainerConfig | DockerConfig | None = None
+    interactive: InteractiveConfig | None = None
 
 
 def _read_pyproject(path: Path) -> dict:
@@ -241,10 +259,22 @@ def load_backend_config(
             gpu=docker.get("gpu", False),
         )
 
+    interactive_section = bc.get("interactive", {})
+    interactive_config = InteractiveConfig(
+        time=_normalize_time(interactive_section.get("time")),
+        gpus=interactive_section.get("gpus", 1),
+        partition=interactive_section.get("partition"),
+        constraint=interactive_section.get("constraint"),
+        mem=interactive_section.get("mem"),
+        cpus=interactive_section.get("cpus"),
+        tmux_session=interactive_section.get("tmux_session", "jernerics"),
+    )
+
     return BackendConfig(
         shared=shared,
         backend=backend_specific,
         container=container_config,
+        interactive=interactive_config,
     )
 
 

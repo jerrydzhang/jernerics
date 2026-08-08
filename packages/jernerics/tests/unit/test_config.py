@@ -6,6 +6,7 @@ from jernerics.config import (
     ConfigNotFound,
     DockerConfig,
     ExitCode,
+    InteractiveConfig,
     PueueConfig,
     SharedConfig,
     SlurmConfig,
@@ -230,6 +231,56 @@ container_type = "apptainer"
 
         assert isinstance(config.container, ApptainerConfig)
         assert config.container.build_dir is None
+
+    def test_load_backend_config_interactive_section(self, tmp_path):
+        project_dir = tmp_path / "interactive"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "interactive"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+
+[tool.jernerics.backends.hpc.interactive]
+time = "8:00:00"
+gpus = 2
+partition = "general-gpu"
+constraint = "a100"
+tmux_session = "dev"
+""")
+        config = load_backend_config("hpc", project_dir)
+
+        assert isinstance(config.interactive, InteractiveConfig)
+        assert config.interactive.time == "8:00:00"
+        assert config.interactive.gpus == 2
+        assert config.interactive.partition == "general-gpu"
+        assert config.interactive.constraint == "a100"
+        assert config.interactive.tmux_session == "dev"
+        assert config.interactive.mem is None
+        assert config.interactive.cpus is None
+
+    def test_load_backend_config_interactive_defaults(self, tmp_path):
+        project_dir = tmp_path / "interactive-default"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "interactive-default"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+""")
+        config = load_backend_config("hpc", project_dir)
+
+        assert isinstance(config.interactive, InteractiveConfig)
+        assert config.interactive.gpus == 1
+        assert config.interactive.tmux_session == "jernerics"
+        assert config.interactive.time is None
+        assert config.interactive.partition is None
 
     def test_load_backend_config_pueue_defaults(self, tmp_path):
         project_dir = tmp_path / "pueue-defaults"

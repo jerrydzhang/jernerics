@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from datetime import UTC, datetime
@@ -19,9 +20,12 @@ from .backend.host import LocalHost, SSHHost
 from .backend.local_backend import LocalBackend
 from .backend.models import SweepSubmission
 from .backend.project_sync import ProjectSync
+from .backend.slurm.interactive import InteractiveSession, format_interactive_script
 from .config import (
     ConfigNotFound,
     ExitCode,
+    InteractiveConfig,
+    SlurmConfig,
     find_pyproject_dir,
     get_project_name,
     load_backend_config,
@@ -290,6 +294,195 @@ def run_remote(
             )
             print("\nQuery metrics:")
             print(query_hint)
+
+
+# ── interactive ──────────────────────────────────────────────────────────────
+
+
+def _build_interactive_session(
+    backend_name: str,
+    *,
+    time: str | None,
+    gpus: int | None,
+    partition: str | None,
+    constraint: str | None,
+) -> InteractiveSession:
+    """Resolve config + CLI flags into an :class:`InteractiveSession`."""
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    try:
+        config = load_backend_config(backend_name)
+    except ConfigNotFound as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+
+    if config.shared.type != "slurm" or not isinstance(config.backend, SlurmConfig):
+        print(
+            f"Error: 'interactive' requires a slurm backend; '{backend_name}'"
+            f" is '{config.shared.type}'."
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    if not config.shared.host:
+        print("Error: 'interactive' requires an SSH host (none configured).")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    project_name = get_project_name(project_dir)
+    host = SSHHost(config.shared.host)
+    slurm = config.backend
+    interactive = config.interactive or InteractiveConfig()
+
+    remote_dir = (
+        config.shared.remote_dir.replace("~", host.home)
+        .replace("{project_name}", project_name)
+        .replace("{project-name}", project_name)
+    )
+    cache_host = (
+        config.shared.cache_dir.replace("~", host.home)
+        .replace("{project_name}", project_name)
+        .replace("{project-name}", project_name)
+        if config.shared.cache_dir
+        else f"{host.home}/.cache/jernerics"
+    )
+
+    login_target = config.shared.host
+    user = login_target.split("@", 1)[0] if "@" in login_target else None
+
+    return InteractiveSession(
+        host=host,
+        job_name=f"jernerics-interactive-{project_name}",
+        remote_dir=remote_dir,
+        container_image=f"{remote_dir}/container.sif",
+        cache_host=cache_host,
+        partition=partition or interactive.partition or slurm.partition,
+        time_limit=time or interactive.time or slurm.time or "4:00:00",
+        gpus=gpus if gpus is not None else interactive.gpus,
+        mem=interactive.mem or slurm.mem or "16G",
+        cpus=interactive.cpus if interactive.cpus is not None else slurm.cpus,
+        constraint=constraint or interactive.constraint,
+        tmux_session=interactive.tmux_session,
+        login_target=login_target,
+        user=user,
+    )
+
+
+def _interactive_connect(
+    session: InteractiveSession,
+    node: str,
+    backend_name: str,
+    *,
+    job_id: str | None = None,
+) -> None:
+    """Attach to the allocation; print a reconnect/teardown hint on exit."""
+    # Sync hook: continuous code sync (mutagen) plugs in here (task uyy.2).
+    session.connect(node)
+    if job_id is None:
+        info = session.find_existing()
+        job_id = info.job_id if info else "?"
+    print()
+    print(f"Disconnected from {node}. The allocation (job {job_id}) is still running.")
+    print(f"  Reconnect:  jernerics interactive --backend {backend_name}")
+    print(f"  End:        jernerics interactive --backend {backend_name} --end")
+
+
+@app.command("interactive")
+def interactive(
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
+    time: Annotated[
+        str | None, typer.Option("--time", help="Walltime, e.g. 4:00:00")
+    ] = None,
+    gpus: Annotated[
+        int | None, typer.Option("--gpus", help="Number of GPUs to allocate")
+    ] = None,
+    partition: Annotated[
+        str | None, typer.Option("--partition", help="SLURM partition")
+    ] = None,
+    constraint: Annotated[
+        str | None, typer.Option("--constraint", help="SLURM constraint, e.g. a100")
+    ] = None,
+    end: Annotated[
+        bool,
+        typer.Option("--end", help="Tear down an existing interactive session"),
+    ] = False,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run", help="Show sbatch script and ssh command without running"
+        ),
+    ] = False,
+) -> None:
+    """Open a reconnectable shell on an allocated GPU node.
+
+    Allocates a GPU via a reservation job that survives SSH disconnect, then
+    drops you into a tmux session inside the container. Re-run to reconnect to
+    an existing session; use --end to release the allocation.
+    """
+    session = _build_interactive_session(
+        backend_name, time=time, gpus=gpus, partition=partition, constraint=constraint
+    )
+
+    if dry_run:
+        script = format_interactive_script(
+            job_name=session.job_name,
+            partition=session.partition,
+            time_limit=session.time_limit,
+            mem=session.mem,
+            cpus=session.cpus,
+            gpus=session.gpus,
+            constraint=session.constraint,
+        )
+        print("=== SBATCH SCRIPT ===")
+        print(script)
+        print()
+        print("=== SSH (after allocation; NODE is the compute host) ===")
+        print(" ".join(shlex.quote(a) for a in session.ssh_argv("NODE")))
+        return
+
+    existing = session.find_existing()
+
+    if end:
+        if existing is None:
+            print(f"No active interactive session for backend '{backend_name}'.")
+            return
+        session.end()
+        print(f"Cancelled interactive job {existing.job_id} (was {existing.state}).")
+        return
+
+    if existing is not None:
+        if existing.state == "RUNNING" and existing.node:
+            print(f"Reconnecting to job {existing.job_id} on {existing.node}...")
+            _interactive_connect(session, existing.node, backend_name)
+            return
+        print(
+            f"Existing session job {existing.job_id} is {existing.state};"
+            " waiting for it to start..."
+        )
+        node = session.wait_for_running(existing.job_id)
+        print(f"Allocation running on {node}. Connecting...")
+        _interactive_connect(session, node, backend_name)
+        return
+
+    readiness = session.host.run(["test", "-f", session.container_image], check=False)
+    if readiness.returncode != 0:
+        print(f"Error: container not found at {session.container_image}.")
+        print("  Run 'jernerics build --backend <name>' first.")
+        raise SystemExit(ExitCode.CONTAINER_ERROR) from None
+
+    session.host.mkdir(session.cache_host)
+    print(
+        f"Submitting interactive allocation ({session.gpus} GPU,"
+        f" partition {session.partition}, {session.time_limit})..."
+    )
+    job_id = session.submit()
+    print(f"Submitted job {job_id}. Waiting for it to start...")
+    node = session.wait_for_running(job_id)
+    print(f"Allocation running on {node}. Connecting...")
+    _interactive_connect(session, node, backend_name, job_id=job_id)
 
 
 # ── build ────────────────────────────────────────────────────────────────────
