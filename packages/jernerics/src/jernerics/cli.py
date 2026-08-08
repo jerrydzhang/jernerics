@@ -369,7 +369,6 @@ def _build_interactive_session(
         mem=interactive.mem or slurm.mem or "16G",
         cpus=interactive.cpus if interactive.cpus is not None else slurm.cpus,
         constraint=constraint or interactive.constraint,
-        tmux_session=interactive.tmux_session,
         login_target=login_target,
         user=user,
     )
@@ -511,12 +510,14 @@ def interactive(
         ),
     ] = False,
 ) -> None:
-    """Open a reconnectable shell on an allocated GPU node.
+    """Open a container shell on an allocated GPU node.
 
     Allocates a GPU via a reservation job that survives SSH disconnect, then
-    drops you into a tmux session inside the container. Continuous code sync
-    (mutagen) mirrors edits in both directions while the allocation runs.
-    Re-run to reconnect to an existing session; use --end to release it.
+    drops you into an apptainer shell inside the container at /work. Continuous
+    code sync (mutagen) mirrors edits in both directions while the allocation
+    runs. Re-run to reconnect to an existing allocation; use --end to release it.
+
+    Process persistence (tmux, screen) is left to the user.
     """
     session, project_dir, project_name = _build_interactive_session(
         backend_name, time=time, gpus=gpus, partition=partition, constraint=constraint

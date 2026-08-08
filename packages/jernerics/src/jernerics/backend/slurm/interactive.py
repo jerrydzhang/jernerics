@@ -1,4 +1,4 @@
-"""Interactive GPU allocation + reconnectable shell.
+"""Interactive GPU allocation + container shell.
 
 The interactive path is deliberately separate from batch sweep submission:
 
@@ -7,15 +7,15 @@ The interactive path is deliberately separate from batch sweep submission:
   session drops and loses the allocation.
 - The user reaches the compute node over ``ssh -o ProxyJump=<login>``. The
   cluster gates node SSH via ``pam_slurm_adopt``, so an active job is required.
-- A host ``tmux`` session wraps an ``apptainer shell`` so the container
-  environment (PYTHONPATH, GPU) persists across reconnects: detaching tmux keeps
-  the apptainer shell alive, and reattaching resumes it.
+- The SSH command runs ``apptainer shell`` directly, dropping the user inside
+  the container in ``/work``. Process persistence (tmux, screen, etc.) is left
+  to the user — jernerics owns the allocation and container entry, not the
+  shell environment.
 
 This module owns allocation logic and SSH command construction only — it reuses
 ``SSHHost`` for every remote call.
 """
 
-import shlex
 import subprocess
 import time
 from dataclasses import dataclass
@@ -116,7 +116,7 @@ def format_interactive_script(
 
 
 class InteractiveSession:
-    """Allocate a GPU node and attach a reconnectable container shell to it."""
+    """Allocate a GPU node and attach a container shell to it."""
 
     def __init__(
         self,
@@ -132,7 +132,6 @@ class InteractiveSession:
         mem: str,
         cpus: int,
         constraint: str | None = None,
-        tmux_session: str = "jernerics",
         login_target: str | None = None,
         user: str | None = None,
         poll_interval: float = 5.0,
@@ -148,7 +147,6 @@ class InteractiveSession:
         self.mem = mem
         self.cpus = cpus
         self.constraint = constraint
-        self.tmux_session = tmux_session
         self.login_target = login_target or getattr(host, "host", None)
         self.user = user
         self.poll_interval = poll_interval
@@ -231,18 +229,18 @@ class InteractiveSession:
         return node
 
     def remote_shell_command(self, node: str) -> str:
-        """Command run on the compute node: host tmux wrapping apptainer shell.
+        """Command run on the compute node: apptainer shell in the project dir.
 
-        ``tmux new-session -A`` attaches when the session exists (reconnect) and
-        creates it — running the apptainer shell — otherwise. Host tmux keeps
-        the apptainer shell alive across SSH disconnects.
+        The user lands inside the container at ``/work`` (the bind-mounted
+        project source). No tmux wrapper — the user owns their own shell
+        environment and process persistence (``tmux``, ``screen``, etc.).
         """
         binds = f"{self.remote_dir}:/work --bind {self.cache_host}:/cache"
-        apptainer = (
-            f"apptainer shell --nv --pwd /work --bind {binds} {self.container_image}"
+        return (
+            f"cd {self.remote_dir} &&"
+            f" apptainer shell --nv --pwd /work --bind {binds}"
+            f" {self.container_image}"
         )
-        inner = f"cd {self.remote_dir} && {apptainer}"
-        return f"tmux new-session -A -s {self.tmux_session} {shlex.quote(inner)}"
 
     def ssh_argv(self, node: str) -> list[str]:
         """Build the local ssh argv (ProxyJump through the login node)."""
@@ -262,7 +260,7 @@ class InteractiveSession:
         ]
 
     def connect(self, node: str) -> int:
-        """Attach to the tmux + container shell; returns ssh's exit code."""
+        """Attach to the container shell; returns ssh's exit code."""
         return subprocess.run(self.ssh_argv(node)).returncode
 
     # ── teardown ────────────────────────────────────────────────────────────

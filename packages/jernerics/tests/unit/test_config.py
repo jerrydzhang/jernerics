@@ -249,7 +249,6 @@ time = "8:00:00"
 gpus = 2
 partition = "general-gpu"
 constraint = "a100"
-tmux_session = "dev"
 """)
         config = load_backend_config("hpc", project_dir)
 
@@ -258,7 +257,6 @@ tmux_session = "dev"
         assert config.interactive.gpus == 2
         assert config.interactive.partition == "general-gpu"
         assert config.interactive.constraint == "a100"
-        assert config.interactive.tmux_session == "dev"
         assert config.interactive.mem is None
         assert config.interactive.cpus is None
 
@@ -278,7 +276,6 @@ host = "user@hpc.example.edu"
 
         assert isinstance(config.interactive, InteractiveConfig)
         assert config.interactive.gpus == 1
-        assert config.interactive.tmux_session == "jernerics"
         assert config.interactive.time is None
         assert config.interactive.partition is None
 

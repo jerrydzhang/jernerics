@@ -29,7 +29,6 @@ def _make_session(
     mem: str = "32G",
     cpus: int = 8,
     constraint: str | None = None,
-    tmux_session: str = "jernerics",
     login_target: str | None = "user@login.hpc.edu",
     user: str | None = "user",
     poll_interval: float = 0.0,
@@ -49,7 +48,6 @@ def _make_session(
         mem=mem,
         cpus=cpus,
         constraint=constraint,
-        tmux_session=tmux_session,
         login_target=login_target,
         user=user,
         poll_interval=poll_interval,
@@ -268,14 +266,16 @@ class TestEnd:
 
 
 class TestSshCommand:
-    def test_remote_shell_command_wraps_apptainer_in_tmux(self):
+    def test_remote_shell_command_runs_apptainer_directly(self):
         session = _make_session()
         cmd = session.remote_shell_command("gpu13")
-        assert cmd.startswith("tmux new-session -A -s jernerics ")
+        assert "cd /home/user/projects/proj" in cmd
         assert "apptainer shell --nv" in cmd
+        assert "--pwd /work" in cmd
         assert "--bind /home/user/projects/proj:/work" in cmd
         assert "--bind /home/user/.cache/jernerics:/cache" in cmd
         assert "container.sif" in cmd
+        assert "tmux" not in cmd
 
     def test_ssh_argv_uses_proxyjump(self):
         session = _make_session(login_target="user@login.hpc.edu", user="user")

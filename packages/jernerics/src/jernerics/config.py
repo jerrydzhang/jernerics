@@ -111,7 +111,6 @@ class InteractiveConfig:
     constraint: str | None = None
     mem: str | None = None
     cpus: int | None = None
-    tmux_session: str = "jernerics"
 
 
 @dataclass
@@ -267,7 +266,6 @@ def load_backend_config(
         constraint=interactive_section.get("constraint"),
         mem=interactive_section.get("mem"),
         cpus=interactive_section.get("cpus"),
-        tmux_session=interactive_section.get("tmux_session", "jernerics"),
     )
 
     return BackendConfig(
