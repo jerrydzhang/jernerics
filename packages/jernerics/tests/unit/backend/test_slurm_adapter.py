@@ -223,10 +223,39 @@ class TestJobLifecycle:
 
     def test_cancel(self):
         host = MagicMock()
-        host.run.return_value = MagicMock(returncode=0)
+        host.run.side_effect = [
+            MagicMock(returncode=0, stdout=""),  # squeue: no dependents
+            MagicMock(returncode=0),  # scancel
+        ]
         adapter = _make_adapter(host=host)
 
         assert adapter.cancel("12345") is True
+        assert host.run.call_args_list[1].args[0] == ["scancel", "12345"]
+
+    def test_cancel_also_cancels_dependent_checker(self):
+        host = MagicMock()
+        host.run.side_effect = [
+            MagicMock(returncode=0, stdout="67890|afterany:12345\n11111|(null)\n"),
+            MagicMock(returncode=0),  # scancel
+        ]
+        adapter = _make_adapter(host=host)
+
+        assert adapter.cancel("12345") is True
+        assert host.run.call_args_list[1].args[0] == ["scancel", "12345", "67890"]
+
+    def test_cancel_ignores_unrelated_jobs(self):
+        host = MagicMock()
+        host.run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout="67890|afterany:99999\n11111|afterany:123456\n",
+            ),
+            MagicMock(returncode=0),  # scancel
+        ]
+        adapter = _make_adapter(host=host)
+
+        assert adapter.cancel("12345") is True
+        assert host.run.call_args_list[1].args[0] == ["scancel", "12345"]
 
     def test_cancel_all(self):
         host = MagicMock()

@@ -410,8 +410,33 @@ class SlurmAdapter:
 
         return jobs
 
+    def _dependent_job_ids(self, job_id: str) -> list[str]:
+        # A sweep submits an array job plus a checker with
+        # --dependency=afterany:$ARRAY_JOB_ID. scancel on the array job
+        # satisfies afterany, leaving the checker PENDING forever, so cancel
+        # must also kill every job depending on the target. %E reports each
+        # queued job's dependency expression.
+        result = self.host.run(
+            ["squeue -u $USER -h -o '%i|%E' 2>/dev/null"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return []
+        pattern = re.compile(rf"(?<![0-9]){re.escape(job_id)}(?:_[0-9]+)?(?![0-9])")
+        dependents: list[str] = []
+        for line in result.stdout.strip().split("\n"):
+            if "|" not in line:
+                continue
+            dep_id, dep_expr = line.split("|", 1)
+            if pattern.search(dep_expr):
+                dependents.append(dep_id.strip())
+        return dependents
+
     def cancel(self, job_id: str) -> bool:
-        result = self.host.run(["scancel", job_id], check=False)
+        targets = [job_id, *self._dependent_job_ids(job_id)]
+        result = self.host.run(["scancel", *targets], check=False)
         return result.returncode == 0
 
     def cancel_all(self) -> bool:
