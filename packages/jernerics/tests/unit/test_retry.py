@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from jernerics.retry import RetryContext, param_key, plan_retry
+from jernerics.retry import FAST_FAIL_LEDGER_KEY, RetryContext, param_key, plan_retry
 from optuna.trial import FrozenTrial, TrialState
 
 
@@ -413,6 +413,195 @@ class TestPlanRetryFastFail:
         assert 5 in plan.fast_failed_trial_ids
         assert plan.retry_counts.get(pkey, 0) == 0
         assert plan.total_array_size == 5
+
+
+class TestPlanRetryFastFailCircuitBreaker:
+    """Repeated instant failures trip a breaker that halts the retry churn."""
+
+    def test_fast_fail_counted_below_threshold(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        _write_heartbeat(hb_dir, 5, age=200, now=now)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                {"lr": 0.01},
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+            max_fast_failures=3,
+        )
+        # Count is recorded so future rounds can detect repetition...
+        assert plan.retry_counts[FAST_FAIL_LEDGER_KEY] == 1
+        # ...but below the threshold the failure is still replaced.
+        assert plan.total_array_size == 5
+
+    def test_at_threshold_stops_spawning_replacements(self, tmp_path):
+        # Prior fast failures already sit at the threshold, so the next fast
+        # failure trips the breaker: no fresh trial is enqueued to replace it.
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        _write_heartbeat(hb_dir, 5, age=200, now=now)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                {"lr": 0.01},
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={FAST_FAIL_LEDGER_KEY: 2},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+            max_fast_failures=3,
+        )
+        assert 5 in plan.fast_failed_trial_ids
+        assert plan.total_array_size == 0
+        assert plan.is_complete
+
+    def test_resets_on_healthy_round(self, tmp_path):
+        # A completion with no fast failure this round clears the counter, so
+        # isolated blips on a long, healthy sweep never accumulate.
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        _write_heartbeat(hb_dir, 5, age=10, now=now)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                {"lr": 0.01},
+                datetime_start=datetime.fromtimestamp(now - 10, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={FAST_FAIL_LEDGER_KEY: 2},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+            max_fast_failures=3,
+        )
+        assert FAST_FAIL_LEDGER_KEY not in plan.retry_counts
+
+    def test_persists_without_completion(self, tmp_path):
+        # The missing-file scenario: nothing ever completes, so the count
+        # survives across rounds and eventually trips the breaker.
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        _write_heartbeat(hb_dir, 5, age=200, now=now)
+
+        trials = [
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                {"lr": 0.01},
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={FAST_FAIL_LEDGER_KEY: 1},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+            max_fast_failures=3,
+        )
+        assert plan.retry_counts[FAST_FAIL_LEDGER_KEY] == 2
+
+    def test_simultaneous_fast_fails_trip_immediately(self, tmp_path):
+        # Several jobs dying at once is overwhelming evidence of a permanent
+        # error: the breaker trips within a single round.
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        for n in (5, 6, 7):
+            _write_heartbeat(hb_dir, n, age=200, now=now)
+
+        trials = [
+            _make_trial(
+                n,
+                TrialState.RUNNING,
+                {"lr": 0.01 * n},
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            )
+            for n in (5, 6, 7)
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+            max_fast_failures=3,
+        )
+        assert plan.retry_counts[FAST_FAIL_LEDGER_KEY] == 3
+        assert plan.total_array_size == 0
+        assert plan.is_complete
+
+    def test_below_threshold_no_replacement_inflation(self, tmp_path):
+        # Confirm the pre-fix behavior is preserved: a single fast failure
+        # below the threshold still spawns one fresh replacement.
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        now = 1000.0
+        _write_heartbeat(hb_dir, 5, age=200, now=now)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(
+                5,
+                TrialState.RUNNING,
+                {"lr": 0.01},
+                datetime_start=datetime.fromtimestamp(now - 5, tz=timezone.utc),
+            ),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=now,
+            fast_fail_threshold_s=30,
+            max_fast_failures=3,
+        )
+        assert plan.fresh_needed == 5
 
 
 class TestPlanRetryFreshRunning:

@@ -52,6 +52,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         max_retries=backend_config.shared.max_retries,
         now=time.time(),
         fast_fail_threshold_s=backend_config.shared.fast_fail_threshold_s,
+        max_fast_failures=backend_config.shared.max_fast_failures,
     )
 
     if plan.is_complete:

@@ -74,6 +74,7 @@ class SharedConfig:
     max_retries: int = 3
     chain_depth_cap: int = 20
     fast_fail_threshold_s: int = 30
+    max_fast_failures: int = 3
 
 
 @dataclass
@@ -229,6 +230,7 @@ def load_backend_config(
         max_retries=bc.get("max_retries", 3),
         chain_depth_cap=bc.get("chain_depth_cap", 20),
         fast_fail_threshold_s=bc.get("fast_fail_threshold_s", 30),
+        max_fast_failures=bc.get("max_fast_failures", 3),
     )
 
     backend_specific: SlurmConfig | PueueConfig | None = None

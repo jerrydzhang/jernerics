@@ -18,6 +18,9 @@ def param_key(params: dict[str, Any]) -> str:
     return hashlib.blake2b(serialized.encode(), digest_size=4).hexdigest()
 
 
+FAST_FAIL_LEDGER_KEY = "__fast_fail__"
+
+
 @dataclass
 class RetryPlan:
     stale_trial_ids: list[int]
@@ -73,6 +76,7 @@ def plan_retry(
     max_retries: int,
     now: float,
     fast_fail_threshold_s: int = 30,
+    max_fast_failures: int = 3,
 ) -> RetryPlan:
     complete = 0
     fresh_running = 0
@@ -117,14 +121,41 @@ def plan_retry(
                 fresh_running += 1
 
     retries_enqueued = len(stale_trial_ids)
-    remaining_needed = n_trials - complete - fresh_running - waiting - retries_enqueued
-    fresh_needed = max(0, remaining_needed)
-    total_array_size = retries_enqueued + fresh_needed
+
+    # Fast-fail circuit breaker. A trial that dies within seconds of starting
+    # usually signals a permanent error (missing input file, bad config, import
+    # crash) rather than a transient node failure. Without a breaker, every
+    # fast failure spawns a fresh replacement that fails the same way, retrying
+    # forever with no backoff. We count fast failures globally in the ledger
+    # (they are environmental, not parameter-specific); once the count reaches
+    # the threshold, fast failures are treated as terminal -- the trial is told
+    # FAIL and no replacement is enqueued, so the broken sweep winds down
+    # instead of churning. The count resets whenever a trial completed this
+    # round and no fast failure occurred, so isolated blips on a long, healthy
+    # sweep never accumulate to trip the breaker.
+    prior_fast_fails = ledger.get(FAST_FAIL_LEDGER_KEY, 0)
+    tripped = prior_fast_fails >= max_fast_failures
 
     updated_ledger = dict(ledger)
+    if complete > 0 and not fast_failed_trial_ids:
+        updated_ledger.pop(FAST_FAIL_LEDGER_KEY, None)
+    elif fast_failed_trial_ids:
+        updated_ledger[FAST_FAIL_LEDGER_KEY] = prior_fast_fails + len(
+            fast_failed_trial_ids
+        )
+        tripped = updated_ledger[FAST_FAIL_LEDGER_KEY] >= max_fast_failures
+
     for pkey in stale_param_keys:
         updated_ledger[pkey] = updated_ledger.get(pkey, 0) + 1
 
+    # Below the threshold, a fast failure is replaced with a fresh sample (let
+    # optuna try different params). Once tripped, fast failures look permanent
+    # (missing input file, bad config), so we stop spawning replacement trials
+    # entirely -- otherwise the broken sweep churns through identical failures
+    # one n_trials batch at a time, forever.
+    remaining_needed = n_trials - complete - fresh_running - waiting - retries_enqueued
+    fresh_needed = 0 if tripped else max(0, remaining_needed)
+    total_array_size = retries_enqueued + fresh_needed
     is_complete = total_array_size == 0
 
     return RetryPlan(
