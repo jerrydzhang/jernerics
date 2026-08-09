@@ -126,7 +126,7 @@ class TestTrackingReplayRoundTrip:
             'lr = config["lr"]\n'
             "tracker.log_param('lr', lr)\n"
             "tracker.log_value('loss', lr * 2, step=1)\n"
-            "tracker.log_json('summary', {'accuracy': 0.95})\n"
+            "tracker.log_value('summary', {'accuracy': 0.95})\n"
             'tracker.finish({"loss": lr * 2})',
         )
         _write_config(config_file, objective_expr='results["loss"]')

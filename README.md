@@ -200,7 +200,7 @@ def trial(config, tracker):
 
     tracker.log_value("accuracy", accuracy, step=config["config_index"])
     tracker.log_param("lr", config["lr"])
-    tracker.log_json("summary", {"accuracy": accuracy, "lr": config["lr"]})
+    tracker.log_value("summary", {"accuracy": accuracy, "lr": config["lr"]})
     tracker.log_artifact("model", "model.pt")
 
     return {"loss": 1.0 - accuracy}

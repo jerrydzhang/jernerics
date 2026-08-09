@@ -1,7 +1,7 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from jernerics.tracking.tracker import JsonlTracker
 
@@ -12,37 +12,66 @@ STUDY_NAME_ENV = "JERNERICS_STUDY_NAME"
 TRIAL_NUMBER_ENV = "JERNERICS_TRIAL_NUMBER"
 RUN_ID_ENV = "JERNERICS_RUN_ID"
 
+type JsonValue = (
+    bool | int | float | str | list[JsonValue] | dict[str, JsonValue] | None
+)
+
 
 class TrackerProtocol(Protocol):
-    def log_param(self, key: str, value: str) -> None: ...
-    def log_value(self, key: str, value: float, step: int) -> None: ...
-    def log_text(self, key: str, value: str) -> None: ...
-    def finish(self, results: dict[str, Any]) -> None: ...
+    def log_param(self, key: str, value: str | float | bool) -> None: ...
+
+    def log_value(
+        self, key: str, value: JsonValue, *, step: int | None = None
+    ) -> None: ...
+
+    def log_artifact(self, key: str, path: str) -> None: ...
+
+    def finish(self, results: dict[str, JsonValue]) -> None: ...
 
 
 class ConsoleTracker:
-    def log_param(self, key: str, value: str) -> None:
+    """Trial tracker for standalone runs; prints each observation to stdout."""
+
+    def log_param(self, key: str, value: str | float | bool) -> None:
         print(f"param: {key}={value}")
 
-    def log_value(self, key: str, value: float, step: int) -> None:
-        print(f"[step {step}] {key}={value}")
+    def log_value(self, key: str, value: JsonValue, *, step: int | None = None) -> None:
+        encoded = json.dumps(value)
+        if step is None:
+            print(f"[value] {key}={encoded}")
+        else:
+            print(f"[step {step}] {key}={encoded}")
 
-    def log_text(self, key: str, value: str) -> None:
-        print(f"[text] {key}={value}")
+    def log_artifact(self, key: str, path: str) -> None:
+        print(f"[artifact] {key}={path}")
 
-    def finish(self, results: dict[str, Any]) -> None:
+    def finish(self, results: dict[str, JsonValue]) -> None:
         print("results:")
         for key, value in results.items():
             print(f"  {key}={value}")
 
 
-class _TrialTracker(JsonlTracker):
-    def log_text(self, key: str, value: str) -> None:
-        self.log_json(key, value)
+class _JobTracker:
+    """Trial tracker for jernerics job runs; composes the JSONL tracking backend."""
 
-    def finish(self, results: dict[str, Any]) -> None:
-        self.log_json("results", results)
-        self.writer.close()
+    def __init__(self, tracker: JsonlTracker) -> None:
+        self._tracker = tracker
+
+    def log_param(self, key: str, value: str | float | bool) -> None:
+        self._tracker.log_param(key, value)
+
+    def log_value(self, key: str, value: JsonValue, *, step: int | None = None) -> None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            self._tracker.log_value(key, value, step=step)
+        else:
+            self._tracker.log_json(key, value, step=step)
+
+    def log_artifact(self, key: str, path: str) -> None:
+        self._tracker.log_artifact(key, path)
+
+    def finish(self, results: dict[str, JsonValue]) -> None:
+        self._tracker.log_json("results", results)
+        self._tracker.writer.close()
 
 
 def is_job() -> bool:
@@ -83,20 +112,22 @@ def trial_tracker() -> TrackerProtocol:
     artifacts_dir = root / "artifacts"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
 
-    return _TrialTracker(
-        project_name,
-        study_name,
-        trial_number,
-        events_dir / f"{trial_number}.jsonl",
-        manifest_path=artifacts_dir / f"{trial_number}.manifest",
-        run_id=run_id,
+    return _JobTracker(
+        JsonlTracker(
+            project_name,
+            study_name,
+            trial_number,
+            events_dir / f"{trial_number}.jsonl",
+            manifest_path=artifacts_dir / f"{trial_number}.manifest",
+            run_id=run_id,
+        )
     )
 
 
 def _required_env(name: str) -> str:
     value = os.environ.get(name)
     if value is None:
-        raise RuntimeError(f"{name} is required when running as a jernerics job")
+        raise RuntimeError(f"{name} is required inside a jernerics job")
     return value
 
 

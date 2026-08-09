@@ -48,7 +48,7 @@ def trial(config, tracker: Tracker) -> dict:
         f"accuracy={accuracy:.4f}\n"
     )
     tracker.log_artifact(f"summary-{trial_idx}.txt", str(summary_file))
-    tracker.log_json(
+    tracker.log_value(
         "summary",
         {
             "loss": loss,
