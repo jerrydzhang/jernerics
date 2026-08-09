@@ -42,7 +42,7 @@ class _TrialTracker(JsonlTracker):
 
     def finish(self, results: dict[str, Any]) -> None:
         self.log_json("results", results)
-        self.close()
+        self.writer.close()
 
 
 def is_job() -> bool:

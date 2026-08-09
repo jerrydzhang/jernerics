@@ -10,10 +10,16 @@ from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 STUDY_NAME = "test-sweep"
 
+_TRIAL_HEADER = (
+    "from jernerics import trial_config, trial_tracker\n"
+    "config = trial_config()\n"
+    "tracker = trial_tracker()\n"
+)
+
 
 def _write_trial(path, body):
-    """Write a minimal trial file defining ``trial(config, tracker)``."""
-    path.write_text(f"def trial(config, tracker):\n    {body}\n")
+    """Write a trial script executed as a subprocess by the runner."""
+    path.write_text(_TRIAL_HEADER + body + "\n")
 
 
 def _write_config(path, base=None, n_trials=2, objective_expr=None):
@@ -43,7 +49,7 @@ class TestBasicSweep:
         trial_file = tmp_path / "trial.py"
         config_file = tmp_path / "config.py"
 
-        _write_trial(trial_file, 'return {"loss": config["lr"] * 2}')
+        _write_trial(trial_file, 'tracker.finish({"loss": config["lr"] * 2})')
         _write_config(config_file, objective_expr='results["loss"]')
 
         spec = _make_spec(tmp_path, trial_file, config_file, n_trials=2)
@@ -73,11 +79,11 @@ class TestArtifactRoundTrip:
         _write_trial(
             trial_file,
             "import os\n"
-            '    path = os.path.join(config["artifact_dir"], "model.txt")\n'
-            '    with open(path, "w") as f:\n'
-            '        f.write("model data")\n'
-            "    tracker.log_artifact('model', path)\n"
-            '    return {"loss": config["lr"] * 2}',
+            'path = os.path.join(config["artifact_dir"], "model.txt")\n'
+            'with open(path, "w") as f:\n'
+            '    f.write("model data")\n'
+            "tracker.log_artifact('model', path)\n"
+            'tracker.finish({"loss": config["lr"] * 2})',
         )
         _write_config(
             config_file,
@@ -118,10 +124,10 @@ class TestTrackingReplayRoundTrip:
         _write_trial(
             trial_file,
             'lr = config["lr"]\n'
-            "    tracker.log_param('lr', lr)\n"
-            "    tracker.log_value('loss', lr * 2, step=1)\n"
-            "    tracker.log_json('summary', {'accuracy': 0.95})\n"
-            '    return {"loss": lr * 2}',
+            "tracker.log_param('lr', lr)\n"
+            "tracker.log_value('loss', lr * 2, step=1)\n"
+            "tracker.log_json('summary', {'accuracy': 0.95})\n"
+            'tracker.finish({"loss": lr * 2})',
         )
         _write_config(config_file, objective_expr='results["loss"]')
 
@@ -138,7 +144,8 @@ class TestTrackingReplayRoundTrip:
         # Verify all event types in SQLite
         con = sqlite3.connect(str(db_path))
         assert con.execute("SELECT COUNT(*) FROM params").fetchone()[0] == 2
-        assert con.execute("SELECT COUNT(*) FROM tracked_values").fetchone()[0] == 4
+        # loss (scalar) + summary (json) + results (json from finish) per trial
+        assert con.execute("SELECT COUNT(*) FROM tracked_values").fetchone()[0] == 6
         assert con.execute("SELECT COUNT(*) FROM trial_end").fetchone()[0] == 2
         assert con.execute("SELECT COUNT(*) FROM sweep_meta").fetchone()[0] == 2
         con.close()
