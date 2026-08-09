@@ -97,3 +97,15 @@ class TestConsoleTracker:
         tracker.finish({"score": 0.9, "status": "ok"})
 
         assert capsys.readouterr().out == "results:\n  score=0.9\n  status=ok\n"
+
+    def test_logs_json_and_artifacts_to_stdout(self, capsys):
+        tracker = ConsoleTracker()
+
+        tracker.log_json("pred", {"a": 1}, step=5)
+        tracker.log_artifact("model.pt", "/tmp/model.pt")
+        tracker.log_value("loss", 0.5, step=5)
+
+        out = capsys.readouterr().out
+        assert '[step 5] pred={"a": 1}\n' in out
+        assert "[artifact] model.pt=/tmp/model.pt\n" in out
+        assert "[step 5] loss=0.5\n" in out
