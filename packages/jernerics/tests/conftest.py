@@ -30,10 +30,12 @@ cpus = 4
 @pytest.fixture
 def tmp_trial_config(tmp_project):
     """Create trial and config files in a project directory."""
-    (tmp_project / "trial.py").write_text("""
-def trial(config, tracker):
-    return {"done": True}
-""")
+    (tmp_project / "trial.py").write_text(
+        "from jernerics import trial_config, trial_tracker\n"
+        "config = trial_config()\n"
+        "tracker = trial_tracker()\n"
+        'tracker.finish({"done": True})\n'
+    )
 
     (tmp_project / "config.py").write_text("""
 base = {"seed": 1}

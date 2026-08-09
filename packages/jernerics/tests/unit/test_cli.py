@@ -122,7 +122,9 @@ class TestInitCommand:
                 init(str(project_dir))
 
         trial = (project_dir / "trial.py").read_text()
-        assert "def trial(config, tracker)" in trial
+        assert "trial_config" in trial
+        assert "trial_tracker" in trial
+        assert "tracker.finish" in trial
         assert (project_dir / "config.py").exists()
 
     def test_init_preserves_existing_trial_and_config(self, tmp_path):

@@ -1170,9 +1170,14 @@ def _copy_starter(project_path: Path, starter: str, ext: str, filename: str) -> 
         pass
 
 
-_TRIAL_SCAFFOLD = """def trial(config, tracker):
-    tracker.log_value("loss", config.get("loss", 0.5))
-    return {"loss": config.get("loss", 0.5)}
+_TRIAL_SCAFFOLD = """from jernerics import trial_config, trial_tracker
+
+config = trial_config({"loss": 0.5})
+tracker = trial_tracker()
+
+loss = config["loss"]
+tracker.log_value("loss", loss, step=0)
+tracker.finish({"loss": loss})
 """
 
 _CONFIG_SCAFFOLD = """base = {"loss": 0.5}
