@@ -21,41 +21,14 @@ class TrackerProtocol(Protocol):
 
 
 class ConsoleTracker:
-    """Standalone tracker used when a trial script runs by hand (no jernerics
-    job environment). Mirrors the :class:`JsonlTracker` surface so trial
-    scripts execute unchanged outside the runner; each call prints to stdout."""
-
-    def log_param(self, key: str, value: object) -> None:
+    def log_param(self, key: str, value: str) -> None:
         print(f"param: {key}={value}")
 
-    def log_value(
-        self,
-        key: str,
-        value: float,
-        step: int | None = None,
-        context: dict | None = None,
-    ) -> None:
+    def log_value(self, key: str, value: float, step: int) -> None:
         print(f"[step {step}] {key}={value}")
 
     def log_text(self, key: str, value: str) -> None:
         print(f"[text] {key}={value}")
-
-    def log_json(
-        self,
-        key: str,
-        value: Any,
-        step: int | None = None,
-        context: dict | None = None,
-    ) -> None:
-        print(f"[step {step}] {key}={json.dumps(value)}")
-
-    def log_artifact(
-        self, key: str, local_path: str, context: dict | None = None
-    ) -> None:
-        print(f"[artifact] {key}={local_path}")
-
-    def log_sweep_meta(self, git_hash: str | None, config: str) -> None:
-        print(f"[sweep] git={git_hash}")
 
     def finish(self, results: dict[str, Any]) -> None:
         print("results:")
