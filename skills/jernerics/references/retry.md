@@ -26,12 +26,32 @@ file paths, chain depth (to prevent infinite retry loops).
 
 ## Configuration
 
-Retry behavior is controlled per-config via the config file:
+Retry behavior is tuned on the **backend profile** in `pyproject.toml`
+(`SharedConfig` fields, under `[tool.jernerics.backends.<name>]`):
 
-- **Staleness threshold** — how long (seconds) without a heartbeat
-  before a trial is considered dead.
-- **Max retries** — how many times a trial can be resubmitted before
-  giving up.
+```toml
+[tool.jernerics.backends.hpc]
+heartbeat_interval_s = 60     # how often the heartbeat file is touched
+stale_after_s = 120           # seconds without a heartbeat => trial is dead
+grace_period_s = 120          # checker waits this long before judging staleness
+max_retries = 3               # per-param retry cap before a trial is exhausted
+chain_depth_cap = 20          # max retry-job chain depth (infinite-loop guard)
+fast_fail_threshold_s = 30    # a death this fast after start counts as a fast fail
+max_fast_failures = 3         # fast-fail circuit-breaker threshold
+```
+
+- **`stale_after_s`** — a `RUNNING` trial whose heartbeat is older than this
+  (seconds) is presumed dead (node crash, OOM) and queued for retry.
+- **`max_retries`** — per-parameter-combination limit. A param set that dies
+  this many times is marked exhausted (FAIL, no further retry).
+- **Fast-fail breaker** (`fast_fail_threshold_s` / `max_fast_failures`) — a
+  trial that dies within seconds of starting usually has a permanent cause
+  (missing input, bad config, import crash), not a transient node failure. It
+  is **not** retried with the same params — Optuna draws a fresh sample
+  instead. Once `max_fast_failures` such deaths accumulate globally, the
+  breaker trips and fast failures become terminal so a broken sweep winds down
+  rather than churning. The counter resets on a healthy round with completions.
+- **`chain_depth_cap`** — hard stop on retry-of-retry depth.
 
 ## Failure modes
 

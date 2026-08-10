@@ -2,20 +2,45 @@
 
 ## Basic pattern
 
-A trial is a plain Python function `trial(config, tracker) -> dict` defined in `trial.py`:
+A trial is a **top-level script** (`trial.py`), not a function. It pulls its
+config and tracker from jernerics, runs, and reports results:
 
 ```python
-def trial(config, tracker):
-    data = load_data(config["seed"])
-    model = train(data, lr=config["lr"])
-    accuracy = evaluate(model)
+from jernerics import trial_config, trial_tracker
 
-    tracker.log_metric("accuracy", accuracy)
-    tracker.log_artifact("model", "model.pt")
-    return {"loss": 1.0 - accuracy}
+config = trial_config({"lr": 0.01, "seed": 42})
+tracker = trial_tracker()
+
+data = load_data(config["seed"])
+model = train(data, lr=config["lr"])
+accuracy = evaluate(model)
+
+tracker.log_value("accuracy", accuracy, step=0)
+tracker.log_artifact("model", "model.pt")
+tracker.finish({"loss": 1.0 - accuracy})
 ```
 
-The runner builds `config = {**base, **search_space(trial), "config_index": n}` and calls `trial(config, tracker)`. The returned dict is passed to the config's `objective` lambda (e.g. `lambda results: results["loss"]`).
+`trial_config(defaults)` returns the merged hyperparameters for this trial.
+`defaults` is **required** when you run the script standalone
+(`python trial.py`) and is ignored inside a jernerics job, where the runner
+injects the real config.
+
+`tracker.finish(results)` is how results reach the sweep's `objective` lambda.
+There is no return value — the runner reads the `results` dict you pass to
+`finish()` back from the tracking file and feeds it to `objective`.
+
+## How the runner calls your trial
+
+The runner does not import or call a function. For each trial it:
+
+1. Samples params and merges `config = {**base, **search_space(trial), "config_index": n}`.
+2. Writes that config to a JSON file and points `JERNERICS_TRIAL_CONFIG` at it.
+3. Executes `trial.py` as a subprocess (`python trial.py`).
+4. Reads the `results` dict your `tracker.finish()` wrote and passes it to the
+   config's `objective` (e.g. `lambda results: results["loss"]`).
+
+Because context flows through environment variables, your trial needs no
+special entry point — just call `trial_config()` / `trial_tracker()` at the top.
 
 ## Config
 
@@ -66,27 +91,40 @@ grid = {"lr": [0.01, 0.001]}
 
 ## Tracker protocol
 
-`tracker` records what matters during the run:
+`tracker = trial_tracker()` returns a tracker — `ConsoleTracker` when run
+standalone (prints each observation to stdout), or a job tracker that writes
+JSONL events and streams them to the tracking server inside a jernerics job.
 
 ```python
-def trial(config, tracker):
-    tracker.log_param("lr", config["lr"])
-    tracker.log_metric("loss", 0.05, step=100)
-    tracker.log_result("summary", {"accuracy": 0.95, "lr": config["lr"]})
-    tracker.log_artifact("model", "model.pt")
-    return {"loss": 0.05}
+config = trial_config(...)
+tracker = trial_tracker()
+
+tracker.log_param("lr", config["lr"])
+tracker.log_value("loss", 0.05, step=100)
+tracker.log_value("summary", {"epoch": 5, "fold": 2})  # non-scalar -> stored as JSON
+tracker.log_artifact("model", "model.pt")
+tracker.finish({"loss": 0.05, "accuracy": 0.95})
 ```
 
-`Tracker` methods:
+Tracker methods:
 
-- `log_param(key, value)` — log a parameter (bool/int/float/str)
-- `log_metric(key, value, step=None)` — log a metric; call repeatedly with increasing `step` for time-series; metrics stream live to the server
-- `log_result(key, value)` — log a structured result (any JSON-serializable value)
-- `log_artifact(key, local_path)` — register a file artifact for upload
+- `log_param(key, value)` — log a parameter (`bool`/`int`/`float`/`str`)
+- `log_value(key, value, *, step=None)` — log an observation. Numbers are
+  stored as scalar metrics (a time-series when you pass increasing `step`);
+  any other JSON-serializable value is stored as JSON. `step` is keyword-only.
+- `log_artifact(key, path)` — register a file artifact for upload
+- `finish(results)` — log a results dict and close the tracker. The runner
+  hands `results` to the config's `objective` lambda.
 
-## Return value
+Metrics stream live to the tracking server during the run when a server is
+configured; a final replay guarantees delivery.
 
-Return a dict whose keys the `objective` lambda reads. There is no task graph and no parallelism within a trial — the function runs linearly, top to bottom. If you need concurrent sub-steps, run them inside `trial` with your own threads/processes.
+## Results and the objective
+
+`finish(results)` takes a dict whose keys the `objective` lambda reads. There
+is no task graph and no parallelism within a trial — the script runs linearly,
+top to bottom. If you need concurrent sub-steps, run them inside the script
+with your own threads/processes.
 
 ## Path handling
 
