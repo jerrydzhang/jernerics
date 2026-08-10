@@ -11,6 +11,19 @@ RUN cd /build/project \
     && uv sync --frozen --no-dev \
     && rm -rf /build /root/.cache
 
+# Re-activate /opt/venv in login subshells: ENV sets PATH only at image build;
+# tmux panes re-run /etc/profile and would otherwise drop /opt/venv/bin.
+RUN printf '%s\n' \
+      'if [ -d /opt/venv/bin ]; then' \
+      '    case ":${PATH:-}:" in' \
+      '        *:/opt/venv/bin:*) ;;' \
+      '        *) export PATH="/opt/venv/bin:${PATH:-}" ;;' \
+      '    esac' \
+      '    export VIRTUAL_ENV=/opt/venv' \
+      'fi' \
+      > /etc/profile.d/jernerics.sh \
+ && echo '. /etc/profile.d/jernerics.sh' >> /etc/bash.bashrc
+
 ENV PATH="/opt/venv/bin:$PATH"
 ENV PYTHONPATH="/work/src"
 ENV LANG=C.UTF-8

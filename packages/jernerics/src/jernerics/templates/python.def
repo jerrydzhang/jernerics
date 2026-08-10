@@ -17,6 +17,21 @@ From: python:3.12-slim
     
     rm -rf /build /root/.cache
 
+    # Re-activate /opt/venv in every login subshell. %environment sets PATH
+    # only at container entry; tmux panes are login shells that re-run
+    # /etc/profile and would otherwise drop /opt/venv/bin (breaks `import torch`).
+    cat >/etc/profile.d/jernerics.sh <<'JERNERICS_VENV'
+if [ -d /opt/venv/bin ]; then
+    case ":${PATH:-}:" in
+        *:/opt/venv/bin:*) ;;
+        *) export PATH="/opt/venv/bin:${PATH:-}" ;;
+    esac
+    export VIRTUAL_ENV=/opt/venv
+fi
+JERNERICS_VENV
+    grep -qs jernerics /etc/bash.bashrc 2>/dev/null \
+        || echo '. /etc/profile.d/jernerics.sh' >> /etc/bash.bashrc
+
 %environment
     export PATH="/opt/venv/bin:$PATH"
     export PYTHONPATH="/work/src"
