@@ -49,38 +49,41 @@ from training data.
 | `jernerics init [dir]` | Create project scaffolding |
 | `jernerics local <trial> <config>` | Run in-process (no backend) |
 | `jernerics run -b <name> <trial> <config>` | Submit sweep to a backend |
-| `jernerics interactive -b <name>` | Open a container shell on an allocated GPU node |
-| `jernerics build -b <name>` | Build container on remote |
-| `jernerics jobs -b <name>` | List jobs |
-| `jernerics cancel -b <name> [id]` | Cancel jobs |
-| `jernerics logs -b <name> <id>` | View logs |
-| `jernerics wait -b <name> <id>` | Block until job completes |
-| `jernerics clean -b <name>` | Delete remote artifacts |
-| `jernerics sync -b <name>` | Replay tracking data from remote |
-| `jernerics replay [--study <s>]` | Replay unsynced tracking data to server |
-| `jernerics runs` | List runs from the tracking server |
-| `jernerics summary <run>` | Per-metric analysis of one run |
-| `jernerics diff <a> <b>` | Compare two runs (params + final metrics) |
-| `jernerics trace <run> [metric]` | Show raw metric series for a run |
+| `jernerics interactive start -b <name>` | Open or reconnect a container shell on an allocated GPU node |
+| `jernerics interactive stop -b <name>` | Tear down the interactive session and its sync |
+| `jernerics interactive sync status -b <name>` | Report-only sync session state (connectivity, conflicts) |
+| `jernerics interactive sync resolve <path>... -b <name> --from local\|cluster` | Safely resolve sync conflicts (backups + checksums) |
+| `jernerics backend build -b <name>` | Build container on remote |
+| `jernerics backend clean -b <name>` | Delete remote artifacts |
+| `jernerics job list -b <name>` | List jobs |
+| `jernerics job cancel -b <name> [id]` | Cancel jobs |
+| `jernerics job logs -b <name> <id>` | View logs |
+| `jernerics job wait -b <name> <id>` | Block until job completes |
+| `jernerics tracking replay [-b <name>]` | Replay local cache (or pull a backend's) to the tracking server |
+| `jernerics tracking runs` | List runs from the tracking server |
+| `jernerics tracking summary <run>` | Per-metric analysis of one run |
+| `jernerics tracking diff <a> <b>` | Compare two runs (params + final metrics) |
+| `jernerics tracking trace <run> [metric]` | Show raw metric series for a run |
 
-Common flags: `--dry-run` (run/build/interactive), `--force` (init/build/clean), `--follow` (logs), `--set KEY=VALUE` (run), `--study` (sync), `--end` (interactive), `--json` (runs/summary/diff/trace).
+Common flags: `--dry-run` (run/backend build/interactive start/tracking replay/resolve), `--force` (init/backend build/backend clean), `--follow` (job logs), `--set KEY=VALUE` (run), `--study` (tracking replay), `--json` (tracking commands, interactive sync status).
 
 ## Reference docs
 
 Load these before relevant activities:
-
 - **`references/project-setup.md`** — Adding jernerics to a project,
   pyproject.toml config, init command, container starters.
 - **`references/trial-authoring.md`** — The `trial.py` script
   (`trial_config`/`trial_tracker`), tracker protocol, config handling,
   logging values/params/artifacts and reporting results via `finish()`.
 - **`references/backends.md`** — Backend profiles, container types,
-  build/sync/clean commands, SSH hosts.
-- **`references/interactive.md`** — `interactive` command: GPU allocation,
-  container shell, mutagen code sync, `InteractiveConfig`.
+  build/clean commands, project-source exclusions (`.jernericsignore`),
+  SSH hosts.
+- **`references/interactive.md`** — `interactive start`/`stop`: GPU
+  allocation, container shell, mutagen code sync, `interactive sync
+  status`/`resolve`, `InteractiveConfig`.
 - **`references/tracking.md`** — Tracking server, artifact storage,
-  environment variables, replay/sync.
-- **`references/observability.md`** — `runs`/`summary`/`diff` commands,
-  metric analysis (slopes), and when to use them vs raw SQL.
+  environment variables, `tracking replay`.
+- **`references/observability.md`** — `tracking runs`/`summary`/`diff`
+  commands, metric analysis (slopes), and when to use them vs raw SQL.
 - **`references/retry.md`** — Heartbeat, retry detection, retry
   config, failure modes, post-hook pipeline.

@@ -38,15 +38,26 @@ tracking directory:
 
 The format is human-readable — inspect a file directly to debug a trial.
 
-## Replay and sync
+## Replay
 
-The `sync` command replays local tracking data from a remote host to the
-tracking server:
+`jernerics tracking replay` ships tracking data to the server, in one of two
+modes:
 
 ```bash
-jernerics sync -b <name>
-jernerics sync -b <name> --study <study_name>
+jernerics tracking replay                       # local cache → server
+jernerics tracking replay --study <study_name>
+jernerics tracking replay --dry-run             # compare against server, send nothing
+jernerics tracking replay --json
+
+jernerics tracking replay -b <name>             # pull backend cache → server
+jernerics tracking replay -b <name> --study <study_name>
 ```
+
+Without `--backend`, the local cache (`cache_dir()/tracking`) is replayed
+(`--study`, `--tracking-dir`, `--server`, `--dry-run`, `--json` all apply).
+With `--backend NAME`, the backend's remote tracking cache is pulled first,
+then shipped (`--study` applies; the local-only options are rejected with
+an error rather than silently ignored).
 
 The post-hook pipeline also runs replay automatically after a sweep completes.
 Ingest is idempotent (`INSERT OR IGNORE` on a unique seq), so live shipping and

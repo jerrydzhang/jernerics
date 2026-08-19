@@ -83,9 +83,9 @@ Which format is used depends on `container_type` in the backend config:
 definition change. Source code is bind-mounted at runtime.
 
 ```bash
-jernerics build -b hpc          # Build if stale
-jernerics build -b hpc --force  # Force rebuild
-jernerics build -b hpc --dry-run  # Preview
+jernerics backend build -b hpc          # Build if stale
+jernerics backend build -b hpc --force  # Force rebuild
+jernerics backend build -b hpc --dry-run  # Preview
 ```
 
 ## Config file structure

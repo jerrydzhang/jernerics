@@ -12,27 +12,27 @@ consumption: identical data, raw values, no human formatting (large
 numbers stay full-precision, slopes as raw floats).
 
 ```bash
-jernerics runs                        # all runs in this project
-jernerics runs --json                 # same, as a JSON array
+jernerics tracking runs                        # all runs in this project
+jernerics tracking runs --json                 # same, as a JSON array
 
-jernerics summary <run>               # one run's full analysis
-jernerics summary <run> --json
+jernerics tracking summary <run>               # one run's full analysis
+jernerics tracking summary <run> --json
 
-jernerics diff <run_a> <run_b>        # compare two runs
-jernerics diff <run_a> <run_b> --json
+jernerics tracking diff <run_a> <run_b>        # compare two runs
+jernerics tracking diff <run_a> <run_b> --json
 ```
 
 A **run id** is `study_name` (trial 0) or `study_name:trial_id`, e.g.
 `symlab-131` or `sweep_42:3`.
 
-## `jernerics runs`
+## `jernerics tracking runs`
 
 One row per `(study_name, trial_id)`: status (completed/running), step
 range, the **priority metric's** final value, duration, created time,
 and all params. The priority column is the first of `loss`, `error`,
 `accuracy`, `r2` that the run logs; if none apply, the column is omitted.
 
-## `jernerics summary <run>`
+## `jernerics tracking summary <run>`
 
 Params, artifacts, and a per-metric table. Each metric row reports:
 
@@ -70,7 +70,7 @@ A near-zero recent slope with a healthy change usually means the metric
 has settled; a recent slope still comparable to the early one means it
 is still moving.
 
-## `jernerics diff <run_a> <run_b>`
+## `jernerics tracking diff <run_a> <run_b>`
 
 Lists params that differ (with each run's value) and params that match
 (count + keys), then a metric table of each run's **final** value with
@@ -80,7 +80,7 @@ and no change.
 
 ## When to use the commands vs raw SQL
 
-- **`runs` / `summary` / `diff`** — quick lookups and comparisons. Fast,
+- **`tracking runs` / `summary` / `diff`** — quick lookups and comparisons. Fast,
   formatted, opinionated about what matters (priority metric, slopes,
   final values). The right first move for "how did this go?" or "how do
   these two differ?".

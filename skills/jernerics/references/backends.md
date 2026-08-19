@@ -59,9 +59,9 @@ Omit `host` for local-only pueue.
 
 ```bash
 # Build container on remote
-jernerics build -b <name>
-jernerics build -b <name> --force    # Force rebuild
-jernerics build -b <name> --dry-run  # Preview
+jernerics backend build -b <name>
+jernerics backend build -b <name> --force    # Force rebuild
+jernerics backend build -b <name> --dry-run  # Preview
 
 # Submit sweep
 jernerics run -b <name> trial.py config.py
@@ -69,27 +69,27 @@ jernerics run -b <name> trial.py config.py --dry-run
 jernerics run -b <name> trial.py config.py --set time=4:00:00
 
 # Monitor
-jernerics jobs -b <name>
-jernerics jobs -b <name> --all
-jernerics logs -b <name> <id> --follow
+jernerics job list -b <name>
+jernerics job list -b <name> --all
+jernerics job logs -b <name> <id> --follow
 
 # Cancel
-jernerics cancel -b <name> <id>
-jernerics cancel -b <name> --all
+jernerics job cancel -b <name> <id>
+jernerics job cancel -b <name> --all
 ```
 
-> **Warning:** `cancel` cancels the main array job but leaves the checker dependency
-> job pending. Clean up with `jernerics cancel -b <name> --all` or manually `scancel`
-> all pending jobs for your user.
+> **Warning:** `job cancel` cancels the main array job but leaves the checker
+dependency job pending. Clean up with `jernerics job cancel -b <name> --all`
+or manually `scancel` all pending jobs for your user.
 
 ```bash
 # Clean remote artifacts
-jernerics clean -b <name>
-jernerics clean -b <name> --full --force
+jernerics backend clean -b <name>
+jernerics backend clean -b <name> --full --force
 
-# Sync tracking data from remote
-jernerics sync -b <name>
-jernerics sync -b <name> --study <name>
+# Pull tracking data from the backend and ship it to the server
+jernerics tracking replay -b <name>
+jernerics tracking replay -b <name> --study <name>
 ```
 
 ## SSH hosts
@@ -105,8 +105,15 @@ For Pueue: the adapter runs `pueue` CLI commands via SSH.
 - SSH commands: `~` expands. Use directly.
 - Slurm directives, quoted strings: `~` does NOT expand. Use `$HOME`.
 
-## Non-tracked files
+## Project-source exclusions
 
-jernerics syncs git-tracked files to the remote automatically. Gitignored files
-(e.g. `.pkl` data pools) must be synced manually via `scp`. If a referenced file
-doesn't exist on the remote, jobs fail instantly and retry indefinitely.
+Every mechanism that transfers project source to the remote (deployment tar
+sync, interactive mutagen sync, one-shot fallback) applies one policy:
+`.gitignore` patterns, then `.jernericsignore` patterns, then a built-in
+list (`__pycache__/`, `*.pyc`, `*.sif`, `results/`, `pools/`, `logs/`,
+`.venv/`, caches — built-ins always win). Add a project-root
+`.jernericsignore` (Git syntax) for files that must not synchronize even
+when Git-tracked or not Git-ignored. Files excluded by the policy (e.g.
+`.pkl` data pools you re-include deliberately) must be copied manually via
+`scp`. If a referenced file doesn't exist on the remote, jobs fail
+instantly and retry indefinitely.
