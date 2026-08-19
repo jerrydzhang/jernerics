@@ -7,6 +7,7 @@ from jernerics.cli import (
     _create_minimal_pyproject,
     _get_default_jernerics_config,
 )
+from jernerics.sync.mutagen_sync import SessionInfo
 from jernerics.tracking.batch_sync import ReplayResult
 from jernerics.tracking.jsonl_io import TrackingWriter
 
@@ -881,6 +882,21 @@ def _interactive_session_stub(existing):
     return sess
 
 
+def _sync_record(name="jernerics-interactive-proj", **overrides):
+    record = SessionInfo(
+        name=name,
+        status="Watching",
+        alpha_path="/local",
+        beta_path="jez@hpc:/home/jez/proj",
+        alpha_connected=True,
+        beta_connected=True,
+        conflicts=0,
+    )
+    for field, value in overrides.items():
+        setattr(record, field, value)
+    return record
+
+
 class TestEnsureInteractiveSync:
     """``_ensure_interactive_sync``: start, resume, restart, and fallback."""
 
@@ -913,8 +929,7 @@ class TestEnsureInteractiveSync:
         from jernerics.cli import _ensure_interactive_sync
 
         sess = self._session()
-        stale = MagicMock()
-        stale.name = "jernerics-interactive-proj"
+        stale = _sync_record()
         with patch("jernerics.cli.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.list_sessions.return_value = [stale]
@@ -929,8 +944,7 @@ class TestEnsureInteractiveSync:
         from jernerics.cli import _ensure_interactive_sync
 
         sess = self._session()
-        live = MagicMock()
-        live.name = "jernerics-interactive-proj"
+        live = _sync_record()
         with patch("jernerics.cli.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.list_sessions.return_value = [live]
@@ -948,6 +962,52 @@ class TestEnsureInteractiveSync:
             _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=True)
             ms.return_value.start.assert_called_once()
         assert "was lost" in capsys.readouterr().out
+
+    def test_reconnect_conflicted_session_reports_without_restart(self, capsys):
+        from jernerics.cli import _ensure_interactive_sync
+
+        sess = self._session()
+        with (
+            patch("jernerics.cli.MutagenSync") as ms,
+            patch("jernerics.cli.ProjectSync") as ps,
+        ):
+            ms.available.return_value = True
+            ms.return_value.list_sessions.return_value = [_sync_record(conflicts=2)]
+            ms.return_value.conflicted_paths.return_value = ["src/a.py", "src/b.py"]
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=True)
+            ms.return_value.start.assert_not_called()
+            ms.return_value.terminate.assert_not_called()
+            ps.return_value.sync_project.assert_not_called()
+        out = capsys.readouterr().out
+        assert "not healthy" in out
+        assert "conflicts: 2" in out
+        assert "src/a.py" in out
+        assert "src/b.py" in out
+        assert "do not propagate in either direction" in out
+        assert "mutagen sync list --long" in out
+        assert "Resolve by making both sides agree" in out
+
+    def test_fresh_start_with_conflicts_warns_without_error(self, capsys):
+        from jernerics.cli import _ensure_interactive_sync
+
+        sess = self._session()
+        with (
+            patch("jernerics.cli.MutagenSync") as ms,
+            patch("jernerics.cli.ProjectSync") as ps,
+        ):
+            ms.available.return_value = True
+            ms.return_value.list_sessions.side_effect = [
+                [],
+                [_sync_record(conflicts=1)],
+            ]
+            ms.return_value.conflicted_paths.return_value = ["src/c.py"]
+            _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
+            ms.return_value.start.assert_called_once()
+            ps.return_value.sync_project.assert_not_called()
+        out = capsys.readouterr().out
+        assert "Code sync is live" in out
+        assert "conflicts: 1" in out
+        assert "src/c.py" in out
 
     def test_fallback_when_mutagen_missing(self, capsys):
         from jernerics.cli import _ensure_interactive_sync

@@ -51,6 +51,8 @@ from .sync.mutagen_sync import (
     MutagenError,
     MutagenNotFound,
     MutagenSync,
+    SessionInfo,
+    is_converged,
     session_name,
 )
 from .tracking.batch_sync import discover_jsonl_files, replay_tracking
@@ -413,6 +415,35 @@ def _oneshot_sync(session: InteractiveSession, project_dir: Path) -> None:
         print(f"Warning: one-shot project sync failed ({e}).")
 
 
+def _warn_sync_unhealthy(sync: MutagenSync, name: str, record: SessionInfo) -> None:
+    """Report an unhealthy or conflicted sync session (report-only).
+
+    Never restarts or overwrites: restarting cannot clear conflicts, and a
+    one-way push would clobber one side. Surfaces the state and lets the user
+    resolve it.
+    """
+    print(f"Warning: code sync session {name} is not healthy:")
+    print(
+        f"  status: {record.status}, alpha connected: {record.alpha_connected},"
+        f" beta connected: {record.beta_connected}, conflicts: {record.conflicts}"
+    )
+    if record.conflicts == 0:
+        return
+    try:
+        paths = sync.conflicted_paths(name)
+    except MutagenError as e:
+        print(f"  Could not list conflicted paths ({e}).")
+        return
+    for path in paths:
+        print(f"  {path}")
+    print("Conflicted files do not propagate in either direction (two-way-safe).")
+    print("Inspect with: mutagen sync list --long")
+    print(
+        "Resolve by making both sides agree (e.g. scp the winner to the other"
+        " side), then re-run this command."
+    )
+
+
 def _ensure_interactive_sync(
     session: InteractiveSession,
     project_dir: Path,
@@ -423,9 +454,11 @@ def _ensure_interactive_sync(
     """Start or resume continuous code sync before attaching to the shell.
 
     A fresh allocation creates and waits on a new sync session. A reconnect
-    leaves a still-live session in place and restarts a dead one. When mutagen
-    is missing or fails, falls back to a single ProjectSync push so the remote
-    starts with current source (no continuous sync).
+    leaves a still-live converged session in place and restarts a dead one;
+    an unhealthy or conflicted session is reported, never restarted or
+    overwritten. When mutagen is missing or fails, falls back to a single
+    ProjectSync push so the remote starts with current source (no continuous
+    sync).
     """
     remote_host = session.login_target
     if not remote_host:
@@ -440,11 +473,16 @@ def _ensure_interactive_sync(
     name = session_name(project_name)
     sync = MutagenSync()
     try:
-        has_session = any(s.name == name for s in sync.list_sessions())
-        if reconnect and has_session:
-            print(f"Continuous code sync already running ({name}).")
+        record = next((s for s in sync.list_sessions() if s.name == name), None)
+        if reconnect and record is not None:
+            if is_converged(record):
+                print(f"Continuous code sync already running ({name}).")
+            else:
+                # Restarting cannot clear conflicts and would lose the sync
+                # baseline; a one-shot fallback would overwrite the remote.
+                _warn_sync_unhealthy(sync, name, record)
             return
-        if has_session:
+        if record is not None:
             # No live allocation backs it (fresh allocation path): the lingering
             # session is stale. Clear it so ``create`` does not collide on name.
             print(f"Replacing stale sync session ({name})...")
@@ -458,6 +496,13 @@ def _ensure_interactive_sync(
     except (MutagenError, MutagenNotFound) as e:
         print(f"Warning: continuous sync unavailable ({e}); using one-shot sync.")
         _oneshot_sync(session, project_dir)
+        return
+    try:
+        record = next((s for s in sync.list_sessions() if s.name == name), None)
+    except (MutagenError, MutagenNotFound):
+        return
+    if record is not None and record.conflicts > 0:
+        _warn_sync_unhealthy(sync, name, record)
 
 
 def _interactive_connect(

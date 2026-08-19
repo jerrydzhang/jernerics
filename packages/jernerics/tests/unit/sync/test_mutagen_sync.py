@@ -12,6 +12,7 @@ from jernerics.sync.mutagen_sync import (
     SessionInfo,
     find_mutagen,
     is_converged,
+    is_idle,
     parse_list_output,
     session_name,
 )
@@ -24,6 +25,7 @@ def _session(
     beta="user@host:/remote",
     alpha_connected=True,
     beta_connected=True,
+    conflicts=0,
 ):
     return SessionInfo(
         name=name,
@@ -32,6 +34,7 @@ def _session(
         beta_path=beta,
         alpha_connected=alpha_connected,
         beta_connected=beta_connected,
+        conflicts=conflicts,
     )
 
 
@@ -60,7 +63,7 @@ class TestParseListOutput:
         assert parse_list_output("") == []
 
     def test_single_session(self):
-        out = "jernerics-interactive-p\tWatching\t/local\tuser@h:/r\ttrue\ttrue\n"
+        out = "jernerics-interactive-p\tWatching\t/local\tuser@h:/r\ttrue\ttrue\t0\n"
         sessions = parse_list_output(out)
         assert len(sessions) == 1
         s = sessions[0]
@@ -70,34 +73,72 @@ class TestParseListOutput:
         assert s.beta_path == "user@h:/r"
         assert s.alpha_connected is True
         assert s.beta_connected is True
+        assert s.conflicts == 0
+
+    def test_conflict_count_parsed(self):
+        out = "n\tWatching\t/a\t/b\ttrue\ttrue\t2\n"
+        assert parse_list_output(out)[0].conflicts == 2
 
     def test_multiple_sessions(self):
-        out = "a\tWatching\t/l1\t/l2\ttrue\ttrue\nb\tSaving\t/l3\t/l4\ttrue\tfalse\n"
+        out = (
+            "a\tWatching\t/l1\t/l2\ttrue\ttrue\t0\n"
+            "b\tSaving\t/l3\t/l4\ttrue\tfalse\t2\n"
+        )
         sessions = parse_list_output(out)
         assert [s.name for s in sessions] == ["a", "b"]
         assert sessions[1].beta_connected is False
+        assert sessions[1].conflicts == 2
 
     def test_malformed_lines_skipped(self):
-        out = "bad\tline\njernerics-interactive-p\tWatching\t/a\t/b\ttrue\ttrue\n"
+        out = (
+            "bad\tline\n"
+            "old\tWatching\t/a\t/b\ttrue\ttrue\n"
+            "jernerics-interactive-p\tWatching\t/a\t/b\ttrue\ttrue\t0\n"
+        )
         sessions = parse_list_output(out)
         assert len(sessions) == 1
         assert sessions[0].name == "jernerics-interactive-p"
 
     def test_connected_false(self):
-        out = "n\tDisconnected\t/a\t/b\tfalse\tfalse\n"
+        out = "n\tDisconnected\t/a\t/b\tfalse\tfalse\t0\n"
         s = parse_list_output(out)[0]
         assert s.alpha_connected is False
         assert s.beta_connected is False
 
 
-class TestIsConverged:
+class TestIsIdle:
     def test_watching_and_connected(self):
-        assert is_converged(_session(status="Watching")) is True
+        assert is_idle(_session(status="Watching")) is True
+
+    def test_conflicts_do_not_block_idle(self):
+        assert is_idle(_session(conflicts=2)) is True
+
+    def test_saving_not_idle(self):
+        assert is_idle(_session(status="Saving")) is False
+
+    def test_conflict_status_not_idle(self):
+        assert is_idle(_session(status="Conflict resolution required")) is False
+
+    def test_alpha_disconnected(self):
+        assert is_idle(_session(alpha_connected=False)) is False
+
+    def test_beta_disconnected(self):
+        assert is_idle(_session(beta_connected=False)) is False
+
+
+class TestIsConverged:
+    def test_idle_without_conflicts(self):
+        assert is_converged(_session()) is True
+
+    def test_conflicts_block_convergence_despite_idle(self):
+        session = _session(conflicts=2)
+        assert is_idle(session) is True
+        assert is_converged(session) is False
 
     def test_saving_not_converged(self):
         assert is_converged(_session(status="Saving")) is False
 
-    def test_conflict_not_converged(self):
+    def test_conflict_status_not_converged(self):
         assert is_converged(_session(status="Conflict resolution required")) is False
 
     def test_alpha_disconnected(self):
@@ -168,7 +209,7 @@ class TestBuildCreateCommand:
 
 
 class TestStart:
-    def _run_dispatch(self, converged_status="Watching"):
+    def _run_dispatch(self, converged_status="Watching", conflicts="0"):
         state = {"name": None}
 
         def fake_run(cmd, **kwargs):
@@ -179,7 +220,7 @@ class TestStart:
                 return _cp(0)
             if sub == "list":
                 name = state["name"] or "jernerics-interactive-p"
-                out = f"{name}\t{converged_status}\t/l\t/h:r\ttrue\ttrue\n"
+                out = f"{name}\t{converged_status}\t/l\t/h:r\ttrue\ttrue\t{conflicts}\n"
                 return _cp(0, stdout=out)
             return _cp(0)
 
@@ -216,27 +257,43 @@ class TestStart:
         def fake_run(cmd, **kwargs):
             if cmd[2] == "create":
                 return _cp(0)
-            return _cp(0, stdout="n\tSaving\t/l\t/h:r\ttrue\tfalse\n")
+            return _cp(0, stdout="n\tSaving\t/l\t/h:r\ttrue\tfalse\t0\n")
 
         with (
             patch("jernerics.sync.mutagen_sync.subprocess.run", side_effect=fake_run),
-            pytest.raises(MutagenError, match="did not converge"),
+            pytest.raises(MutagenError, match="did not reach idle"),
         ):
             sync.start("/l", "h", "/r", name="n", convergence_timeout=1)
 
+    def test_start_succeeds_with_conflicts(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen", poll_interval=0.01)
+        with patch(
+            "jernerics.sync.mutagen_sync.subprocess.run",
+            side_effect=self._run_dispatch(conflicts="2"),
+        ):
+            name = sync.start("/l", "h", "/r", name="n", convergence_timeout=5)
+        assert name == "n"
 
-class TestWaitConverged:
-    def test_converges(self):
+
+class TestWaitIdle:
+    def test_returns_true_when_idle(self):
         sync = MutagenSync(mutagen_path="/p/mutagen", poll_interval=0.01)
         with patch.object(MutagenSync, "list_sessions", return_value=[_session()]):
-            assert sync.wait_converged("jernerics-interactive-proj", timeout=5) is True
+            assert sync.wait_idle("jernerics-interactive-proj", timeout=5) is True
 
-    def test_times_out_when_not_converged(self):
+    def test_returns_true_when_idle_with_conflicts(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen", poll_interval=0.01)
+        with patch.object(
+            MutagenSync, "list_sessions", return_value=[_session(conflicts=2)]
+        ):
+            assert sync.wait_idle("jernerics-interactive-proj", timeout=5) is True
+
+    def test_times_out_when_not_idle(self):
         sync = MutagenSync(mutagen_path="/p/mutagen", poll_interval=0.01)
         with patch.object(
             MutagenSync, "list_sessions", return_value=[_session(status="Saving")]
         ):
-            assert sync.wait_converged("jernerics-interactive-proj", timeout=1) is False
+            assert sync.wait_idle("jernerics-interactive-proj", timeout=1) is False
 
     def test_raises_when_session_never_appears(self):
         sync = MutagenSync(mutagen_path="/p/mutagen", poll_interval=0.01)
@@ -244,7 +301,7 @@ class TestWaitConverged:
             patch.object(MutagenSync, "list_sessions", return_value=[]),
             pytest.raises(MutagenError, match="not found"),
         ):
-            sync.wait_converged("ghost", timeout=1)
+            sync.wait_idle("ghost", timeout=1)
 
 
 class TestTerminate:
@@ -279,8 +336,8 @@ class TestListSessions:
     def test_parses_all_sessions(self):
         sync = MutagenSync(mutagen_path="/p/mutagen")
         out = (
-            "jernerics-interactive-a\tWatching\t/la\t/ra\ttrue\ttrue\n"
-            "other\tSaving\t/lb\t/rb\ttrue\tfalse\n"
+            "jernerics-interactive-a\tWatching\t/la\t/ra\ttrue\ttrue\t0\n"
+            "other\tSaving\t/lb\t/rb\ttrue\tfalse\t0\n"
         )
         with patch(
             "jernerics.sync.mutagen_sync.subprocess.run",
@@ -292,8 +349,8 @@ class TestListSessions:
     def test_client_side_name_filter(self):
         sync = MutagenSync(mutagen_path="/p/mutagen")
         out = (
-            "jernerics-interactive-a\tWatching\t/la\t/ra\ttrue\ttrue\n"
-            "jernerics-interactive-b\tSaving\t/lb\t/rb\ttrue\ttrue\n"
+            "jernerics-interactive-a\tWatching\t/la\t/ra\ttrue\ttrue\t0\n"
+            "jernerics-interactive-b\tSaving\t/lb\t/rb\ttrue\ttrue\t2\n"
         )
         with patch(
             "jernerics.sync.mutagen_sync.subprocess.run",
@@ -319,6 +376,50 @@ class TestListSessions:
             pytest.raises(MutagenError, match="sync list failed"),
         ):
             sync.list_sessions()
+
+
+class TestConflictedPaths:
+    def test_parses_paths_for_named_session(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        out = "jernerics-interactive-p\tsrc/a.py\tsrc/b.py\t\nother\tsrc/x.py\t\n"
+        with patch(
+            "jernerics.sync.mutagen_sync.subprocess.run",
+            return_value=_cp(0, stdout=out),
+        ) as mock_run:
+            paths = sync.conflicted_paths("jernerics-interactive-p")
+        assert paths == ["src/a.py", "src/b.py"]
+        args = mock_run.call_args[0][0]
+        assert args[1:3] == ["sync", "list"]
+        assert "--template" in args
+
+    def test_empty_conflicts_yield_empty_list(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        out = "jernerics-interactive-p\t\n"
+        with patch(
+            "jernerics.sync.mutagen_sync.subprocess.run",
+            return_value=_cp(0, stdout=out),
+        ):
+            assert sync.conflicted_paths("jernerics-interactive-p") == []
+
+    def test_absent_session_yields_empty_list(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        out = "other\tsrc/x.py\t\n"
+        with patch(
+            "jernerics.sync.mutagen_sync.subprocess.run",
+            return_value=_cp(0, stdout=out),
+        ):
+            assert sync.conflicted_paths("jernerics-interactive-p") == []
+
+    def test_list_failure_raises(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        with (
+            patch(
+                "jernerics.sync.mutagen_sync.subprocess.run",
+                return_value=_cp(1, stderr="daemon down"),
+            ),
+            pytest.raises(MutagenError, match="sync list failed"),
+        ):
+            sync.conflicted_paths("jernerics-interactive-p")
 
 
 class TestOrphans:

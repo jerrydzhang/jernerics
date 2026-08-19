@@ -70,13 +70,22 @@ INTERACTIVE_EXCLUDES: list[str] = [
     ".ruff_cache/",
     ".hypothesis/",
     ".pytest_cache/",
+    ".direnv/",
 ]
 
 #: mutagen ``sync list`` template emitting one tab-delimited record per session:
-#: name, status, alpha path, beta path, alpha connected, beta connected.
+#: name, status, alpha path, beta path, alpha connected, beta connected,
+#: conflict count.
 _LIST_TEMPLATE = (
     "{{range .}}{{.Name}}\t{{.Status}}\t{{.Alpha.Path}}"
-    "\t{{.Beta.Path}}\t{{.Alpha.Connected}}\t{{.Beta.Connected}}\n{{end}}"
+    "\t{{.Beta.Path}}\t{{.Alpha.Connected}}\t{{.Beta.Connected}}"
+    "\t{{len .Conflicts}}\n{{end}}"
+)
+
+#: mutagen ``sync list`` template emitting one line per session as
+#: ``<name>\t<path>\t...\t`` — a session without conflicts renders ``<name>\t``.
+_CONFLICTS_TEMPLATE = (
+    "{{range .}}{{.Name}}\t{{range .Conflicts}}{{.Path}}\t{{end}}\n{{end}}"
 )
 
 
@@ -130,6 +139,7 @@ class SessionInfo:
     beta_path: str
     alpha_connected: bool
     beta_connected: bool
+    conflicts: int
 
     @property
     def is_jernerics(self) -> bool:
@@ -146,9 +156,9 @@ def parse_list_output(output: str) -> list[SessionInfo]:
     sessions: list[SessionInfo] = []
     for line in output.splitlines():
         fields = line.split("\t")
-        if len(fields) != 6:
+        if len(fields) != 7:
             continue
-        name, status, alpha_path, beta_path, alpha_conn, beta_conn = fields
+        name, status, alpha_path, beta_path, alpha_conn, beta_conn, conflicts = fields
         sessions.append(
             SessionInfo(
                 name=name,
@@ -157,17 +167,18 @@ def parse_list_output(output: str) -> list[SessionInfo]:
                 beta_path=beta_path,
                 alpha_connected=alpha_conn == "true",
                 beta_connected=beta_conn == "true",
+                conflicts=int(conflicts),
             )
         )
     return sessions
 
 
-def is_converged(session: SessionInfo) -> bool:
+def is_idle(session: SessionInfo) -> bool:
     """True once a session has finished its initial sync and is idle.
 
     Requires both endpoints connected and status at idle. Conflict states
     (``Conflict resolution required``, ``Waiting for confirmation``) are
-    intentionally *not* converged — two-way-safe surfaces them rather than
+    intentionally *not* idle — two-way-safe surfaces them rather than
     silently overwriting.
     """
     return (
@@ -175,6 +186,16 @@ def is_converged(session: SessionInfo) -> bool:
         and session.alpha_connected
         and session.beta_connected
     )
+
+
+def is_converged(session: SessionInfo) -> bool:
+    """True once a session is idle with no conflicted paths.
+
+    Conflicted files propagate in neither direction under two-way-safe, so a
+    conflicted session is not converged even though its healthy paths still
+    sync.
+    """
+    return is_idle(session) and session.conflicts == 0
 
 
 class MutagenSync:
@@ -255,10 +276,11 @@ class MutagenSync:
         ignore_vcs: bool = True,
         convergence_timeout: int = DEFAULT_CONVERGENCE_TIMEOUT,
     ) -> str:
-        """Create a session and block until initial convergence.
+        """Create a session and block until it is idle.
 
         Returns the session ``name``. Raises :class:`MutagenError` if creation
         fails or the session does not reach idle within ``convergence_timeout``.
+        Conflicts do not raise — the session still syncs non-conflicted paths.
         """
         cmd = self.build_create_command(
             local_dir,
@@ -276,18 +298,20 @@ class MutagenSync:
                 f"mutagen sync create failed (exit {result.returncode}): "
                 f"{(result.stderr or result.stdout).strip()}"
             )
-        if not self.wait_converged(name, timeout=convergence_timeout):
+        if not self.wait_idle(name, timeout=convergence_timeout):
             raise MutagenError(
-                f"sync session {name!r} did not converge within "
+                f"sync session {name!r} did not reach idle within "
                 f"{convergence_timeout}s (last status see `mutagen sync list`)"
             )
         return name
 
-    def wait_converged(self, name: str, timeout: int = 60) -> bool:
-        """Poll until session ``name`` is converged, or ``timeout`` elapses.
+    def wait_idle(self, name: str, timeout: int = 60) -> bool:
+        """Poll until session ``name`` is idle, or ``timeout`` elapses.
 
-        Returns True on convergence, False on timeout. Raises
-        :class:`MutagenError` if the session cannot be found at all.
+        Returns True on idle, False on timeout. Raises :class:`MutagenError`
+        if the session cannot be found at all. Deliberately ignores conflicts:
+        a conflicted session still syncs its healthy paths, and gating on zero
+        conflicts here would push callers toward destructive fallbacks.
         """
         deadline = time.monotonic() + timeout
         seen = False
@@ -300,7 +324,7 @@ class MutagenSync:
                 time.sleep(self.poll_interval)
                 continue
             seen = True
-            if is_converged(session):
+            if is_idle(session):
                 return True
             time.sleep(self.poll_interval)
         if not seen:
@@ -334,8 +358,8 @@ class MutagenSync:
 
         Filtering is done client-side: ``mutagen sync list <name>`` *errors*
         (exit 1) when the name is absent rather than returning empty, which
-        would break convergence polling. Fetching all sessions and filtering
-        here keeps ``wait_converged`` robust while the daemon registers a
+        would break idle polling. Fetching all sessions and filtering
+        here keeps ``wait_idle`` robust while the daemon registers a
         freshly created session.
         """
         result = self._run(
@@ -353,6 +377,29 @@ class MutagenSync:
         if name is not None:
             sessions = [s for s in sessions if s.name == name]
         return sessions
+
+    def conflicted_paths(self, name: str) -> list[str]:
+        """Return the conflicted paths of session ``name``.
+
+        Empty when the session has no conflicts or does not exist. Raises
+        :class:`MutagenError` when ``mutagen sync list`` itself fails.
+        """
+        result = self._run(
+            ["sync", "list", "--template", _CONFLICTS_TEMPLATE],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise MutagenError(
+                f"mutagen sync list failed (exit {result.returncode}): "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
+        for line in result.stdout.splitlines():
+            fields = line.split("\t")
+            if fields[0] == name:
+                return [path for path in fields[1:] if path]
+        return []
 
     def find_orphans(
         self, alive_names: Iterable[str] | None = None
