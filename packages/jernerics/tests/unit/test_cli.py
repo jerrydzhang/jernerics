@@ -223,6 +223,18 @@ class TestCommandTree:
 
         assert actual == expected
 
+    def test_interactive_sync_group_exposes_status(self):
+        from jernerics.cli import app
+
+        interactive = next(
+            g.typer_instance for g in app.registered_groups if g.name == "interactive"
+        )
+        assert interactive is not None
+        assert [g.name for g in interactive.registered_groups] == ["sync"]
+        sync = interactive.registered_groups[0].typer_instance
+        assert sync is not None
+        assert [c.name for c in sync.registered_commands] == ["status"]
+
 
 class TestWaitCommand:
     def test_wait_calls_backend_with_correct_args(self, capsys):
@@ -1274,3 +1286,246 @@ class TestInteractiveSyncWiring:
         ensure.assert_called_once_with(sess, Path("/proj"), "proj", reconnect=True)
         sess.connect.assert_called_once_with("gpu1")
         warn.assert_called_once_with("proj", alive=True)
+
+
+class TestSyncStatusCommand:
+    """``interactive sync status``: read-only report of the mutagen session."""
+
+    def _run(self, record, *, json_output=False, paths=None):
+        from jernerics.commands.interactive import sync_status
+
+        with (
+            patch(
+                "jernerics.commands.interactive.find_pyproject_dir",
+                return_value=Path("/proj"),
+            ),
+            patch("jernerics.commands.interactive.load_backend_config"),
+            patch(
+                "jernerics.commands.interactive.get_project_name",
+                return_value="proj",
+            ),
+            patch("jernerics.commands.interactive.MutagenSync") as ms,
+        ):
+            ms.available.return_value = True
+            ms.return_value.list_sessions.return_value = (
+                [record] if record is not None else []
+            )
+            ms.return_value.conflicted_paths.return_value = paths or []
+            sync_status(backend_name="hpc", json_output=json_output)
+
+    def test_healthy_session_human_output(self, capsys):
+        self._run(_sync_record())
+        out = capsys.readouterr().out
+        assert "Session:   jernerics-interactive-proj" in out
+        assert "Status:    Watching" in out
+        assert "Local:     connected" in out
+        assert "Cluster:   connected" in out
+        assert "Idle:      yes" in out
+        assert "Converged: yes" in out
+        assert "Conflicts: 0" in out
+
+    def test_healthy_session_json_output(self, capsys):
+        self._run(_sync_record(), json_output=True)
+        report = json.loads(capsys.readouterr().out)
+        assert report == {
+            "project": "proj",
+            "backend": "hpc",
+            "session": "jernerics-interactive-proj",
+            "exists": True,
+            "status": "Watching",
+            "local_connected": True,
+            "cluster_connected": True,
+            "idle": True,
+            "converged": True,
+            "conflicts": 0,
+            "conflicted_paths": [],
+        }
+
+    def test_conflicted_session_lists_paths(self, capsys):
+        self._run(_sync_record(conflicts=2), paths=["src/a.py", "src/b.py"])
+        out = capsys.readouterr().out
+        assert "Conflicts: 2" in out
+        assert "src/a.py" in out
+        assert "src/b.py" in out
+        assert "do not propagate" in out
+
+    def test_conflicted_session_json_paths(self, capsys):
+        self._run(
+            _sync_record(conflicts=2),
+            json_output=True,
+            paths=["src/a.py", "src/b.py"],
+        )
+        report = json.loads(capsys.readouterr().out)
+        assert report["conflicts"] == 2
+        assert report["conflicted_paths"] == ["src/a.py", "src/b.py"]
+        assert report["converged"] is False
+
+    def test_disconnected_endpoints_reported_without_error(self, capsys):
+        self._run(
+            _sync_record(
+                status="Connecting", alpha_connected=False, beta_connected=False
+            ),
+            json_output=True,
+        )
+        report = json.loads(capsys.readouterr().out)
+        assert report["local_connected"] is False
+        assert report["cluster_connected"] is False
+        assert report["idle"] is False
+
+    def test_syncing_session_reported_without_error(self, capsys):
+        self._run(_sync_record(status="Scanning"), json_output=True)
+        report = json.loads(capsys.readouterr().out)
+        assert report["status"] == "Scanning"
+        assert report["idle"] is False
+        assert report["converged"] is False
+
+    def test_missing_session_json_shape(self, capsys):
+        self._run(None, json_output=True)
+        report = json.loads(capsys.readouterr().out)
+        assert report == {
+            "project": "proj",
+            "backend": "hpc",
+            "session": "jernerics-interactive-proj",
+            "exists": False,
+            "status": None,
+            "local_connected": None,
+            "cluster_connected": None,
+            "idle": False,
+            "converged": False,
+            "conflicts": 0,
+            "conflicted_paths": [],
+        }
+
+    def test_missing_session_human_output(self, capsys):
+        self._run(None)
+        out = capsys.readouterr().out
+        assert "jernerics-interactive-proj not found" in out
+
+    def test_unknown_backend_exits_config_error(self, capsys):
+        from jernerics.commands.interactive import sync_status
+        from jernerics.config import ConfigNotFound, ExitCode
+
+        with (
+            patch(
+                "jernerics.commands.interactive.find_pyproject_dir",
+                return_value=Path("/proj"),
+            ),
+            patch(
+                "jernerics.commands.interactive.load_backend_config",
+                side_effect=ConfigNotFound("unknown backend 'nope'"),
+            ),
+            pytest.raises(SystemExit) as exc,
+        ):
+            sync_status(backend_name="nope")
+        assert exc.value.code == ExitCode.CONFIG_ERROR
+        assert "unknown backend" in capsys.readouterr().out
+
+    def test_no_pyproject_exits_config_error(self):
+        from jernerics.commands.interactive import sync_status
+        from jernerics.config import ExitCode
+
+        with (
+            patch(
+                "jernerics.commands.interactive.find_pyproject_dir", return_value=None
+            ),
+            pytest.raises(SystemExit) as exc,
+        ):
+            sync_status(backend_name="hpc")
+        assert exc.value.code == ExitCode.CONFIG_ERROR
+
+    def test_mutagen_missing_exits_error(self, capsys):
+        from jernerics.commands.interactive import sync_status
+        from jernerics.config import ExitCode
+
+        with (
+            patch(
+                "jernerics.commands.interactive.find_pyproject_dir",
+                return_value=Path("/proj"),
+            ),
+            patch("jernerics.commands.interactive.load_backend_config"),
+            patch(
+                "jernerics.commands.interactive.get_project_name",
+                return_value="proj",
+            ),
+            patch("jernerics.commands.interactive.MutagenSync") as ms,
+        ):
+            ms.available.return_value = False
+            with pytest.raises(SystemExit) as exc:
+                sync_status(backend_name="hpc")
+        assert exc.value.code == ExitCode.GENERAL_ERROR
+        assert "mutagen not found" in capsys.readouterr().out
+
+    def test_mutagen_failure_exits_error(self, capsys):
+        from jernerics.commands.interactive import sync_status
+        from jernerics.config import ExitCode
+        from jernerics.sync.mutagen_sync import MutagenError
+
+        with (
+            patch(
+                "jernerics.commands.interactive.find_pyproject_dir",
+                return_value=Path("/proj"),
+            ),
+            patch("jernerics.commands.interactive.load_backend_config"),
+            patch(
+                "jernerics.commands.interactive.get_project_name",
+                return_value="proj",
+            ),
+            patch("jernerics.commands.interactive.MutagenSync") as ms,
+        ):
+            ms.available.return_value = True
+            ms.return_value.list_sessions.side_effect = MutagenError("boom")
+            with pytest.raises(SystemExit) as exc:
+                sync_status(backend_name="hpc")
+        assert exc.value.code == ExitCode.GENERAL_ERROR
+
+    def test_status_uses_only_read_only_mutagen_calls(self, capsys):
+        from subprocess import CompletedProcess
+
+        from jernerics.commands.interactive import sync_status
+
+        listing = (
+            "jernerics-interactive-proj\tWatching\t/local\tjez@hpc:/remote"
+            "\ttrue\ttrue\t2\n"
+        )
+        conflicts = "jernerics-interactive-proj\tsrc/a.py\tsrc/b.py\n"
+        outputs = [listing, conflicts]
+        calls: list[list[str]] = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            return CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=outputs[min(len(calls) - 1, len(outputs) - 1)],
+                stderr="",
+            )
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/mutagen"),
+            patch(
+                "jernerics.commands.interactive.find_pyproject_dir",
+                return_value=Path("/proj"),
+            ),
+            patch("jernerics.commands.interactive.load_backend_config"),
+            patch(
+                "jernerics.commands.interactive.get_project_name",
+                return_value="proj",
+            ),
+            patch("jernerics.sync.mutagen_sync.subprocess.run", side_effect=fake_run),
+        ):
+            sync_status(backend_name="hpc")
+
+        assert len(calls) == 2
+        for argv in calls:
+            assert argv[1:3] == ["sync", "list"]
+            assert not {
+                "create",
+                "terminate",
+                "flush",
+                "pause",
+                "resume",
+                "reset",
+            } & set(argv)
+        out = capsys.readouterr().out
+        assert "Conflicts: 2" in out
+        assert "src/a.py" in out

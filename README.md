@@ -95,6 +95,7 @@ jernerics run --backend hpc trial.py config.py
 | `jernerics run --backend <name> <trial> <config>` | Run on a backend |
 | `jernerics interactive start --backend <name>` | Open or reconnect to a GPU shell (`--time`, `--gpus`, `--partition`, `--constraint`) |
 | `jernerics interactive stop --backend <name>` | Tear down the interactive session |
+| `jernerics interactive sync status --backend <name>` | Report code-sync session health (`--json`) |
 | `jernerics job list --backend <name>` | List jobs (`--all`, `--json`) |
 | `jernerics job cancel --backend <name> [id]` | Cancel jobs (`--all`) |
 | `jernerics job logs --backend <name> <id>` | View logs (`--follow`, `--array-index`, `--stderr`) |

@@ -1,3 +1,4 @@
+import json
 import shlex
 import subprocess
 from pathlib import Path
@@ -26,6 +27,7 @@ from jernerics.sync.mutagen_sync import (
     MutagenSync,
     SessionInfo,
     is_converged,
+    is_idle,
     session_name,
 )
 
@@ -381,8 +383,93 @@ def stop(
     print(f"Cancelled interactive job {existing.job_id} (was {existing.state}).")
 
 
+def sync_status(
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
+    json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
+) -> None:
+    """Report the state of this project's interactive code-sync session.
+
+    Read-only: never creates, restarts, terminates, or flushes the mutagen
+    session — a missing, disconnected, syncing, or conflicted session is data,
+    not an error. Exits nonzero only when the config or mutagen itself
+    prevents inspection.
+    """
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+    try:
+        load_backend_config(backend_name)
+    except ConfigNotFound as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+
+    project_name = get_project_name(project_dir)
+    name = session_name(project_name)
+
+    if not MutagenSync.available():
+        print("Error: mutagen not found on PATH; cannot inspect sync status.")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+
+    sync = MutagenSync()
+    try:
+        record = next((s for s in sync.list_sessions() if s.name == name), None)
+        paths = sync.conflicted_paths(name) if record and record.conflicts else []
+    except (MutagenError, MutagenNotFound) as e:
+        print(f"Error: could not inspect sync session {name} ({e}).")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    report = {
+        "project": project_name,
+        "backend": backend_name,
+        "session": name,
+        "exists": record is not None,
+        "status": record.status if record is not None else None,
+        "local_connected": record.alpha_connected if record is not None else None,
+        "cluster_connected": record.beta_connected if record is not None else None,
+        "idle": is_idle(record) if record is not None else False,
+        "converged": is_converged(record) if record is not None else False,
+        "conflicts": record.conflicts if record is not None else 0,
+        "conflicted_paths": paths,
+    }
+
+    if json_output:
+        print(json.dumps(report, indent=2))
+        return
+
+    if record is None:
+        print(f"Sync session {name} not found (project '{project_name}').")
+        print(f"Start one with: jernerics interactive start --backend {backend_name}")
+        return
+
+    print(f"Session:   {name}")
+    print(f"Status:    {record.status}")
+    print(
+        f"Local:     {'connected' if record.alpha_connected else 'disconnected'}"
+        f" ({record.alpha_path})"
+    )
+    print(
+        f"Cluster:   {'connected' if record.beta_connected else 'disconnected'}"
+        f" ({record.beta_path})"
+    )
+    print(f"Idle:      {'yes' if report['idle'] else 'no'}")
+    print(f"Converged: {'yes' if report['converged'] else 'no'}")
+    print(f"Conflicts: {record.conflicts}")
+    if record.conflicts:
+        print("Conflicted paths:")
+        for path in paths:
+            print(f"  {path}")
+        print("Conflicted files do not propagate in either direction (two-way-safe).")
+        print("Inspect with: mutagen sync list --long")
+
+
 def register(app: typer.Typer) -> None:
     group = typer.Typer(help="Interactive GPU shells on a backend")
     group.command("start")(start)
     group.command("stop")(stop)
+    sync_group = typer.Typer(help="Inspect interactive code sync")
+    sync_group.command("status")(sync_status)
+    group.add_typer(sync_group, name="sync")
     app.add_typer(group, name="interactive")
