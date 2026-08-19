@@ -148,7 +148,7 @@ def init(
     print("\nNext steps:")
     print("  1. Edit pyproject.toml to add dependencies")
     print("  2. Run 'jernerics local trial.py config.py' to test the scaffold")
-    print("  3. Run 'jernerics build --backend <name>' to build on remote")
+    print("  3. Run 'jernerics backend build --backend <name>' to build on remote")
 
 
 def _get_default_jernerics_config(project_name: str) -> dict:

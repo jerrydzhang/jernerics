@@ -100,7 +100,7 @@ class PueueConfig:
 
 @dataclass
 class InteractiveConfig:
-    """Options for ``jernerics interactive`` GPU sessions.
+    """Options for ``jernerics interactive start`` GPU sessions.
 
     Fields left ``None`` inherit from the backend's ``SlurmConfig`` at resolve
     time so interactive defaults track the batch configuration.

@@ -31,23 +31,6 @@ from jernerics.paths import cache_dir
 from jernerics.tracking.batch_sync import discover_jsonl_files, replay_tracking
 from jernerics.tracking.jsonl_io import TrackingReader
 
-# ── sync ─────────────────────────────────────────────────────────────────────
-
-
-def sync(
-    backend_name: Annotated[
-        str, typer.Option("--backend", "-b", help="Backend name from config")
-    ],
-    study: Annotated[
-        str | None,
-        typer.Option("--study", "-s", help="Scope to a single study"),
-    ] = None,
-):
-    backend, _, project_dir = _get_backend(backend_name)
-    project_name = get_project_name(project_dir)
-    backend.sync(project_name, study=study)
-
-
 # ── replay ───────────────────────────────────────────────────────────────────
 
 # Server tables that hold one row per ingested tracking event. Counting their
@@ -128,6 +111,14 @@ def replay(
         str | None,
         typer.Option("--study", "-s", help="Scope replay to a single study"),
     ] = None,
+    backend_name: Annotated[
+        str | None,
+        typer.Option(
+            "--backend",
+            "-b",
+            help="Pull the backend's remote tracking cache, then ship to server",
+        ),
+    ] = None,
     tracking_dir: Annotated[
         Path | None,
         typer.Option(
@@ -145,6 +136,30 @@ def replay(
     ] = False,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
+    """Replay tracked events to the server.
+
+    Without ``--backend`` replays the local tracking cache. With ``--backend``
+    pulls that backend's remote tracking cache, then ships it to the server.
+    """
+    if backend_name is not None:
+        rejected = [
+            flag
+            for flag, value in (
+                ("--tracking-dir", tracking_dir),
+                ("--server", server),
+                ("--dry-run", dry_run),
+                ("--json", json_output),
+            )
+            if value
+        ]
+        if rejected:
+            print(f"Error: {' '.join(rejected)} cannot be combined with --backend.")
+            raise SystemExit(ExitCode.GENERAL_ERROR)
+        backend, _, project_dir = _get_backend(backend_name)
+        project_name = get_project_name(project_dir)
+        backend.sync(project_name, study=study)
+        return
+
     base_url = server or load_tracking_server()
     if not base_url:
         print(
@@ -222,6 +237,7 @@ def _parse_run_id(run_id: str) -> tuple[str, int]:
 def runs(
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
+    """List recorded runs for this project."""
     store, project = _get_tracking_store()
     try:
         data = get_all_runs(store, project)
@@ -242,6 +258,7 @@ def summary(
     ],
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
+    """Show one run's params, metrics, and artifacts."""
     store, project = _get_tracking_store()
     study_name, trial_id = _parse_run_id(run_id)
     try:
@@ -264,6 +281,7 @@ def diff(
     run_b: Annotated[str, typer.Argument(help="Second run id (study_name[:trial_id])")],
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
+    """Compare two runs side by side."""
     store, project = _get_tracking_store()
     try:
         for spec in (run_a, run_b):
@@ -293,6 +311,7 @@ def trace(
     ] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
+    """Show a metric's series for a run."""
     store, project = _get_tracking_store()
     study_name, trial_id = _parse_run_id(run_id)
     try:
@@ -343,9 +362,10 @@ def trace(
 
 
 def register(app: typer.Typer) -> None:
-    app.command("sync")(sync)
-    app.command("replay")(replay)
-    app.command("runs")(runs)
-    app.command("summary")(summary)
-    app.command("diff")(diff)
-    app.command("trace")(trace)
+    group = typer.Typer(help="Replay tracking data and inspect recorded runs")
+    group.command("replay")(replay)
+    group.command("runs")(runs)
+    group.command("summary")(summary)
+    group.command("diff")(diff)
+    group.command("trace")(trace)
+    app.add_typer(group, name="tracking")

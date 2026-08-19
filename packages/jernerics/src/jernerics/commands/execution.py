@@ -205,8 +205,8 @@ def run_remote(
     if result is not None:
         print("\nMonitor progress:")
         job_id = result.submissions[0].job_id
-        print(f"  jernerics logs --backend {backend_name} {job_id} --follow")
-        print(f"  jernerics wait --backend {backend_name} {job_id}")
+        print(f"  jernerics job logs --backend {backend_name} {job_id} --follow")
+        print(f"  jernerics job wait --backend {backend_name} {job_id}")
 
         tracking_server = load_tracking_server()
         if tracking_server:

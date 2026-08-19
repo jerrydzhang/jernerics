@@ -26,6 +26,7 @@ def build(
         typer.Option("--dry-run", help="Preview actions without executing"),
     ] = False,
 ):
+    """Build the project container on a backend."""
     project_path = Path(project_dir).resolve()
     if not project_path.exists():
         print(f"Error: Project directory not found: {project_path}")
@@ -62,6 +63,7 @@ def clean(
         typer.Option("--force", "-f", help="Execute (dry-run by default)"),
     ] = False,
 ) -> None:
+    """Clean a backend's generated artifacts (dry-run by default)."""
     backend, project_name, _ = _get_backend(backend_name)
 
     try:
@@ -72,9 +74,7 @@ def clean(
 
 
 def register(app: typer.Typer) -> None:
-    app.command("build")(build)
-
-
-# Registered after the job commands in cli.py to keep the original help order
-def register_clean(app: typer.Typer) -> None:
-    app.command("clean")(clean)
+    group = typer.Typer(help="Build and clean backend containers and artifacts")
+    group.command("build")(build)
+    group.command("clean")(clean)
+    app.add_typer(group, name="backend")

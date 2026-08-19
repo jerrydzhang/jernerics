@@ -246,11 +246,11 @@ def _interactive_connect(
         job_id = info.job_id if info else "?"
     print()
     print(f"Disconnected from {node}. The allocation (job {job_id}) is still running.")
-    print(f"  Reconnect:  jernerics interactive --backend {backend_name}")
-    print(f"  End:        jernerics interactive --backend {backend_name} --end")
+    print(f"  Reconnect:  jernerics interactive start --backend {backend_name}")
+    print(f"  End:        jernerics interactive stop --backend {backend_name}")
 
 
-def interactive(
+def start(
     backend_name: Annotated[
         str, typer.Option("--backend", "-b", help="Backend name from config")
     ],
@@ -266,10 +266,6 @@ def interactive(
     constraint: Annotated[
         str | None, typer.Option("--constraint", help="SLURM constraint, e.g. a100")
     ] = None,
-    end: Annotated[
-        bool,
-        typer.Option("--end", help="Tear down an existing interactive session"),
-    ] = False,
     dry_run: Annotated[
         bool,
         typer.Option(
@@ -282,7 +278,8 @@ def interactive(
     Allocates a GPU via a reservation job that survives SSH disconnect, then
     drops you into an apptainer shell inside the container at /work. Continuous
     code sync (mutagen) mirrors edits in both directions while the allocation
-    runs. Re-run to reconnect to an existing allocation; use --end to release it.
+    runs. Re-run to reconnect to an existing allocation; stop it with
+    ``jernerics interactive stop``.
 
     Process persistence (tmux, screen) is left to the user.
     """
@@ -308,15 +305,6 @@ def interactive(
         return
 
     existing = session.find_existing()
-
-    if end:
-        if existing is None:
-            print(f"No active interactive session for backend '{backend_name}'.")
-            return
-        _terminate_interactive_sync(project_name)
-        session.end()
-        print(f"Cancelled interactive job {existing.job_id} (was {existing.state}).")
-        return
 
     _warn_sync_orphans(project_name, alive=existing is not None)
 
@@ -351,7 +339,7 @@ def interactive(
     readiness = session.host.run(["test", "-f", session.container_image], check=False)
     if readiness.returncode != 0:
         print(f"Error: container not found at {session.container_image}.")
-        print("  Run 'jernerics build --backend <name>' first.")
+        print("  Run 'jernerics backend build --backend <name>' first.")
         raise SystemExit(ExitCode.CONTAINER_ERROR) from None
 
     session.host.mkdir(session.cache_host)
@@ -374,5 +362,27 @@ def interactive(
     )
 
 
+def stop(
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
+) -> None:
+    """Tear down an interactive session and stop its code sync."""
+    session, _, project_name = _build_interactive_session(
+        backend_name, time=None, gpus=None, partition=None, constraint=None
+    )
+
+    existing = session.find_existing()
+    if existing is None:
+        print(f"No active interactive session for backend '{backend_name}'.")
+        return
+    _terminate_interactive_sync(project_name)
+    session.end()
+    print(f"Cancelled interactive job {existing.job_id} (was {existing.state}).")
+
+
 def register(app: typer.Typer) -> None:
-    app.command("interactive")(interactive)
+    group = typer.Typer(help="Interactive GPU shells on a backend")
+    group.command("start")(start)
+    group.command("stop")(stop)
+    app.add_typer(group, name="interactive")

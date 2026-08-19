@@ -12,7 +12,7 @@ from jernerics.paths import cache_dir
 # ── jobs ─────────────────────────────────────────────────────────────────────
 
 
-def jobs(
+def list_jobs(
     backend_name: Annotated[
         str, typer.Option("--backend", "-b", help="Backend name from config")
     ],
@@ -25,6 +25,7 @@ def jobs(
         typer.Option("--json", help="Output as JSON"),
     ] = False,
 ):
+    """List jobs known to a backend."""
     backend, _, _ = _get_backend(backend_name)
     job_list = backend.list_jobs(include_completed=all, local_cache_dir=cache_dir())
 
@@ -72,6 +73,7 @@ def cancel(
         typer.Option("--all", "-a", help="Cancel all your jobs"),
     ] = False,
 ):
+    """Cancel one job by ID, or all jobs with --all."""
     backend, _, _ = _get_backend(backend_name)
 
     if all:
@@ -112,6 +114,7 @@ def logs(
         typer.Option("--stderr", "-e", help="Show stderr instead of stdout"),
     ] = False,
 ):
+    """Stream a job's stdout (or stderr) from the backend."""
     backend, _, _ = _get_backend(backend_name)
 
     try:
@@ -149,6 +152,7 @@ def wait(
         typer.Option("--poll-interval", "-p", help="Seconds between status polls"),
     ] = 10,
 ):
+    """Block until a job finishes, succeeding only if it completed."""
     backend, _, _ = _get_backend(backend_name)
 
     try:
@@ -172,7 +176,9 @@ def wait(
 
 
 def register(app: typer.Typer) -> None:
-    app.command("jobs")(jobs)
-    app.command("cancel")(cancel)
-    app.command("logs")(logs)
-    app.command("wait")(wait)
+    group = typer.Typer(help="Inspect and manage backend jobs")
+    group.command("list")(list_jobs)
+    group.command("cancel")(cancel)
+    group.command("logs")(logs)
+    group.command("wait")(wait)
+    app.add_typer(group, name="job")

@@ -164,7 +164,7 @@ class Backend:
             if result.returncode != 0:
                 print(
                     "Error: container not found on remote.\n"
-                    "  Run 'jernerics build --backend <name>' first."
+                    "  Run 'jernerics backend build --backend <name>' first."
                 )
                 raise RuntimeError("container not found on remote")
 
@@ -301,7 +301,7 @@ class Backend:
 
         print(f"\nBuild job submitted: {job_id}")
         print("Monitor build with:")
-        print(f"  jernerics logs --backend <name> {job_id}")
+        print(f"  jernerics job logs --backend <name> {job_id}")
 
     def clean(
         self,

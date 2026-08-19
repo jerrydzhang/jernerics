@@ -93,12 +93,19 @@ jernerics run --backend hpc trial.py config.py
 | `jernerics init <name>` | Scaffold a project |
 | `jernerics local <trial> <config>` | Run a sweep locally |
 | `jernerics run --backend <name> <trial> <config>` | Run on a backend |
-| `jernerics build --backend <name>` | Build the container on the remote |
-| `jernerics jobs --backend <name>` | List jobs (`--study`) |
-| `jernerics cancel --backend <name> [id]` | Cancel jobs (`--all`) |
-| `jernerics logs --backend <name> <id>` | View logs (`--follow`, `--array-index`, `--stderr`) |
-| `jernerics clean --backend <name>` | Delete remote artifacts (`--full`, `--force`) |
-| `jernerics sync --backend <name>` | Replay tracking data from remote to server (`--study`) |
+| `jernerics interactive start --backend <name>` | Open or reconnect to a GPU shell (`--time`, `--gpus`, `--partition`, `--constraint`) |
+| `jernerics interactive stop --backend <name>` | Tear down the interactive session |
+| `jernerics job list --backend <name>` | List jobs (`--all`, `--json`) |
+| `jernerics job cancel --backend <name> [id]` | Cancel jobs (`--all`) |
+| `jernerics job logs --backend <name> <id>` | View logs (`--follow`, `--array-index`, `--stderr`) |
+| `jernerics job wait --backend <name> <id>` | Block until a job finishes (`--timeout`, `--poll-interval`) |
+| `jernerics backend build --backend <name>` | Build the container on the remote |
+| `jernerics backend clean --backend <name>` | Delete remote artifacts (`--full`, `--force`) |
+| `jernerics tracking replay [--backend <name>]` | Replay local cache (or pull from a backend) to the server (`--study`, `--dry-run`, `--json`) |
+| `jernerics tracking runs` | List recorded runs (`--json`) |
+| `jernerics tracking summary <run>` | Show params, metrics, and artifacts (`--json`) |
+| `jernerics tracking diff <a> <b>` | Compare two runs (`--json`) |
+| `jernerics tracking trace <run> [metric]` | Show a metric series (`--json`) |
 
 ## Configuration
 

@@ -194,6 +194,36 @@ class TestMainFunction:
             mock_app.assert_called_once()
 
 
+class TestCommandTree:
+    def test_root_exposes_locked_commands_and_groups(self):
+        from jernerics.cli import app
+
+        assert [c.name for c in app.registered_commands] == ["init", "local", "run"]
+        assert [g.name for g in app.registered_groups] == [
+            "interactive",
+            "job",
+            "backend",
+            "tracking",
+        ]
+
+    def test_groups_expose_locked_subcommands(self):
+        from jernerics.cli import app
+
+        expected = {
+            "interactive": ["start", "stop"],
+            "job": ["list", "cancel", "logs", "wait"],
+            "backend": ["build", "clean"],
+            "tracking": ["replay", "runs", "summary", "diff", "trace"],
+        }
+        actual = {}
+        for info in app.registered_groups:
+            instance = info.typer_instance
+            assert instance is not None
+            actual[info.name] = [c.name for c in instance.registered_commands]
+
+        assert actual == expected
+
+
 class TestWaitCommand:
     def test_wait_calls_backend_with_correct_args(self, capsys):
         from jernerics.commands.jobs import wait
@@ -649,11 +679,54 @@ class TestReplayCommand:
         assert json.loads(capsys.readouterr().out) == []
         store.query.assert_not_called()
 
+    def test_backend_mode_syncs_from_backend(self):
+        from jernerics.commands.tracking import replay
+
+        backend = MagicMock()
+        with (
+            patch(
+                "jernerics.commands.tracking._get_backend",
+                return_value=(backend, "p", Path("/proj")),
+            ) as get_backend,
+            patch(
+                "jernerics.commands.tracking.get_project_name",
+                return_value="proj",
+            ) as project_name,
+        ):
+            replay(backend_name="hpc", study="sweep1")
+
+        get_backend.assert_called_once_with("hpc")
+        project_name.assert_called_once_with(Path("/proj"))
+        backend.sync.assert_called_once_with("proj", study="sweep1")
+
+    @pytest.mark.parametrize(
+        ("flag", "kwargs"),
+        [
+            ("--tracking-dir", {"tracking_dir": Path("/tmp/trk")}),
+            ("--server", {"server": "http://srv:8000"}),
+            ("--dry-run", {"dry_run": True}),
+            ("--json", {"json_output": True}),
+        ],
+    )
+    def test_backend_mode_rejects_local_only_flags(self, flag, kwargs, capsys):
+        from jernerics.commands.tracking import replay
+        from jernerics.config import ExitCode
+
+        with (
+            patch("jernerics.commands.tracking._get_backend") as get_backend,
+            pytest.raises(SystemExit) as exc_info,
+        ):
+            replay(backend_name="hpc", **kwargs)
+
+        assert exc_info.value.code == ExitCode.GENERAL_ERROR
+        get_backend.assert_not_called()
+        assert f"{flag} cannot be combined with --backend" in capsys.readouterr().out
+
 
 class TestJobsCommand:
     def test_jobs_table_renders_study_column(self, capsys, tmp_path):
         from jernerics.backend.models import JobInfo
-        from jernerics.commands.jobs import jobs
+        from jernerics.commands.jobs import list_jobs
 
         backend = MagicMock()
         backend.list_jobs.return_value = [
@@ -672,7 +745,7 @@ class TestJobsCommand:
             ),
             patch("jernerics.commands.jobs.cache_dir", return_value=tmp_path),
         ):
-            jobs(backend_name="hpc")
+            list_jobs(backend_name="hpc")
 
         out = capsys.readouterr().out
         assert "STUDY" in out
@@ -681,7 +754,7 @@ class TestJobsCommand:
 
     def test_jobs_json_includes_study_name(self, capsys, tmp_path):
         from jernerics.backend.models import JobInfo
-        from jernerics.commands.jobs import jobs
+        from jernerics.commands.jobs import list_jobs
 
         backend = MagicMock()
         backend.list_jobs.return_value = [
@@ -699,7 +772,7 @@ class TestJobsCommand:
             ),
             patch("jernerics.commands.jobs.cache_dir", return_value=tmp_path),
         ):
-            jobs(backend_name="hpc", json_output=True)
+            list_jobs(backend_name="hpc", json_output=True)
 
         data = json.loads(capsys.readouterr().out)
         assert data[0]["study_name"] == "overfit_seed42"
@@ -1135,7 +1208,7 @@ class TestInteractiveSyncWiring:
     """The ``interactive`` command threads sync through every lifecycle path."""
 
     def test_end_terminates_sync_before_scancel(self):
-        from jernerics.commands.interactive import interactive
+        from jernerics.commands.interactive import stop
 
         existing = MagicMock(job_id="123", state="RUNNING", node="gpu1")
         sess = _interactive_session_stub(existing)
@@ -1157,12 +1230,12 @@ class TestInteractiveSyncWiring:
         ):
             term.side_effect = record_terminate
             sess.end.side_effect = record_end
-            interactive(backend_name="hpc", end=True)
+            stop(backend_name="hpc")
 
         assert order == ["terminate", "end"]
 
     def test_new_session_starts_sync_then_connects(self):
-        from jernerics.commands.interactive import interactive
+        from jernerics.commands.interactive import start
 
         sess = _interactive_session_stub(None)
         sess.submit.return_value = "123"
@@ -1176,14 +1249,14 @@ class TestInteractiveSyncWiring:
             patch("jernerics.commands.interactive._warn_sync_orphans") as warn,
             patch("jernerics.commands.interactive._ensure_interactive_sync") as ensure,
         ):
-            interactive(backend_name="hpc")
+            start(backend_name="hpc")
 
         ensure.assert_called_once_with(sess, Path("/proj"), "proj", reconnect=False)
         sess.connect.assert_called_once_with("gpu1")
         warn.assert_called_once_with("proj", alive=False)
 
     def test_reconnect_running_uses_reconnect_sync(self):
-        from jernerics.commands.interactive import interactive
+        from jernerics.commands.interactive import start
 
         existing = MagicMock(job_id="123", state="RUNNING", node="gpu1")
         sess = _interactive_session_stub(existing)
@@ -1196,7 +1269,7 @@ class TestInteractiveSyncWiring:
             patch("jernerics.commands.interactive._warn_sync_orphans") as warn,
             patch("jernerics.commands.interactive._ensure_interactive_sync") as ensure,
         ):
-            interactive(backend_name="hpc")
+            start(backend_name="hpc")
 
         ensure.assert_called_once_with(sess, Path("/proj"), "proj", reconnect=True)
         sess.connect.assert_called_once_with("gpu1")
