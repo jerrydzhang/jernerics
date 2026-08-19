@@ -29,6 +29,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from jernerics.sync.exclusions import mutagen_ignores, project_excludes
+
 MUTAGEN_BIN = "mutagen"
 
 #: Prefix for every jernerics-managed sync session. Orphan detection matches on
@@ -48,30 +50,6 @@ DEFAULT_POLL_INTERVAL = 1.0
 #: How long :meth:`MutagenSync.start` waits for the initial sync to settle.
 DEFAULT_CONVERGENCE_TIMEOUT = 60
 
-#: Ignore patterns for interactive sync. ``--ignore-vcs`` handles ``.git`` etc.
-#: separately, so VCS dirs are intentionally absent here. Mirrors
-#: ``ProjectSync.DEFAULT_EXCLUDES`` plus interactive-only paths (``pools/``,
-#: ``logs/``). Applied by mutagen continuously in both directions.
-INTERACTIVE_EXCLUDES: list[str] = [
-    "__pycache__/",
-    "*.pyc",
-    "*.sif",
-    ".cache/",
-    "results/",
-    "pools/",
-    "logs/",
-    ".venv/",
-    "venv/",
-    "*.egg-info/",
-    ".eggs/",
-    "build/",
-    "dist/",
-    ".mypy_cache/",
-    ".ruff_cache/",
-    ".hypothesis/",
-    ".pytest_cache/",
-    ".direnv/",
-]
 
 #: mutagen ``sync list`` template emitting one tab-delimited record per session:
 #: name, status, alpha path, beta path, alpha connected, beta connected,
@@ -235,7 +213,7 @@ class MutagenSync:
         remote_dir: str,
         *,
         name: str,
-        excludes: Sequence[str] = INTERACTIVE_EXCLUDES,
+        excludes: Sequence[str] | None = None,
         sync_mode: str = "two-way-safe",
         watch_mode: str = "portable",
         ignore_vcs: bool = True,
@@ -243,7 +221,14 @@ class MutagenSync:
         """Build the ``mutagen sync create`` argv (without the leading binary).
 
         Pure function — safe to unit-test without invoking mutagen.
+        ``excludes`` defaults to the effective policy for ``local_dir`` (its
+        ``.gitignore`` and ``.jernericsignore`` patterns plus the built-in
+        list). Mutagen locks ignores at creation: later policy changes apply
+        only to the next intentionally created session. VCS-dir patterns are
+        dropped in favor of ``--ignore-vcs``.
         """
+        if excludes is None:
+            excludes = project_excludes(Path(local_dir))
         beta = f"{remote_host}:{remote_dir}"
         cmd: list[str] = [
             "sync",
@@ -259,7 +244,7 @@ class MutagenSync:
         ]
         if ignore_vcs:
             cmd.append("--ignore-vcs")
-        for pattern in excludes:
+        for pattern in mutagen_ignores(excludes, ignore_vcs=ignore_vcs):
             cmd += ["-i", pattern]
         return cmd
 
@@ -270,7 +255,7 @@ class MutagenSync:
         remote_dir: str,
         *,
         name: str,
-        excludes: Sequence[str] = INTERACTIVE_EXCLUDES,
+        excludes: Sequence[str] | None = None,
         sync_mode: str = "two-way-safe",
         watch_mode: str = "portable",
         ignore_vcs: bool = True,

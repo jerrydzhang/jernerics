@@ -6,24 +6,13 @@ from pathlib import Path
 
 import pathspec
 
-DEFAULT_SCP_TIMEOUT = 300
+from jernerics.sync.exclusions import (
+    compile_excludes,
+    project_excludes,
+    should_include,
+)
 
-DEFAULT_EXCLUDES = [
-    ".git/",
-    "__pycache__/",
-    "*.pyc",
-    "*.sif",
-    ".cache/",
-    "results/",
-    ".venv/",
-    "venv/",
-    "*.egg-info/",
-    ".eggs/",
-    "build/",
-    "dist/",
-    ".mypy_cache/",
-    ".ruff_cache/",
-]
+DEFAULT_SCP_TIMEOUT = 300
 
 
 def _quote_path(path: str) -> str:
@@ -33,35 +22,13 @@ def _quote_path(path: str) -> str:
     return shlex.quote(path)
 
 
-def _load_gitignore(project_path: Path) -> pathspec.PathSpec | None:
-    gitignore_path = project_path / ".gitignore"
-    if not gitignore_path.exists():
-        return None
-    patterns = gitignore_path.read_text().splitlines()
-    return pathspec.PathSpec.from_lines("gitignore", patterns)
-
-
-def _should_include(
-    rel_path: str,
-    gitignore_spec: pathspec.PathSpec | None,
-    default_spec: pathspec.PathSpec,
-) -> bool:
-    if gitignore_spec and gitignore_spec.match_file(rel_path):
-        return False
-    return not default_spec.match_file(rel_path)
-
-
-def _collect_files(
-    project_path: Path,
-    gitignore_spec: pathspec.PathSpec | None,
-    default_spec: pathspec.PathSpec,
-) -> list[Path]:
+def _collect_files(project_path: Path, spec: pathspec.PathSpec) -> list[Path]:
     files = []
     for item in project_path.rglob("*"):
         if not item.is_file():
             continue
         rel_path = item.relative_to(project_path).as_posix()
-        if _should_include(rel_path, gitignore_spec, default_spec):
+        if should_include(rel_path, spec):
             files.append(item)
     return files
 
@@ -78,10 +45,8 @@ class ProjectSync:
     ) -> bool:
         project_path = Path(project_dir)
 
-        gitignore_spec = _load_gitignore(project_path)
-        default_spec = pathspec.PathSpec.from_lines("gitignore", DEFAULT_EXCLUDES)
-
-        files_to_sync = _collect_files(project_path, gitignore_spec, default_spec)
+        spec = compile_excludes(project_excludes(project_path))
+        files_to_sync = _collect_files(project_path, spec)
 
         if not files_to_sync:
             return True

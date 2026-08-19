@@ -153,6 +153,14 @@ remote_dir = "."
 | `sampler` | No | Optuna sampler (default: `TPESampler`) |
 | `backend_overrides` | No | Per-backend option overrides |
 
+### `.jernericsignore` — project sync excludes
+
+Every mechanism that transfers project source to a remote — deployment tar sync, interactive mutagen sync, and the one-shot fallback — applies one exclusion policy, composed in order: your `.gitignore` patterns, then `.jernericsignore` patterns, then a built-in list (`.git/`, `__pycache__/`, `*.pyc`, `*.sif`, `.cache/`, `results/`, `pools/`, `logs/`, `.venv/`, `venv/`, `*.egg-info/`, `.eggs/`, `build/`, `dist/`, `.mypy_cache/`, `.ruff_cache/`, `.hypothesis/`, `.pytest_cache/`, `.direnv/`).
+
+Patterns use Git ignore syntax — root a pattern with a leading `/`, negate with `!`. Later sources win: `.jernericsignore` can re-include something `.gitignore` excluded, but the built-in list always wins and can never be negated. This is how you keep Git-tracked paths (e.g. `checkpoints/`) out of the remote copy. `.jernericsignore` itself synchronizes.
+
+Mutagen locks its ignore set when a session is created: edits to `.gitignore` or `.jernericsignore` take effect the next time a session is intentionally created (a fresh allocation, or replacement of a stale session). A live or conflicted session is never restarted automatically — stop it and start again to apply the new policy.
+
 ### Environment variables
 
 ```bash

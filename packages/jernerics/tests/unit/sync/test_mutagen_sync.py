@@ -2,9 +2,14 @@ from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import pytest
+from jernerics.sync.exclusions import (
+    BUILTIN_EXCLUDES,
+    IGNORE_FILENAME,
+    mutagen_ignores,
+    project_excludes,
+)
 from jernerics.sync.mutagen_sync import (
     CONVERGED_STATUS,
-    INTERACTIVE_EXCLUDES,
     SESSION_PREFIX,
     MutagenError,
     MutagenNotFound,
@@ -193,12 +198,41 @@ class TestBuildCreateCommand:
             assert pat in cmd
         assert cmd.count("-i") == 2
 
-    def test_default_excludes_used_when_omitted(self):
+    def test_default_excludes_are_builtin_minus_vcs_patterns(self):
         sync = MutagenSync(mutagen_path="/p/mutagen")
         cmd = sync.build_create_command("/l", "h", "/r", name="n")
-        assert cmd.count("-i") == len(INTERACTIVE_EXCLUDES)
-        for pat in INTERACTIVE_EXCLUDES:
-            assert pat in cmd
+        i_args = [arg for i, arg in enumerate(cmd) if cmd[i - 1] == "-i"]
+        assert i_args == mutagen_ignores(BUILTIN_EXCLUDES)
+        assert ".git/" not in i_args
+
+    def test_default_excludes_derived_from_local_dir(self, tmp_path):
+        (tmp_path / IGNORE_FILENAME).write_text("scratch/\n")
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        cmd = sync.build_create_command(tmp_path, "h", "/r", name="n")
+        i_args = [arg for i, arg in enumerate(cmd) if cmd[i - 1] == "-i"]
+        assert i_args == mutagen_ignores(project_excludes(tmp_path))
+        assert "scratch/" in i_args
+
+    def test_ignore_vcs_drops_vcs_pattern_entries(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        cmd = sync.build_create_command(
+            "/l", "h", "/r", name="n", excludes=[".git/", "results/"]
+        )
+        i_args = [arg for i, arg in enumerate(cmd) if cmd[i - 1] == "-i"]
+        assert i_args == ["results/"]
+
+    def test_no_ignore_vcs_keeps_vcs_pattern_entries(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        cmd = sync.build_create_command(
+            "/l",
+            "h",
+            "/r",
+            name="n",
+            excludes=[".git/", "results/"],
+            ignore_vcs=False,
+        )
+        i_args = [arg for i, arg in enumerate(cmd) if cmd[i - 1] == "-i"]
+        assert i_args == [".git/", "results/"]
 
     def test_path_object_accepted(self):
         from pathlib import Path
