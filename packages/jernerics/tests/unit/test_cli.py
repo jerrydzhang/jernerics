@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from jernerics.cli import (
+from jernerics.commands.project import (
     _create_minimal_pyproject,
     _get_default_jernerics_config,
 )
@@ -87,10 +87,10 @@ class TestInitCommand:
 
         with patch("shutil.which") as mock_which:
             mock_which.return_value = "/usr/bin/uv"
-            with patch("jernerics.cli.subprocess.run") as mock_run:
+            with patch("jernerics.commands.project.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-                from jernerics.cli import init
+                from jernerics.commands.project import init
 
                 init(str(project_dir))
 
@@ -101,10 +101,10 @@ class TestInitCommand:
 
         with patch("shutil.which") as mock_which:
             mock_which.return_value = "/usr/bin/uv"
-            with patch("jernerics.cli.subprocess.run") as mock_run:
+            with patch("jernerics.commands.project.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-                from jernerics.cli import init
+                from jernerics.commands.project import init
 
                 init(str(project_dir))
 
@@ -115,10 +115,10 @@ class TestInitCommand:
 
         with patch("shutil.which") as mock_which:
             mock_which.return_value = "/usr/bin/uv"
-            with patch("jernerics.cli.subprocess.run") as mock_run:
+            with patch("jernerics.commands.project.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-                from jernerics.cli import init
+                from jernerics.commands.project import init
 
                 init(str(project_dir))
 
@@ -136,10 +136,10 @@ class TestInitCommand:
 
         with patch("shutil.which") as mock_which:
             mock_which.return_value = "/usr/bin/uv"
-            with patch("jernerics.cli.subprocess.run") as mock_run:
+            with patch("jernerics.commands.project.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-                from jernerics.cli import init
+                from jernerics.commands.project import init
 
                 init(str(project_dir))
 
@@ -152,7 +152,7 @@ class TestInitCommand:
         with patch("shutil.which") as mock_which:
             mock_which.return_value = None
 
-            from jernerics.cli import init
+            from jernerics.commands.project import init
 
             with pytest.raises(SystemExit):
                 init(str(project_dir))
@@ -163,7 +163,7 @@ class TestInitCommand:
         with patch("shutil.which") as mock_which:
             mock_which.return_value = "/usr/bin/uv"
 
-            from jernerics.cli import init
+            from jernerics.commands.project import init
 
             with pytest.raises(SystemExit):
                 init(str(project_dir), starter="nonexistent")
@@ -175,10 +175,10 @@ class TestInitCommand:
 
         with patch("shutil.which") as mock_which:
             mock_which.return_value = "/usr/bin/uv"
-            with patch("jernerics.cli.subprocess.run") as mock_run:
+            with patch("jernerics.commands.project.subprocess.run") as mock_run:
                 mock_run.return_value = MagicMock(returncode=0, stderr="", stdout="")
 
-                from jernerics.cli import init
+                from jernerics.commands.project import init
 
                 init(str(project_dir))
 
@@ -196,13 +196,13 @@ class TestMainFunction:
 
 class TestWaitCommand:
     def test_wait_calls_backend_with_correct_args(self, capsys):
-        from jernerics.cli import wait
+        from jernerics.commands.jobs import wait
 
         mock_backend = MagicMock()
         mock_backend.wait_for_completion.return_value = True
 
         with patch(
-            "jernerics.cli._get_backend",
+            "jernerics.commands.jobs._get_backend",
             return_value=(mock_backend, "proj", Path("/tmp")),
         ):
             wait("job-123", backend_name="hpc", timeout=None, poll_interval=10)
@@ -214,13 +214,13 @@ class TestWaitCommand:
         assert "completed successfully" in out
 
     def test_wait_exit_zero_on_success(self, capsys):
-        from jernerics.cli import wait
+        from jernerics.commands.jobs import wait
 
         mock_backend = MagicMock()
         mock_backend.wait_for_completion.return_value = True
 
         with patch(
-            "jernerics.cli._get_backend",
+            "jernerics.commands.jobs._get_backend",
             return_value=(mock_backend, "proj", Path("/tmp")),
         ):
             wait("job-123", backend_name="hpc", timeout=None, poll_interval=10)
@@ -229,14 +229,14 @@ class TestWaitCommand:
         assert "Job job-123 completed successfully" in out
 
     def test_wait_exit_one_on_failure(self, capsys):
-        from jernerics.cli import wait
+        from jernerics.commands.jobs import wait
 
         mock_backend = MagicMock()
         mock_backend.wait_for_completion.return_value = False
 
         with (
             patch(
-                "jernerics.cli._get_backend",
+                "jernerics.commands.jobs._get_backend",
                 return_value=(mock_backend, "proj", Path("/tmp")),
             ),
             pytest.raises(SystemExit) as exc_info,
@@ -248,14 +248,14 @@ class TestWaitCommand:
         assert "finished with non-success status" in out
 
     def test_wait_exit_two_on_timeout(self, capsys):
-        from jernerics.cli import wait
+        from jernerics.commands.jobs import wait
 
         mock_backend = MagicMock()
         mock_backend.wait_for_completion.side_effect = TimeoutError("timed out")
 
         with (
             patch(
-                "jernerics.cli._get_backend",
+                "jernerics.commands.jobs._get_backend",
                 return_value=(mock_backend, "proj", Path("/tmp")),
             ),
             pytest.raises(SystemExit) as exc_info,
@@ -272,22 +272,22 @@ class TestWaitCommand:
 
 class TestRunsCommand:
     def test_runs_json_outputs_analysis(self, capsys):
-        from jernerics.cli import runs
+        from jernerics.commands.tracking import runs
 
         canned = [{"study_name": "s", "trial_id": 0, "status": "running"}]
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.get_all_runs", return_value=canned),
+            patch("jernerics.commands.tracking.get_all_runs", return_value=canned),
         ):
             runs(json_output=True)
 
         assert json.loads(capsys.readouterr().out) == canned
 
     def test_runs_text_renders_without_error(self, capsys):
-        from jernerics.cli import runs
+        from jernerics.commands.tracking import runs
 
         canned = [
             {
@@ -306,10 +306,10 @@ class TestRunsCommand:
         ]
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.get_all_runs", return_value=canned),
+            patch("jernerics.commands.tracking.get_all_runs", return_value=canned),
         ):
             runs(json_output=False)
 
@@ -318,14 +318,14 @@ class TestRunsCommand:
         assert "completed" in out
 
     def test_runs_empty_message(self, capsys):
-        from jernerics.cli import runs
+        from jernerics.commands.tracking import runs
 
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.get_all_runs", return_value=[]),
+            patch("jernerics.commands.tracking.get_all_runs", return_value=[]),
         ):
             runs(json_output=False)
 
@@ -334,7 +334,7 @@ class TestRunsCommand:
 
 class TestSummaryCommand:
     def test_summary_json_outputs_analysis(self, capsys):
-        from jernerics.cli import summary
+        from jernerics.commands.tracking import summary
 
         canned = {
             "study_name": "s",
@@ -344,25 +344,25 @@ class TestSummaryCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_run_summary", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_run_summary", return_value=canned),
         ):
             summary("s", json_output=True)
 
         assert json.loads(capsys.readouterr().out) == canned
 
     def test_summary_missing_run_exits(self, capsys):
-        from jernerics.cli import summary
+        from jernerics.commands.tracking import summary
 
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=False),
+            patch("jernerics.commands.tracking.run_exists", return_value=False),
             pytest.raises(SystemExit) as exc_info,
         ):
             summary("ghost", json_output=False)
@@ -370,7 +370,7 @@ class TestSummaryCommand:
         assert exc_info.value.code == 1
 
     def test_summary_text_renders_git_hash(self, capsys):
-        from jernerics.cli import summary
+        from jernerics.commands.tracking import summary
 
         canned = {
             "study_name": "s",
@@ -388,11 +388,11 @@ class TestSummaryCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_run_summary", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_run_summary", return_value=canned),
         ):
             summary("s", json_output=False)
 
@@ -400,7 +400,7 @@ class TestSummaryCommand:
         assert "git: 4a5e109" in out
 
     def test_summary_text_renders_text_metrics_section(self, capsys):
-        from jernerics.cli import summary
+        from jernerics.commands.tracking import summary
 
         canned = {
             "study_name": "s",
@@ -418,11 +418,11 @@ class TestSummaryCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_run_summary", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_run_summary", return_value=canned),
         ):
             summary("s", json_output=False)
 
@@ -431,7 +431,7 @@ class TestSummaryCommand:
         assert "pred_expr (5 points)" in out
 
     def test_summary_text_omits_text_metrics_when_absent(self, capsys):
-        from jernerics.cli import summary
+        from jernerics.commands.tracking import summary
 
         canned = {
             "study_name": "s",
@@ -449,11 +449,11 @@ class TestSummaryCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_run_summary", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_run_summary", return_value=canned),
         ):
             summary("s", json_output=False)
 
@@ -463,7 +463,7 @@ class TestSummaryCommand:
 
 class TestDiffCommand:
     def test_diff_json_outputs_analysis(self, capsys):
-        from jernerics.cli import diff
+        from jernerics.commands.tracking import diff
 
         canned = {
             "run_a": {"label": "a"},
@@ -475,25 +475,25 @@ class TestDiffCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_run_diff", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_run_diff", return_value=canned),
         ):
             diff("a", "b", json_output=True)
 
         assert json.loads(capsys.readouterr().out) == canned
 
     def test_diff_missing_run_exits(self, capsys):
-        from jernerics.cli import diff
+        from jernerics.commands.tracking import diff
 
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=False),
+            patch("jernerics.commands.tracking.run_exists", return_value=False),
             pytest.raises(SystemExit) as exc_info,
         ):
             diff("a", "b", json_output=False)
@@ -522,10 +522,10 @@ def _write_jsonl(path: Path, n: int, study: str = "sweep1") -> None:
 
 class TestReplayCommand:
     def test_passes_resolved_server_and_dir_to_replay(self):
-        from jernerics.cli import replay
+        from jernerics.commands.tracking import replay
 
         with patch(
-            "jernerics.cli.replay_tracking", return_value=ReplayResult()
+            "jernerics.commands.tracking.replay_tracking", return_value=ReplayResult()
         ) as mock_rt:
             replay(server="http://srv:8000", tracking_dir=Path("/tmp/trk"))
 
@@ -535,23 +535,24 @@ class TestReplayCommand:
         assert kwargs["study"] is None
 
     def test_resolves_tracking_dir_from_cache_when_unset(self, tmp_path):
-        from jernerics.cli import replay
+        from jernerics.commands.tracking import replay
 
         with (
             patch(
-                "jernerics.cli.replay_tracking", return_value=ReplayResult()
+                "jernerics.commands.tracking.replay_tracking",
+                return_value=ReplayResult(),
             ) as mock_rt,
-            patch("jernerics.cli.cache_dir", return_value=tmp_path),
+            patch("jernerics.commands.tracking.cache_dir", return_value=tmp_path),
         ):
             replay(server="http://srv:8000")
 
         assert mock_rt.call_args.kwargs["tracking_dir"] == tmp_path / "tracking"
 
     def test_json_output_emits_result(self, capsys):
-        from jernerics.cli import replay
+        from jernerics.commands.tracking import replay
 
         result = ReplayResult(files_processed=1, events_sent=3, errors=["boom"])
-        with patch("jernerics.cli.replay_tracking", return_value=result):
+        with patch("jernerics.commands.tracking.replay_tracking", return_value=result):
             replay(
                 server="http://srv:8000",
                 tracking_dir=Path("/tmp/trk"),
@@ -564,11 +565,13 @@ class TestReplayCommand:
         assert out["errors"] == ["boom"]
 
     def test_no_server_configured_exits(self):
-        from jernerics.cli import replay
+        from jernerics.commands.tracking import replay
         from jernerics.config import ExitCode
 
         with (
-            patch("jernerics.cli.load_tracking_server", return_value=None),
+            patch(
+                "jernerics.commands.tracking.load_tracking_server", return_value=None
+            ),
             pytest.raises(SystemExit) as exc_info,
         ):
             replay()
@@ -576,13 +579,13 @@ class TestReplayCommand:
         assert exc_info.value.code == ExitCode.CONFIG_ERROR
 
     def test_dry_run_computes_delta_json(self, tmp_path, capsys):
-        from jernerics.cli import replay
+        from jernerics.commands.tracking import replay
 
         _write_jsonl(tmp_path / "sweep1" / "events" / "0.jsonl", 10)
         store = MagicMock()
         store.query.return_value = (["COUNT(*)"], [(1,)])
 
-        with patch("jernerics.cli.RemoteStore", return_value=store):
+        with patch("jernerics.commands.tracking.RemoteStore", return_value=store):
             replay(
                 server="http://srv:8000",
                 tracking_dir=tmp_path,
@@ -594,14 +597,14 @@ class TestReplayCommand:
         assert report == [{"study": "sweep1", "local": 10, "synced": 5, "new": 5}]
 
     def test_dry_run_scoped_to_study(self, tmp_path, capsys):
-        from jernerics.cli import replay
+        from jernerics.commands.tracking import replay
 
         _write_jsonl(tmp_path / "alpha" / "events" / "0.jsonl", 4)
         _write_jsonl(tmp_path / "beta" / "events" / "0.jsonl", 6)
         store = MagicMock()
         store.query.return_value = (["COUNT(*)"], [(0,)])
 
-        with patch("jernerics.cli.RemoteStore", return_value=store):
+        with patch("jernerics.commands.tracking.RemoteStore", return_value=store):
             replay(
                 server="http://srv:8000",
                 tracking_dir=tmp_path,
@@ -614,13 +617,13 @@ class TestReplayCommand:
         assert report == [{"study": "beta", "local": 6, "synced": 0, "new": 6}]
 
     def test_dry_run_text_output(self, tmp_path, capsys):
-        from jernerics.cli import replay
+        from jernerics.commands.tracking import replay
 
         _write_jsonl(tmp_path / "sweep1" / "events" / "0.jsonl", 10)
         store = MagicMock()
         store.query.return_value = (["COUNT(*)"], [(3,)])
 
-        with patch("jernerics.cli.RemoteStore", return_value=store):
+        with patch("jernerics.commands.tracking.RemoteStore", return_value=store):
             replay(
                 server="http://srv:8000",
                 tracking_dir=tmp_path,
@@ -632,10 +635,10 @@ class TestReplayCommand:
         assert "dry run" in out
 
     def test_dry_run_no_local_events(self, tmp_path, capsys):
-        from jernerics.cli import replay
+        from jernerics.commands.tracking import replay
 
         store = MagicMock()
-        with patch("jernerics.cli.RemoteStore", return_value=store):
+        with patch("jernerics.commands.tracking.RemoteStore", return_value=store):
             replay(
                 server="http://srv:8000",
                 tracking_dir=tmp_path,
@@ -650,7 +653,7 @@ class TestReplayCommand:
 class TestJobsCommand:
     def test_jobs_table_renders_study_column(self, capsys, tmp_path):
         from jernerics.backend.models import JobInfo
-        from jernerics.cli import jobs
+        from jernerics.commands.jobs import jobs
 
         backend = MagicMock()
         backend.list_jobs.return_value = [
@@ -663,8 +666,11 @@ class TestJobsCommand:
             JobInfo(job_id="26887168", name="build", status="RUNNING"),
         ]
         with (
-            patch("jernerics.cli._get_backend", return_value=(backend, "p", tmp_path)),
-            patch("jernerics.cli.cache_dir", return_value=tmp_path),
+            patch(
+                "jernerics.commands.jobs._get_backend",
+                return_value=(backend, "p", tmp_path),
+            ),
+            patch("jernerics.commands.jobs.cache_dir", return_value=tmp_path),
         ):
             jobs(backend_name="hpc")
 
@@ -675,7 +681,7 @@ class TestJobsCommand:
 
     def test_jobs_json_includes_study_name(self, capsys, tmp_path):
         from jernerics.backend.models import JobInfo
-        from jernerics.cli import jobs
+        from jernerics.commands.jobs import jobs
 
         backend = MagicMock()
         backend.list_jobs.return_value = [
@@ -687,8 +693,11 @@ class TestJobsCommand:
             ),
         ]
         with (
-            patch("jernerics.cli._get_backend", return_value=(backend, "p", tmp_path)),
-            patch("jernerics.cli.cache_dir", return_value=tmp_path),
+            patch(
+                "jernerics.commands.jobs._get_backend",
+                return_value=(backend, "p", tmp_path),
+            ),
+            patch("jernerics.commands.jobs.cache_dir", return_value=tmp_path),
         ):
             jobs(backend_name="hpc", json_output=True)
 
@@ -698,7 +707,7 @@ class TestJobsCommand:
 
 class TestTraceCommand:
     def test_trace_json_scalar(self, capsys):
-        from jernerics.cli import trace
+        from jernerics.commands.tracking import trace
 
         canned = {
             "value_type": "scalar",
@@ -709,11 +718,11 @@ class TestTraceCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_metric_series", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_metric_series", return_value=canned),
         ):
             trace("s", "loss", json_output=True)
 
@@ -724,7 +733,7 @@ class TestTraceCommand:
         assert out["series"][0]["value"] == pytest.approx(9.0)
 
     def test_trace_json_text(self, capsys):
-        from jernerics.cli import trace
+        from jernerics.commands.tracking import trace
 
         canned = {
             "value_type": "json",
@@ -735,11 +744,11 @@ class TestTraceCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_metric_series", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_metric_series", return_value=canned),
         ):
             trace("s", "pred_expr", json_output=True)
 
@@ -748,7 +757,7 @@ class TestTraceCommand:
         assert out["series"][0]["value"] == "<BOS>"
 
     def test_trace_text_scalar_output(self, capsys):
-        from jernerics.cli import trace
+        from jernerics.commands.tracking import trace
 
         canned = {
             "value_type": "scalar",
@@ -759,11 +768,11 @@ class TestTraceCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_metric_series", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_metric_series", return_value=canned),
         ):
             trace("s", "loss")
 
@@ -774,7 +783,7 @@ class TestTraceCommand:
         assert "0.032" in out
 
     def test_trace_text_text_output(self, capsys):
-        from jernerics.cli import trace
+        from jernerics.commands.tracking import trace
 
         canned = {
             "value_type": "json",
@@ -784,11 +793,11 @@ class TestTraceCommand:
         }
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_metric_series", return_value=canned),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_metric_series", return_value=canned),
         ):
             trace("s", "pred_expr")
 
@@ -797,15 +806,15 @@ class TestTraceCommand:
         assert "<BOS>" in out
 
     def test_trace_missing_metric_exits(self, capsys):
-        from jernerics.cli import trace
+        from jernerics.commands.tracking import trace
 
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_metric_series", return_value=None),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_metric_series", return_value=None),
             pytest.raises(SystemExit) as exc_info,
         ):
             trace("s", "ghost", json_output=False)
@@ -814,14 +823,14 @@ class TestTraceCommand:
         assert "ghost" in capsys.readouterr().out
 
     def test_trace_missing_run_exits(self, capsys):
-        from jernerics.cli import trace
+        from jernerics.commands.tracking import trace
 
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=False),
+            patch("jernerics.commands.tracking.run_exists", return_value=False),
             pytest.raises(SystemExit) as exc_info,
         ):
             trace("ghost", "loss", json_output=False)
@@ -829,7 +838,7 @@ class TestTraceCommand:
         assert exc_info.value.code == 1
 
     def test_trace_no_metric_lists_available(self, capsys):
-        from jernerics.cli import trace
+        from jernerics.commands.tracking import trace
 
         canned_keys = [
             {"key": "loss", "value_type": "scalar", "count": 5},
@@ -837,11 +846,13 @@ class TestTraceCommand:
         ]
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_metric_keys", return_value=canned_keys),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch(
+                "jernerics.commands.tracking.get_metric_keys", return_value=canned_keys
+            ),
         ):
             trace("s")
 
@@ -852,15 +863,15 @@ class TestTraceCommand:
         assert "json" in out
 
     def test_trace_no_metric_no_metrics_message(self, capsys):
-        from jernerics.cli import trace
+        from jernerics.commands.tracking import trace
 
         with (
             patch(
-                "jernerics.cli._get_tracking_store",
+                "jernerics.commands.tracking._get_tracking_store",
                 return_value=(MagicMock(), "p"),
             ),
-            patch("jernerics.cli.run_exists", return_value=True),
-            patch("jernerics.cli.get_metric_keys", return_value=[]),
+            patch("jernerics.commands.tracking.run_exists", return_value=True),
+            patch("jernerics.commands.tracking.get_metric_keys", return_value=[]),
         ):
             trace("s")
 
@@ -908,12 +919,12 @@ class TestEnsureInteractiveSync:
         return sess
 
     def test_new_session_creates_sync(self):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
 
         sess = self._session()
         with (
-            patch("jernerics.cli.MutagenSync") as ms,
-            patch("jernerics.cli.ProjectSync") as ps,
+            patch("jernerics.commands.interactive.MutagenSync") as ms,
+            patch("jernerics.commands.interactive.ProjectSync") as ps,
         ):
             ms.available.return_value = True
             ms.return_value.list_sessions.return_value = []
@@ -926,11 +937,11 @@ class TestEnsureInteractiveSync:
             ps.assert_not_called()
 
     def test_new_session_replaces_stale_session(self, capsys):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
 
         sess = self._session()
         stale = _sync_record()
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.list_sessions.return_value = [stale]
             _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
@@ -941,11 +952,11 @@ class TestEnsureInteractiveSync:
         assert "Replacing stale" in capsys.readouterr().out
 
     def test_reconnect_keeps_live_session(self, capsys):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
 
         sess = self._session()
         live = _sync_record()
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.list_sessions.return_value = [live]
             _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=True)
@@ -953,10 +964,10 @@ class TestEnsureInteractiveSync:
         assert "already running" in capsys.readouterr().out
 
     def test_reconnect_restarts_dead_session(self, capsys):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
 
         sess = self._session()
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.list_sessions.return_value = []
             _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=True)
@@ -964,12 +975,12 @@ class TestEnsureInteractiveSync:
         assert "was lost" in capsys.readouterr().out
 
     def test_reconnect_conflicted_session_reports_without_restart(self, capsys):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
 
         sess = self._session()
         with (
-            patch("jernerics.cli.MutagenSync") as ms,
-            patch("jernerics.cli.ProjectSync") as ps,
+            patch("jernerics.commands.interactive.MutagenSync") as ms,
+            patch("jernerics.commands.interactive.ProjectSync") as ps,
         ):
             ms.available.return_value = True
             ms.return_value.list_sessions.return_value = [_sync_record(conflicts=2)]
@@ -988,12 +999,12 @@ class TestEnsureInteractiveSync:
         assert "Resolve by making both sides agree" in out
 
     def test_fresh_start_with_conflicts_warns_without_error(self, capsys):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
 
         sess = self._session()
         with (
-            patch("jernerics.cli.MutagenSync") as ms,
-            patch("jernerics.cli.ProjectSync") as ps,
+            patch("jernerics.commands.interactive.MutagenSync") as ms,
+            patch("jernerics.commands.interactive.ProjectSync") as ps,
         ):
             ms.available.return_value = True
             ms.return_value.list_sessions.side_effect = [
@@ -1010,12 +1021,12 @@ class TestEnsureInteractiveSync:
         assert "src/c.py" in out
 
     def test_fallback_when_mutagen_missing(self, capsys):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
 
         sess = self._session()
         with (
-            patch("jernerics.cli.MutagenSync") as ms,
-            patch("jernerics.cli.ProjectSync") as ps,
+            patch("jernerics.commands.interactive.MutagenSync") as ms,
+            patch("jernerics.commands.interactive.ProjectSync") as ps,
         ):
             ms.available.return_value = False
             _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
@@ -1025,13 +1036,13 @@ class TestEnsureInteractiveSync:
         assert "mutagen not found" in capsys.readouterr().out
 
     def test_start_failure_falls_back_to_oneshot(self):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
         from jernerics.sync.mutagen_sync import MutagenError
 
         sess = self._session()
         with (
-            patch("jernerics.cli.MutagenSync") as ms,
-            patch("jernerics.cli.ProjectSync") as ps,
+            patch("jernerics.commands.interactive.MutagenSync") as ms,
+            patch("jernerics.commands.interactive.ProjectSync") as ps,
         ):
             ms.available.return_value = True
             ms.return_value.start.side_effect = MutagenError("boom")
@@ -1039,19 +1050,19 @@ class TestEnsureInteractiveSync:
             ps.return_value.sync_project.assert_called_once()
 
     def test_no_host_is_noop(self):
-        from jernerics.cli import _ensure_interactive_sync
+        from jernerics.commands.interactive import _ensure_interactive_sync
 
         sess = self._session(login_target=None)
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             _ensure_interactive_sync(sess, Path("/proj"), "proj", reconnect=False)
             ms.available.assert_not_called()
 
 
 class TestTerminateInteractiveSync:
     def test_terminates_named_session(self, capsys):
-        from jernerics.cli import _terminate_interactive_sync
+        from jernerics.commands.interactive import _terminate_interactive_sync
 
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = True
             _terminate_interactive_sync("proj")
             ms.return_value.terminate.assert_called_once_with(
@@ -1060,18 +1071,18 @@ class TestTerminateInteractiveSync:
         assert "Stopped code sync" in capsys.readouterr().out
 
     def test_noop_when_mutagen_missing(self):
-        from jernerics.cli import _terminate_interactive_sync
+        from jernerics.commands.interactive import _terminate_interactive_sync
 
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = False
             _terminate_interactive_sync("proj")
             ms.return_value.terminate.assert_not_called()
 
     def test_swallows_terminate_error(self):
-        from jernerics.cli import _terminate_interactive_sync
+        from jernerics.commands.interactive import _terminate_interactive_sync
         from jernerics.sync.mutagen_sync import MutagenError
 
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.terminate.side_effect = MutagenError("nope")
             _terminate_interactive_sync("proj")
@@ -1079,11 +1090,11 @@ class TestTerminateInteractiveSync:
 
 class TestWarnSyncOrphans:
     def test_warns_about_orphans(self, capsys):
-        from jernerics.cli import _warn_sync_orphans
+        from jernerics.commands.interactive import _warn_sync_orphans
 
         orphan = MagicMock()
         orphan.name = "jernerics-interactive-dead"
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.find_orphans.return_value = [orphan]
             _warn_sync_orphans("proj", alive=False)
@@ -1092,18 +1103,18 @@ class TestWarnSyncOrphans:
         assert "jernerics-interactive-dead" in out
 
     def test_silent_when_no_orphans(self, capsys):
-        from jernerics.cli import _warn_sync_orphans
+        from jernerics.commands.interactive import _warn_sync_orphans
 
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.find_orphans.return_value = []
             _warn_sync_orphans("proj", alive=False)
         assert "stale" not in capsys.readouterr().out
 
     def test_alive_marks_current_as_live(self):
-        from jernerics.cli import _warn_sync_orphans
+        from jernerics.commands.interactive import _warn_sync_orphans
 
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = True
             ms.return_value.find_orphans.return_value = []
             _warn_sync_orphans("proj", alive=True)
@@ -1112,9 +1123,9 @@ class TestWarnSyncOrphans:
             )
 
     def test_noop_when_mutagen_missing(self):
-        from jernerics.cli import _warn_sync_orphans
+        from jernerics.commands.interactive import _warn_sync_orphans
 
-        with patch("jernerics.cli.MutagenSync") as ms:
+        with patch("jernerics.commands.interactive.MutagenSync") as ms:
             ms.available.return_value = False
             _warn_sync_orphans("proj", alive=False)
             ms.return_value.find_orphans.assert_not_called()
@@ -1124,7 +1135,7 @@ class TestInteractiveSyncWiring:
     """The ``interactive`` command threads sync through every lifecycle path."""
 
     def test_end_terminates_sync_before_scancel(self):
-        from jernerics.cli import interactive
+        from jernerics.commands.interactive import interactive
 
         existing = MagicMock(job_id="123", state="RUNNING", node="gpu1")
         sess = _interactive_session_stub(existing)
@@ -1139,10 +1150,10 @@ class TestInteractiveSyncWiring:
 
         with (
             patch(
-                "jernerics.cli._build_interactive_session",
+                "jernerics.commands.interactive._build_interactive_session",
                 return_value=(sess, Path("/proj"), "proj"),
             ),
-            patch("jernerics.cli._terminate_interactive_sync") as term,
+            patch("jernerics.commands.interactive._terminate_interactive_sync") as term,
         ):
             term.side_effect = record_terminate
             sess.end.side_effect = record_end
@@ -1151,7 +1162,7 @@ class TestInteractiveSyncWiring:
         assert order == ["terminate", "end"]
 
     def test_new_session_starts_sync_then_connects(self):
-        from jernerics.cli import interactive
+        from jernerics.commands.interactive import interactive
 
         sess = _interactive_session_stub(None)
         sess.submit.return_value = "123"
@@ -1159,11 +1170,11 @@ class TestInteractiveSyncWiring:
 
         with (
             patch(
-                "jernerics.cli._build_interactive_session",
+                "jernerics.commands.interactive._build_interactive_session",
                 return_value=(sess, Path("/proj"), "proj"),
             ),
-            patch("jernerics.cli._warn_sync_orphans") as warn,
-            patch("jernerics.cli._ensure_interactive_sync") as ensure,
+            patch("jernerics.commands.interactive._warn_sync_orphans") as warn,
+            patch("jernerics.commands.interactive._ensure_interactive_sync") as ensure,
         ):
             interactive(backend_name="hpc")
 
@@ -1172,18 +1183,18 @@ class TestInteractiveSyncWiring:
         warn.assert_called_once_with("proj", alive=False)
 
     def test_reconnect_running_uses_reconnect_sync(self):
-        from jernerics.cli import interactive
+        from jernerics.commands.interactive import interactive
 
         existing = MagicMock(job_id="123", state="RUNNING", node="gpu1")
         sess = _interactive_session_stub(existing)
 
         with (
             patch(
-                "jernerics.cli._build_interactive_session",
+                "jernerics.commands.interactive._build_interactive_session",
                 return_value=(sess, Path("/proj"), "proj"),
             ),
-            patch("jernerics.cli._warn_sync_orphans") as warn,
-            patch("jernerics.cli._ensure_interactive_sync") as ensure,
+            patch("jernerics.commands.interactive._warn_sync_orphans") as warn,
+            patch("jernerics.commands.interactive._ensure_interactive_sync") as ensure,
         ):
             interactive(backend_name="hpc")
 

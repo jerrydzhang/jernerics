@@ -2,7 +2,7 @@ import shutil
 import subprocess
 
 import pytest
-from jernerics.cli import _capture_git_hash
+from jernerics.commands.execution import _capture_git_hash
 
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 

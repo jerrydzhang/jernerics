@@ -107,12 +107,12 @@ class TestLocalBackendPostHook:
 class TestRunLocalSingleConfig:
     @patch("jernerics.backend.local_backend.run_trial")
     @patch("jernerics.backend.local_backend.cache_dir")
-    @patch("jernerics.cli.load_config")
+    @patch("jernerics.commands.execution.load_config")
     def test_single_config_runs_once(self, mock_load, mock_cache_dir, mock_run_trial):
         import tempfile
         from pathlib import Path
 
-        from jernerics.cli import run_local
+        from jernerics.commands.execution import run_local
 
         mock_load.return_value = SweepConfig(
             base={"seed": 42},
@@ -142,12 +142,12 @@ class TestRunLocalSingleConfig:
 class TestRunLocalSweep:
     @patch("jernerics.backend.local_backend.run_trial")
     @patch("jernerics.backend.local_backend.cache_dir")
-    @patch("jernerics.cli.load_config")
+    @patch("jernerics.commands.execution.load_config")
     def test_sweep_runs_n_trials(self, mock_load, mock_cache_dir, mock_run_trial):
         import tempfile
         from pathlib import Path
 
-        from jernerics.cli import run_local
+        from jernerics.commands.execution import run_local
 
         mock_load.return_value = SweepConfig(
             base={"seed": 42},
