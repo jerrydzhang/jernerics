@@ -62,7 +62,13 @@ _LIST_TEMPLATE = (
 
 #: mutagen ``sync list`` template emitting one line per session as
 #: ``<name>\t<path>\t...\t`` — a session without conflicts renders ``<name>\t``.
+#: mutagen ≥0.18 names the conflicted path ``Conflict.Root``.
 _CONFLICTS_TEMPLATE = (
+    "{{range .}}{{.Name}}\t{{range .Conflicts}}{{.Root}}\t{{end}}\n{{end}}"
+)
+
+#: Same shape for mutagen <0.18, where the field was named ``Path``.
+_CONFLICTS_TEMPLATE_LEGACY = (
     "{{range .}}{{.Name}}\t{{range .Conflicts}}{{.Path}}\t{{end}}\n{{end}}"
 )
 
@@ -363,18 +369,49 @@ class MutagenSync:
             sessions = [s for s in sessions if s.name == name]
         return sessions
 
-    def conflicted_paths(self, name: str) -> list[str]:
-        """Return the conflicted paths of session ``name``.
+    def flush(self, name: str) -> None:
+        """Force a synchronization cycle on session ``name`` and wait for it.
 
-        Empty when the session has no conflicts or does not exist. Raises
-        :class:`MutagenError` when ``mutagen sync list`` itself fails.
+        ``mutagen sync flush`` blocks until the cycle completes unless passed
+        ``--skip-wait``; we always wait so a subsequent conflict re-read sees
+        post-cycle state. Raises :class:`MutagenError` on failure.
         """
         result = self._run(
-            ["sync", "list", "--template", _CONFLICTS_TEMPLATE],
+            ["sync", "flush", name],
             capture_output=True,
             text=True,
             check=False,
         )
+        if result.returncode != 0:
+            raise MutagenError(
+                f"mutagen sync flush {name!r} failed (exit {result.returncode}): "
+                f"{(result.stderr or result.stdout).strip()}"
+            )
+
+    def conflicted_paths(self, name: str) -> list[str]:
+        """Return the conflicted paths of session ``name``.
+
+        Empty when the session has no conflicts or does not exist. Raises
+        ``MutagenError`` when ``mutagen sync list`` itself fails.
+        """
+        template = _CONFLICTS_TEMPLATE
+        result = self._run(
+            ["sync", "list", "--template", template],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0 and "can't evaluate field Root" in (
+            result.stderr or ""
+        ) + (result.stdout or ""):
+            # mutagen <0.18 named the conflicted path field ``Path``.
+            template = _CONFLICTS_TEMPLATE_LEGACY
+            result = self._run(
+                ["sync", "list", "--template", template],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
         if result.returncode != 0:
             raise MutagenError(
                 f"mutagen sync list failed (exit {result.returncode}): "

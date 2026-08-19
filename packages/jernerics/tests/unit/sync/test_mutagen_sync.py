@@ -444,16 +444,59 @@ class TestConflictedPaths:
         ):
             assert sync.conflicted_paths("jernerics-interactive-p") == []
 
-    def test_list_failure_raises(self):
+    def test_root_template_falls_back_to_legacy_path_field(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        template_error = (
+            "unable to execute formatting template: can't evaluate field Root"
+        )
+        legacy_out = "jernerics-interactive-p\tsrc/a.py\t\n"
+        with patch(
+            "jernerics.sync.mutagen_sync.subprocess.run",
+            side_effect=[
+                _cp(1, stderr=template_error),
+                _cp(0, stdout=legacy_out),
+            ],
+        ) as mock_run:
+            paths = sync.conflicted_paths("jernerics-interactive-p")
+        assert paths == ["src/a.py"]
+        legacy_template = mock_run.call_args[0][0][4]
+        assert ".Root" not in legacy_template
+        assert ".Path" in legacy_template
+
+    def test_other_template_errors_still_raise(self):
         sync = MutagenSync(mutagen_path="/p/mutagen")
         with (
             patch(
                 "jernerics.sync.mutagen_sync.subprocess.run",
-                return_value=_cp(1, stderr="daemon down"),
+                return_value=_cp(1, stderr="some other failure"),
             ),
             pytest.raises(MutagenError, match="sync list failed"),
         ):
             sync.conflicted_paths("jernerics-interactive-p")
+
+
+class TestFlush:
+    def test_success_runs_flush_for_named_session(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        with patch(
+            "jernerics.sync.mutagen_sync.subprocess.run",
+            return_value=_cp(0, stdout=""),
+        ) as mock_run:
+            sync.flush("jernerics-interactive-p")
+        args = mock_run.call_args[0][0]
+        assert args[1:4] == ["sync", "flush", "jernerics-interactive-p"]
+        assert "--skip-wait" not in args
+
+    def test_failure_raises_mutagen_error(self):
+        sync = MutagenSync(mutagen_path="/p/mutagen")
+        with (
+            patch(
+                "jernerics.sync.mutagen_sync.subprocess.run",
+                return_value=_cp(1, stderr="no such session"),
+            ),
+            pytest.raises(MutagenError, match="sync flush"),
+        ):
+            sync.flush("jernerics-interactive-p")
 
 
 class TestOrphans:

@@ -30,6 +30,13 @@ from jernerics.sync.mutagen_sync import (
     is_idle,
     session_name,
 )
+from jernerics.sync.resolve import (
+    PathPlan,
+    ResolveError,
+    ResolveReport,
+    SourceSide,
+    resolve_conflicts,
+)
 
 
 def _build_interactive_session(
@@ -465,11 +472,117 @@ def sync_status(
         print("Inspect with: mutagen sync list --long")
 
 
+def _print_resolution_preview(plans: list[PathPlan], run_dir: Path) -> None:
+    """Render the pre-mutation preview: one block per selected path."""
+    print(f"Backup run directory: {run_dir}")
+    for plan in plans:
+        assert plan.backup_path is not None
+        print(f"  {plan.rel}  ({plan.direction}, {plan.winner_size} bytes)")
+        print(f"    winner sha256 ({plan.source.value}): {plan.winner_sha}")
+        print(f"    loser sha256 ({plan.loser_side}): {plan.loser_sha}")
+        print(f"    loser backup: {plan.backup_path}")
+
+
+def _print_resolution_report(report: ResolveReport) -> None:
+    if report.error is not None:
+        print(f"Error: {report.error}")
+    if report.completed:
+        print(f"Completed ({len(report.completed)}):")
+        for rel in report.completed:
+            print(f"  {rel}")
+    if report.unresolved:
+        print(f"Unresolved ({len(report.unresolved)}):")
+        for rel in report.unresolved:
+            outcome = report.outcomes[rel]
+            detail = f" — {outcome.error}" if outcome.error else ""
+            print(f"  {rel}{detail}")
+    if report.untouched:
+        print(f"Untouched ({len(report.untouched)}):")
+        for rel in report.untouched:
+            print(f"  {rel}")
+    if report.run_dir is not None:
+        print(f"Backups (never auto-deleted): {report.run_dir}")
+
+
+def sync_resolve(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="Conflicted relative paths to resolve"),
+    ],
+    backend_name: Annotated[
+        str, typer.Option("--backend", "-b", help="Backend name from config")
+    ],
+    source: Annotated[SourceSide, typer.Option("--from", help="Which side wins")],
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Preview only; no backup, no change")
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes", help="Proceed without prompting (required when noninteractive)"
+        ),
+    ] = False,
+) -> None:
+    """Resolve sync conflicts by overwriting one side from the other.
+
+    Safety: losers are backed up locally first, every transfer is checksum
+    verified, and the session is flushed afterwards — the mutagen session
+    itself is never restarted. One --from side wins for every listed PATH.
+    """
+    project_dir = find_pyproject_dir()
+    if project_dir is None:
+        print("Error: No pyproject.toml found. Run 'jernerics init' to create one.")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+    try:
+        load_backend_config(backend_name)
+    except ConfigNotFound as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+
+    project_name = get_project_name(project_dir)
+    name = session_name(project_name)
+
+    if not MutagenSync.available():
+        print("Error: mutagen not found on PATH; cannot resolve conflicts.")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+
+    try:
+        report = resolve_conflicts(
+            MutagenSync(),
+            name,
+            [str(p) for p in paths],
+            source,
+            project_name,
+            dry_run=dry_run,
+            assume_yes=yes,
+            confirm=typer.confirm,
+            on_plans=_print_resolution_preview,
+        )
+    except ResolveError as e:
+        if str(e) == "declined":
+            print("Aborted; nothing was changed.")
+        else:
+            print(f"Error: {e}")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+    except (MutagenError, MutagenNotFound) as e:
+        print(f"Error: could not inspect sync session {name} ({e}).")
+        raise SystemExit(ExitCode.GENERAL_ERROR) from None
+
+    if report.dry_run:
+        print("Dry run: no backups written, nothing changed.")
+        return
+    _print_resolution_report(report)
+    if not report.ok:
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+    print(f"Resolved {len(report.completed)} path(s); conflicts cleared.")
+
+
 def register(app: typer.Typer) -> None:
     group = typer.Typer(help="Interactive GPU shells on a backend")
     group.command("start")(start)
     group.command("stop")(stop)
-    sync_group = typer.Typer(help="Inspect interactive code sync")
+    sync_group = typer.Typer(help="Inspect and resolve interactive code sync")
     sync_group.command("status")(sync_status)
+    sync_group.command("resolve")(sync_resolve)
     group.add_typer(sync_group, name="sync")
     app.add_typer(group, name="interactive")

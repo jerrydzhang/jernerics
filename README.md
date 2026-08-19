@@ -96,6 +96,7 @@ jernerics run --backend hpc trial.py config.py
 | `jernerics interactive start --backend <name>` | Open or reconnect to a GPU shell (`--time`, `--gpus`, `--partition`, `--constraint`) |
 | `jernerics interactive stop --backend <name>` | Tear down the interactive session |
 | `jernerics interactive sync status --backend <name>` | Report code-sync session health (`--json`) |
+| `jernerics interactive sync resolve <path>... --backend <name> --from local\|cluster` | Resolve conflicted paths with backups (`--dry-run`, `--yes`) |
 | `jernerics job list --backend <name>` | List jobs (`--all`, `--json`) |
 | `jernerics job cancel --backend <name> [id]` | Cancel jobs (`--all`) |
 | `jernerics job logs --backend <name> <id>` | View logs (`--follow`, `--array-index`, `--stderr`) |
@@ -170,6 +171,24 @@ JERNERICS_API_KEY           # Optional bearer token; must match on server and cl
 ```
 
 When `JERNERICS_API_KEY` is set in the server's environment, all requests (`/query`, `/ingest`, `/artifact`) must include an `Authorization: Bearer <key>` header. The same value is forwarded to remote backends automatically. If unset on the server, auth is disabled and all connections are accepted. Artifacts are stored on the server's disk (configured via `--artifacts-dir`); no external object storage is required.
+
+## Interactive sync conflict resolution
+
+`jernerics interactive sync status` lists conflicted paths. Conflicted files stop propagating in both directions (`two-way-safe` mode) until both sides agree. To resolve explicitly:
+
+```bash
+jernerics interactive sync resolve src/a.py src/b.py --backend hpc --from local
+```
+
+Every listed PATH must currently be conflicted and exist as a regular file on both sides; one `--from` side (local or cluster) wins the whole invocation. The command previews each transfer (direction, sizes, checksums, backup destination), asks once for confirmation (`--yes` for noninteractive use, `--dry-run` to preview only), then:
+
+- backs up every losing copy locally under `$XDG_STATE_HOME/jernerics/sync-backups/<project>/<run>/` (default `~/.local/state/...`; cluster losers are downloaded there) and checksum-verifies all backups before overwriting anything;
+- re-hashes both sides immediately before each overwrite (aborts on any mid-flight change) and lands each file via a verified temp file plus atomic rename, one path at a time;
+- stops at the first failure — never rolls back — and reports completed, untouched, and unresolved paths;
+- flushes the existing mutagen session and verifies every selected path left the conflict list.
+
+Backups and a `manifest.json` per run are kept indefinitely; nothing is auto-deleted. The sync session itself is never restarted or replaced by resolution.
+
 
 ## Deployment
 

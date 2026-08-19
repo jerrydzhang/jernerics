@@ -223,7 +223,7 @@ class TestCommandTree:
 
         assert actual == expected
 
-    def test_interactive_sync_group_exposes_status(self):
+    def test_interactive_sync_group_exposes_status_and_resolve(self):
         from jernerics.cli import app
 
         interactive = next(
@@ -233,7 +233,7 @@ class TestCommandTree:
         assert [g.name for g in interactive.registered_groups] == ["sync"]
         sync = interactive.registered_groups[0].typer_instance
         assert sync is not None
-        assert [c.name for c in sync.registered_commands] == ["status"]
+        assert [c.name for c in sync.registered_commands] == ["status", "resolve"]
 
 
 class TestWaitCommand:
