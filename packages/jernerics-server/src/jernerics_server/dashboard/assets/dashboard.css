@@ -1,0 +1,109 @@
+/* Dashboard shell styling: plain CSS, no build step. */
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #1a1a1a;
+}
+
+.shell {
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 0 1rem;
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #ddd;
+}
+
+.nav .brand {
+  font-weight: 700;
+  text-decoration: none;
+  color: inherit;
+}
+
+.nav .project-picker {
+  min-width: 14rem;
+}
+
+.nav .tray {
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.nav form {
+  margin-left: auto;
+}
+
+.nav .logout {
+  border: 1px solid #ccc;
+  background: #f7f7f7;
+  padding: 0.3rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.page {
+  padding: 1rem 0;
+}
+
+.surface {
+  border: 1px solid #e3e3e3;
+  border-radius: 6px;
+  padding: 1rem;
+  margin: 0.5rem 0;
+  background: #fafafa;
+}
+
+.surface-empty h3,
+.surface-error h3 {
+  margin-top: 0;
+}
+
+.surface-error {
+  border-color: #e0b4b4;
+  background: #fff6f6;
+}
+
+.surface-construction .construction-label {
+  font-weight: 600;
+}
+
+.surface-construction .construction-note {
+  color: #777;
+  font-style: italic;
+}
+
+.login-card {
+  max-width: 20rem;
+  margin: 8rem auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1.5rem;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+}
+
+.login-card input {
+  padding: 0.4rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+.login-card button {
+  padding: 0.4rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #f7f7f7;
+  cursor: pointer;
+}
+
+.login-error {
+  color: #b00020;
+  margin: 0;
+}

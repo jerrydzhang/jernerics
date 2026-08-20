@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "HTTP tracking server for jernerics"
 requires-python = ">=3.12"
 dependencies = [
+    "dash>=4.2",
+    "dash-ag-grid>=31.2",
     "fastapi>=0.136.1",
     "jernerics-schema",
     "uvicorn[standard]>=0.46.0",

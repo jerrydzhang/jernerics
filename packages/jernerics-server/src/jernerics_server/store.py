@@ -306,6 +306,11 @@ class Store:
     def close(self) -> None:
         self._con.close()
 
+    @property
+    def path(self) -> Path:
+        """Database file location (the dashboard secret lives beside it)."""
+        return self._path
+
     def _refuse_legacy(self, version: int) -> None:
         placeholders = ", ".join("?" * len(_V2_TABLES))
         present = [

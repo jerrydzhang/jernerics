@@ -18,6 +18,11 @@ def serve(
     root = (
         Path(artifacts_root) if artifacts_root else Path(db_path).parent / "artifacts"
     )
-    app = create_app(store, api_key=api_key, artifacts_root=root)
+    app = create_app(
+        store,
+        api_key=api_key,
+        artifacts_root=root,
+        dashboard=True,
+    )
     config = uvicorn.Config(app, host=host, port=http_port, log_level="error")
     uvicorn.Server(config).run()

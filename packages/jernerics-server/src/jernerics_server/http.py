@@ -139,6 +139,7 @@ def create_app(
     api_key: str | None = None,
     artifacts_root: str | Path | None = None,
     heartbeat_stale_s: float = 900.0,
+    dashboard: bool = False,
 ) -> FastAPI:
     app = FastAPI()
     app.add_middleware(_IngestBodyLimit)
@@ -148,6 +149,20 @@ def create_app(
         artifacts_root=Path(artifacts_root) if artifacts_root is not None else None,
     )
     queries = QueryService(store, heartbeat_stale_s=heartbeat_stale_s)
+    dashboard_ctx = None
+    artifact_get_deps: list = []
+    if dashboard:
+        from .dashboard import (
+            build_dashboard_context,
+            mount_dashboard,
+            session_or_bearer_auth,
+        )
+
+        dashboard_ctx = build_dashboard_context(store, queries=queries, api_key=api_key)
+        if api_key:
+            # Same-origin artifact downloads accept the dashboard session;
+            # uploads and every other endpoint stay bearer-only.
+            artifact_get_deps = [Depends(session_or_bearer_auth(dashboard_ctx))]
 
     @app.post("/query", response_model=None, dependencies=deps)
     def query(req: QueryRequest) -> JSONResponse:
@@ -393,7 +408,16 @@ def create_app(
             finally:
                 tmp.unlink(missing_ok=True)
 
-        @app.get("/artifact/{artifact_id}", response_model=None, dependencies=deps)
+        @app.get(
+            "/dashboard/artifact/{artifact_id}",
+            response_model=None,
+            dependencies=artifact_get_deps or deps,
+        )
+        @app.get(
+            "/artifact/{artifact_id}",
+            response_model=None,
+            dependencies=artifact_get_deps or deps,
+        )
         def get_artifact(artifact_id: str) -> FileResponse:
             canonical = _canonical_artifact_id(artifact_id)
             declaration = store.artifact_declaration(canonical)
@@ -422,5 +446,8 @@ def create_app(
     @app.get("/api/health", response_model=None, dependencies=deps)
     def health() -> JSONResponse:
         return JSONResponse(content={"ok": True})
+
+    if dashboard_ctx is not None:
+        mount_dashboard(app, dashboard_ctx)
 
     return app
