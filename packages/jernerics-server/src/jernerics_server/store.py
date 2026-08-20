@@ -27,7 +27,7 @@ from jernerics_schema import (
     TrialState,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _V2_TABLES = ("sweep_meta", "trial_end", "params")
 
@@ -212,9 +212,19 @@ def _migrate_to_v4(con: sqlite3.Connection) -> None:
         con.execute(statement)
 
 
+def _migrate_to_v5(con: sqlite3.Connection) -> None:
+    for statement in (
+        "ALTER TABLE trials ADD COLUMN objective REAL",
+        "ALTER TABLE trials ADD COLUMN distributions_json TEXT",
+        "ALTER TABLE trials ADD COLUMN attrs_json TEXT",
+    ):
+        con.execute(statement)
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_to_v3,
     4: _migrate_to_v4,
+    5: _migrate_to_v5,
 }
 
 

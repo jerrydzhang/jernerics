@@ -1313,3 +1313,162 @@ class TestDeterministicSweepIdentity:
         assert result.applied == 3
         assert rows(store, "SELECT COUNT(*) FROM sweeps") == [(1,)]
         assert rows(store, "SELECT COUNT(*) FROM submissions") == [(2,)]
+
+
+class TestOptimizerMirrorColumns:
+    """objective/distributions/attrs carried by trial snapshots."""
+
+    def _events(
+        self,
+        sweep: uuid.UUID,
+        trial: uuid.UUID,
+        *,
+        state: TrialState = TrialState.COMPLETED,
+        **overrides,
+    ) -> list:
+        sweep_event = SweepSnapshotEvent(
+            event_id=eid(),
+            recorded_at=at(0),
+            project="proj",
+            sweep_id=sweep,
+            name="s",
+            state="running",
+        )
+        trial_event = TrialSnapshotEvent(
+            event_id=eid(),
+            recorded_at=at(1),
+            trial_id=trial,
+            sweep_id=sweep,
+            number=0,
+            retry_root_trial_id=trial,
+            state=state,
+            params=FlatContext({"lr": 0.1}),
+            **overrides,
+        )
+        return [sweep_event, trial_event]
+
+    def _seed(self, service, sweep, trial, **kwargs):
+        events = self._events(sweep, trial, **kwargs)
+        return service.apply(request_of(events)), events
+
+    def test_columns_materialize_from_snapshot(self, store, service):
+        sweep, trial = eid(), eid()
+        distributions = FlatContext(
+            {"lr": '{"name": "FloatDistribution", "attributes": {"low": 0.0}}'}
+        )
+        attrs = FlatContext({"jernerics_trial_id": str(trial), "retry_index": 0})
+        result, _ = self._seed(
+            service,
+            sweep,
+            trial,
+            objective=0.25,
+            distributions=distributions,
+            attrs=attrs,
+        )
+
+        assert result.applied == 2
+        assert rows(
+            store,
+            "SELECT objective, distributions_json, attrs_json FROM trials",
+        ) == [
+            (
+                0.25,
+                '{"lr":"{\\"name\\": \\"FloatDistribution\\", '
+                '\\"attributes\\": {\\"low\\": 0.0}}"}',
+                f'{{"jernerics_trial_id":"{trial}","retry_index":0}}',
+            )
+        ]
+
+    def test_identical_replay_is_duplicate(self, store, service):
+        sweep, trial = eid(), eid()
+        self._seed(service, sweep, trial, objective=0.25, attrs=FlatContext({"g": 1}))
+
+        result, _ = self._seed(
+            service, sweep, trial, objective=0.25, attrs=FlatContext({"g": 1})
+        )
+
+        assert (result.applied, result.duplicates) == (0, 2)
+
+    def test_objective_filled_from_earlier_running_snapshot(self, store, service):
+        sweep, trial = eid(), eid()
+        self._seed(service, sweep, trial, state=TrialState.RUNNING)
+
+        result, _ = self._seed(service, sweep, trial, objective=0.25)
+
+        assert result.applied == 1
+        assert rows(store, "SELECT objective FROM trials") == [(0.25,)]
+
+    def test_differing_objective_conflicts(self, store, service):
+        sweep, trial = eid(), eid()
+        self._seed(service, sweep, trial, objective=0.25)
+
+        with pytest.raises(IngestConflictError, match="objective is write-once"):
+            self._seed(service, sweep, trial, objective=0.75)
+
+        assert rows(store, "SELECT objective FROM trials") == [(0.25,)]
+
+    def test_differing_objective_maps_to_409(self, store, client, service):
+        sweep, trial = eid(), eid()
+        self._seed(service, sweep, trial, objective=0.25)
+
+        response = post_events(
+            client,
+            request_of(self._events(sweep, trial, objective=0.75)),
+        )
+
+        assert response.status_code == 409
+        assert response.json()["error"] == "conflict"
+
+    def test_differing_distributions_conflict(self, store, service):
+        sweep, trial = eid(), eid()
+        self._seed(
+            service,
+            sweep,
+            trial,
+            distributions=FlatContext({"lr": '{"name": "FloatDistribution"}'}),
+        )
+
+        with pytest.raises(IngestConflictError, match="distributions_json"):
+            self._seed(
+                service,
+                sweep,
+                trial,
+                distributions=FlatContext({"lr": '{"name": "IntDistribution"}'}),
+            )
+
+    def test_terminal_state_conflict_leaves_columns_untouched(self, store, service):
+        sweep, trial = eid(), eid()
+        self._seed(
+            service,
+            sweep,
+            trial,
+            objective=0.25,
+            attrs=FlatContext({"jernerics_trial_id": str(trial)}),
+        )
+
+        result, _ = self._seed(
+            service,
+            sweep,
+            trial,
+            state=TrialState.FAILED,
+            objective=0.9,
+            attrs=FlatContext({"jernerics_trial_id": "other"}),
+        )
+
+        assert len(result.conflicts) == 1
+        assert result.conflicts[0].kind == "optimizer_terminal_state"
+        assert rows(store, "SELECT state, objective, attrs_json FROM trials") == [
+            ("completed", 0.25, f'{{"jernerics_trial_id":"{trial}"}}')
+        ]
+        assert rows(store, "SELECT kind FROM reconciliation_conflicts") == [
+            ("optimizer_terminal_state",)
+        ]
+
+    def test_null_objective_after_filled_is_noop(self, store, service):
+        sweep, trial = eid(), eid()
+        self._seed(service, sweep, trial, objective=0.25)
+
+        result, _ = self._seed(service, sweep, trial, state=TrialState.RUNNING)
+
+        assert result.duplicates == 1
+        assert rows(store, "SELECT objective FROM trials") == [(0.25,)]

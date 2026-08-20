@@ -71,6 +71,12 @@ class Tracker(Protocol):
         number: int,
         state: TrialState,
         params: dict[str, ScalarValue],
+        objective: float | None = None,
+        distributions: FlatContext | None = None,
+        attrs: FlatContext | None = None,
+        retry_of_trial_id: TrialId | None = None,
+        retry_root_trial_id: TrialId | None = None,
+        retry_index: int = 0,
     ) -> TrialSnapshotEvent | None: ...
     def emit_execution_start(
         self, hostname: str | None = None
@@ -232,6 +238,12 @@ class JsonlTracker:
         number: int,
         state: TrialState,
         params: dict[str, ScalarValue],
+        objective: float | None = None,
+        distributions: FlatContext | None = None,
+        attrs: FlatContext | None = None,
+        retry_of_trial_id: TrialId | None = None,
+        retry_root_trial_id: TrialId | None = None,
+        retry_index: int = 0,
     ) -> TrialSnapshotEvent:
         return self._emit(
             TrialSnapshotEvent(
@@ -242,7 +254,16 @@ class JsonlTracker:
                 number=number,
                 state=state,
                 params=FlatContext(params),
-                retry_root_trial_id=self.trial_id,
+                objective=objective,
+                distributions=distributions,
+                attrs=attrs,
+                retry_of_trial_id=retry_of_trial_id,
+                retry_root_trial_id=(
+                    retry_root_trial_id
+                    if retry_root_trial_id is not None
+                    else self.trial_id
+                ),
+                retry_index=retry_index,
             )
         )
 
@@ -353,6 +374,12 @@ class NullTracker:
         number: int,
         state: TrialState,
         params: dict[str, ScalarValue],
+        objective: float | None = None,
+        distributions: FlatContext | None = None,
+        attrs: FlatContext | None = None,
+        retry_of_trial_id: TrialId | None = None,
+        retry_root_trial_id: TrialId | None = None,
+        retry_index: int = 0,
     ) -> None:
         pass
 

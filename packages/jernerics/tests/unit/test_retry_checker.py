@@ -1,11 +1,16 @@
-"""Tests for the retry_checker using assemble_infrastructure + submit_sweep."""
-
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
+import optuna
+import pytest
 from jernerics.retry import RetryContext
+from jernerics_schema import TrialSnapshotEvent, sweep_id_for
+from jernerics_schema import TrialState as SchemaTrialState
+from optuna.storages.journal import JournalFileBackend, JournalStorage
 from optuna.trial import FrozenTrial, TrialState
 
 
@@ -19,6 +24,8 @@ def _make_trial(
     trial.number = number
     trial.state = state
     trial.params = params if params is not None else {"lr": 0.01}
+    trial.user_attrs = {}
+    trial.distributions = {}
     trial.datetime_start = datetime_start or datetime.fromtimestamp(0, tz=timezone.utc)
     return trial
 
@@ -564,3 +571,208 @@ class TestRetryCheckerFastFail:
         study.tell.assert_any_call(5, state=TrialState.FAIL)
         study.enqueue_trial.assert_not_called()
         mock_submit.assert_called_once()
+
+
+class TestRetryLineageJournal:
+    """Lineage enqueue and terminal snapshots against a real journal."""
+
+    def _study(self, tmp_path, name="lin"):
+        storage_url = str(tmp_path / f"{name}.journal")
+        study = optuna.create_study(
+            study_name=name,
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        return study, storage_url
+
+    def _ask_with_identity(self, study, params=None):
+        import uuid as uuid_module
+
+        trial = study.ask()
+        if params:
+            for key, value in params.items():
+                trial.suggest_float(key, value, value)
+        identity = uuid_module.uuid4()
+        trial.set_user_attr("jernerics_trial_id", str(identity))
+        return trial, identity
+
+    def test_enqueue_retry_carries_first_generation_lineage(self, tmp_path):
+        from jernerics.retry_checker import _enqueue_retry
+        from jernerics.tracking.jsonl_io import TrackingReader
+
+        study, _ = self._study(tmp_path)
+        trial, identity = self._ask_with_identity(study, {"lr": 0.25})
+        tracking_dir = tmp_path / "tracking" / "lin"
+
+        _enqueue_retry(
+            study,
+            trial.number,
+            sweep_id=sweep_id_for("proj", "lin"),
+            submission_dir=tracking_dir / "submission",
+        )
+
+        original = study.trials[0]
+        assert original.state == TrialState.FAIL
+        retry = study.trials[1]
+        assert retry.state == TrialState.WAITING
+        assert retry.user_attrs["retry_of"] == 0
+        assert retry.user_attrs["retry_root"] == 0
+        assert retry.user_attrs["retry_index"] == 1
+        assert retry.user_attrs["retry_of_trial_id"] == str(identity)
+        assert retry.user_attrs["retry_root_trial_id"] == str(identity)
+        assert retry.params == {}
+
+        events = [
+            event
+            for event in TrackingReader(tracking_dir / "submission" / "checker.jsonl")
+            if isinstance(event, TrialSnapshotEvent)
+        ]
+        assert len(events) == 1
+        snapshot = events[0]
+        assert snapshot.state == SchemaTrialState.FAILED
+        assert snapshot.trial_id == identity
+        assert snapshot.number == 0
+        assert snapshot.objective is None
+
+    def test_retry_of_retry_keeps_root_and_bumps_index(self, tmp_path):
+        from jernerics.retry_checker import _enqueue_retry
+
+        study, _ = self._study(tmp_path)
+        root_trial, root_identity = self._ask_with_identity(study, {"lr": 0.25})
+        _enqueue_retry(
+            study,
+            root_trial.number,
+            sweep_id=sweep_id_for("proj", "lin"),
+            submission_dir=None,
+        )
+
+        first_retry = study.ask()
+        first_identity = uuid4()
+        first_retry.set_user_attr("jernerics_trial_id", str(first_identity))
+        first_retry.suggest_float("lr", 0.25, 0.25)
+
+        _enqueue_retry(
+            study,
+            first_retry.number,
+            sweep_id=sweep_id_for("proj", "lin"),
+            submission_dir=None,
+        )
+
+        second_retry = study.trials[2]
+        assert second_retry.user_attrs["retry_of"] == 1
+        assert second_retry.user_attrs["retry_root"] == 0
+        assert second_retry.user_attrs["retry_index"] == 2
+        assert second_retry.user_attrs["retry_of_trial_id"] == str(first_identity)
+        assert second_retry.user_attrs["retry_root_trial_id"] == str(root_identity)
+
+    def test_mark_failed_emits_terminal_snapshot(self, tmp_path):
+        from jernerics.retry_checker import _mark_failed
+        from jernerics.tracking.jsonl_io import TrackingReader
+
+        study, _ = self._study(tmp_path)
+        trial, identity = self._ask_with_identity(study, {"lr": 0.5})
+        tracking_dir = tmp_path / "tracking" / "lin"
+
+        _mark_failed(
+            study,
+            trial.number,
+            sweep_id=sweep_id_for("proj", "lin"),
+            submission_dir=tracking_dir / "submission",
+        )
+
+        assert study.trials[0].state == TrialState.FAIL
+        snapshot = next(
+            event
+            for event in TrackingReader(tracking_dir / "submission" / "checker.jsonl")
+            if isinstance(event, TrialSnapshotEvent)
+        )
+        assert snapshot.state == SchemaTrialState.FAILED
+        assert snapshot.trial_id == identity
+        assert snapshot.params.root["lr"] == pytest.approx(0.5)
+
+    def test_mark_failed_without_tracking_files_is_silent(self, tmp_path):
+        from jernerics.retry_checker import _mark_failed
+
+        study, _ = self._study(tmp_path)
+        trial, _ = self._ask_with_identity(study, {"lr": 0.5})
+
+        _mark_failed(
+            study,
+            trial.number,
+            sweep_id=sweep_id_for("proj", "lin"),
+            submission_dir=tmp_path / "nope" / "submission",
+        )
+
+        assert study.trials[0].state == TrialState.FAIL
+
+    def test_run_checker_enqueues_lineage_with_real_journal(self, tmp_path):
+        """Full checker pass against a real stale trial."""
+        from jernerics.config import SharedConfig
+        from jernerics.retry_checker import run_checker
+
+        study, storage_url = self._study(tmp_path, name="full")
+        _trial, identity = self._ask_with_identity(study, {"lr": 0.25})
+        tracking_dir = tmp_path / "tracking" / "full"
+        hb_dir = tracking_dir / "heartbeats"
+        hb_dir.mkdir(parents=True)
+        hb_path = hb_dir / "0.heartbeat"
+        hb_path.touch()
+        stale = time.time() - 500
+        os.utime(hb_path, (stale, stale))
+
+        (tmp_path / "pyproject.toml").write_text("")
+        ctx = RetryContext(
+            study_name="full",
+            backend_name="hpc",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+            storage_path=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_dir=str(tmp_path),
+            project_name="proj",
+            host_home=str(tmp_path),
+        )
+        ctx_path = tmp_path / "ctx.json"
+        ctx_path.write_text(ctx.to_json())
+
+        with (
+            patch("jernerics.retry_checker.time") as mock_time,
+            patch("jernerics.retry_checker.read_ledger", return_value={}),
+            patch("jernerics.retry_checker.write_ledger"),
+            patch("jernerics.retry_checker.load_backend_config") as mock_backend,
+            patch("jernerics.retry_checker.load_config") as mock_config,
+            patch("jernerics.retry_checker.assemble_infrastructure") as mock_asm,
+            patch("jernerics.retry_checker.submit_sweep") as mock_submit,
+            patch("jernerics.retry_checker.load_tracking_server", return_value=None),
+        ):
+            mock_time.time.return_value = time.time()
+            mock_time.sleep = MagicMock()
+            mock_backend.return_value.shared = SharedConfig(
+                name="hpc",
+                type="slurm",
+                stale_after_s=120,
+                grace_period_s=0,
+                fast_fail_threshold_s=-10000,
+            )
+            sweep = MagicMock()
+            sweep.n_trials = 1
+            sweep.direction = "minimize"
+            sweep.backend_overrides = {}
+            mock_config.return_value = sweep
+            mock_asm.return_value = MagicMock()
+            mock_submit.return_value = None
+
+            submitted = run_checker(ctx_path=str(ctx_path), chain_depth=0)
+
+        assert submitted is True
+        original = optuna.load_study(
+            study_name="full",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        ).trials[0]
+        assert original.state == TrialState.FAIL
+        retry = optuna.load_study(
+            study_name="full",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        ).trials[1]
+        assert retry.user_attrs["retry_of"] == 0
+        assert retry.user_attrs["retry_index"] == 1
+        assert retry.user_attrs["retry_of_trial_id"] == str(identity)

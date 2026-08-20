@@ -212,19 +212,24 @@ class TestExecutionLifecycleEvents:
         events = _read_events(tracking_dir / "events" / "0.jsonl")
         start_at, _ = _first(events, "execution_start")
         resolved_at, resolved = _first(events, "value", "resolved_config")
+        ask_at, ask_snapshot = _first(events, "trial_snapshot")
         child_at, _ = _first(events, "value", "loss")
-        snapshot_at, snapshot = _first(events, "trial_snapshot")
+        tell_snapshots = [event for event in events if event.tag == "trial_snapshot"]
         end_at, end = _first(events, "execution_end")
 
-        assert (
-            start_at < resolved_at < child_at < snapshot_at < end_at == len(events) - 1
-        )
+        assert start_at < resolved_at < ask_at < child_at < end_at == len(events) - 1
+        assert len(tell_snapshots) == 2
+        assert ask_snapshot.state.value == "running"
+        assert ask_snapshot.objective is None
+        terminal = tell_snapshots[1]
+        assert terminal.state.value == "completed"
+        assert terminal.objective == pytest.approx(0.5)
         assert resolved.observation["lr"] == pytest.approx(0.01)
-        assert resolved.observation["seed"] == snapshot.params.root["seed"]
-        assert snapshot.state.value == "running"
-        assert snapshot.retry_root_trial_id == snapshot.trial_id
-        assert snapshot.retry_of_trial_id is None
-        assert snapshot.retry_index == 0
+        assert resolved.observation["seed"] == ask_snapshot.params.root["seed"]
+        for snapshot in tell_snapshots:
+            assert snapshot.retry_root_trial_id == snapshot.trial_id
+            assert snapshot.retry_of_trial_id is None
+            assert snapshot.retry_index == 0
         assert any(event.tag == "execution_heartbeat" for event in events)
         assert end.outcome.value == "success"
         assert end.failure_summary is None
@@ -234,6 +239,7 @@ class TestExecutionLifecycleEvents:
             storage=JournalStorage(JournalFileBackend(storage_url)),
         )
         assert study.trials[0].state == optuna.trial.TrialState.COMPLETE
+        assert study.trials[0].value == pytest.approx(0.5)
 
     def test_nonzero_child_records_failure_and_exits_nonzero(self, tmp_path):
         trial_file = tmp_path / "trial.py"
@@ -254,8 +260,9 @@ class TestExecutionLifecycleEvents:
         assert exc_info.value.code == 1
 
         events = _read_events(tracking_dir / "events" / "0.jsonl")
-        _, snapshot = _first(events, "trial_snapshot")
-        assert snapshot.state.value == "running"
+        snapshots = [event for event in events if event.tag == "trial_snapshot"]
+        assert [s.state.value for s in snapshots] == ["running", "failed"]
+        assert all(s.objective is None for s in snapshots)
         _, end = _first(events, "execution_end")
         assert end.outcome.value == "failure"
         assert end.exit_code == 2
@@ -264,6 +271,13 @@ class TestExecutionLifecycleEvents:
         assert end.failure_summary is not None
         assert len(end.failure_summary) <= 2000
         assert "code 2" in end.failure_summary
+
+        study = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        assert study.trials[0].state == optuna.trial.TrialState.FAIL
+        assert events[-1].tag == "execution_end"
 
     def test_objective_failure_records_exception_kind(self, tmp_path):
         trial_file = tmp_path / "trial.py"
@@ -287,12 +301,19 @@ class TestExecutionLifecycleEvents:
                 project_name="proj",
             )
 
-        _, end = _first(
-            _read_events(tracking_dir / "events" / "0.jsonl"), "execution_end"
-        )
+        events = _read_events(tracking_dir / "events" / "0.jsonl")
+        snapshots = [event for event in events if event.tag == "trial_snapshot"]
+        assert [s.state.value for s in snapshots] == ["running", "failed"]
+        _, end = _first(events, "execution_end")
         assert end.outcome.value == "failure"
         assert end.failure_kind.value == "exception"
         assert "objective blew up" in end.failure_summary
+
+        study = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        assert study.trials[0].state == optuna.trial.TrialState.FAIL
 
     def test_commit_failure_records_failure_not_success(self, tmp_path, monkeypatch):
         trial_file = tmp_path / "trial.py"
@@ -303,10 +324,18 @@ class TestExecutionLifecycleEvents:
 
         class FakeTrial:
             number = 0
+            params: dict = {}
+            distributions: dict = {}
+            user_attrs: dict = {}
+
+            def set_user_attr(self, key, value):
+                self.user_attrs[key] = value
 
         class FailingCommitStudy:
-            def optimize(self, objective, n_trials=1):
-                objective(FakeTrial())
+            def ask(self):
+                return FakeTrial()
+
+            def tell(self, trial, value=None, state=None):
                 raise RuntimeError("journal storage write failed")
 
         monkeypatch.setattr(
@@ -358,6 +387,184 @@ class TestExecutionLifecycleEvents:
         assert end.outcome.value == "cancelled"
         assert end.exit_code is not None
         assert end.exit_code < 0
+
+    def test_snapshots_mirror_all_distribution_kinds(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 0.5})\n')
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "n_trials = 1\n"
+            "def search_space(trial):\n"
+            "    return {\n"
+            "        'rate': trial.suggest_float('rate', 0.0, 1.0),\n"
+            "        'seed': trial.suggest_int('seed', 1, 5),\n"
+            "        'mode': trial.suggest_categorical('mode', ['a', 'b']),\n"
+            "    }\n"
+            "def objective(results):\n    return results['loss']\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+        )
+
+        _, snapshot = _first(
+            _read_events(tracking_dir / "events" / "0.jsonl"), "trial_snapshot"
+        )
+        distributions = snapshot.distributions.root
+        assert set(distributions) == {"rate", "seed", "mode"}
+        assert '"FloatDistribution"' in distributions["rate"]
+        assert '"IntDistribution"' in distributions["seed"]
+        assert '"CategoricalDistribution"' in distributions["mode"]
+        for encoded in distributions.values():
+            json.loads(encoded)
+        assert set(snapshot.params.root) == {"rate", "seed", "mode"}
+        assert snapshot.params.root["mode"] in ("a", "b")
+        assert isinstance(snapshot.params.root["rate"], float)
+        assert isinstance(snapshot.params.root["seed"], int)
+
+    def test_enqueued_lineage_attrs_flow_into_snapshots(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 0.5})\n')
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "n_trials = 2\n"
+            "def search_space(trial):\n"
+            "    return {'seed': trial.suggest_int('seed', 1, 5)}\n"
+            "def objective(results):\n    return results['loss']\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        parent_id = uuid4()
+        study = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        study.enqueue_trial(
+            {"seed": 3},
+            user_attrs={
+                "retry_of": 0,
+                "retry_root": 0,
+                "retry_index": 1,
+                "retry_of_trial_id": str(parent_id),
+                "retry_root_trial_id": str(parent_id),
+            },
+        )
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+        )
+
+        events = _read_events(tracking_dir / "events" / "0.jsonl")
+        snapshots = [event for event in events if event.tag == "trial_snapshot"]
+        for snapshot in snapshots:
+            assert snapshot.retry_of_trial_id == parent_id
+            assert snapshot.retry_root_trial_id == parent_id
+            assert snapshot.retry_index == 1
+            assert snapshot.params.root["seed"] == 3
+            assert snapshot.attrs.root["retry_index"] == 1
+            assert snapshot.attrs.root["retry_root"] == 0
+        study_after = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        assert study_after.trials[0].user_attrs["retry_of_trial_id"] == str(parent_id)
+
+    def test_enqueued_lineage_without_root_id_uses_own_identity(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 0.5})\n')
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "n_trials = 2\n"
+            "def search_space(trial):\n"
+            "    return {'seed': trial.suggest_int('seed', 1, 5)}\n"
+            "def objective(results):\n    return results['loss']\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        study = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        study.enqueue_trial(
+            {"seed": 4},
+            user_attrs={
+                "retry_of": 5,
+                "retry_root": 0,
+                "retry_index": 2,
+                "retry_of_trial_id": str(uuid4()),
+            },
+        )
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+        )
+
+        events = _read_events(tracking_dir / "events" / "0.jsonl")
+        snapshot = next(e for e in events if e.tag == "trial_snapshot")
+        assert snapshot.retry_index == 2
+        assert snapshot.retry_root_trial_id == snapshot.trial_id
+        assert snapshot.retry_of_trial_id is not None
+
+    def test_lineage_without_recorded_parent_id_is_never_invented(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 0.5})\n')
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "n_trials = 2\n"
+            "def search_space(trial):\n"
+            "    return {'seed': trial.suggest_int('seed', 1, 5)}\n"
+            "def objective(results):\n    return results['loss']\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        study = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        study.enqueue_trial(
+            {"seed": 5},
+            user_attrs={"retry_of": 3, "retry_root": 1, "retry_index": 1},
+        )
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+        )
+
+        events = _read_events(tracking_dir / "events" / "0.jsonl")
+        snapshot = next(e for e in events if e.tag == "trial_snapshot")
+        assert snapshot.retry_of_trial_id is None
+        assert snapshot.retry_root_trial_id == snapshot.trial_id
+        assert snapshot.retry_index == 1
+        assert snapshot.attrs.root["retry_of"] == 3
 
 
 class TestRunIdRemoval:

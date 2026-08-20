@@ -11,6 +11,8 @@ from typing import Any
 import tomllib
 from optuna.samplers import BaseSampler
 
+from jernerics.search import SearchTrial
+
 ARTIFACT_ENV_VARS = [
     "JERNERICS_API_KEY",
 ]
@@ -32,7 +34,7 @@ def is_tty() -> bool:
 @dataclass
 class SweepConfig:
     base: dict[str, Any]
-    search_space: Callable[..., dict[str, Any]] | None
+    search_space: Callable[[SearchTrial], dict[str, Any]] | None
     n_trials: int
     sampler: BaseSampler | None
     objective: Callable[..., float] | None

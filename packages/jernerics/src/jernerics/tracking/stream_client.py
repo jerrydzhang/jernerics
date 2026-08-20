@@ -28,6 +28,7 @@ RETRY_MAX_WAIT = 10.0
 
 class TransportResponse(Protocol):
     status_code: int
+    content: bytes
 
 
 class Transport(Protocol):

@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from jernerics_schema import PROTOCOL_VERSION, IngestRequest
+from jernerics_schema import (
+    PROTOCOL_VERSION,
+    ConflictRecord,
+    IngestRequest,
+    IngestResponse,
+)
 from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
 
 from .jsonl_io import cursor_path, read_cursor, scan_events, write_cursor
@@ -23,6 +28,7 @@ from .stream_client import (
     RETRY_MAX_WAIT,
     HttpTransport,
     Transport,
+    TransportResponse,
 )
 
 
@@ -32,6 +38,7 @@ class FileResult:
     events_sent: int = 0
     events_total: int = 0
     error: str | None = None
+    conflicts: list[ConflictRecord] = field(default_factory=list)
 
 
 @dataclass
@@ -40,6 +47,7 @@ class ReplayResult:
     events_sent: int = 0
     events_failed: int = 0
     errors: list[str] = field(default_factory=list)
+    conflicts: list[ConflictRecord] = field(default_factory=list)
 
 
 def _post_with_retries(
@@ -49,7 +57,7 @@ def _post_with_retries(
     transport: Transport,
     max_retries: int,
     timeout: float = 30.0,
-) -> None:
+) -> TransportResponse:
     retry_count = 0
     while True:
         try:
@@ -57,7 +65,7 @@ def _post_with_retries(
                 url, content=body, headers=headers, timeout=timeout
             )
             if 200 <= response.status_code < 300:
-                return
+                return response
             detail = f"HTTP {response.status_code}"
         except httpx.HTTPError as exc:
             detail = str(exc)
@@ -95,7 +103,10 @@ def _replay_file(
                 protocol_version=PROTOCOL_VERSION,
                 events=[event for event, _ in batch],
             ).model_dump_json()
-            _post_with_retries(url, body, headers, transport, max_retries)
+            response = _post_with_retries(url, body, headers, transport, max_retries)
+            result.conflicts.extend(
+                IngestResponse.model_validate_json(response.content).conflicts
+            )
             write_cursor(path, offset)
             sent += len(batch)
     except (httpx.HTTPError, OSError, ValueError, RuntimeError) as exc:
@@ -122,6 +133,7 @@ def replay_tracking(
     max_workers: int = 16,
     max_retries: int = 10,
     transport: Transport | None = None,
+    skip: set[Path] | None = None,
 ) -> ReplayResult:
     """
     Replay JSONL tracking files to the HTTP server.
@@ -138,8 +150,13 @@ def replay_tracking(
         max_workers: Thread pool size for concurrent sends.
         max_retries: Max retries per batch on HTTP failure.
         transport: Optional transport override (tests, in-process servers).
+        skip: Optional files to leave entirely untouched by this replay.
     """
-    jsonl_files = discover_jsonl_files(tracking_dir, study)
+    jsonl_files = [
+        path
+        for path in discover_jsonl_files(tracking_dir, study)
+        if path not in (skip or set())
+    ]
 
     if not jsonl_files:
         print("No .jsonl files found.", file=sys.stderr)
@@ -154,37 +171,44 @@ def replay_tracking(
 
     aggregated = ReplayResult()
 
+    # Submission-level files ship before per-trial event logs: sweeps and
+    # retry parents must exist before trial event batches reference them.
+    waves = [
+        [path for path in jsonl_files if path.parent.name != "events"],
+        [path for path in jsonl_files if path.parent.name == "events"],
+    ]
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(
-                _replay_file, path, base_url, api_key, max_retries, transport
-            ): path
-            for path in jsonl_files
-        }
+        for wave in waves:
+            futures = {
+                executor.submit(
+                    _replay_file, path, base_url, api_key, max_retries, transport
+                ): path
+                for path in wave
+            }
+            for future in futures:
+                file_result = future.result()
+                aggregated.files_processed += 1
+                aggregated.conflicts.extend(file_result.conflicts)
 
-        for future in futures:
-            file_result = future.result()
-            aggregated.files_processed += 1
-
-            if file_result.error:
-                aggregated.events_failed += (
-                    file_result.events_total - file_result.events_sent
-                )
-                aggregated.errors.append(f"{file_result.path}: {file_result.error}")
-                print(
-                    f"  [FAIL] {file_result.path.name}: {file_result.error}",
-                    file=sys.stderr,
-                )
-            else:
-                aggregated.events_sent += file_result.events_sent
-                if file_result.events_total > 0:
+                if file_result.error:
+                    aggregated.events_failed += (
+                        file_result.events_total - file_result.events_sent
+                    )
+                    aggregated.errors.append(f"{file_result.path}: {file_result.error}")
                     print(
-                        f"  [{aggregated.files_processed}/{len(jsonl_files)}] "
-                        f"{file_result.path.name} "
-                        f"({file_result.events_sent}/"
-                        f"{file_result.events_total} events)",
+                        f"  [FAIL] {file_result.path.name}: {file_result.error}",
                         file=sys.stderr,
                     )
+                else:
+                    aggregated.events_sent += file_result.events_sent
+                    if file_result.events_total > 0:
+                        print(
+                            f"  [{aggregated.files_processed}/{len(jsonl_files)}] "
+                            f"{file_result.path.name} "
+                            f"({file_result.events_sent}/"
+                            f"{file_result.events_total} events)",
+                            file=sys.stderr,
+                        )
 
     print(
         f"Done. {aggregated.files_processed} files, "

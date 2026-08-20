@@ -16,6 +16,7 @@ from jernerics_schema import (
     ExecutionHeartbeatEvent,
     ExecutionProgressEvent,
     ExecutionStartEvent,
+    FlatContext,
     IngestRequest,
     JobSnapshotEvent,
     ManualParamEvent,
@@ -62,6 +63,10 @@ def _to_ns(value: datetime) -> int:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _optional_json(context: FlatContext | None) -> str | None:
+    return _canonical_json(context.root) if context is not None else None
 
 
 def _opt_str(value: uuid.UUID | None) -> str | None:
@@ -487,10 +492,14 @@ class IngestService:
         conflicts: list[ConflictRecord],
     ) -> bool:
         ns = _to_ns(event.recorded_at)
+        # Flat distributions/attrs travel as canonical JSON strings in the
+        # trials row; None means the snapshot does not carry them.
+        distributions_json = _optional_json(event.distributions)
+        attrs_json = _optional_json(event.attrs)
         row = con.execute(
             "SELECT sweep_id, number, state, retry_of_trial_id, "
-            "retry_root_trial_id, retry_index, updated_ns FROM trials "
-            "WHERE trial_id = ?",
+            "retry_root_trial_id, retry_index, objective, distributions_json, "
+            "attrs_json, updated_ns FROM trials WHERE trial_id = ?",
             [str(event.trial_id)],
         ).fetchone()
         changed = False
@@ -533,7 +542,9 @@ class IngestService:
             con.execute(
                 "INSERT INTO trials (trial_id, sweep_id, number, state, "
                 "retry_of_trial_id, retry_root_trial_id, retry_index, "
-                "created_ns, updated_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "objective, distributions_json, attrs_json, "
+                "created_ns, updated_ns) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     str(event.trial_id),
                     str(event.sweep_id),
@@ -542,6 +553,9 @@ class IngestService:
                     _opt_str(event.retry_of_trial_id),
                     str(event.retry_root_trial_id),
                     event.retry_index,
+                    event.objective,
+                    distributions_json,
+                    attrs_json,
                     ns,
                     ns,
                 ],
@@ -555,6 +569,9 @@ class IngestService:
                 retry_of,
                 retry_root,
                 retry_index,
+                objective,
+                stored_distributions,
+                stored_attrs,
                 updated_ns,
             ) = row
             if sweep_id != str(event.sweep_id) or number != event.number:
@@ -581,8 +598,10 @@ class IngestService:
                     f"retry_index={lineage[2]})",
                 )
             stored_state = TrialState(state)
+            state_conflict = False
             if stored_state in _TERMINAL_TRIAL_STATES:
                 if event.state != stored_state:
+                    state_conflict = True
                     changed = self._record_optimizer_conflict(
                         con, ns, stored_state, event, conflicts
                     )
@@ -593,6 +612,32 @@ class IngestService:
                         "UPDATE trials SET state = ?, updated_ns = ? "
                         "WHERE trial_id = ?",
                         [event.state.value, new_updated, str(event.trial_id)],
+                    )
+                    changed = True
+            if not state_conflict:
+                fills = {}
+                for column, stored_value, incoming in (
+                    ("objective", objective, event.objective),
+                    ("distributions_json", stored_distributions, distributions_json),
+                    ("attrs_json", stored_attrs, attrs_json),
+                ):
+                    if incoming is None or stored_value == incoming:
+                        continue
+                    if stored_value is not None:
+                        raise self._conflict(
+                            index,
+                            event,
+                            f"trial {event.trial_id} {column} is write-once: "
+                            f"stored {stored_value!r}, incoming {incoming!r}",
+                        )
+                    fills[column] = incoming
+                if fills:
+                    # Terminal facts stay whole: a snapshot whose state
+                    # conflicted never writes objective/distributions/attrs.
+                    con.execute(
+                        f"UPDATE trials SET {', '.join(f'{k} = ?' for k in fills)}, "
+                        "updated_ns = max(updated_ns, ?) WHERE trial_id = ?",
+                        [*fills.values(), ns, str(event.trial_id)],
                     )
                     changed = True
         for key, value in event.params.root.items():

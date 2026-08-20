@@ -19,6 +19,8 @@ from jernerics_schema import (
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.config import load_config
+from jernerics.optuna_mirror import TRIAL_ID_ATTR, snapshot_kwargs
+from jernerics.tracking import Tracker
 from jernerics.tracking.jsonl_io import TrackingReader
 from jernerics.tracking.trial_environment import TrialEnvironment
 from jernerics.trial_context import (
@@ -47,6 +49,14 @@ def run_trial(
     server_addr: str | None = None,
     heartbeat_interval_s: float = 60.0,
 ) -> None:
+    """Run one trial through the explicit ask/tell optimizer lifecycle.
+
+    ``study.ask`` allocates the optimizer trial; search-space evaluation,
+    child execution, and objective evaluation run under Jernerics control;
+    ``study.tell`` commits the terminal optimizer state (objective on
+    success, FAIL otherwise) before the execution ends. Trial snapshots
+    mirror the optimizer state after ask and after tell.
+    """
     sweep = load_config(config_file)
 
     study = optuna.load_study(
@@ -56,7 +66,8 @@ def run_trial(
     sweep_id = sweep_id_for(project_name or "", study_name)
     run: dict[str, Any] = {"environment": None, "exit_code": None}
 
-    def objective(trial: optuna.trial.Trial) -> float:
+    trial = study.ask()
+    try:
         environment = TrialEnvironment(
             tracking_dir=tracking_dir or "",
             trial_number=trial.number,
@@ -65,6 +76,9 @@ def run_trial(
         )
         run["environment"] = environment
         environment.start()
+        if environment.trial_id is not None:
+            trial.set_user_attr(TRIAL_ID_ATTR, str(environment.trial_id))
+
         params: dict[str, Any] = sweep.search_space(trial) if sweep.search_space else {}
 
         if params and set(sweep.base) & set(params):
@@ -82,6 +96,13 @@ def run_trial(
 
         if environment.tracker is not None:
             environment.tracker.log_json("resolved_config", config)
+        _emit_trial_snapshot(
+            environment.tracker,
+            trial,
+            sweep_id=sweep_id,
+            trial_id=environment.trial_id,
+            state=TrialState.RUNNING,
+        )
 
         completed = subprocess.run(
             [sys.executable, str(Path(trial_file).resolve())],
@@ -99,21 +120,6 @@ def run_trial(
         )
         run["exit_code"] = completed.returncode
 
-        if environment.tracker is not None:
-            # Only flat scalars fit TrialSnapshotEvent.params; richer values
-            # are dropped rather than stringified.
-            flat_params = {
-                key: value
-                for key, value in params.items()
-                if isinstance(value, str | int | float | bool) or value is None
-            }
-            environment.tracker.emit_trial_snapshot(
-                sweep_id=sweep_id,
-                number=trial.number,
-                state=TrialState.RUNNING,
-                params=flat_params,
-            )
-
         if completed.returncode != 0:
             print(
                 f"Trial {trial.number + 1} failed with exit code "
@@ -125,20 +131,58 @@ def run_trial(
         print(f"Trial {trial.number + 1} completed", file=sys.stderr)
 
         results = _read_trial_results(events_path)
-
-        if sweep.objective:
-            return sweep.objective(results)
-        return 0.0
-
-    try:
-        study.optimize(objective, n_trials=1)
+        value = sweep.objective(results) if sweep.objective else 0.0
     except BaseException as exc:
-        _finish_failure(run["environment"], exc, run)
+        try:
+            study.tell(trial, state=optuna.trial.TrialState.FAIL)
+            _emit_trial_snapshot(
+                (run["environment"].tracker if run["environment"] else None),
+                trial,
+                sweep_id=sweep_id,
+                trial_id=run["environment"].trial_id if run["environment"] else None,
+                state=TrialState.FAILED,
+            )
+        finally:
+            _finish_failure(run["environment"], exc, run)
         if isinstance(exc, _TaskFailure):
             sys.exit(1)
         raise
+
+    try:
+        study.tell(trial, value)
+        _emit_trial_snapshot(
+            run["environment"].tracker if run["environment"] else None,
+            trial,
+            sweep_id=sweep_id,
+            trial_id=run["environment"].trial_id if run["environment"] else None,
+            state=TrialState.COMPLETED,
+            objective=value,
+        )
+    except BaseException as exc:
+        _finish_failure(run["environment"], exc, run)
+        raise
     if run["environment"] is not None:
         run["environment"].finish_execution(ExecutionOutcome.SUCCESS)
+
+
+def _emit_trial_snapshot(
+    tracker: Tracker | None,
+    trial: Any,
+    *,
+    sweep_id: SweepId,
+    trial_id: TrialId | None,
+    state: TrialState,
+    objective: float | None = None,
+) -> None:
+    if tracker is None or trial_id is None:
+        return
+    tracker.emit_trial_snapshot(
+        sweep_id=sweep_id,
+        number=trial.number,
+        state=state,
+        objective=objective,
+        **snapshot_kwargs(trial, trial_id=trial_id),
+    )
 
 
 def _finish_failure(

@@ -1,10 +1,13 @@
 import argparse
 import time
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import optuna
+from jernerics_schema import SweepId, sweep_id_for
 from optuna.storages.journal import JournalFileBackend, JournalStorage
-from optuna.trial import TrialState
+from optuna.trial import FrozenTrial, TrialState
 
 from jernerics.backend.host import StdoutHost
 from jernerics.backend.models import SweepSubmission
@@ -14,11 +17,70 @@ from jernerics.config import (
     load_config,
     load_tracking_server,
 )
+from jernerics.optuna_mirror import frozen_trial_snapshot, retry_lineage_attrs
 from jernerics.retry import (
     plan_retry,
     read_ledger,
     write_ledger,
 )
+from jernerics.tracking.jsonl_io import TrackingWriter
+
+
+def _append_submission_snapshot(
+    trial: FrozenTrial,
+    *,
+    sweep_id: SweepId,
+    submission_dir: Path | None,
+) -> None:
+    """Best-effort terminal snapshot where the study's replay finds it.
+
+    Where the checker runs without access to the tracking files, emit
+    nothing; post-hook reconciliation from the journal covers the state.
+    """
+    if submission_dir is None:
+        return
+    try:
+        event = frozen_trial_snapshot(
+            trial,
+            sweep_id=sweep_id,
+            recorded_at=datetime.now(UTC),
+            event_id=uuid.uuid4(),
+        )
+        with TrackingWriter(submission_dir / "checker.jsonl") as writer:
+            writer.write_event(event)
+    except Exception:
+        return
+
+
+def _mark_failed(
+    study: optuna.study.Study,
+    number: int,
+    *,
+    sweep_id: SweepId,
+    submission_dir: Path | None,
+) -> None:
+    study.tell(number, state=TrialState.FAIL)
+    _append_submission_snapshot(
+        study.trials[number], sweep_id=sweep_id, submission_dir=submission_dir
+    )
+
+
+def _enqueue_retry(
+    study: optuna.study.Study,
+    number: int,
+    *,
+    sweep_id: SweepId,
+    submission_dir: Path | None,
+) -> None:
+    """Fail the stale trial and enqueue a replacement carrying retry lineage."""
+    original = study.trials[number]
+    _mark_failed(study, number, sweep_id=sweep_id, submission_dir=submission_dir)
+    root_number = original.user_attrs.get("retry_root", number)
+    if not isinstance(root_number, int) or isinstance(root_number, bool):
+        root_number = number
+    root = study.trials[root_number] if root_number != number else original
+    lineage = retry_lineage_attrs(study.trials[number], root)
+    study.enqueue_trial(original.params, user_attrs=lineage)
 
 
 def run_checker(ctx_path: str, chain_depth: int) -> bool:
@@ -61,14 +123,18 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
     if chain_depth >= backend_config.shared.chain_depth_cap:
         return False
 
+    sweep_id = sweep_id_for(ctx.project_name or "", ctx.study_name)
+    submission_dir = Path(tracking_dir) / "submission" if tracking_dir else None
+
     for trial_id in plan.stale_trial_ids:
-        study.tell(trial_id, state=TrialState.FAIL)
-        study.enqueue_trial(study.trials[trial_id].params)
+        _enqueue_retry(
+            study, trial_id, sweep_id=sweep_id, submission_dir=submission_dir
+        )
 
     for trial_id in plan.exhausted_trial_ids:
-        study.tell(trial_id, state=TrialState.FAIL)
+        _mark_failed(study, trial_id, sweep_id=sweep_id, submission_dir=submission_dir)
     for trial_id in plan.fast_failed_trial_ids:
-        study.tell(trial_id, state=TrialState.FAIL)
+        _mark_failed(study, trial_id, sweep_id=sweep_id, submission_dir=submission_dir)
 
     write_ledger(ledger_path, plan.retry_counts)
 

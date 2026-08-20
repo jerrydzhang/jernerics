@@ -26,6 +26,7 @@ BASE_URL = "http://localhost:8000"
 @dataclass
 class _FakeResponse:
     status_code: int
+    content: bytes = b'{"accepted": 0}'
 
 
 class FakeTransport:
@@ -42,6 +43,8 @@ class FakeTransport:
             response = self.always if self.always is not None else 200
         if isinstance(response, Exception):
             raise response
+        if isinstance(response, _FakeResponse):
+            return response
         return _FakeResponse(response)
 
     @property
@@ -98,6 +101,41 @@ class TestReplayFile:
         assert sizes == [100, 100, 50]
         assert result.events_sent == 250
         assert read_cursor(path) == path.stat().st_size
+
+    def test_collects_conflicts_from_acknowledged_response(self, tmp_path) -> None:
+        from jernerics_schema import ConflictRecord
+
+        trial = uuid4()
+        conflict = ConflictRecord(
+            trial_id=trial,
+            kind="optimizer_terminal_state",
+            detail='{"existing": "completed", "incoming": "failed"}',
+        )
+        body = json.dumps(
+            {
+                "accepted": 1,
+                "duplicates": 0,
+                "conflicts": [
+                    {
+                        "trial_id": str(trial),
+                        "kind": conflict.kind,
+                        "detail": conflict.detail,
+                    }
+                ],
+            }
+        ).encode()
+        path = _write_events(tmp_path / "0.jsonl", [_value_event()])
+        transport = FakeTransport(responses=[_FakeResponse(200, content=body)])
+
+        result = _replay_file(path, BASE_URL, transport=transport)
+
+        assert result.error is None
+        assert result.conflicts == [conflict]
+
+        aggregated = replay_tracking(
+            tracking_dir=tmp_path, base_url=BASE_URL, transport=FakeTransport()
+        )
+        assert aggregated.conflicts == []
 
     def test_starts_at_cursor_and_ships_only_remainder(self, tmp_path: Path) -> None:
         events = [_value_event(f"m{i}") for i in range(10)]

@@ -82,6 +82,9 @@ class TrialSnapshotEvent(RetryLineage, Event):
     number: int = Field(ge=0)
     state: TrialState
     params: FlatContext = Field(default_factory=FlatContext)
+    objective: float | None = None
+    distributions: FlatContext | None = None
+    attrs: FlatContext | None = None
 
 
 class ExecutionStartEvent(Event):
