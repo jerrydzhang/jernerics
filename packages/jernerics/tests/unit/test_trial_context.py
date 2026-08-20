@@ -160,6 +160,17 @@ class TestJobTracker:
             }
         ]
 
+    def test_set_progress_emits_execution_progress_event(self, job_tracker):
+        tracker, tmp_path = job_tracker
+        tracker.set_progress(4, 10, "epochs")
+
+        [event] = _read_events(tmp_path)
+
+        assert event.tag == "execution_progress"
+        assert event.current == 4
+        assert event.total == 10
+        assert event.unit == "epochs"
+
     def test_finish_records_results_and_closes_tracking(self, job_tracker):
         tracker, tmp_path = job_tracker
         tracker.finish({"score": 1.0})
@@ -193,6 +204,11 @@ class TestConsoleTracker:
         ConsoleTracker().log_artifact("model", "/tmp/model.pt")
 
         assert capsys.readouterr().out == "[artifact] model=/tmp/model.pt\n"
+
+    def test_set_progress_prints_progress(self, capsys):
+        ConsoleTracker().set_progress(3, 10, "epochs")
+
+        assert capsys.readouterr().out == "[progress] 3/10 epochs\n"
 
     def test_finish_prints_results(self, capsys):
         ConsoleTracker().finish({"score": 0.9, "status": "ok"})

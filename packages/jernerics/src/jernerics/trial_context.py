@@ -39,6 +39,8 @@ class TrackerProtocol(Protocol):
         content_type: str | None = None,
     ) -> None: ...
 
+    def set_progress(self, current: int, total: int, unit: str) -> None: ...
+
     def finish(self, results: dict[str, JsonValue]) -> None: ...
 
 
@@ -64,6 +66,9 @@ class ConsoleTracker:
         content_type: str | None = None,
     ) -> None:
         print(f"[artifact] {key}={path}")
+
+    def set_progress(self, current: int, total: int, unit: str) -> None:
+        print(f"[progress] {current}/{total} {unit}")
 
     def finish(self, results: dict[str, JsonValue]) -> None:
         print("results:")
@@ -98,6 +103,9 @@ class _JobTracker:
         content_type: str | None = None,
     ) -> None:
         self._tracker.log_artifact(key, path, source=source, content_type=content_type)
+
+    def set_progress(self, current: int, total: int, unit: str) -> None:
+        self._tracker.set_progress(current, total, unit)
 
     def finish(self, results: dict[str, JsonValue]) -> None:
         self._tracker.log_json("results", results)
