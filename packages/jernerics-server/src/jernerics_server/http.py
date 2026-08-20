@@ -1,21 +1,67 @@
 import hashlib
 import os
 import uuid as uuid_lib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
-from jernerics_schema import IngestError, IngestRequest, IngestResponse
+from jernerics_schema import (
+    ArtifactsQuery,
+    ExecutionsQuery,
+    IngestError,
+    IngestRequest,
+    IngestResponse,
+    LineageQuery,
+    ProjectsQuery,
+    ProvenanceQuery,
+    QueryErrorBody,
+    QueryErrorResponse,
+    SweepsQuery,
+    TrialParamsQuery,
+    TrialsQuery,
+    ValueCatalogQuery,
+    ValuesQuery,
+)
 from pydantic import BaseModel
 from starlette.responses import FileResponse
 
 from .ingest import IngestService, IngestServiceError
-from .store import Store
+from .queries import QueryService, QueryServiceError
+from .store import QueryResourceLimitError, Store
 
 _READ_ONLY_KEYWORDS = {"SELECT", "WITH", "VALUES", "EXPLAIN", "SHOW", "DESCRIBE"}
 MAX_ROWS = 10_000
 MAX_INGEST_BYTES = 8 * 1024 * 1024
+
+
+def _is_read_only(sql: str) -> bool:
+    first_word = sql.strip().split()[0].upper()
+    return first_word in _READ_ONLY_KEYWORDS
+
+
+def _records_response(
+    records: Sequence[BaseModel | str], next_token: str | None = None
+) -> JSONResponse:
+    dumped = [
+        record.model_dump(mode="json") if isinstance(record, BaseModel) else record
+        for record in records
+    ]
+    return JSONResponse(content={"records": dumped, "next_token": next_token})
+
+
+def _structured_error(code: str, detail: str) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content=QueryErrorResponse(
+            error=QueryErrorBody(code=code, detail=detail)
+        ).model_dump(mode="json"),
+    )
+
+
+def _query_error(e: QueryServiceError) -> JSONResponse:
+    return _structured_error(e.code, str(e))
 
 
 class QueryRequest(BaseModel):
@@ -23,9 +69,7 @@ class QueryRequest(BaseModel):
     params: list | None = None
 
 
-def _is_read_only(sql: str) -> bool:
-    first_word = sql.strip().split()[0].upper()
-    return first_word in _READ_ONLY_KEYWORDS
+_EMPTY_PROJECTS_QUERY = ProjectsQuery()
 
 
 def _make_auth_dependency(api_key: str):
@@ -94,6 +138,7 @@ def create_app(
     *,
     api_key: str | None = None,
     artifacts_root: str | Path | None = None,
+    heartbeat_stale_s: float = 900.0,
 ) -> FastAPI:
     app = FastAPI()
     app.add_middleware(_IngestBodyLimit)
@@ -102,6 +147,7 @@ def create_app(
         store,
         artifacts_root=Path(artifacts_root) if artifacts_root is not None else None,
     )
+    queries = QueryService(store, heartbeat_stale_s=heartbeat_stale_s)
 
     @app.post("/query", response_model=None, dependencies=deps)
     def query(req: QueryRequest) -> JSONResponse:
@@ -112,6 +158,8 @@ def create_app(
             )
         try:
             columns, rows = store.query(req.sql, req.params)
+        except QueryResourceLimitError as e:
+            return _structured_error("query_resource_limit", str(e))
         except Exception as e:
             return JSONResponse(
                 status_code=400,
@@ -125,6 +173,107 @@ def create_app(
         return JSONResponse(
             content={"columns": columns, "rows": [list(r) for r in rows]}
         )
+
+    @app.post("/projects", response_model=None, dependencies=deps)
+    def projects(req: ProjectsQuery = _EMPTY_PROJECTS_QUERY) -> JSONResponse:
+        return _records_response(queries.projects())
+
+    @app.post("/sweeps", response_model=None, dependencies=deps)
+    def sweeps(req: SweepsQuery) -> JSONResponse:
+        try:
+            records, next_token = queries.sweeps(
+                req.selection,
+                states=req.states,
+                page=req.page,
+                page_token=req.page_token,
+            )
+        except QueryServiceError as e:
+            return _query_error(e)
+        return _records_response(records, next_token)
+
+    @app.post("/trials", response_model=None, dependencies=deps)
+    def trials(req: TrialsQuery) -> JSONResponse:
+        try:
+            records, next_token = queries.trials(
+                req.selection,
+                states=req.states,
+                retry_roots_only=req.retry_roots_only,
+                page=req.page,
+                page_token=req.page_token,
+            )
+        except QueryServiceError as e:
+            return _query_error(e)
+        return _records_response(records, next_token)
+
+    @app.post("/trial-params", response_model=None, dependencies=deps)
+    def trial_params(req: TrialParamsQuery) -> JSONResponse:
+        try:
+            records, next_token = queries.trial_params(
+                req.selection,
+                kinds=req.kinds,
+                page=req.page,
+                page_token=req.page_token,
+            )
+        except QueryServiceError as e:
+            return _query_error(e)
+        return _records_response(records, next_token)
+
+    @app.post("/lineage", response_model=None, dependencies=deps)
+    def lineage(req: LineageQuery) -> JSONResponse:
+        return _records_response(queries.lineage(req.selection))
+
+    @app.post("/executions", response_model=None, dependencies=deps)
+    def executions(req: ExecutionsQuery) -> JSONResponse:
+        return _records_response(
+            queries.executions(
+                req.selection,
+                states=req.states,
+                derive=req.derive,
+                heartbeat_stale_s=req.heartbeat_stale_s,
+            )
+        )
+
+    @app.post("/value-catalog", response_model=None, dependencies=deps)
+    def value_catalog(req: ValueCatalogQuery) -> JSONResponse:
+        return _records_response(queries.value_catalog(req.selection))
+
+    @app.post("/values", response_model=None, dependencies=deps)
+    def values(req: ValuesQuery) -> JSONResponse:
+        keys = tuple(req.keys or ())
+        if req.key is not None:
+            keys = (req.key, *keys)
+        try:
+            records, next_token = queries.values(
+                req.selection,
+                keys=keys or None,
+                steps=req.steps,
+                since_ns=req.since_ns,
+                json_only=req.json_only,
+                page=req.page,
+                page_token=req.page_token,
+            )
+        except QueryServiceError as e:
+            return _query_error(e)
+        return _records_response(records, next_token)
+
+    @app.post("/artifacts", response_model=None, dependencies=deps)
+    def artifacts(req: ArtifactsQuery) -> JSONResponse:
+        try:
+            records, next_token = queries.artifacts(
+                req.selection,
+                keys=req.keys,
+                received=req.received,
+                source=req.source,
+                page=req.page,
+                page_token=req.page_token,
+            )
+        except QueryServiceError as e:
+            return _query_error(e)
+        return _records_response(records, next_token)
+
+    @app.post("/provenance", response_model=None, dependencies=deps)
+    def provenance(req: ProvenanceQuery) -> JSONResponse:
+        return _records_response(queries.provenance(req.selection))
 
     @app.post("/ingest", response_model=None, dependencies=deps)
     def ingest(req: IngestRequest) -> JSONResponse:

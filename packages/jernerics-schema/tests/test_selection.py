@@ -1,9 +1,16 @@
-"""Contract tests for selection, page, and query models."""
+"""Contract tests for selection, page, token, and query models."""
 
 import uuid
 
 import pytest
-from jernerics_schema import Page, Query, Selection
+from jernerics_schema import (
+    Page,
+    PageToken,
+    Query,
+    Selection,
+    decode_page_token,
+    encode_page_token,
+)
 from pydantic import ValidationError
 
 
@@ -41,3 +48,27 @@ def test_page_bounds(kwargs: dict) -> None:
 def test_query_defaults() -> None:
     query = Query(selection=Selection(project="proj"))
     assert query.page == Page()
+
+
+def test_page_token_roundtrip_preserves_cursor_types() -> None:
+    token = PageToken(
+        cursor=("00000000-0000-0000-0000-000000000000", "loss", 7),
+        limit=100,
+        filters={"selection": {"project": "proj"}, "json_only": False},
+    )
+    decoded = decode_page_token(encode_page_token(token))
+    assert decoded == token
+    assert decoded.cursor[2] == 7
+    assert decoded.cursor[0] == "00000000-0000-0000-0000-000000000000"
+
+
+def test_decode_page_token_rejects_garbage() -> None:
+    for garbage in ("!!!", "e30", "bm90LWEtdG9rZW4", ""):
+        with pytest.raises(ValueError):
+            decode_page_token(garbage)
+
+
+def test_page_token_is_frozen() -> None:
+    token = PageToken(cursor=("a",), limit=10)
+    with pytest.raises(ValidationError):
+        token.limit = 11

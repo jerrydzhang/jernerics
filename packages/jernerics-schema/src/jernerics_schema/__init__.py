@@ -37,13 +37,31 @@ from .ingest import (
 )
 from .lifecycle import ExecutionOutcome, FailureKind, SubmissionState, TrialState
 from .lineage import RetryLineage
+from .queries import (
+    ArtifactsQuery,
+    ExecutionsQuery,
+    LineageQuery,
+    ProjectsQuery,
+    ProvenanceQuery,
+    QueryErrorBody,
+    QueryErrorResponse,
+    SweepsQuery,
+    TrialParamsQuery,
+    TrialsQuery,
+    ValueCatalogQuery,
+    ValuesQuery,
+)
 from .records import (
     ArtifactRecord,
     ExecutionRecord,
     JobRecord,
+    ProvenanceRecord,
     SubmissionRecord,
     SweepRecord,
+    TrialLineageRecord,
+    TrialParamRecord,
     TrialRecord,
+    ValueCatalogRecord,
     ValueRecord,
 )
 from .scalars import (
@@ -52,7 +70,14 @@ from .scalars import (
     Observation,
     ScalarValue,
 )
-from .selection import Page, Query, Selection
+from .selection import (
+    Page,
+    PageToken,
+    Query,
+    Selection,
+    decode_page_token,
+    encode_page_token,
+)
 
 __all__ = [
     "JERNERICS_NAMESPACE",
@@ -62,6 +87,7 @@ __all__ = [
     "ArtifactId",
     "ArtifactRecord",
     "ArtifactSource",
+    "ArtifactsQuery",
     "ConflictRecord",
     "Event",
     "EventId",
@@ -72,6 +98,7 @@ __all__ = [
     "ExecutionProgressEvent",
     "ExecutionRecord",
     "ExecutionStartEvent",
+    "ExecutionsQuery",
     "FailureKind",
     "FlatContext",
     "IngestError",
@@ -80,10 +107,17 @@ __all__ = [
     "JobId",
     "JobRecord",
     "JobSnapshotEvent",
+    "LineageQuery",
     "ManualParamEvent",
     "Observation",
     "Page",
+    "PageToken",
+    "ProjectsQuery",
+    "ProvenanceQuery",
+    "ProvenanceRecord",
     "Query",
+    "QueryErrorBody",
+    "QueryErrorResponse",
     "RetryLineage",
     "ScalarValue",
     "Selection",
@@ -94,13 +128,23 @@ __all__ = [
     "SweepId",
     "SweepRecord",
     "SweepSnapshotEvent",
+    "SweepsQuery",
     "TrackingEvent",
     "TrialId",
+    "TrialLineageRecord",
+    "TrialParamRecord",
+    "TrialParamsQuery",
     "TrialRecord",
     "TrialSnapshotEvent",
     "TrialState",
+    "TrialsQuery",
     "UtcDatetime",
+    "ValueCatalogQuery",
+    "ValueCatalogRecord",
     "ValueEvent",
     "ValueRecord",
+    "ValuesQuery",
+    "decode_page_token",
+    "encode_page_token",
     "sweep_id_for",
 ]

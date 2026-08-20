@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 from jernerics_schema import (
@@ -9,11 +10,15 @@ from jernerics_schema import (
     ExecutionOutcome,
     ExecutionRecord,
     JobRecord,
+    ProvenanceRecord,
     SubmissionRecord,
     SubmissionState,
     SweepRecord,
+    TrialLineageRecord,
+    TrialParamRecord,
     TrialRecord,
     TrialState,
+    ValueCatalogRecord,
     ValueRecord,
 )
 from pydantic import BaseModel, ValidationError
@@ -55,9 +60,13 @@ def _records() -> list[BaseModel]:
             ended_at=NOW,
             outcome=ExecutionOutcome.SUCCESS,
             exit_code=0,
+            last_heartbeat_ns=1_772_000_000_000_000_000,
+            last_observation_ns=1_772_000_000_100_000_000,
+            monitoring="ended",
         ),
         ValueRecord(trial_id=trial_id, key="loss", step=2, value=0.5),
         ValueRecord(
+            execution_id=execution_id,
             trial_id=trial_id,
             key="pred",
             step=3,
@@ -72,6 +81,35 @@ def _records() -> list[BaseModel]:
             content_type="text/plain",
             size_bytes=16,
             source="system",
+            received_ns=1_772_000_000_000_000_000,
+        ),
+        TrialParamRecord(
+            trial_id=trial_id,
+            kind="sampled",
+            key="lr",
+            value=0.1,
+        ),
+        TrialLineageRecord(
+            trial_id=trial_id,
+            retry_root_trial_id=trial_id,
+            number=0,
+            sweep_id=sweep_id,
+        ),
+        ValueCatalogRecord(
+            key="loss",
+            kind="scalar",
+            n_points=4,
+            latest_step=3,
+            n_trials=2,
+        ),
+        ProvenanceRecord(
+            submission_id=submission_id,
+            sweep_id=sweep_id,
+            backend="slurm",
+            submitted_at_ns=1_772_000_000_000_000_000,
+            expected_trials=12,
+            git_hash="0" * 40,
+            config_source="config.py",
         ),
     ]
 
@@ -102,3 +140,15 @@ def test_trial_record_lineage_defaults() -> None:
     assert record.params.root == {}
     assert record.retry_of_trial_id is None
     assert record.retry_index == 0
+
+
+def test_monitoring_rejects_unknown_label() -> None:
+    bad_label: Any = "fresh"
+    with pytest.raises(ValidationError):
+        ExecutionRecord(
+            execution_id=uuid.uuid4(),
+            trial_id=uuid.uuid4(),
+            hostname="node01",
+            started_at=NOW,
+            monitoring=bad_label,
+        )

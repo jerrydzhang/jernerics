@@ -47,6 +47,20 @@ class FutureSchemaError(StoreError):
     """The database schema version is newer than this build supports."""
 
 
+class QueryResourceLimitError(StoreError):
+    """A raw query exceeded its VM-step or wall-clock budget."""
+
+
+MAX_QUERY_VM_STEPS = 50_000_000
+"""VM-step budget for one raw SQL execution."""
+
+MAX_QUERY_SECONDS = 5.0
+"""Wall-clock budget for one raw SQL execution."""
+
+_PROGRESS_PERIOD = 1_000_000
+"""VM steps between raw-query resource checks."""
+
+
 def _enum_check(column: str, enum: type[Enum]) -> str:
     values = ", ".join(f"'{member.value}'" for member in enum)
     return f"CHECK({column} IN ({values}))"
@@ -346,10 +360,31 @@ class Store:
     ) -> tuple[list[str], list[tuple]]:
         con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True)
         try:
+            deadline = time.monotonic() + MAX_QUERY_SECONDS
+            checks = 0
+
+            def _over_budget() -> int:
+                nonlocal checks
+                checks += 1
+                return (
+                    1
+                    if checks * _PROGRESS_PERIOD > MAX_QUERY_VM_STEPS
+                    or time.monotonic() > deadline
+                    else 0
+                )
+
+            con.set_progress_handler(_over_budget, _PROGRESS_PERIOD)
             cursor = con.execute(sql, params or [])
             columns = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
             return columns, rows
+        except sqlite3.OperationalError as e:
+            if "interrupted" in str(e):
+                raise QueryResourceLimitError(
+                    f"query exceeded resource limits ({MAX_QUERY_VM_STEPS} VM "
+                    f"steps / {MAX_QUERY_SECONDS}s wall clock)"
+                ) from e
+            raise
         finally:
             con.close()
 
