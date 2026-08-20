@@ -333,3 +333,122 @@ a.project-row:hover {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* Artifact listing and viewer (jernerics-h5d.14) */
+
+.badge-available {
+  border-color: #9fd6a8;
+  background: #e9f9ee;
+}
+
+.badge-pending {
+  border-color: #e2d49a;
+  background: #fdf7e0;
+}
+
+.grid .cell-available {
+  color: #1e7e34;
+  font-weight: 600;
+}
+
+.grid .cell-pending {
+  color: #b06d0b;
+  font-weight: 600;
+}
+
+.mono-cell {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.download {
+  display: inline-block;
+  margin-top: 0.6rem;
+  padding: 0.25rem 0.9rem;
+  border: 1px solid #9aa5b1;
+  border-radius: 6px;
+  background: #f4f6f8;
+  color: #16323f;
+  text-decoration: none;
+  font-size: 0.9rem;
+}
+
+.download:hover {
+  background: #e8ecef;
+}
+
+.artifact-note {
+  color: #6b6250;
+  font-size: 0.9rem;
+}
+
+.artifact-card {
+  padding: 0.8rem 1rem;
+  border: 1px dashed #c9c9c9;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.text-view,
+.log-view {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  max-height: 40rem;
+  overflow-y: auto;
+  margin: 0;
+}
+
+.log-view {
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  background: #101418;
+  color: #d7e0d7;
+}
+
+.json-tree {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.json-branch {
+  margin: 0.15rem 0;
+}
+
+.json-leaf {
+  padding-left: 1.1rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.summary-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.6rem;
+}
+
+.summary-card {
+  padding: 0.2rem 0.7rem;
+  border: 1px solid #c9c9c9;
+  border-radius: 6px;
+  background: #f4f6f8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+}
+
+.quick-filter {
+  margin-bottom: 0.6rem;
+  min-width: 16rem;
+}
+
+.artifact-image {
+  max-width: 100%;
+  border: 1px solid #e3e3e3;
+  border-radius: 6px;
+}
+
+.artifact-video {
+  max-width: 100%;
+}

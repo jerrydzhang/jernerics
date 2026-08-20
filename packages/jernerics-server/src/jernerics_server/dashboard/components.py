@@ -50,6 +50,20 @@ def time_cell(ns: int | None, now_ns: int) -> str:
     return f"{absolute_time(ns)} ({relative_time(ns, now_ns)})"
 
 
+def human_size(size: int | None) -> str:
+    """Human byte size ("256 KiB"); exact multiples drop the decimal."""
+    if size is None:
+        return UNKNOWN
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    value = float(size)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            digits = 0 if value == int(value) else 1
+            return f"{value:.{digits}f} {unit}"
+        value /= 1024
+    return UNKNOWN
+
+
 def datetime_to_ns(moment: datetime) -> int:
     """Exact datetime-to-nanoseconds (no float epoch loss)."""
     delta = moment - datetime(1970, 1, 1, tzinfo=UTC)

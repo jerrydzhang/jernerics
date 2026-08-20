@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal
 
 from jernerics_schema import (
@@ -151,9 +152,16 @@ _ZERO_COUNTS: dict[str, int] = {
 class QueryService:
     """Every domain read over the v3 store, shared by HTTP and callbacks."""
 
-    def __init__(self, store: Store, *, heartbeat_stale_s: float = 900.0) -> None:
+    def __init__(
+        self,
+        store: Store,
+        *,
+        heartbeat_stale_s: float = 900.0,
+        artifacts_root: Path | None = None,
+    ) -> None:
         self._store = store
         self.heartbeat_stale_s = heartbeat_stale_s
+        self._artifacts_root = artifacts_root
 
     def _trial_id_bits(
         self, selection: Selection, trials_alias: str = "t"
@@ -687,6 +695,70 @@ class QueryService:
             for row in rows
         ]
         return records, next_token
+
+    @staticmethod
+    def _artifact_row(row: tuple) -> dict[str, Any]:
+        """One artifacts-table row as a dict, context JSON decoded."""
+        return {
+            "artifact_id": row[0],
+            "execution_id": row[1],
+            "key": row[2],
+            "filename": row[3],
+            "content_type": row[4],
+            "size_bytes": row[5],
+            "sha256": row[6],
+            "context": json.loads(row[7]) if row[7] else None,
+            "source": row[8],
+            "declared_ns": row[9],
+            "received_ns": row[10],
+        }
+
+    def trial_artifacts(self, trial_id: uuid.UUID) -> list[dict[str, Any]]:
+        """Every artifact declared for one trial, ordered so repeated keys
+        read as consecutive versions by declaration time."""
+        _, rows = self._store.query(
+            "SELECT a.artifact_id, a.execution_id, a.key, a.filename, "
+            "a.content_type, a.size_bytes, a.sha256, a.context_json, "
+            "a.source, a.declared_ns, a.received_ns "
+            "FROM artifacts a WHERE a.trial_id = ? "
+            "ORDER BY a.key, a.declared_ns, a.artifact_id",
+            [str(trial_id)],
+        )
+        return [self._artifact_row(row) for row in rows]
+
+    def artifact_context(self, artifact_id: uuid.UUID) -> dict[str, Any] | None:
+        """Every stored fact for one artifact plus its trial/sweep context
+        (deep-link entry point for the artifact viewer)."""
+        _, rows = self._store.query(
+            "SELECT a.artifact_id, a.execution_id, a.key, a.filename, "
+            "a.content_type, a.size_bytes, a.sha256, a.context_json, "
+            "a.source, a.declared_ns, a.received_ns, t.trial_id, "
+            "s.sweep_id, s.project, s.name "
+            "FROM artifacts a JOIN trials t ON a.trial_id = t.trial_id "
+            "JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            "WHERE a.artifact_id = ?",
+            [str(artifact_id)],
+        )
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            **self._artifact_row(row),
+            "trial_id": row[11],
+            "sweep_id": row[12],
+            "project": row[13],
+            "sweep_name": row[14],
+        }
+
+    def artifact_blob_path(self, artifact_id: uuid.UUID) -> Path | None:
+        """Local path of the received blob file, or None when absent."""
+        if self._artifacts_root is None:
+            return None
+        blob = self._store.artifact_blob(str(artifact_id))
+        if blob is None:
+            return None
+        path = self._artifacts_root / blob[0]
+        return path if path.is_file() else None
 
     def provenance(self, selection: Selection) -> list[ProvenanceRecord]:
         sweep_ids = self._selected_sweep_ids(selection)

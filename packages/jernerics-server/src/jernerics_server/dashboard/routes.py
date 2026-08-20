@@ -2,7 +2,9 @@
 
 Deep links: ``/dashboard`` (project catalog), ``/dashboard/project/<name>``
 (workspace sweep grid), ``/dashboard/sweep/<id>``, ``/dashboard/trial/<id>``,
-``/dashboard/execution/<id>``, and ``/dashboard/analysis`` (cross-sweep
+``/dashboard/execution/<id>``, ``/dashboard/artifact-view/<hex>`` (the
+viewer; ``/dashboard/artifact/<hex>`` is the raw download alias served by
+the HTTP layer, not a page), and ``/dashboard/analysis`` (cross-sweep
 analysis; its query string carries the selection token). Unknown paths
 render the not-found surface. ``polls`` on a PageSpec is only the
 route-level default; live pages decide from fetched facts (see
@@ -20,6 +22,7 @@ PageKind = Literal[
     "sweep",
     "trial",
     "execution",
+    "artifact",
     "analysis",
     "not-found",
 ]
@@ -27,6 +30,7 @@ PageKind = Literal[
 _KINDS: tuple[PageKind, ...] = ("sweep", "trial", "execution")
 
 _PROJECT_PREFIX = f"{ROUTES_BASE}/project/"
+_ARTIFACT_VIEW_PREFIX = f"{ROUTES_BASE}/artifact-view/"
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,10 @@ def parse_route(pathname: str | None) -> PageSpec:
         project = path[len(_PROJECT_PREFIX) :].strip("/")
         if project:
             return PageSpec(kind="workspace", object_id=project)
+    if path.startswith(_ARTIFACT_VIEW_PREFIX):
+        artifact_id = path[len(_ARTIFACT_VIEW_PREFIX) :].strip("/")
+        if artifact_id:
+            return PageSpec(kind="artifact", object_id=artifact_id)
     for kind in _KINDS:
         prefix = f"{ROUTES_BASE}/{kind}/"
         if path.startswith(prefix):

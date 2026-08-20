@@ -148,7 +148,11 @@ def create_app(
         store,
         artifacts_root=Path(artifacts_root) if artifacts_root is not None else None,
     )
-    queries = QueryService(store, heartbeat_stale_s=heartbeat_stale_s)
+    queries = QueryService(
+        store,
+        heartbeat_stale_s=heartbeat_stale_s,
+        artifacts_root=Path(artifacts_root) if artifacts_root is not None else None,
+    )
     dashboard_ctx = None
     artifact_get_deps: list = []
     if dashboard:

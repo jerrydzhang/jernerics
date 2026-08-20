@@ -116,6 +116,57 @@ class SweepDetail:
 
 
 @dataclass(frozen=True)
+class ArtifactRow:
+    """One artifact version row: repeated keys number v1..vN by
+    declaration time and are never collapsed."""
+
+    artifact_id: str
+    key: str
+    version: int
+    versions: int
+    execution_id: str | None
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str | None
+    context: dict[str, Any] | None
+    source: str
+    declared_ns: int
+    received_ns: int | None
+
+    @property
+    def available(self) -> bool:
+        return self.received_ns is not None
+
+
+@dataclass(frozen=True)
+class ArtifactView:
+    """Everything the artifact viewer page renders."""
+
+    artifact_id: str
+    key: str
+    version: int
+    versions: int
+    execution_id: str | None
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str | None
+    context: dict[str, Any] | None
+    source: str
+    declared_ns: int
+    received_ns: int | None
+    trial_id: str
+    sweep_id: str
+    sweep_name: str
+    project: str
+
+    @property
+    def available(self) -> bool:
+        return self.received_ns is not None
+
+
+@dataclass(frozen=True)
 class TrialDetail:
     """Everything the trial page renders."""
 
@@ -124,6 +175,7 @@ class TrialDetail:
     catalog: list[ValueCatalogRecord]
     executions: list[ExecutionRecord]
     lineage: list[dict[str, Any]]
+    artifacts: tuple["ArtifactRow", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -134,6 +186,7 @@ class ExecutionDetail:
     params: list[TrialParamRecord]
     provenance: list[ProvenanceRecord]
     resolved_config: dict[str, Any] | None
+    artifacts: tuple["ArtifactRow", ...] = ()
 
 
 def _format_param(value: Any) -> str:
@@ -314,6 +367,7 @@ class DashboardService:
                 }
                 for record in self.queries.lineage(family)
             ],
+            artifacts=self.trial_artifacts(context["trial_id"]),
         )
 
     def execution_detail(self, execution_id: str) -> ExecutionDetail | None:
@@ -338,7 +392,114 @@ class DashboardService:
             params=self.queries.trial_params(selection)[0],
             provenance=self.queries.provenance(sweep_selection),
             resolved_config=resolved,
+            artifacts=self.execution_artifacts(execution_id),
         )
+
+    # -- Artifacts (jernerics-h5d.14) ------------------------------------
+
+    @staticmethod
+    def _artifact_rows(records: Sequence[dict[str, Any]]) -> tuple[ArtifactRow, ...]:
+        """Version rows: records arrive key/declaration ordered, so a
+        running per-key counter numbers v1..vN without collapsing."""
+        totals: dict[str, int] = {}
+        for record in records:
+            totals[record["key"]] = totals.get(record["key"], 0) + 1
+        seen: dict[str, int] = {}
+        rows: list[ArtifactRow] = []
+        for record in records:
+            seen[record["key"]] = seen.get(record["key"], 0) + 1
+            rows.append(
+                ArtifactRow(
+                    artifact_id=record["artifact_id"],
+                    key=record["key"],
+                    version=seen[record["key"]],
+                    versions=totals[record["key"]],
+                    execution_id=record["execution_id"],
+                    filename=record["filename"],
+                    content_type=record["content_type"],
+                    size_bytes=record["size_bytes"],
+                    sha256=record["sha256"],
+                    context=record["context"],
+                    source=record["source"],
+                    declared_ns=record["declared_ns"],
+                    received_ns=record["received_ns"],
+                )
+            )
+        return tuple(rows)
+
+    def trial_artifacts(self, trial_id: str) -> tuple[ArtifactRow, ...]:
+        """All artifact versions of one trial (``()`` for unknown ids)."""
+        parsed = _parse_id(trial_id)
+        if parsed is None:
+            return ()
+        return self._artifact_rows(self.queries.trial_artifacts(parsed))
+
+    def execution_artifacts(self, execution_id: str) -> tuple[ArtifactRow, ...]:
+        """Execution-bound artifact rows. Versions stay numbered within
+        the whole trial so the grid and the viewer page always agree."""
+        parsed = _parse_id(execution_id)
+        if parsed is None:
+            return ()
+        context = self.queries.execution_context(parsed)
+        if context is None:
+            return ()
+        return tuple(
+            row
+            for row in self.trial_artifacts(context["trial_id"])
+            if row.execution_id == str(parsed)
+        )
+
+    def artifact_view(self, artifact_id: str) -> ArtifactView | None:
+        """Viewer page data; ``None`` when the id matches no artifact."""
+        parsed = _parse_id(artifact_id)
+        if parsed is None:
+            return None
+        context = self.queries.artifact_context(parsed)
+        if context is None:
+            return None
+        row = next(
+            (
+                row
+                for row in self.trial_artifacts(context["trial_id"])
+                if row.artifact_id == str(parsed)
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        return ArtifactView(
+            artifact_id=row.artifact_id,
+            key=row.key,
+            version=row.version,
+            versions=row.versions,
+            execution_id=row.execution_id,
+            filename=row.filename,
+            content_type=row.content_type,
+            size_bytes=row.size_bytes,
+            sha256=row.sha256,
+            context=row.context,
+            source=row.source,
+            declared_ns=row.declared_ns,
+            received_ns=row.received_ns,
+            trial_id=context["trial_id"],
+            sweep_id=context["sweep_id"],
+            sweep_name=context["sweep_name"],
+            project=context["project"],
+        )
+
+    def read_artifact_text(self, artifact_id: str, cap: int) -> tuple[str, bool] | None:
+        """First ``cap`` bytes of the stored blob as text plus a truncated
+        flag; ``None`` when the blob is absent (never raises on decode)."""
+        parsed = _parse_id(artifact_id)
+        if parsed is None:
+            return None
+        path = self.queries.artifact_blob_path(parsed)
+        if path is None:
+            return None
+        with open(path, "rb") as blob:
+            raw = blob.read(cap)
+            truncated = blob.read(1) != b""
+        return raw.decode("utf-8", errors="replace"), truncated
 
     # -- Analysis page (jernerics-h5d.13) ---------------------------------
 

@@ -14,7 +14,7 @@ import dash
 from dash import Input, Output, State, no_update
 from dash.exceptions import PreventUpdate
 
-from . import analysis, layout
+from . import analysis, artifacts, layout
 from .components import Error
 from .routes import parse_route
 from .service import DashboardService, TrialDetail
@@ -72,6 +72,14 @@ def page_content(
                 False,
             )
         return layout.execution_page(detail, now), detail.context["ended_ns"] is None
+    if spec.kind == "artifact":
+        view = service.artifact_view(spec.object_id or "")
+        if view is None:
+            return (
+                layout.missing_object_page("artifact", spec.object_id or ""),
+                False,
+            )
+        return artifacts.viewer_page(service, view, now), False
     if spec.kind == "analysis":
         # Interactive, user-driven exploration: no polling, so tab state
         # survives until the next navigation.
@@ -359,3 +367,24 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _render_analysis_python(tray: dict | None, project: str | None):
         return analysis.python_tab(service, project, tray)
+
+    # -- Artifact listing and viewer (jernerics-h5d.14) ------------------
+
+    @app.callback(
+        Output("url", "pathname"),
+        Input("artifact-grid", "cellClicked"),
+        prevent_initial_call=True,
+    )
+    def _open_artifact(click: dict | None):
+        artifact_id = (click or {}).get("rowId")
+        if not artifact_id:
+            raise PreventUpdate
+        return artifacts.viewer_href(str(artifact_id))
+
+    @app.callback(
+        Output("artifact-rows-grid", "dashGridOptions"),
+        Input("artifact-quick-filter", "value"),
+        prevent_initial_call=True,
+    )
+    def _filter_artifact_rows(text: str | None):
+        return {"quickFilterText": text or ""}

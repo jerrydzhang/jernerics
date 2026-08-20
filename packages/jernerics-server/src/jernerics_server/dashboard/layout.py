@@ -15,7 +15,7 @@ import json
 from dash import dcc, html
 from dash_ag_grid import AgGrid
 
-from . import components
+from . import artifacts, components
 from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
 from .routes import ROUTES_BASE
 from .service import (
@@ -34,6 +34,7 @@ _KIND_LABELS = {
     "sweep": "Sweep",
     "trial": "Trial",
     "execution": "Execution",
+    "artifact": "Artifact",
 }
 
 _MONITORING_ORDER = (
@@ -535,6 +536,13 @@ def trial_page(detail: TrialDetail, now_ns: int) -> html.Div:
             html.Section(
                 [html.H3("Executions"), executions_table], className="section"
             ),
+            html.Section(
+                [
+                    html.H3("Artifacts"),
+                    artifacts.artifact_grid(detail.artifacts, now_ns),
+                ],
+                className="section",
+            ),
         ],
         className="page",
     )
@@ -679,10 +687,19 @@ def execution_page(detail: ExecutionDetail, now_ns: int) -> html.Div:
         className="section",
         id="section-optimizer-state",
     )
+    artifact_section = html.Section(
+        [
+            html.H3("Artifacts"),
+            artifacts.artifact_grid(detail.artifacts, now_ns),
+        ],
+        className="section",
+        id="section-execution-artifacts",
+    )
     return html.Div(
         [
             html.H2(f"Execution {short_id(context['execution_id'])}"),
             facts,
+            artifact_section,
             optimizer,
         ],
         className="page",
