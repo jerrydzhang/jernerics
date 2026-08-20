@@ -314,7 +314,7 @@ class SlurmAdapter:
         checker_id = parts[1] if len(parts) > 1 else None
         subs = [JobSubmission(job_id=job_id, n_trials=params.n_trials)]
         if checker_id is not None:
-            subs.append(JobSubmission(job_id=checker_id, n_trials=0))
+            subs.append(JobSubmission(job_id=checker_id, n_trials=0, role="checker"))
         return SubmitResult(submissions=subs)
 
     def submit_job(

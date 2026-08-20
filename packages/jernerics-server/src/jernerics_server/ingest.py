@@ -17,6 +17,7 @@ from jernerics_schema import (
     ExecutionProgressEvent,
     ExecutionStartEvent,
     IngestRequest,
+    JobSnapshotEvent,
     ManualParamEvent,
     ScalarValue,
     SubmissionSnapshotEvent,
@@ -39,14 +40,15 @@ _TERMINAL_TRIAL_STATES = frozenset(
 _TIER: dict[str, int] = {
     "sweep_snapshot": 0,
     "submission_snapshot": 1,
-    "trial_snapshot": 2,
-    "execution_start": 3,
-    "execution_heartbeat": 4,
-    "execution_progress": 4,
-    "manual_param": 4,
-    "value": 4,
-    "execution_end": 5,
-    "artifact_declaration": 6,
+    "job_snapshot": 2,
+    "trial_snapshot": 3,
+    "execution_start": 4,
+    "execution_heartbeat": 5,
+    "execution_progress": 5,
+    "manual_param": 5,
+    "value": 5,
+    "execution_end": 6,
+    "artifact_declaration": 7,
 }
 
 
@@ -207,6 +209,8 @@ class IngestService:
                 return self._apply_sweep_snapshot(con, index, event)
             case SubmissionSnapshotEvent():
                 return self._apply_submission_snapshot(con, index, event)
+            case JobSnapshotEvent():
+                return self._apply_job_snapshot(con, index, event)
             case TrialSnapshotEvent():
                 return self._apply_trial_snapshot(con, index, event, conflicts)
             case ExecutionStartEvent():
@@ -292,8 +296,18 @@ class IngestService:
         self, con: sqlite3.Connection, index: int, event: SubmissionSnapshotEvent
     ) -> bool:
         ns = _to_ns(event.recorded_at)
+        submitted_ns = (
+            _to_ns(event.submitted_at) if event.submitted_at is not None else None
+        )
+        incoming = (
+            submitted_ns,
+            event.expected_trials,
+            event.git_hash,
+            event.config_source,
+        )
         row = con.execute(
-            "SELECT sweep_id, backend, state, updated_ns FROM submissions "
+            "SELECT sweep_id, backend, state, submitted_ns, expected_trials, "
+            "git_hash, config_source, updated_ns FROM submissions "
             "WHERE submission_id = ?",
             [str(event.submission_id)],
         ).fetchone()
@@ -314,18 +328,30 @@ class IngestService:
                 )
             con.execute(
                 "INSERT INTO submissions (submission_id, sweep_id, backend, "
-                "state, created_ns, updated_ns) VALUES (?, ?, ?, ?, ?, ?)",
+                "state, submitted_ns, expected_trials, git_hash, "
+                "config_source, created_ns, updated_ns) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     str(event.submission_id),
                     str(event.sweep_id),
                     event.backend,
                     state_value,
+                    *incoming,
                     ns,
                     ns,
                 ],
             )
             return True
-        sweep_id, backend, state, updated_ns = row
+        (
+            sweep_id,
+            backend,
+            state,
+            submitted,
+            expected,
+            git_hash,
+            config_source,
+            updated_ns,
+        ) = row
         if sweep_id != str(event.sweep_id):
             raise self._conflict(
                 index,
@@ -340,12 +366,116 @@ class IngestService:
                 f"submission {event.submission_id} backend is immutable: "
                 f"stored {backend!r}, incoming {event.backend!r}",
             )
+        stored = (submitted, expected, git_hash, config_source)
+        for name, was, now in zip(
+            ("submitted_ns", "expected_trials", "git_hash", "config_source"),
+            stored,
+            incoming,
+            strict=True,
+        ):
+            if was is not None and now is not None and was != now:
+                raise self._conflict(
+                    index,
+                    event,
+                    f"submission {event.submission_id} {name} is write-once: "
+                    f"stored {was!r}, incoming {now!r}",
+                )
+        filled = tuple(
+            was if was is not None else now
+            for was, now in zip(stored, incoming, strict=True)
+        )
         new_updated = max(updated_ns, ns)
-        if state == state_value and new_updated == updated_ns:
+        if state == state_value and filled == stored and new_updated == updated_ns:
             return False
         con.execute(
-            "UPDATE submissions SET state = ?, updated_ns = ? WHERE submission_id = ?",
-            [state_value, new_updated, str(event.submission_id)],
+            "UPDATE submissions SET state = ?, submitted_ns = ?, "
+            "expected_trials = ?, git_hash = ?, config_source = ?, "
+            "updated_ns = ? WHERE submission_id = ?",
+            [state_value, *filled, new_updated, str(event.submission_id)],
+        )
+        return True
+
+    def _apply_job_snapshot(
+        self, con: sqlite3.Connection, index: int, event: JobSnapshotEvent
+    ) -> bool:
+        ns = _to_ns(event.recorded_at)
+        state_value = event.state.value
+        row = con.execute(
+            "SELECT submission_id, scheduler_job_id, role, state, updated_ns "
+            "FROM submission_jobs WHERE job_id = ?",
+            [str(event.job_id)],
+        ).fetchone()
+        if row is None:
+            if (
+                con.execute(
+                    "SELECT 1 FROM submissions WHERE submission_id = ?",
+                    [str(event.submission_id)],
+                ).fetchone()
+                is None
+            ):
+                raise self._invalid(
+                    index,
+                    event,
+                    f"job {event.job_id} references unknown submission "
+                    f"{event.submission_id}",
+                )
+            clash = con.execute(
+                "SELECT job_id FROM submission_jobs WHERE submission_id = ? "
+                "AND scheduler_job_id = ?",
+                [str(event.submission_id), event.scheduler_job_id],
+            ).fetchone()
+            if clash is not None:
+                raise self._conflict(
+                    index,
+                    event,
+                    f"job {event.job_id} reuses (submission_id, "
+                    f"scheduler_job_id) = ({event.submission_id}, "
+                    f"{event.scheduler_job_id}) already held by job {clash[0]}",
+                )
+            con.execute(
+                "INSERT INTO submission_jobs (job_id, submission_id, "
+                "scheduler_job_id, role, state, updated_ns) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    str(event.job_id),
+                    str(event.submission_id),
+                    event.scheduler_job_id,
+                    event.role,
+                    state_value,
+                    ns,
+                ],
+            )
+            return True
+        submission_id, scheduler_job_id, role, state, updated_ns = row
+        if submission_id != str(event.submission_id):
+            raise self._conflict(
+                index,
+                event,
+                f"job {event.job_id} submission is immutable: stored "
+                f"{submission_id}, incoming {event.submission_id}",
+            )
+        if scheduler_job_id != event.scheduler_job_id:
+            raise self._conflict(
+                index,
+                event,
+                f"job {event.job_id} scheduler_job_id is immutable: stored "
+                f"{scheduler_job_id!r}, incoming {event.scheduler_job_id!r}",
+            )
+        if role is not None and role != event.role:
+            raise self._conflict(
+                index,
+                event,
+                f"job {event.job_id} role is immutable: stored {role!r}, "
+                f"incoming {event.role!r}",
+            )
+        filled_role = role if role is not None else event.role
+        new_updated = max(updated_ns, ns)
+        if state == state_value and filled_role == role and new_updated == updated_ns:
+            return False
+        con.execute(
+            "UPDATE submission_jobs SET role = ?, state = ?, updated_ns = ? "
+            "WHERE job_id = ?",
+            [filled_role, state_value, new_updated, str(event.job_id)],
         )
         return True
 

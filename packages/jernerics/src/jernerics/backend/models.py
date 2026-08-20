@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,6 +19,7 @@ class SweepSubmission:
     backend_overrides: dict[str, str] = field(default_factory=dict)
     grid: dict[str, list] | None = None
     git_hash: str | None = None
+    submission_id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
 
 @dataclass
@@ -37,6 +39,7 @@ class JobSubmission:
     output_pattern: str | None = None
     error_pattern: str | None = None
     n_trials: int = 0
+    role: str = "trials"
 
 
 @dataclass

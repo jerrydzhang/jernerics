@@ -25,6 +25,10 @@ class SubmissionRecord(BaseModel):
     sweep_id: SweepId
     backend: str
     state: SubmissionState
+    submitted_at: UtcDatetime | None = None
+    expected_trials: int | None = Field(default=None, ge=1)
+    git_hash: str | None = None
+    config_source: str | None = None
 
 
 class JobRecord(BaseModel):
@@ -33,6 +37,7 @@ class JobRecord(BaseModel):
     job_id: JobId
     submission_id: SubmissionId
     scheduler_job_id: str
+    role: str = "trials"
     state: SubmissionState
 
 

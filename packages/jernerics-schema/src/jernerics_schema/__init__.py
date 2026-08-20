@@ -7,6 +7,7 @@ from .events import (
     ExecutionHeartbeatEvent,
     ExecutionProgressEvent,
     ExecutionStartEvent,
+    JobSnapshotEvent,
     ManualParamEvent,
     SubmissionSnapshotEvent,
     SweepSnapshotEvent,
@@ -16,6 +17,7 @@ from .events import (
     ValueEvent,
 )
 from .ids import (
+    JERNERICS_NAMESPACE,
     ArtifactId,
     EventId,
     ExecutionId,
@@ -23,6 +25,7 @@ from .ids import (
     SubmissionId,
     SweepId,
     TrialId,
+    sweep_id_for,
 )
 from .ingest import (
     PROTOCOL_VERSION,
@@ -51,6 +54,7 @@ from .scalars import (
 from .selection import Page, Query, Selection
 
 __all__ = [
+    "JERNERICS_NAMESPACE",
     "JSON_VALUE_MAX_BYTES",
     "PROTOCOL_VERSION",
     "ArtifactDeclarationEvent",
@@ -73,6 +77,7 @@ __all__ = [
     "IngestResponse",
     "JobId",
     "JobRecord",
+    "JobSnapshotEvent",
     "ManualParamEvent",
     "Observation",
     "Page",
@@ -95,4 +100,5 @@ __all__ = [
     "UtcDatetime",
     "ValueEvent",
     "ValueRecord",
+    "sweep_id_for",
 ]

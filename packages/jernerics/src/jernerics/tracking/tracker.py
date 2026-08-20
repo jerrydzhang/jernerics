@@ -21,7 +21,10 @@ from jernerics_schema import (
     FlatContext,
     ManualParamEvent,
     ScalarValue,
+    SweepId,
     TrialId,
+    TrialSnapshotEvent,
+    TrialState,
     ValueEvent,
 )
 
@@ -61,6 +64,14 @@ class Tracker(Protocol):
     def emit_heartbeat(
         self, at: datetime | None = None
     ) -> ExecutionHeartbeatEvent | None: ...
+    def emit_trial_snapshot(
+        self,
+        *,
+        sweep_id: SweepId,
+        number: int,
+        state: TrialState,
+        params: dict[str, ScalarValue],
+    ) -> TrialSnapshotEvent | None: ...
     def emit_execution_start(
         self, hostname: str | None = None
     ) -> ExecutionStartEvent | None: ...
@@ -214,6 +225,27 @@ class JsonlTracker:
             )
         )
 
+    def emit_trial_snapshot(
+        self,
+        *,
+        sweep_id: SweepId,
+        number: int,
+        state: TrialState,
+        params: dict[str, ScalarValue],
+    ) -> TrialSnapshotEvent:
+        return self._emit(
+            TrialSnapshotEvent(
+                event_id=uuid4(),
+                recorded_at=_now(),
+                trial_id=self.trial_id,
+                sweep_id=sweep_id,
+                number=number,
+                state=state,
+                params=FlatContext(params),
+                retry_root_trial_id=self.trial_id,
+            )
+        )
+
     def emit_execution_start(self, hostname: str | None = None) -> ExecutionStartEvent:
         return self._emit(
             ExecutionStartEvent(
@@ -312,6 +344,16 @@ class NullTracker:
         pass
 
     def emit_heartbeat(self, at: datetime | None = None) -> None:
+        pass
+
+    def emit_trial_snapshot(
+        self,
+        *,
+        sweep_id: SweepId,
+        number: int,
+        state: TrialState,
+        params: dict[str, ScalarValue],
+    ) -> None:
         pass
 
     def emit_execution_start(self, hostname: str | None = None) -> None:

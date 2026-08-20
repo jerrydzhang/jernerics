@@ -96,6 +96,99 @@ class TestLocalBackendPostHook:
         mock_replay.assert_not_called()
 
 
+class TestLocalBackendSubmissionEvents:
+    @patch("jernerics.backend.local_backend.run_trial")
+    @patch("jernerics.backend.local_backend.cache_dir")
+    def test_emits_submission_events_when_project_named(
+        self, mock_cache_dir, mock_run_trial, tmp_path
+    ):
+        from jernerics.backend.local_backend import LocalBackend
+        from jernerics.backend.models import SweepSubmission
+
+        mock_cache_dir.return_value = tmp_path
+        (tmp_path / "optuna").mkdir(parents=True)
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text(
+            "from optuna.samplers import TPESampler\n"
+            "base = {}\n"
+            "n_trials = 1\n"
+            "direction = 'minimize'\n"
+            "sampler = TPESampler()\n"
+        )
+
+        spec = SweepSubmission(
+            trial_path=tmp_path / "trial.py",
+            config_path=tmp_path / "config.py",
+            study_name="mystudy",
+            storage_url=str(tmp_path / "optuna" / "mystudy.journal"),
+            n_trials=1,
+            project_name="proj",
+            tracking_dir=tmp_path / "tracking" / "mystudy",
+            git_hash="abc123",
+        )
+
+        LocalBackend(tracking_server=None).submit_sweep(spec)
+
+        path = (
+            tmp_path
+            / "tracking"
+            / "mystudy"
+            / "submission"
+            / f"{spec.submission_id}.jsonl"
+        )
+        events = _read_submission_events(path)
+        assert [event.tag for event in events] == [
+            "sweep_snapshot",
+            "submission_snapshot",
+            "job_snapshot",
+        ]
+        submission = events[1]
+        assert submission.expected_trials == 1
+        assert submission.git_hash == "abc123"
+        assert submission.config_source == str(tmp_path / "config.py")
+        assert events[2].role == "trials"
+        assert events[2].scheduler_job_id == "local"
+
+    @patch("jernerics.backend.local_backend.run_trial")
+    @patch("jernerics.backend.local_backend.cache_dir")
+    def test_skips_emission_without_project_name(
+        self, mock_cache_dir, mock_run_trial, tmp_path
+    ):
+        from jernerics.backend.local_backend import LocalBackend
+        from jernerics.backend.models import SweepSubmission
+
+        mock_cache_dir.return_value = tmp_path
+        (tmp_path / "optuna").mkdir(parents=True)
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text(
+            "from optuna.samplers import TPESampler\n"
+            "base = {}\n"
+            "n_trials = 1\n"
+            "direction = 'minimize'\n"
+            "sampler = TPESampler()\n"
+        )
+
+        spec = SweepSubmission(
+            trial_path=tmp_path / "trial.py",
+            config_path=tmp_path / "config.py",
+            study_name="mystudy",
+            storage_url=str(tmp_path / "optuna" / "mystudy.journal"),
+            n_trials=1,
+            tracking_dir=tmp_path / "tracking" / "mystudy",
+        )
+
+        LocalBackend(tracking_server=None).submit_sweep(spec)
+
+        assert not (tmp_path / "tracking" / "mystudy" / "submission").exists()
+
+
+def _read_submission_events(path):
+    from jernerics.tracking.jsonl_io import TrackingReader
+
+    with TrackingReader(path) as reader:
+        return list(reader)
+
+
 class TestRunLocalSingleConfig:
     @patch("jernerics.backend.local_backend.run_trial")
     @patch("jernerics.backend.local_backend.cache_dir")

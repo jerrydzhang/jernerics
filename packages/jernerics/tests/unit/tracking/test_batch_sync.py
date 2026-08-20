@@ -209,6 +209,34 @@ class TestDiscoverJsonlFiles:
     def test_empty_dir_returns_empty_list(self, tmp_path: Path) -> None:
         assert discover_jsonl_files(tmp_path) == []
 
+    def test_finds_submission_logs(self, tmp_path: Path) -> None:
+        submission = _write_events(
+            tmp_path / "alpha" / "submission" / "abc.jsonl", [_value_event()]
+        )
+
+        assert discover_jsonl_files(tmp_path) == [submission]
+
+    def test_scopes_submission_logs_to_study(self, tmp_path: Path) -> None:
+        alpha = _write_events(
+            tmp_path / "alpha" / "submission" / "abc.jsonl", [_value_event()]
+        )
+        _write_events(tmp_path / "beta" / "submission" / "def.jsonl", [_value_event()])
+
+        assert discover_jsonl_files(tmp_path, study="alpha") == [alpha]
+
+    def test_merges_events_and_submission_logs_sorted(self, tmp_path: Path) -> None:
+        events = _write_events(
+            tmp_path / "alpha" / "events" / "0.jsonl", [_value_event()]
+        )
+        submission = _write_events(
+            tmp_path / "alpha" / "submission" / "abc.jsonl", [_value_event()]
+        )
+
+        found = discover_jsonl_files(tmp_path)
+
+        assert found == sorted([events, submission])
+        assert set(found) == {events, submission}
+
 
 class TestReplayTracking:
     def test_ships_every_file_and_deletes_files_and_cursors(

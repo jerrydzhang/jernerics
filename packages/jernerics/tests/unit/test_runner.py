@@ -11,7 +11,7 @@ from jernerics.runner import (
     run_trial,
 )
 from jernerics.tracking.jsonl_io import TrackingWriter
-from jernerics_schema import ValueEvent
+from jernerics_schema import ValueEvent, sweep_id_for
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 trial_id = uuid4()
@@ -134,6 +134,7 @@ class TestTrialEnv:
     def test_contains_all_required_jernerics_vars(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KEEP_ME", "yes")
         config_path = tmp_path / "c.json"
+        sweep_id = sweep_id_for("proj", "study")
 
         env = _trial_env(
             config_path=config_path,
@@ -141,7 +142,7 @@ class TestTrialEnv:
             project_name="proj",
             study_name="study",
             trial_number=7,
-            run_id=99,
+            sweep_id=sweep_id,
             trial_id=trial_id,
             execution_id=execution_id,
         )
@@ -151,10 +152,219 @@ class TestTrialEnv:
         assert env["JERNERICS_PROJECT_NAME"] == "proj"
         assert env["JERNERICS_STUDY_NAME"] == "study"
         assert env["JERNERICS_TRIAL_NUMBER"] == "7"
-        assert env["JERNERICS_RUN_ID"] == "99"
+        assert env["JERNERICS_SWEEP_ID"] == str(sweep_id)
         assert env["JERNERICS_TRIAL_ID"] == str(trial_id)
         assert env["JERNERICS_EXECUTION_ID"] == str(execution_id)
+        assert "JERNERICS_RUN_ID" not in env
         assert env["KEEP_ME"] == "yes"
+
+
+def _read_events(path):
+    from jernerics.tracking.jsonl_io import TrackingReader
+
+    with TrackingReader(path) as reader:
+        return list(reader)
+
+
+def _first(events, tag, key=None):
+    for index, event in enumerate(events):
+        if event.tag == tag and (key is None or getattr(event, "key", None) == key):
+            return index, event
+    raise AssertionError(f"no {tag}{'/' + key if key else ''} event found")
+
+
+class TestExecutionLifecycleEvents:
+    def _tracking_dir(self, tmp_path):
+        tracking_dir = tmp_path / "tracking" / "s"
+        tracking_dir.mkdir(parents=True)
+        return tracking_dir
+
+    def test_success_orders_events_and_end_after_commit(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(
+            _HEADER
+            + "import time\n"
+            + "time.sleep(0.2)\n"
+            + 'tracker.log_value("loss", 0.5)\n'
+            + 'tracker.finish({"loss": 0.5})\n'
+        )
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {'lr': 0.01}\n"
+            "n_trials = 1\n"
+            "def search_space(trial):\n"
+            "    return {'seed': trial.suggest_int('seed', 1, 5)}\n"
+            "def objective(results):\n    return results['loss']\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+            heartbeat_interval_s=0.05,
+        )
+
+        events = _read_events(tracking_dir / "events" / "0.jsonl")
+        start_at, _ = _first(events, "execution_start")
+        resolved_at, resolved = _first(events, "value", "resolved_config")
+        child_at, _ = _first(events, "value", "loss")
+        snapshot_at, snapshot = _first(events, "trial_snapshot")
+        end_at, end = _first(events, "execution_end")
+
+        assert (
+            start_at < resolved_at < child_at < snapshot_at < end_at == len(events) - 1
+        )
+        assert resolved.observation["lr"] == pytest.approx(0.01)
+        assert resolved.observation["seed"] == snapshot.params.root["seed"]
+        assert snapshot.state.value == "running"
+        assert snapshot.retry_root_trial_id == snapshot.trial_id
+        assert snapshot.retry_of_trial_id is None
+        assert snapshot.retry_index == 0
+        assert any(event.tag == "execution_heartbeat" for event in events)
+        assert end.outcome.value == "success"
+        assert end.failure_summary is None
+
+        study = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        assert study.trials[0].state == optuna.trial.TrialState.COMPLETE
+
+    def test_nonzero_child_records_failure_and_exits_nonzero(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text("import sys; sys.exit(2)\n")
+        config_file = _config_file(tmp_path, objective=False)
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_trial(
+                trial_file=str(trial_file),
+                config_file=str(config_file),
+                study_name="s",
+                storage_url=storage_url,
+                tracking_dir=str(tracking_dir),
+                project_name="proj",
+            )
+        assert exc_info.value.code == 1
+
+        events = _read_events(tracking_dir / "events" / "0.jsonl")
+        _, snapshot = _first(events, "trial_snapshot")
+        assert snapshot.state.value == "running"
+        _, end = _first(events, "execution_end")
+        assert end.outcome.value == "failure"
+        assert end.exit_code == 2
+        assert end.failure_kind is not None
+        assert end.failure_kind.value in {"unknown", "nonzero_exit"}
+        assert end.failure_summary is not None
+        assert len(end.failure_summary) <= 2000
+        assert "code 2" in end.failure_summary
+
+    def test_objective_failure_records_exception_kind(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 0.5})\n')
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "n_trials = 1\n"
+            "def objective(results):\n    raise ValueError('objective blew up')\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        with pytest.raises(ValueError, match="objective blew up"):
+            run_trial(
+                trial_file=str(trial_file),
+                config_file=str(config_file),
+                study_name="s",
+                storage_url=storage_url,
+                tracking_dir=str(tracking_dir),
+                project_name="proj",
+            )
+
+        _, end = _first(
+            _read_events(tracking_dir / "events" / "0.jsonl"), "execution_end"
+        )
+        assert end.outcome.value == "failure"
+        assert end.failure_kind.value == "exception"
+        assert "objective blew up" in end.failure_summary
+
+    def test_commit_failure_records_failure_not_success(self, tmp_path, monkeypatch):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 0.5})\n')
+        config_file = _config_file(tmp_path)
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        class FakeTrial:
+            number = 0
+
+        class FailingCommitStudy:
+            def optimize(self, objective, n_trials=1):
+                objective(FakeTrial())
+                raise RuntimeError("journal storage write failed")
+
+        monkeypatch.setattr(
+            "jernerics.runner.optuna.load_study", lambda *a, **k: FailingCommitStudy()
+        )
+
+        with pytest.raises(RuntimeError, match="journal storage write failed"):
+            run_trial(
+                trial_file=str(trial_file),
+                config_file=str(config_file),
+                study_name="s",
+                storage_url=storage_url,
+                tracking_dir=str(tracking_dir),
+                project_name="proj",
+            )
+
+        _, end = _first(
+            _read_events(tracking_dir / "events" / "0.jsonl"), "execution_end"
+        )
+        assert end.outcome.value == "failure"
+        assert end.failure_summary is not None
+        assert "journal storage write failed" in end.failure_summary
+
+    def test_signal_terminated_child_records_cancellation(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(
+            "import os, signal, time\n"
+            "time.sleep(0.1)\n"
+            "os.kill(os.getpid(), signal.SIGTERM)\n"
+        )
+        config_file = _config_file(tmp_path, objective=False)
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_trial(
+                trial_file=str(trial_file),
+                config_file=str(config_file),
+                study_name="s",
+                storage_url=storage_url,
+                tracking_dir=str(tracking_dir),
+                project_name="proj",
+            )
+        assert exc_info.value.code == 1
+
+        _, end = _first(
+            _read_events(tracking_dir / "events" / "0.jsonl"), "execution_end"
+        )
+        assert end.outcome.value == "cancelled"
+        assert end.exit_code is not None
+        assert end.exit_code < 0
+
+
+class TestRunIdRemoval:
+    def test_no_run_id_identity_in_trial_context(self):
+        from jernerics import trial_context
+
+        assert not [name for name in vars(trial_context) if "RUN_ID" in name]
 
 
 def _value_event(key: str, *, value=None, observation=None) -> ValueEvent:

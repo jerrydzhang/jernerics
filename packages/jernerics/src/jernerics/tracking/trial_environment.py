@@ -5,7 +5,13 @@ from pathlib import Path
 from typing import Self
 from uuid import uuid4
 
-from jernerics_schema import ExecutionId, ExecutionOutcome, TrialId
+from jernerics_schema import (
+    ExecutionEndEvent,
+    ExecutionId,
+    ExecutionOutcome,
+    FailureKind,
+    TrialId,
+)
 
 from jernerics.tracking import Tracker
 from jernerics.tracking.infra import resolve_tracking_ship
@@ -42,8 +48,10 @@ class TrialEnvironment:
         self._sync_client: StreamClient | None = None
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
+        self._finished = False
+        self._closed = False
 
-    def __enter__(self) -> Self:
+    def start(self) -> Self:
         if not self._tracking_dir:
             return self
 
@@ -90,21 +98,57 @@ class TrialEnvironment:
 
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
-        if self._heartbeat_stop:
-            self._heartbeat_stop.set()
-        if self._heartbeat_thread:
-            self._heartbeat_thread.join(timeout=5.0)
-        if self.tracker:
-            if exc_type is None:
-                self.tracker.emit_execution_end(outcome=ExecutionOutcome.SUCCESS)
-            else:
-                self.tracker.emit_execution_end(
-                    outcome=ExecutionOutcome.FAILURE,
-                    failure_summary=(
-                        repr(exc_val)[:2000] if exc_val is not None else None
-                    ),
-                )
+    def __enter__(self) -> Self:
+        return self.start()
+
+    def finish_execution(
+        self,
+        outcome: ExecutionOutcome,
+        *,
+        exit_code: int | None = None,
+        failure_kind: FailureKind | None = None,
+        failure_summary: str | None = None,
+    ) -> ExecutionEndEvent | None:
+        """Emit the single execution_end and stop heartbeats, files, shipping.
+
+        The runner calls this only after the optimizer commit (or a factual
+        failure), so the event's terminal facts are never premature. When no
+        terminal evidence ever arrives, ``execution_end`` is simply absent and
+        the execution stays incomplete server-side.
+        """
+        if self._finished:
+            return None
+        self._finished = True
+        if failure_summary is not None:
+            failure_summary = failure_summary[:2000]
+        self._stop_heartbeats()
+        end: ExecutionEndEvent | None = None
+        if self.tracker is not None:
+            end = self.tracker.emit_execution_end(
+                outcome,
+                exit_code=exit_code,
+                failure_kind=failure_kind,
+                failure_summary=failure_summary,
+            )
+        self.close()
+        return end
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_heartbeats()
+        if self.tracker is not None:
             self.tracker.close()
-        if self._sync_client:
+        if self._sync_client is not None:
             self._sync_client.join()
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.close()
+
+    def _stop_heartbeats(self) -> None:
+        if self._heartbeat_stop is not None:
+            self._heartbeat_stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=5.0)
+            self._heartbeat_thread = None

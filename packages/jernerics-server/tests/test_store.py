@@ -107,10 +107,10 @@ def _table_names(con: sqlite3.Connection) -> set[str]:
 
 
 class TestInit:
-    def test_fresh_store_creates_v3_schema(self, tmp_path):
+    def test_fresh_store_creates_current_schema(self, tmp_path):
         path = tmp_path / "store.sqlite"
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(3,)]
+            assert store.query("PRAGMA user_version")[1] == [(4,)]
             con = sqlite3.connect(path)
             assert _table_names(con) - {"sqlite_sequence"} == TABLES
             con.close()
@@ -122,7 +122,7 @@ class TestInit:
 
     def test_reopen_existing_store_is_noop_and_keeps_data(self, db_path):
         with Store(db_path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(3,)]
+            assert store.query("PRAGMA user_version")[1] == [(4,)]
             assert store.query("SELECT trial_id FROM trials")[1] == [("t1",)]
             assert store.query("SELECT COUNT(*) FROM tracked_values")[1] == [(1,)]
 
@@ -393,13 +393,92 @@ class TestLegacyRefusal:
 
 
 class TestFutureSchema:
-    def test_user_version_4_refused(self, tmp_path):
+    def test_user_version_beyond_supported_refused(self, tmp_path):
         path = tmp_path / "store.sqlite"
         con = sqlite3.connect(path)
-        con.execute("PRAGMA user_version=4")
+        con.execute("PRAGMA user_version=5")
         con.close()
-        with pytest.raises(FutureSchemaError, match="version 4"):
+        with pytest.raises(FutureSchemaError, match="version 5"):
             Store(path)
+
+    def test_user_version_4_still_opens(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        Store(path).close()
+        with Store(path) as store:
+            assert store.query("PRAGMA user_version")[1] == [(4,)]
+
+
+class TestMigrationV3ToV4:
+    def _make_v3_file(self, path: Path) -> None:
+        con = sqlite3.connect(path)
+        store_module._MIGRATIONS[3](con)
+        con.execute("PRAGMA user_version=3")
+        con.execute("PRAGMA foreign_keys=ON")
+        con.executescript(
+            """
+            INSERT INTO sweeps (sweep_id, project, name, state, created_ns, updated_ns)
+            VALUES ('sw', 'p', 'n', 'running', 1, 2);
+            INSERT INTO submissions
+            (submission_id, sweep_id, backend, state, created_ns, updated_ns)
+            VALUES ('sub', 'sw', 'slurm', 'submitted', 1, 2);
+            INSERT INTO submission_jobs
+            (job_id, submission_id, scheduler_job_id, state, updated_ns)
+            VALUES ('job', 'sub', '123', 'submitted', 2);
+            """
+        )
+        con.commit()
+        con.close()
+
+    def test_v3_file_upgrades_in_place(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v3_file(path)
+
+        with Store(path) as store:
+            assert store.query("PRAGMA user_version")[1] == [(4,)]
+            submission_cols = {
+                row[1] for row in store.query("PRAGMA table_info(submissions)")[1]
+            }
+            assert {
+                "submitted_ns",
+                "expected_trials",
+                "git_hash",
+                "config_source",
+            } <= submission_cols
+            job_cols = {
+                row[1] for row in store.query("PRAGMA table_info(submission_jobs)")[1]
+            }
+            store.verify()
+
+    def test_v3_data_survives_upgrade(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v3_file(path)
+
+        with Store(path) as store:
+            assert store.query("SELECT submission_id, backend, state FROM submissions")[
+                1
+            ] == [("sub", "slurm", "submitted")]
+            assert store.query(
+                "SELECT job_id, scheduler_job_id, role FROM submission_jobs"
+            )[1] == [("job", "123", None)]
+
+    def test_new_columns_accept_writes_after_upgrade(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v3_file(path)
+
+        with Store(path) as store:
+            store._con.execute(
+                "UPDATE submissions SET submitted_ns = 5, expected_trials = 8, "
+                "git_hash = 'abc', config_source = 'config.py', "
+                "updated_ns = 5 WHERE submission_id = 'sub'"
+            )
+            store._con.execute(
+                "UPDATE submission_jobs SET role = 'trials' WHERE job_id = 'job'"
+            )
+            assert store.query(
+                "SELECT submitted_ns, expected_trials, git_hash, config_source "
+                "FROM submissions"
+            )[1] == [(5, 8, "abc", "config.py")]
+            assert store.query("SELECT role FROM submission_jobs")[1] == [("trials",)]
 
 
 class TestMigrationAtomicity:
@@ -428,7 +507,7 @@ class TestMigrationAtomicity:
         monkeypatch.undo()
         with Store(path) as store:
             store.verify()
-            assert store.query("PRAGMA user_version")[1] == [(3,)]
+            assert store.query("PRAGMA user_version")[1] == [(4,)]
 
 
 def _make_v2_db(path: Path) -> None:

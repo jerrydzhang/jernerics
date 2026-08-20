@@ -27,9 +27,10 @@ class TestExecutionLifecycle:
     def test_success_path_emits_start_then_end(self, tmp_path) -> None:
         env = TrialEnvironment(tracking_dir=str(tmp_path), trial_number=0)
 
-        with env:
-            assert env.tracker is not None
-            env.tracker.log_value("loss", 0.5)
+        env.start()
+        assert env.tracker is not None
+        env.tracker.log_value("loss", 0.5)
+        env.finish_execution(ExecutionOutcome.SUCCESS)
 
         events = read_events(tmp_path / "events" / "0.jsonl")
         start = events[0]
@@ -44,38 +45,56 @@ class TestExecutionLifecycle:
 
         assert end.execution_id == env.execution_id
         assert end.outcome == ExecutionOutcome.SUCCESS
-        assert end.failure_summary is None
         assert end.exit_code is None
+        assert end.failure_summary is None
 
-    def test_exception_path_emits_failure_with_bounded_summary(self, tmp_path) -> None:
+    def test_failure_path_emits_failure_with_bounded_summary(self, tmp_path) -> None:
         env = TrialEnvironment(tracking_dir=str(tmp_path), trial_number=0)
 
-        try:
-            with env:
-                raise ValueError("boom")
-        except ValueError:
-            pass
+        env.start()
+        env.finish_execution(
+            ExecutionOutcome.FAILURE,
+            failure_summary=repr(ValueError("boom")),
+        )
 
         end = read_events(tmp_path / "events" / "0.jsonl")[-1]
         assert isinstance(end, ExecutionEndEvent)
         assert end.outcome == ExecutionOutcome.FAILURE
         assert end.failure_summary is not None
         assert "boom" in end.failure_summary
-        assert len(end.failure_summary) <= 2000
 
-    def test_huge_exception_summary_is_truncated_to_2000(self, tmp_path) -> None:
+    def test_huge_failure_summary_is_truncated_to_2000(self, tmp_path) -> None:
         env = TrialEnvironment(tracking_dir=str(tmp_path), trial_number=0)
 
-        try:
-            with env:
-                raise ValueError("x" * 9000)
-        except ValueError:
-            pass
+        env.start()
+        env.finish_execution(ExecutionOutcome.FAILURE, failure_summary="x" * 5000)
 
         end = read_events(tmp_path / "events" / "0.jsonl")[-1]
         assert isinstance(end, ExecutionEndEvent)
         assert end.failure_summary is not None
         assert len(end.failure_summary) == 2000
+
+    def test_exit_without_finish_leaves_no_terminal_evidence(self, tmp_path) -> None:
+        env = TrialEnvironment(tracking_dir=str(tmp_path), trial_number=0)
+
+        with env:
+            assert env.tracker is not None
+            env.tracker.log_value("loss", 0.5)
+
+        events = read_events(tmp_path / "events" / "0.jsonl")
+        assert not any(isinstance(event, ExecutionEndEvent) for event in events)
+
+    def test_finish_execution_twice_emits_end_once(self, tmp_path) -> None:
+        env = TrialEnvironment(tracking_dir=str(tmp_path), trial_number=0)
+
+        env.start()
+        env.finish_execution(ExecutionOutcome.SUCCESS)
+        env.finish_execution(ExecutionOutcome.FAILURE)
+
+        events = read_events(tmp_path / "events" / "0.jsonl")
+        ends = [event for event in events if isinstance(event, ExecutionEndEvent)]
+        assert len(ends) == 1
+        assert ends[0].outcome == ExecutionOutcome.SUCCESS
 
     def test_ids_are_uuids_and_stable_within_the_run(self, tmp_path) -> None:
         env = TrialEnvironment(tracking_dir=str(tmp_path), trial_number=0)

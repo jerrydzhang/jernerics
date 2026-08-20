@@ -1,5 +1,7 @@
 """Service- and HTTP-level tests for atomic v3 batched event ingest."""
 
+import subprocess
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -17,10 +19,12 @@ from jernerics_schema import (
     FailureKind,
     FlatContext,
     IngestRequest,
+    JobSnapshotEvent,
     ManualParamEvent,
     SubmissionSnapshotEvent,
     SubmissionState,
     SweepSnapshotEvent,
+    TrackingEvent,
     TrialSnapshotEvent,
     TrialState,
     ValueEvent,
@@ -285,6 +289,10 @@ class TestIngestService:
                 "submitted",
                 ns(at(1)),
                 ns(at(1)),
+                None,
+                None,
+                None,
+                None,
             )
         ]
         assert rows(
@@ -826,3 +834,482 @@ class TestIngestAuth:
                 "duplicates": 0,
                 "conflicts": [],
             }
+
+
+def _submission_seed(ids: Ids) -> list:
+    return [
+        SweepSnapshotEvent(
+            event_id=eid(),
+            recorded_at=at(0),
+            project="proj",
+            sweep_id=ids.sweep,
+            name="alpha",
+            state="running",
+        ),
+    ]
+
+
+class TestSubmissionProvenance:
+    def test_provenance_columns_materialize(self, store, service):
+        sweep = eid()
+        submission = eid()
+        events = _submission_seed(Ids(sweep=sweep)) + [
+            SubmissionSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(1),
+                submission_id=submission,
+                sweep_id=sweep,
+                backend="slurm",
+                state=SubmissionState.SUBMITTED,
+                submitted_at=at(1),
+                expected_trials=12,
+                git_hash="abc123",
+                config_source="configs/sweep.py",
+            ),
+        ]
+        result = service.apply(request_of(events))
+        assert result.applied == 2
+        assert rows(
+            store,
+            "SELECT submitted_ns, expected_trials, git_hash, config_source "
+            "FROM submissions",
+        ) == [(ns(at(1)), 12, "abc123", "configs/sweep.py")]
+        event = SubmissionSnapshotEvent(
+            event_id=eid(),
+            recorded_at=at(1),
+            submission_id=submission,
+            sweep_id=sweep,
+            backend="slurm",
+            state=SubmissionState.SUBMITTED,
+            submitted_at=at(1),
+            expected_trials=12,
+            git_hash="abc123",
+            config_source="configs/sweep.py",
+        )
+        service.apply(request_of(_submission_seed(Ids(sweep=sweep)) + [event]))
+        result = service.apply(
+            request_of(
+                _submission_seed(Ids(sweep=sweep))
+                + [
+                    SubmissionSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(1),
+                        submission_id=submission,
+                        sweep_id=sweep,
+                        backend="slurm",
+                        state=SubmissionState.SUBMITTED,
+                        submitted_at=at(1),
+                        expected_trials=12,
+                        git_hash="abc123",
+                        config_source="configs/sweep.py",
+                    )
+                ]
+            )
+        )
+        assert result.duplicates == 2
+        assert rows(store, "SELECT COUNT(*) FROM submissions") == [(1,)]
+
+    def test_differing_provenance_conflicts(self, store, service):
+        submission = eid()
+        sweep = eid()
+        service.apply(
+            request_of(
+                _submission_seed(Ids(sweep=sweep))
+                + [
+                    SubmissionSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(1),
+                        submission_id=submission,
+                        sweep_id=sweep,
+                        backend="slurm",
+                        state=SubmissionState.SUBMITTED,
+                        submitted_at=at(1),
+                        expected_trials=12,
+                        git_hash="abc123",
+                        config_source="configs/sweep.py",
+                    )
+                ]
+            )
+        )
+        with pytest.raises(IngestConflictError, match="write-once"):
+            service.apply(
+                request_of(
+                    [
+                        SubmissionSnapshotEvent(
+                            event_id=eid(),
+                            recorded_at=at(2),
+                            submission_id=submission,
+                            sweep_id=sweep,
+                            backend="slurm",
+                            state=SubmissionState.SUBMITTED,
+                            expected_trials=13,
+                        )
+                    ]
+                )
+            )
+
+    def test_null_provenance_later_filled_by_replay(self, store, service):
+        submission = eid()
+        sweep = eid()
+        service.apply(
+            request_of(
+                _submission_seed(Ids(sweep=sweep))
+                + [
+                    SubmissionSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(1),
+                        submission_id=submission,
+                        sweep_id=sweep,
+                        backend="slurm",
+                        state=SubmissionState.SUBMITTED,
+                    )
+                ]
+            )
+        )
+        service.apply(
+            request_of(
+                [
+                    SubmissionSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(2),
+                        submission_id=submission,
+                        sweep_id=sweep,
+                        backend="slurm",
+                        state=SubmissionState.RUNNING,
+                        submitted_at=at(1),
+                        expected_trials=12,
+                    )
+                ]
+            )
+        )
+        assert rows(
+            store, "SELECT state, submitted_ns, expected_trials FROM submissions"
+        ) == [("running", ns(at(1)), 12)]
+
+
+class TestJobSnapshot:
+    def _seeded(self, sweep: uuid.UUID, submission: uuid.UUID) -> list:
+        return _submission_seed(Ids(sweep=sweep)) + [
+            SubmissionSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(1),
+                submission_id=submission,
+                sweep_id=sweep,
+                backend="slurm",
+                state=SubmissionState.SUBMITTED,
+            ),
+        ]
+
+    def test_jobs_upsert_per_scheduler_identity(self, store, service):
+        sweep, submission = eid(), eid()
+        events = self._seeded(sweep, submission) + [
+            JobSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                job_id=eid(),
+                submission_id=submission,
+                scheduler_job_id="123",
+                role="trials",
+                state=SubmissionState.SUBMITTED,
+            ),
+            JobSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                job_id=eid(),
+                submission_id=submission,
+                scheduler_job_id="124",
+                role="checker",
+                state=SubmissionState.SUBMITTED,
+            ),
+        ]
+        result = service.apply(request_of(events))
+        assert result.applied == 4
+        assert rows(
+            store,
+            "SELECT scheduler_job_id, role, state FROM submission_jobs "
+            "ORDER BY scheduler_job_id",
+        ) == [("123", "trials", "submitted"), ("124", "checker", "submitted")]
+
+    def test_duplicate_replay_reports_duplicates(self, store, service):
+        sweep, submission, job = eid(), eid(), eid()
+        events = self._seeded(sweep, submission) + [
+            JobSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                job_id=job,
+                submission_id=submission,
+                scheduler_job_id="123",
+                role="trials",
+                state=SubmissionState.SUBMITTED,
+            ),
+        ]
+        service.apply(request_of(events))
+        replay = service.apply(
+            request_of(
+                [
+                    JobSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(2),
+                        job_id=job,
+                        submission_id=submission,
+                        scheduler_job_id="123",
+                        role="trials",
+                        state=SubmissionState.SUBMITTED,
+                    )
+                ]
+            )
+        )
+        assert replay.duplicates == 1
+        assert rows(store, "SELECT COUNT(*) FROM submission_jobs") == [(1,)]
+
+    def test_differing_role_conflicts(self, store, service):
+        sweep, submission, job = eid(), eid(), eid()
+        service.apply(
+            request_of(
+                self._seeded(sweep, submission)
+                + [
+                    JobSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(2),
+                        job_id=job,
+                        submission_id=submission,
+                        scheduler_job_id="123",
+                        role="trials",
+                        state=SubmissionState.SUBMITTED,
+                    )
+                ]
+            )
+        )
+        with pytest.raises(IngestConflictError, match="role is immutable"):
+            service.apply(
+                request_of(
+                    [
+                        JobSnapshotEvent(
+                            event_id=eid(),
+                            recorded_at=at(3),
+                            job_id=job,
+                            submission_id=submission,
+                            scheduler_job_id="123",
+                            role="checker",
+                            state=SubmissionState.SUBMITTED,
+                        )
+                    ]
+                )
+            )
+
+    def test_scheduler_identity_unique_per_submission(self, store, service):
+        sweep, submission = eid(), eid()
+        service.apply(request_of(self._seeded(sweep, submission)))
+        with pytest.raises(IngestConflictError, match="already held by job"):
+            service.apply(
+                request_of(
+                    [
+                        JobSnapshotEvent(
+                            event_id=eid(),
+                            recorded_at=at(2),
+                            job_id=eid(),
+                            submission_id=submission,
+                            scheduler_job_id="123",
+                            role="trials",
+                            state=SubmissionState.SUBMITTED,
+                        ),
+                        JobSnapshotEvent(
+                            event_id=eid(),
+                            recorded_at=at(2),
+                            job_id=eid(),
+                            submission_id=submission,
+                            scheduler_job_id="123",
+                            role="checker",
+                            state=SubmissionState.SUBMITTED,
+                        ),
+                    ]
+                )
+            )
+
+    def test_job_for_unknown_submission_is_invalid(self, store, service):
+        with pytest.raises(IngestValidationError, match="unknown submission"):
+            service.apply(
+                request_of(
+                    [
+                        JobSnapshotEvent(
+                            event_id=eid(),
+                            recorded_at=at(2),
+                            job_id=eid(),
+                            submission_id=eid(),
+                            scheduler_job_id="123",
+                            role="trials",
+                            state=SubmissionState.SUBMITTED,
+                        )
+                    ]
+                )
+            )
+
+    def test_conflicting_provenance_maps_to_409(self, store, client):
+        sweep, submission = eid(), eid()
+        seeded = _submission_seed(Ids(sweep=sweep)) + [
+            SubmissionSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(1),
+                submission_id=submission,
+                sweep_id=sweep,
+                backend="slurm",
+                state=SubmissionState.SUBMITTED,
+                git_hash="abc",
+            ),
+        ]
+        assert post_events(client, request_of(seeded)).status_code == 200
+        conflicting = [
+            SubmissionSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                submission_id=submission,
+                sweep_id=sweep,
+                backend="slurm",
+                state=SubmissionState.SUBMITTED,
+                git_hash="def",
+            ),
+        ]
+        response = post_events(client, request_of(conflicting))
+        assert response.status_code == 409
+
+    def _execution_events(
+        self,
+        sweep: uuid.UUID,
+        trial: uuid.UUID,
+        execution: uuid.UUID,
+        number: int,
+        *,
+        heartbeats: int,
+    ) -> list:
+        events: list[TrackingEvent] = [
+            SweepSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(0),
+                project="proj",
+                sweep_id=sweep,
+                name="watched",
+                state="running",
+            ),
+            TrialSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(1),
+                trial_id=trial,
+                sweep_id=sweep,
+                number=number,
+                state=TrialState.RUNNING,
+                retry_root_trial_id=trial,
+            ),
+            ExecutionStartEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                execution_id=execution,
+                trial_id=trial,
+                hostname="node01",
+                started_at=at(2),
+            ),
+        ]
+        for beat in range(heartbeats):
+            events.append(
+                ExecutionHeartbeatEvent(
+                    event_id=eid(),
+                    recorded_at=at(3 + beat),
+                    execution_id=execution,
+                    at=at(3 + beat),
+                )
+            )
+        return events
+
+    def test_missing_heartbeats_synthesize_no_failure(self, store, service):
+        sweep, trial, execution = eid(), eid(), eid()
+        service.apply(
+            request_of(self._execution_events(sweep, trial, execution, 0, heartbeats=0))
+        )
+        assert rows(
+            store,
+            "SELECT ended_ns, outcome, exit_code, failure_kind, "
+            "failure_summary, last_heartbeat_ns FROM executions",
+        ) == [(None, None, None, None, None, None)]
+
+    def test_dashboard_inputs_derive_from_heartbeats_without_stale_label(
+        self, store, service
+    ):
+        sweep = eid()
+        quiet_trial, quiet_exec = eid(), eid()
+        live_trial, live_exec = eid(), eid()
+        service.apply(
+            request_of(
+                self._execution_events(sweep, quiet_trial, quiet_exec, 0, heartbeats=0)
+                + self._execution_events(sweep, live_trial, live_exec, 1, heartbeats=2)
+            )
+        )
+        stale_threshold_ns = ns(at(2))
+        quiet, live = (
+            rows(
+                store,
+                "SELECT execution_id FROM executions WHERE ended_ns IS NULL "
+                "AND (last_heartbeat_ns IS NULL OR last_heartbeat_ns < ?)",
+                [stale_threshold_ns],
+            ),
+            rows(
+                store,
+                "SELECT execution_id FROM executions WHERE ended_ns IS NULL "
+                "AND last_heartbeat_ns >= ?",
+                [stale_threshold_ns],
+            ),
+        )
+        assert quiet == [(str(quiet_exec),)]
+        assert live == [(str(live_exec),)]
+
+        table_columns = store.query("PRAGMA table_info(executions)")[1]
+        assert all("stale" not in row[1] for row in table_columns)
+        for table in ALL_TABLES:
+            for row in rows(store, f"SELECT * FROM {table}"):
+                assert "stale" not in [str(value).lower() for value in row]
+
+
+class TestDeterministicSweepIdentity:
+    def test_sweep_id_for_is_stable_across_calls_and_processes(self):
+        from jernerics_schema import sweep_id_for
+
+        first = sweep_id_for("proj", "alpha")
+        assert sweep_id_for("proj", "alpha") == first
+        assert sweep_id_for("proj", "beta") != first
+
+        code = (
+            "from jernerics_schema import sweep_id_for;"
+            "print(sweep_id_for('proj', 'alpha'))"
+        )
+        other = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        )
+        assert other.stdout.strip() == str(first)
+
+    def test_two_submissions_share_sweep_id_without_conflict(self, store, service):
+        from jernerics_schema import sweep_id_for
+
+        sweep = sweep_id_for("proj", "alpha")
+        events: list[TrackingEvent] = [
+            SweepSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(0),
+                project="proj",
+                sweep_id=sweep,
+                name="alpha",
+                state="running",
+            ),
+        ]
+        for submission in (eid(), eid()):
+            events.append(
+                SubmissionSnapshotEvent(
+                    event_id=eid(),
+                    recorded_at=at(1),
+                    submission_id=submission,
+                    sweep_id=sweep,
+                    backend="slurm",
+                    state=SubmissionState.SUBMITTED,
+                )
+            )
+        result = service.apply(request_of(events))
+        assert result.applied == 3
+        assert rows(store, "SELECT COUNT(*) FROM sweeps") == [(1,)]
+        assert rows(store, "SELECT COUNT(*) FROM submissions") == [(2,)]

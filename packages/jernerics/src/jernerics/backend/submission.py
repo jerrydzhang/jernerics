@@ -1,7 +1,18 @@
 import os
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from jernerics_schema import (
+    JobSnapshotEvent,
+    SubmissionSnapshotEvent,
+    SubmissionState,
+    SweepSnapshotEvent,
+    TrackingEvent,
+    sweep_id_for,
+)
 
 from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.command_builders import build_sweep_commands
@@ -16,6 +27,61 @@ from jernerics.config import (
     _normalize_time,
 )
 from jernerics.retry import RetryContext
+
+
+def build_submission_events(spec, backend_name: str, result) -> list:
+    """Deploy-path v3 events describing one sweep submission and its jobs."""
+    project = spec.project_name or ""
+    sweep_id = sweep_id_for(project, spec.study_name)
+    now = datetime.now(UTC)
+    config_source = spec.config_relpath or str(spec.config_path)
+    events: list[TrackingEvent] = [
+        SweepSnapshotEvent(
+            event_id=uuid.uuid4(),
+            recorded_at=now,
+            project=project,
+            sweep_id=sweep_id,
+            name=spec.study_name,
+            state="running",
+        ),
+        SubmissionSnapshotEvent(
+            event_id=uuid.uuid4(),
+            recorded_at=now,
+            submission_id=uuid.UUID(spec.submission_id),
+            sweep_id=sweep_id,
+            backend=backend_name,
+            state=SubmissionState.SUBMITTED,
+            submitted_at=now,
+            expected_trials=spec.n_trials or None,
+            git_hash=spec.git_hash,
+            config_source=config_source,
+        ),
+    ]
+    for sub in result.submissions:
+        events.append(
+            JobSnapshotEvent(
+                event_id=uuid.uuid4(),
+                recorded_at=now,
+                job_id=uuid.uuid4(),
+                submission_id=uuid.UUID(spec.submission_id),
+                scheduler_job_id=sub.job_id,
+                role=sub.role,
+                state=SubmissionState.SUBMITTED,
+            )
+        )
+    return events
+
+
+def write_submission_events(
+    events: list, host, tracking_dir: str, filename: str
+) -> None:
+    """Persist submission JSONL where the sweep's post-hook replay finds it."""
+    submission_dir = f"{tracking_dir}/submission"
+    host.mkdir(submission_dir)
+    host.write_file(
+        f"{submission_dir}/{filename}",
+        "".join(event.model_dump_json() + "\n" for event in events),
+    )
 
 
 def _make_container(container_type: str, project_name: str = "", *, gpu: bool = False):
@@ -191,4 +257,13 @@ def submit_sweep(
     if dry_run:
         return infra.adapter.render_sweep(params)
 
-    return infra.adapter.submit_sweep(params)
+    result = infra.adapter.submit_sweep(params)
+    if spec.project_name and result is not None:
+        events = build_submission_events(spec, backend_name, result)
+        write_submission_events(
+            events,
+            host,
+            f"{cache_host}/tracking/{spec.study_name}",
+            f"{spec.submission_id}.jsonl",
+        )
+    return result

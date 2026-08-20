@@ -108,9 +108,10 @@ def discover_jsonl_files(
     tracking_dir: Path,
     study: str | None = None,
 ) -> list[Path]:
-    """Find all .jsonl event files under tracking_dir, optionally per study."""
-    pattern = f"{study}/events/*.jsonl" if study else "*/events/*.jsonl"
-    return sorted(tracking_dir.glob(pattern))
+    """Find event and submission .jsonl files, optionally per study."""
+    prefix = study if study is not None else "*"
+    patterns = (f"{prefix}/events/*.jsonl", f"{prefix}/submission/*.jsonl")
+    return sorted({path for pattern in patterns for path in tracking_dir.glob(pattern)})
 
 
 def replay_tracking(

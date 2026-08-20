@@ -2,12 +2,20 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
 import optuna
-from jernerics_schema import ExecutionId, TrialId, ValueEvent
+from jernerics_schema import (
+    ExecutionId,
+    ExecutionOutcome,
+    FailureKind,
+    SweepId,
+    TrialId,
+    TrialState,
+    ValueEvent,
+    sweep_id_for,
+)
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.config import load_config
@@ -16,8 +24,8 @@ from jernerics.tracking.trial_environment import TrialEnvironment
 from jernerics.trial_context import (
     EXECUTION_ID_ENV,
     PROJECT_NAME_ENV,
-    RUN_ID_ENV,
     STUDY_NAME_ENV,
+    SWEEP_ID_ENV,
     TRACKING_DIR_ENV,
     TRIAL_CONFIG_ENV,
     TRIAL_ID_ENV,
@@ -45,57 +53,78 @@ def run_trial(
         study_name=study_name,
         storage=JournalStorage(JournalFileBackend(storage_url)),
     )
-    run_id = int(time.time())
+    sweep_id = sweep_id_for(project_name or "", study_name)
+    run: dict[str, Any] = {"environment": None, "exit_code": None}
 
     def objective(trial: optuna.trial.Trial) -> float:
-        with TrialEnvironment(
+        environment = TrialEnvironment(
             tracking_dir=tracking_dir or "",
             trial_number=trial.number,
             server_addr=server_addr,
             heartbeat_interval_s=heartbeat_interval_s,
-        ) as environment:
-            params: dict[str, Any] = (
-                sweep.search_space(trial) if sweep.search_space else {}
+        )
+        run["environment"] = environment
+        environment.start()
+        params: dict[str, Any] = sweep.search_space(trial) if sweep.search_space else {}
+
+        if params and set(sweep.base) & set(params):
+            overlap = sorted(set(sweep.base) & set(params))
+            raise ValueError(
+                f"Config keys defined in both base and search_space: {overlap}. "
+                "Please remove the overlapping keys from either 'base' or "
+                "'search_space' in the config file."
             )
 
-            if params and set(sweep.base) & set(params):
-                overlap = sorted(set(sweep.base) & set(params))
-                raise ValueError(
-                    f"Config keys defined in both base and search_space: {overlap}. "
-                    "Please remove the overlapping keys from either 'base' or "
-                    "'search_space' in the config file."
-                )
+        config = {**sweep.base, **params, "config_index": trial.number}
 
-            config = {**sweep.base, **params, "config_index": trial.number}
+        config_path = _write_trial_config(config, tracking_dir, trial.number)
+        events_path = Path(tracking_dir or "") / "events" / f"{trial.number}.jsonl"
 
-            config_path = _write_trial_config(config, tracking_dir, trial.number)
-            events_path = Path(tracking_dir or "") / "events" / f"{trial.number}.jsonl"
+        if environment.tracker is not None:
+            environment.tracker.log_json("resolved_config", config)
 
-            completed = subprocess.run(
-                [sys.executable, str(Path(trial_file).resolve())],
-                env=_trial_env(
-                    config_path=config_path,
-                    tracking_dir=tracking_dir or "",
-                    project_name=project_name or "",
-                    study_name=study_name,
-                    trial_number=trial.number,
-                    run_id=run_id,
-                    trial_id=environment.trial_id,
-                    execution_id=environment.execution_id,
-                ),
-                check=False,
+        completed = subprocess.run(
+            [sys.executable, str(Path(trial_file).resolve())],
+            env=_trial_env(
+                config_path=config_path,
+                tracking_dir=tracking_dir or "",
+                project_name=project_name or "",
+                study_name=study_name,
+                trial_number=trial.number,
+                sweep_id=sweep_id,
+                trial_id=environment.trial_id,
+                execution_id=environment.execution_id,
+            ),
+            check=False,
+        )
+        run["exit_code"] = completed.returncode
+
+        if environment.tracker is not None:
+            # Only flat scalars fit TrialSnapshotEvent.params; richer values
+            # are dropped rather than stringified.
+            flat_params = {
+                key: value
+                for key, value in params.items()
+                if isinstance(value, str | int | float | bool) or value is None
+            }
+            environment.tracker.emit_trial_snapshot(
+                sweep_id=sweep_id,
+                number=trial.number,
+                state=TrialState.RUNNING,
+                params=flat_params,
             )
-            if completed.returncode != 0:
-                print(
-                    f"Trial {trial.number + 1} failed with exit code "
-                    f"{completed.returncode}",
-                    file=sys.stderr,
-                )
-                raise _TaskFailure
 
-            print(f"Trial {trial.number + 1} completed", file=sys.stderr)
+        if completed.returncode != 0:
+            print(
+                f"Trial {trial.number + 1} failed with exit code "
+                f"{completed.returncode}",
+                file=sys.stderr,
+            )
+            raise _TaskFailure
 
-            results = _read_trial_results(events_path)
+        print(f"Trial {trial.number + 1} completed", file=sys.stderr)
+
+        results = _read_trial_results(events_path)
 
         if sweep.objective:
             return sweep.objective(results)
@@ -103,8 +132,42 @@ def run_trial(
 
     try:
         study.optimize(objective, n_trials=1)
-    except _TaskFailure:
-        sys.exit(1)
+    except BaseException as exc:
+        _finish_failure(run["environment"], exc, run)
+        if isinstance(exc, _TaskFailure):
+            sys.exit(1)
+        raise
+    if run["environment"] is not None:
+        run["environment"].finish_execution(ExecutionOutcome.SUCCESS)
+
+
+def _finish_failure(
+    environment: TrialEnvironment | None, exc: BaseException, run: dict[str, Any]
+) -> None:
+    if environment is None:
+        return
+    exit_code = run["exit_code"]
+    if isinstance(exc, _TaskFailure):
+        if exit_code is not None and exit_code < 0:
+            environment.finish_execution(
+                ExecutionOutcome.CANCELLED,
+                exit_code=exit_code,
+                failure_summary=f"child terminated by signal {-exit_code}",
+            )
+        else:
+            environment.finish_execution(
+                ExecutionOutcome.FAILURE,
+                exit_code=exit_code,
+                failure_kind=FailureKind.UNKNOWN,
+                failure_summary=f"child process exited with code {exit_code}",
+            )
+        return
+    environment.finish_execution(
+        ExecutionOutcome.FAILURE,
+        exit_code=exit_code if exit_code == 0 else None,
+        failure_kind=FailureKind.EXCEPTION,
+        failure_summary=repr(exc),
+    )
 
 
 def _write_trial_config(
@@ -114,7 +177,7 @@ def _write_trial_config(
     configs_dir = cache_root / "configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
     path = configs_dir / f"trial_{config_index}.json"
-    path.write_text(json.dumps(config))
+    path.write_text(json.dumps(config, indent=2))
     return path
 
 
@@ -125,7 +188,7 @@ def _trial_env(
     project_name: str,
     study_name: str,
     trial_number: int,
-    run_id: int,
+    sweep_id: SweepId,
     trial_id: TrialId | None,
     execution_id: ExecutionId | None,
 ) -> dict[str, str]:
@@ -136,7 +199,7 @@ def _trial_env(
         PROJECT_NAME_ENV: project_name,
         STUDY_NAME_ENV: study_name,
         TRIAL_NUMBER_ENV: str(trial_number),
-        RUN_ID_ENV: str(run_id),
+        SWEEP_ID_ENV: str(sweep_id),
     }
     if trial_id is not None:
         env[TRIAL_ID_ENV] = str(trial_id)

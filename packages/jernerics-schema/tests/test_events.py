@@ -15,6 +15,7 @@ from jernerics_schema import (
     ExecutionStartEvent,
     FailureKind,
     FlatContext,
+    JobSnapshotEvent,
     ManualParamEvent,
     SubmissionSnapshotEvent,
     SubmissionState,
@@ -31,6 +32,7 @@ NOW = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
 VARIANT_CLASSES = (
     SweepSnapshotEvent,
     SubmissionSnapshotEvent,
+    JobSnapshotEvent,
     TrialSnapshotEvent,
     ExecutionStartEvent,
     ExecutionHeartbeatEvent,
@@ -67,6 +69,15 @@ def _samples() -> list[Event]:
             submission_id=uuid.uuid4(),
             sweep_id=sweep_id,
             backend="slurm",
+            state=SubmissionState.SUBMITTED,
+        ),
+        JobSnapshotEvent(
+            event_id=eid(),
+            recorded_at=NOW,
+            job_id=uuid.uuid4(),
+            submission_id=uuid.uuid4(),
+            scheduler_job_id="123456",
+            role="checker",
             state=SubmissionState.SUBMITTED,
         ),
         TrialSnapshotEvent(

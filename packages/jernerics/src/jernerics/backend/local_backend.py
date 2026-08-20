@@ -10,11 +10,13 @@ from jernerics.backend.models import (
     SubmitResult,
     SweepSubmission,
 )
+from jernerics.backend.submission import build_submission_events
 from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import replay_tracking
 from jernerics.tracking.infra import resolve_tracking_ship
+from jernerics.tracking.jsonl_io import TrackingWriter
 
 
 class LocalBackend:
@@ -50,6 +52,8 @@ class LocalBackend:
             keys = sorted(spec.grid.keys())
             for combo in itertools.product(*[spec.grid[k] for k in keys]):
                 study.enqueue_trial(dict(zip(keys, combo, strict=True)))
+
+        self._emit_submission_events(spec, tracker_dir)
 
         any_failed = False
 
@@ -98,3 +102,15 @@ class LocalBackend:
             api_key=api_key,
             study=spec.study_name,
         )
+
+    def _emit_submission_events(self, spec: SweepSubmission, tracker_dir: Path) -> None:
+        if not spec.project_name:
+            return
+        result = SubmitResult(
+            submissions=[JobSubmission(job_id="local", n_trials=spec.n_trials)]
+        )
+        events = build_submission_events(spec, "local", result)
+        path = tracker_dir / "submission" / f"{spec.submission_id}.jsonl"
+        with TrackingWriter(path) as writer:
+            for event in events:
+                writer.write_event(event)

@@ -11,7 +11,15 @@ from pydantic import (
     model_validator,
 )
 
-from .ids import ArtifactId, EventId, ExecutionId, SubmissionId, SweepId, TrialId
+from .ids import (
+    ArtifactId,
+    EventId,
+    ExecutionId,
+    JobId,
+    SubmissionId,
+    SweepId,
+    TrialId,
+)
 from .lifecycle import ExecutionOutcome, FailureKind, SubmissionState, TrialState
 from .lineage import RetryLineage
 from .scalars import FlatContext, Observation, ScalarValue
@@ -51,6 +59,19 @@ class SubmissionSnapshotEvent(Event):
     submission_id: SubmissionId
     sweep_id: SweepId
     backend: str
+    state: SubmissionState
+    submitted_at: UtcDatetime | None = None
+    expected_trials: int | None = Field(default=None, ge=1)
+    git_hash: str | None = None
+    config_source: str | None = None
+
+
+class JobSnapshotEvent(Event):
+    tag: Literal["job_snapshot"] = "job_snapshot"
+    job_id: JobId
+    submission_id: SubmissionId
+    scheduler_job_id: str
+    role: str
     state: SubmissionState
 
 
@@ -135,6 +156,7 @@ class ArtifactDeclarationEvent(Event):
 TrackingEvent = Annotated[
     SweepSnapshotEvent
     | SubmissionSnapshotEvent
+    | JobSnapshotEvent
     | TrialSnapshotEvent
     | ExecutionStartEvent
     | ExecutionHeartbeatEvent

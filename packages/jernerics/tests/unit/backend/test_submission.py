@@ -12,6 +12,11 @@ from jernerics.config import (
     SharedConfig,
     SlurmConfig,
 )
+from jernerics_schema import (
+    JobSnapshotEvent,
+    SubmissionSnapshotEvent,
+    SweepSnapshotEvent,
+)
 
 
 def _slurm_apptainer_config() -> BackendConfig:
@@ -265,6 +270,137 @@ class TestSubmitSweep:
         assert result == "#!/bin/bash\necho hello"
         adapter.render_sweep.assert_called_once()
         adapter.submit_sweep.assert_not_called()
+
+
+class TestSubmissionEventEmission:
+    def _make_infra(self, adapter, cache_dir):
+        from jernerics.backend.submission import SweepInfrastructure
+
+        return SweepInfrastructure(
+            adapter=adapter,
+            container=NoContainer(),
+            paths=PathResolver(
+                remote_dir="/scratch/proj",
+                cache_dir=cache_dir,
+                container=NoContainer(),
+                project_name="",
+            ),
+        )
+
+    def test_emits_one_job_snapshot_per_submission(self, tmp_path):
+        from jernerics.backend.host import LocalHost
+        from jernerics.backend.submission import submit_sweep
+
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[
+                JobSubmission(job_id="123", n_trials=5, role="trials"),
+                JobSubmission(job_id="124", n_trials=0, role="checker"),
+            ]
+        )
+        infra = self._make_infra(adapter, str(tmp_path))
+        spec = SweepSubmission(
+            trial_path=Path("trial.py"),
+            config_path=Path("configs/sweep.py"),
+            study_name="mystudy",
+            storage_url="/cache/optuna/mystudy.journal",
+            n_trials=5,
+            trial_relpath="trial.py",
+            config_relpath="configs/sweep.py",
+            project_name="proj",
+            git_hash="abc123",
+        )
+
+        result = submit_sweep(
+            spec,
+            infra,
+            host=LocalHost(),
+            project_dir="/work",
+            project_name="proj",
+            backend_name="hpc",
+            direction="minimize",
+        )
+
+        assert result is not None
+        path = (
+            tmp_path
+            / "tracking"
+            / "mystudy"
+            / "submission"
+            / f"{spec.submission_id}.jsonl"
+        )
+        from jernerics.tracking.jsonl_io import TrackingReader
+
+        with TrackingReader(path) as reader:
+            events = list(reader)
+        assert [event.tag for event in events] == [
+            "sweep_snapshot",
+            "submission_snapshot",
+            "job_snapshot",
+            "job_snapshot",
+        ]
+        sweep, submission = events[0], events[1]
+        assert isinstance(sweep, SweepSnapshotEvent)
+        assert isinstance(submission, SubmissionSnapshotEvent)
+        jobs = [event for event in events if isinstance(event, JobSnapshotEvent)]
+        assert len(jobs) == 2
+        assert sweep.name == "mystudy"
+        assert submission.backend == "hpc"
+        assert submission.expected_trials == 5
+        assert submission.git_hash == "abc123"
+        assert submission.config_source == "configs/sweep.py"
+        assert submission.submission_id.hex == spec.submission_id
+        assert [job.scheduler_job_id for job in jobs] == ["123", "124"]
+        assert [job.role for job in jobs] == ["trials", "checker"]
+
+    def test_no_events_without_project_name(self, tmp_path):
+        from unittest.mock import MagicMock
+
+        from jernerics.backend.host import LocalHost
+        from jernerics.backend.submission import submit_sweep
+
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="123", n_trials=5)]
+        )
+        infra = self._make_infra(adapter, str(tmp_path))
+        spec = SweepSubmission(
+            trial_path=Path("trial.py"),
+            config_path=Path("config.py"),
+            study_name="mystudy",
+            storage_url="/cache/optuna/mystudy.journal",
+            n_trials=5,
+        )
+
+        submit_sweep(
+            spec,
+            infra,
+            host=LocalHost(),
+            project_dir="/work",
+            project_name="proj",
+            backend_name="hpc",
+            direction="minimize",
+        )
+
+        assert not (tmp_path / "tracking").exists()
+
+    def test_submission_ids_are_fresh_per_submission(self):
+        first = SweepSubmission(
+            trial_path=Path("t.py"),
+            config_path=Path("c.py"),
+            study_name="s",
+            storage_url="u",
+            n_trials=1,
+        )
+        second = SweepSubmission(
+            trial_path=Path("t.py"),
+            config_path=Path("c.py"),
+            study_name="s",
+            storage_url="u",
+            n_trials=1,
+        )
+        assert first.submission_id != second.submission_id
+        assert len(first.submission_id) == 32
 
 
 class TestAssembleInfrastructure:
