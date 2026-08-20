@@ -1,6 +1,7 @@
 [tool.uv.workspace]
 members = [
     "packages/jernerics",
+    "packages/jernerics-schema",
     "packages/jernerics-server",
 ]
 
@@ -57,11 +58,11 @@ include = [
     "packages/*/src",
     "packages/*/tests",
 ]
-
 [tool.ty.environment]
 extra-paths = [
     "packages/jernerics/src",
     "packages/jernerics-server/src",
+    "packages/jernerics-schema/src",
 ]
 
 [tool.ty.rules]

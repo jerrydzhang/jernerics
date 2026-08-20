@@ -5,8 +5,12 @@ description = "HTTP tracking server for jernerics"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.136.1",
+    "jernerics-schema",
     "uvicorn[standard]>=0.46.0",
 ]
+
+[tool.uv.sources]
+jernerics-schema = { workspace = true }
 
 [dependency-groups]
 dev = [

@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 [manifest]
 members = [
     "jernerics",
+    "jernerics-schema",
     "jernerics-server",
 ]
 
@@ -398,6 +399,7 @@ source = { editable = "packages/jernerics" }
 dependencies = [
     { name = "cloudpickle" },
     { name = "httpx" },
+    { name = "jernerics-schema" },
     { name = "numpy" },
     { name = "optuna" },
     { name = "pathspec" },
@@ -422,6 +424,7 @@ dev = [
 requires-dist = [
     { name = "cloudpickle", specifier = ">=3.0.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "jernerics-schema", editable = "packages/jernerics-schema" },
     { name = "numpy", specifier = ">=2.3.3" },
     { name = "optuna", specifier = ">=4.8.0" },
     { name = "pathspec", specifier = ">=0.12.1" },
@@ -443,11 +446,31 @@ dev = [
 ]
 
 [[package]]
+name = "jernerics-schema"
+version = "0.1.0"
+source = { editable = "packages/jernerics-schema" }
+dependencies = [
+    { name = "pydantic" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "pydantic", specifier = ">=2.11" }]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.4.2" }]
+
+[[package]]
 name = "jernerics-server"
 version = "0.1.0"
 source = { editable = "packages/jernerics-server" }
 dependencies = [
     { name = "fastapi" },
+    { name = "jernerics-schema" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -460,6 +483,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.136.1" },
+    { name = "jernerics-schema", editable = "packages/jernerics-schema" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.46.0" },
 ]
 
