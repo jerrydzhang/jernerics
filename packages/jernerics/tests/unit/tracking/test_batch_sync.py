@@ -11,6 +11,7 @@ from jernerics.tracking.batch_sync import (
     _replay_file,
     discover_jsonl_files,
     replay_tracking,
+    ship_events_file,
 )
 from jernerics.tracking.jsonl_io import (
     TrackingWriter,
@@ -347,6 +348,62 @@ class TestReplayTracking:
         assert not path.exists()
 
 
+class TestShipEventsFile:
+    def test_ships_events_from_byte_zero_and_advances_cursor(
+        self, tmp_path: Path
+    ) -> None:
+        path = _write_events(
+            tmp_path / "deploy.jsonl", [_value_event(f"m{i}") for i in range(3)]
+        )
+        transport = FakeTransport()
+
+        assert ship_events_file(path, BASE_URL, transport=transport) is True
+
+        assert len(transport.bodies) == 1
+        assert len(json.loads(transport.bodies[0])["events"]) == 3
+        assert read_cursor(path) == path.stat().st_size
+        assert path.exists()
+
+    def test_second_call_sends_nothing(self, tmp_path: Path) -> None:
+        path = _write_events(tmp_path / "deploy.jsonl", [_value_event()])
+        transport = FakeTransport()
+        ship_events_file(path, BASE_URL, transport=transport)
+
+        assert ship_events_file(path, BASE_URL, transport=transport) is True
+
+        assert len(transport.requests) == 1
+
+    def test_missing_file_is_silent_noop(self, tmp_path: Path, capfd) -> None:
+        assert (
+            ship_events_file(
+                tmp_path / "absent.jsonl", BASE_URL, transport=FakeTransport()
+            )
+            is False
+        )
+        assert capfd.readouterr().err == ""
+
+    def test_failure_returns_false_notes_and_keeps_cursor(
+        self, tmp_path: Path, capfd
+    ) -> None:
+        path = _write_events(tmp_path / "deploy.jsonl", [_value_event()])
+        transport = FakeTransport(always=httpx.ConnectError("refused"))
+
+        assert (
+            ship_events_file(path, BASE_URL, transport=transport, max_retries=1)
+            is False
+        )
+
+        assert "immediate ship of deploy.jsonl failed" in capfd.readouterr().err
+        assert read_cursor(path) == 0
+        assert path.exists()
+
+
+def test_replay_uses_batches_of_at_most_100(tmp_path: Path) -> None:
+    from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
+
+    assert MAX_EVENTS_PER_REQUEST == 100
+
+
 class TestFileResultShape:
     def test_defaults(self, tmp_path: Path) -> None:
         result = FileResult(path=tmp_path / "x.jsonl")
@@ -361,9 +418,3 @@ class TestFileResultShape:
         assert result.error is None
         assert result.events_sent == 0
         assert result.events_total == 0
-
-
-def test_replay_uses_batches_of_at_most_100(tmp_path: Path) -> None:
-    from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
-
-    assert MAX_EVENTS_PER_REQUEST == 100

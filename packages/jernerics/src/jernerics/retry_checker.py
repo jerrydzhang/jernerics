@@ -23,6 +23,8 @@ from jernerics.retry import (
     read_ledger,
     write_ledger,
 )
+from jernerics.tracking.batch_sync import ship_events_file
+from jernerics.tracking.infra import resolve_tracking_ship
 from jernerics.tracking.jsonl_io import TrackingWriter
 
 
@@ -137,6 +139,17 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         _mark_failed(study, trial_id, sweep_id=sweep_id, submission_dir=submission_dir)
 
     write_ledger(ledger_path, plan.retry_counts)
+
+    # Land the checker's failed-trial snapshots before the retry trials
+    # stream live: a retry's first snapshot references its retry parent,
+    # which must already exist server-side. Best-effort — the retry
+    # sweep's post-hook replay remains the delivery guarantee.
+    if submission_dir is not None:
+        checker_server = ctx.server_addr or load_tracking_server(project_dir)
+        ship = resolve_tracking_ship(checker_server or "")
+        if ship:
+            base_url, api_key = ship
+            ship_events_file(submission_dir / "checker.jsonl", base_url, api_key)
 
     # --- Submit via shared submission module ---
 

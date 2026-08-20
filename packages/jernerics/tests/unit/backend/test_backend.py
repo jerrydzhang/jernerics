@@ -1,11 +1,12 @@
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.backend import Backend
 from jernerics.backend.container import NoContainer
+from jernerics.backend.host import LocalHost
 from jernerics.backend.models import JobSubmission, SubmitResult, SweepSubmission
 from jernerics.backend.path_resolver import PathResolver
 from jernerics.backend.submission import SweepInfrastructure
@@ -27,11 +28,13 @@ def _make_backend(host=None, container=None, adapter=None, syncer=None, **overri
         "project_name": "proj",
         "tracking_server": None,
         "heartbeat_interval_s": 60.0,
+        "remote_dir": "/scratch/user/proj",
+        "cache_host": "/scratch/cache",
     }
     defaults.update(overrides)
     paths = PathResolver(
-        remote_dir="/scratch/user/proj",
-        cache_dir="/scratch/cache",
+        remote_dir=defaults["remote_dir"],
+        cache_dir=defaults["cache_host"],
         container=container,
         project_name=defaults["project_name"],
     )
@@ -160,6 +163,95 @@ class TestPrepareAndSubmit:
         meta = json.loads(meta_file.read_text())
         assert meta["n_trials"] == 5
         assert meta["study_name"] == "mystudy"
+
+    @patch("jernerics.backend.backend.resolve_tracking_ship")
+    @patch("jernerics.backend.backend.ship_events_file")
+    def test_ships_submission_events_after_submit(
+        self, mock_ship, mock_resolve, tmp_path
+    ):
+        mock_resolve.return_value = ("http://localhost:8000", None)
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="123", n_trials=5)]
+        )
+        backend = _make_backend(
+            host=LocalHost(),
+            adapter=adapter,
+            tracking_server="http://localhost:8000",
+            remote_dir=str(tmp_path / "proj"),
+            cache_host=str(tmp_path / "cache"),
+        )
+        spec = _make_spec()
+
+        backend.prepare_and_submit(
+            spec,
+            project_dir=tmp_path / "proj",
+            project_name="proj",
+            direction="minimize",
+            backend_name="hpc",
+        )
+
+        adapter.submit_sweep.assert_called_once()
+        mock_ship.assert_called_once()
+        path, base_url = mock_ship.call_args[0][:2]
+        assert path == (
+            tmp_path
+            / "cache"
+            / "proj"
+            / "tracking"
+            / "mystudy"
+            / f"{spec.submission_id}.jsonl"
+        )
+        assert base_url == "http://localhost:8000"
+
+    @patch("jernerics.backend.backend.resolve_tracking_ship")
+    @patch("jernerics.backend.backend.ship_events_file")
+    def test_shipping_failure_does_not_fail_submission(
+        self, mock_ship, mock_resolve, tmp_path
+    ):
+        mock_resolve.return_value = ("http://localhost:8000", None)
+        mock_ship.return_value = False
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="123", n_trials=5)]
+        )
+        backend = _make_backend(
+            host=LocalHost(),
+            adapter=adapter,
+            tracking_server="http://localhost:8000",
+            remote_dir=str(tmp_path / "proj"),
+            cache_host=str(tmp_path / "cache"),
+        )
+        spec = _make_spec()
+
+        result = backend.prepare_and_submit(
+            spec,
+            project_dir=tmp_path / "proj",
+            project_name="proj",
+            direction="minimize",
+            backend_name="hpc",
+        )
+
+        assert result.submissions[0].job_id == "123"
+
+    @patch("jernerics.backend.backend.ship_events_file")
+    def test_no_ship_without_tracking_server(self, mock_ship):
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="123", n_trials=5)]
+        )
+        backend = _make_backend(adapter=adapter)
+        spec = _make_spec()
+
+        backend.prepare_and_submit(
+            spec,
+            project_dir=Path("/tmp/proj"),
+            project_name="proj",
+            direction="minimize",
+            backend_name="hpc",
+        )
+
+        mock_ship.assert_not_called()
 
     def test_constructs_post_hook_with_retry(self, tmp_path):
         adapter = MagicMock()

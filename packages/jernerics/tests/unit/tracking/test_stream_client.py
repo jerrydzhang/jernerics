@@ -97,6 +97,23 @@ def _wait_for(predicate, timeout: float = 5.0, what: str = "condition") -> None:
 
 
 class TestBatching:
+    def test_events_written_during_window_join_first_batch(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event("m0")])
+        transport = FakeTransport()
+        client = _make_client(path, transport, poll_interval=0.3)
+
+        client.start()
+        time.sleep(0.05)
+        _write_events(path, [_value_event(f"m{i}") for i in (1, 2)])
+        _wait_for(lambda: transport.requests, what="first flush")
+        client.join()
+
+        assert len(transport.requests) == 1
+        assert len(json.loads(transport.bodies[0])["events"]) == 3
+
     def test_partial_batch_flushes_after_window(self, tmp_path: Path) -> None:
         path = tmp_path / "events.jsonl"
         _write_events(path, [_value_event(f"m{i}") for i in range(3)])

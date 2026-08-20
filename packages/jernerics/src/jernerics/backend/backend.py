@@ -12,6 +12,8 @@ from jernerics.backend.job_meta import load_job_studies, save_job_meta
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
 from jernerics.backend.submission import SweepInfrastructure, submit_sweep
 from jernerics.config import ARTIFACT_ENV_VARS
+from jernerics.tracking.batch_sync import ship_events_file
+from jernerics.tracking.infra import resolve_tracking_ship
 
 
 def _check_path_dependencies(project_dir: Path) -> None:
@@ -183,7 +185,23 @@ class Backend:
             heartbeat_interval_s=self.heartbeat_interval_s,
         )
 
-        # Save meta
+        # Land the sweep/submission/job events immediately so live trial
+        # streams validate from their first batch. Best-effort: remote
+        # backends write the file on the host (silent no-op here) and the
+        # post-hook replay remains the delivery guarantee.
+        if spec.project_name and result is not None and self.tracking_server:
+            ship = resolve_tracking_ship(self.tracking_server)
+            if ship:
+                base_url, api_key = ship
+                ship_events_file(
+                    Path(cache_host)
+                    / "tracking"
+                    / spec.study_name
+                    / f"{spec.submission_id}.jsonl",
+                    base_url,
+                    api_key,
+                )
+
         if local_cache_dir is not None and result is not None:
             effective_output = output_pattern or f"{cache_host}/logs/%A_%a.out"
             effective_error = error_pattern or f"{cache_host}/logs/%A_%a.err"

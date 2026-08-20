@@ -1,95 +1,68 @@
 # Observability
 
-Post-hoc analysis of tracked runs: list them, drill into one, or compare
-two. These commands read the tracking server over HTTP — no backend or
-job required, so they work from your laptop against a remote server.
+Post-hoc analysis of tracked trials: list them, drill into one, compare
+two, or pull a raw series. These commands read the tracking server's
+typed domain endpoints over HTTP — no backend or job required, so they
+work from your laptop against a remote server.
 
 ## Commands
 
-All three connect via `JERNERICS_TRACKING_SERVER` (or
-`[tool.jernerics] tracking_server`) and accept `--json` for machine
-consumption: identical data, raw values, no human formatting (large
-numbers stay full-precision, slopes as raw floats).
+All connect via `JERNERICS_TRACKING_SERVER` (or
+`[tool.jernerics] tracking_server`) plus the project name from
+`pyproject.toml`, and accept `--json` for machine consumption:
 
 ```bash
-jernerics tracking runs                        # all runs in this project
-jernerics tracking runs --json                 # same, as a JSON array
+jernerics tracking runs                        # every trial in this project
+jernerics tracking runs --json
 
-jernerics tracking summary <run>               # one run's full analysis
-jernerics tracking summary <run> --json
+jernerics tracking summary <ref>               # one trial, everything stored
+jernerics tracking summary <ref> --json
 
-jernerics tracking diff <run_a> <run_b>        # compare two runs
-jernerics tracking diff <run_a> <run_b> --json
+jernerics tracking diff <ref_a> <ref_b>        # compare two trials
+jernerics tracking trace <ref> <key>           # one value key's step series
+jernerics tracking query "<sql>"               # raw read-only SQL escape hatch
 ```
 
-A **run id** is `study_name` (trial 0) or `study_name:trial_id`, e.g.
-`symlab-131` or `sweep_42:3`.
+A **trial ref** is `<sweep-name>:<trial-number>` (e.g. `sweep:3`) or a
+raw 32-hex trial id.
 
 ## `jernerics tracking runs`
 
-One row per `(study_name, trial_id)`: status (completed/running), step
-range, the **priority metric's** final value, duration, created time,
-and all params. The priority column is the first of `loss`, `error`,
-`accuracy`, `r2` that the run logs; if none apply, the column is omitted.
+One row per trial: sweep, number, state, objective, retry root, the
+derived monitoring label (active / quiet / stale / ended / unknown,
+folded from the trial's executions), param and value counts, and last
+activity.
 
-## `jernerics tracking summary <run>`
+## `jernerics tracking summary <ref>`
 
-Params, artifacts, and a per-metric table. Each metric row reports:
+One trial's full record: lineage (the whole retry family ordered by
+generation), params split by kind (sampled vs manual), the value
+catalog (per key: type, point count, latest step), artifact
+declarations (repeated keys read as versions), and every execution
+with its outcome.
 
-- **First / Last / Change** — earliest and latest logged values
-  (chronological by log order), and `last - first`.
-- **Slope [a-b]** — least-squares slope (value per step) over the first
-  10% and last 10% of points. The `[a-b]` header is the step span each
-  window covers.
-- **n_points** — total scalar points for the metric.
+## `jernerics tracking diff <ref_a> <ref_b>`
 
-Slopes are skipped (shown as `-`) when a 10% window would hold fewer
-than 5 points — i.e. series shorter than ~50 logged points get no slope.
-All metrics are treated identically and sorted alphabetically.
+Params union (each side's value, blank when absent), latest values per
+key on both sides, and both objectives.
 
-### Reading the slopes
+## `jernerics tracking trace <ref> <key>`
 
-After pulling a summary, compare the early and recent slopes of each
-metric. If `|early| / |recent|` (or the inverse) exceeds roughly **10×**,
-the metric's behaviour changed substantially during training — it is
-not a smooth trajectory. Common causes: a warmup ramp ending, a
-learning-rate schedule step, divergence/recovery, or a regime change.
-Before drawing conclusions from the summary alone, fetch the raw series
-and look at the actual curve:
-
-```sql
--- via /query, or any sqlite client against the store
-SELECT step, scalar_val
-FROM tracked_values
-WHERE project = ? AND study_name = ? AND trial_id = ?
-  AND key = ? AND value_type = 'scalar' AND scalar_val IS NOT NULL
-ORDER BY step;
-```
-
-A near-zero recent slope with a healthy change usually means the metric
-has settled; a recent slope still comparable to the early one means it
-is still moving.
-
-## `jernerics tracking diff <run_a> <run_b>`
-
-Lists params that differ (with each run's value) and params that match
-(count + keys), then a metric table of each run's **final** value with
-the change (`b - a`). Diff compares final values only — not trajectory
-shape. A metric present in one run but not the other shows a blank side
-and no change.
+The `[step, value]` series for one value key on one trial — scalar
+values as floats, JSON observations as canonical JSON text. Unsummarized;
+use `--json` to reason over the full series.
 
 ## When to use the commands vs raw SQL
 
-- **`tracking runs` / `summary` / `diff`** — quick lookups and comparisons. Fast,
-  formatted, opinionated about what matters (priority metric, slopes,
-  final values). The right first move for "how did this go?" or "how do
-  these two differ?".
-- **Raw SQL via `/query`** — anything the summaries do not cover:
-  custom aggregations, joins across studies, per-step series, filtering
-  by `context` JSON, histograms, correlation between params and metric
-  outcomes across many trials. `/query` accepts read-only `SELECT`/
-  `WITH`/`VALUES` SQL plus optional bound `params` (a JSON array), and
-  caps results at 10 000 rows.
+- **runs / summary / diff / trace** — quick lookups and comparisons
+  through typed records. The right first move for "how did this go?"
+  or "how do these two differ?".
+- **`tracking query`** — the expert escape hatch for anything the typed
+  surface cannot answer: custom aggregations, joins across sweeps,
+  correlations. Read-only statements only, capped at 10 000 rows and a
+  runtime budget. Prefer the summary for orientation, then drop to SQL
+  once you know which series or cross-cut you need.
 
-Prefer the summary for orientation, then drop to SQL once you know which
-series or cross-cut you need.
+The same data is available programmatically via
+`jernerics.tracking.TrackingClient` (typed records, no SQL) — see
+`references/tracking.md`.

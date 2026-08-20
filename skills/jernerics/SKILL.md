@@ -34,13 +34,16 @@ from training data.
 - **Backend** — An execution target. Configured as named `slurm` or `pueue`
   profiles in `pyproject.toml`; `jernerics local` runs in-process with no
   backend.
-- **Tracking** — An HTTP server that ingests trial events (JSONL over
-  HTTP `/ingest`) and serves them via SQL (`/query`). Metrics stream live
-  during the run; a final replay guarantees delivery.
-- **Artifact storage** — Artifact files served from the tracking
-  server's disk over HTTP (`/artifact`); no external object storage.
+- **Tracking** — An HTTP server that ingests tagged events (JSONL over
+  HTTP `/ingest`) and serves typed domain reads, a read-only dashboard,
+  and raw SQL (`/query`). Metrics stream live during the run; a final
+  replay guarantees delivery.
+- **Artifact storage** — Immutable artifact blobs with versions by
+  repeated key, served from the tracking server's disk over HTTP
+  (`/artifact/{id}`); no external object storage.
 - **Retry** — Heartbeat-based staleness detection with automatic
-  resubmission for node deaths.
+  resubmission for node deaths; retries carry lineage so families read
+  as generations.
 
 ## CLI surface
 
@@ -59,13 +62,13 @@ from training data.
 | `jernerics job cancel -b <name> [id]` | Cancel jobs |
 | `jernerics job logs -b <name> <id>` | View logs |
 | `jernerics job wait -b <name> <id>` | Block until job completes |
-| `jernerics tracking replay [-b <name>]` | Replay local cache (or pull a backend's) to the tracking server |
-| `jernerics tracking runs` | List runs from the tracking server |
-| `jernerics tracking summary <run>` | Per-metric analysis of one run |
-| `jernerics tracking diff <a> <b>` | Compare two runs (params + final metrics) |
-| `jernerics tracking trace <run> [metric]` | Show raw metric series for a run |
+| `jernerics tracking runs` | List this project's trials with derived monitoring |
+| `jernerics tracking summary <ref>` | One trial: lineage, params, values, artifacts, executions |
+| `jernerics tracking diff <a> <b>` | Compare two trials (params + latest values) |
+| `jernerics tracking trace <ref> <key>` | One value key's step series |
+| `jernerics tracking query "<sql>"` | Raw read-only SQL escape hatch |
 
-Common flags: `--dry-run` (run/backend build/interactive start/tracking replay/resolve), `--force` (init/backend build/backend clean), `--follow` (job logs), `--set KEY=VALUE` (run), `--study` (tracking replay), `--json` (tracking commands, interactive sync status).
+Common flags: `--dry-run` (run/backend build/interactive start/tracking replay/resolve), `--force` (init/backend build/backend clean), `--follow` (job logs), `--set KEY=VALUE` (run), `--study` (tracking replay), `--json` (tracking commands, interactive sync status). A trial ref is `<sweep-name>:<trial-number>` or a 32-hex trial id.
 
 ## Reference docs
 
@@ -81,9 +84,9 @@ Load these before relevant activities:
 - **`references/interactive.md`** — `interactive start`/`stop`: GPU
   allocation, container shell, mutagen code sync, `interactive sync
   status`/`resolve`, `InteractiveConfig`.
-- **`references/tracking.md`** — Tracking server, artifact storage,
-  environment variables, `tracking replay`.
-- **`references/observability.md`** — `tracking runs`/`summary`/`diff`
-  commands, metric analysis (slopes), and when to use them vs raw SQL.
+- **`references/tracking.md`** — Tracking server, event model, artifact
+  storage, environment variables, `tracking replay`.
+- **`references/observability.md`** — `tracking runs`/`summary`/`diff`/
+  `trace`/`query` commands and when to use them vs raw SQL.
 - **`references/retry.md`** — Heartbeat, retry detection, retry
   config, failure modes, post-hook pipeline.

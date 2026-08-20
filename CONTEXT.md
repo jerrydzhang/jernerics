@@ -9,7 +9,7 @@ A single hyperparameter search — defines a search space, a number of trials, a
 _Avoid_: study (Optuna-internal term, not user-facing)
 
 **Trial**:
-A single run within a sweep. One invocation of the user's `trial(config, tracker)` function with a specific parameter combination drawn from the search space.
+A single run within a sweep. One invocation of the user's `trial(config, tracker)` function with a specific parameter combination drawn from the search space. Identified by a UUID and a number; a retried trial points at its root so a family reads as generations.
 
 **Backend**:
 A scheduler-backed execution environment that runs sweeps. Slurm and Pueue are the two backend types. Composed from an Orchestrator, a Scheduler Adapter, and a ProjectSync.
@@ -52,48 +52,56 @@ _Avoid_: template (implies variable substitution)
 **Tracker**:
 The interface (`Tracker` protocol) for logging params, metrics, results, and artifacts during a trial.
 
-**Envelope**:
-A single tracked event (param, metric, result, artifact, or trial_end). One JSON object per line in the local JSONL buffer; POSTed to the server's `/ingest` endpoint.
+**Event**:
+A single tracked record in the v3 wire contract — sweep/submission/job snapshots, trial snapshots, execution lifecycle (start, heartbeat, progress, end), manual params, values, artifact declarations. One JSON object per line in the local JSONL buffer; shipped in batches to the server's `/ingest`. Ingest is idempotent per event id, so live shipping, replay, and reconciliation overlapping is safe.
+_Avoid_: envelope (v2 term)
 
 **Stream**:
-The live path: the tracker appends each envelope to a local `.jsonl` file, and a ship client tails it and POSTs each envelope to the server's `/ingest` endpoint while the trial is running — so metrics appear live.
+The live path: the runner's tracker appends each event to a local `.jsonl` file, and a ship client tails it from a durable byte cursor and POSTs batches to the server's `/ingest` endpoint while the trial is running — so metrics appear live.
 _Avoid_: sync (ambiguous with the CLI command / replay path)
 
 **Replay**:
-The batch path: after trials finish, any `.jsonl` files not fully shipped live are replayed to the server via HTTP POST. Triggered by the `sync` CLI command and the post-hook. Ingest is idempotent (`INSERT OR IGNORE` on a unique seq), so live + replay overlapping is safe.
+The batch path: after trials finish, any `.jsonl` events not fully shipped live are replayed to the server via HTTP POST. Triggered by `jernerics tracking replay` and the post-hook. Ingest is idempotent per event id, so live + replay overlapping is safe.
 
 **Query endpoint**:
-An HTTP endpoint (`POST /query`) on the tracking server that accepts read-only SQL and returns JSON rows. The thin interface between analytical clients (notebooks, ad-hoc tools) and the SQLite store.
+An HTTP endpoint (`POST /query`) on the tracking server that accepts read-only SQL and returns JSON rows. The expert escape hatch for questions the typed domain reads cannot answer; everything routine goes through the domain endpoints.
 
-**Run**:
-A single (study_name, trial_id) pair in the tracking store. Every tracked event belongs to a run. Referenced in the CLI as `study_name` or `study_name:trial_id`.
+**Execution**:
+One attempt to run a trial — identified by a UUID, owned by the trial. Heartbeats, explicit progress (`current`/`total`/`unit`), stored stdout/stderr, and artifacts attach to executions. Monitoring labels (active / quiet / stale / ended) are derived on read from the last heartbeat and the outcome, never stored.
+_Avoid_: run (v2 term — the v3 store has no run entity)
+
+**Submission**:
+One deployment of a sweep to a backend: which backend, scheduler state, expected trials, git hash, and config source. Owns its scheduler jobs. Emitted at deploy time by the deploy path.
+
+**Selection**:
+The typed scope every domain read is pinned to: a project plus optional sweep/trial/retry-root/execution ids. Encodable as an opaque token (`encode_selection`) so a dashboard URL can hand the exact same scope to a notebook or script.
 
 **Observability CLI**:
-The read surface over tracking data: `runs` (list studies), `summary` (metrics + params overview), `diff` (compare two runs), `trace` (raw step/value series for any metric), `replay` (sync unsynced local events to server). All commands support `--json` for agent consumption.
+The read surface over tracked data: `runs` (list trials with derived monitoring), `summary` (one trial's lineage, params, values, artifacts, executions), `diff` (compare two trials), `trace` (one value key's step series), `query` (raw SQL escape hatch), plus `replay`. All commands support `--json` for agent consumption.
 
 **Trace**:
-The raw `[step, value]` series for a single metric in a run — both scalar (loss, token_acc) and text/json (pred_expr). Surfaced without interpretation; the CLI does not summarize or visualize it. For humans: a step-by-step listing. For agents: `--json` returns the full series for reasoning.
+The raw `[step, value]` series for a single value key on one trial — scalar values as floats, JSON observations as canonical JSON text. Surfaced without interpretation; the CLI does not summarize or visualize it. For humans: a step-by-step listing. For agents: `--json` returns the full series for reasoning.
 
-**Scalar metric**:
-A tracked value with `value_type='scalar'` — a float logged over training steps (loss, lr, grad_norm, ce_loss, token_acc, val_r2, etc.). Summary renders these with first/last/change and early/recent slopes.
+**Scalar value**:
+A tracked value with a float payload, logged over steps (loss, lr, grad_norm, token_acc, …) with an optional flat scalar context (e.g. `{"phase": "train"}`) that becomes a queryable dimension.
 
-**Text metric**:
-A tracked value with `value_type='json'` — a string logged over steps (e.g. `pred_expr`, the model's predicted symbolic expression). Summary lists these by name + point count but does not summarize them; use `trace` to see the full series.
+**JSON observation**:
+A tracked value carrying an arbitrary JSON object payload, bounded to 64 KiB encoded — anything larger belongs in an artifact, not a value.
 
 **Dashboard**:
-The deferred web UI for deep-dive experiment analysis (curve visualization, structured metric views, cross-run exploration). The CLI handles quick check-ins; the dashboard handles the rest. Does not exist yet.
+The read-only web UI mounted on the tracking server (`/dashboard/...`): live operational monitoring, sweep/trial/execution pages, artifact and stored-log viewers, cross-sweep analysis, and a continue-in-Python selection handoff. Browser login exchanges the API key for a signed session cookie. The CLI handles quick check-ins; the dashboard handles the rest.
 
 **Tracking server**:
-A single HTTP process. Ingests trial events (`POST /ingest`), serves them via SQL (`POST /query`), and serves/stores artifact files (`GET`/`POST /artifact/...`) on its own disk. Owns the SQLite file exclusively. Authenticated via a bearer API key in the `Authorization` header. No external object storage — artifacts live on the server's disk.
+A single HTTP process. Ingests tagged events (`POST /ingest`), serves typed domain reads (`/sweeps`, `/trials`, `/values`, ...), raw SQL (`POST /query`), and stores/serves immutable artifact blobs (`PUT`/`GET /artifact/{id}`) on its own disk. Owns the SQLite file exclusively. Authenticated via a bearer API key in the `Authorization` header. No external object storage — artifacts live on the server's disk.
 
 **Funnel vs tailnet**:
-All HTTP traffic (ingestion from HPC, replay from post-hook, live streaming from local runs) goes through the Tailscale funnel URL with TLS. The query and artifact endpoints listen on the same process — tailnet-only, accessible only from personal devices. API key auth applies everywhere regardless.
+All HTTP traffic (ingestion from HPC, replay from post-hook, live streaming from local runs) goes through the Tailscale funnel URL with TLS. The read and artifact endpoints listen on the same process — tailnet-only, accessible only from personal devices. API key auth applies everywhere regardless.
 
 **Heartbeat**:
-A file touched periodically by a running trial. Used to detect stale (presumably dead) trials. Exists under `heartbeats/<trial_number>.heartbeat`.
+A file touched periodically by a running trial, mirrored as an `execution_heartbeat` event so the server sees liveness live. Exists under `heartbeats/<trial_number>.heartbeat`. Used to detect stale (presumably dead) executions; the derived label is computed on read, never stored.
 
 **Retry**:
-The system that detects stale trials (via heartbeats), marks them failed in Optuna, and resubmits them. Composed of a retry plan, a retry context, and a checker job.
+The system that detects stale trials (via heartbeats), marks them failed in Optuna, and resubmits them carrying lineage (`retry_of`, `retry_root`, `retry_index`) so retries render as families/generations. Composed of a retry plan, a retry context, and a checker job.
 _Avoid_: auto-retry (that's the config flag name, not the concept)
 
 **Scheduler adapter**:
@@ -105,7 +113,7 @@ The shared layer that composes host + container runtime + path resolver + projec
 _Avoid_: orchestration (that's the module name, not the concept)
 
 **Post-hook**:
-The process that runs on the remote after all trials finish. Performs retry detection/resubmission, uploads the optuna journal, replays tracking events, and syncs artifacts to the server.
+The process that runs on the remote after all trials finish. Performs retry detection/resubmission, reconciles the optuna journal with terminal server state, replays tracking events, and uploads pending artifact blobs to the server.
 _Avoid_: checker (that's the current implementation name — it will grow beyond checking)
 
 ## Relationships

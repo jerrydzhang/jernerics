@@ -125,15 +125,17 @@ class StreamClient:
             if not self._stop.is_set():
                 window_deadline = time.monotonic() + self.batch_window
                 while len(pending) < self.batch_size:
-                    remaining = window_deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
+                    # Always rescan before closing the window: a wait that
+                    # runs to the deadline must not strand events written
+                    # while we slept (a prefix batch can reference events
+                    # the server has not seen yet and stick retrying).
                     events, offset = scan_events(
                         self.path, offset, self.batch_size - len(pending)
                     )
-                    if events:
-                        pending.extend(events)
-                        continue
+                    pending.extend(events)
+                    remaining = window_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
                     self._stop.wait(min(remaining, self.poll_interval))
                     if self._stop.is_set():
                         break

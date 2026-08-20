@@ -75,11 +75,12 @@ Near-term, three thrusts:
 - **Robustness** — make the system as reliable as the work it runs demands.
   Retry/heartbeat and the post-hook are the sharp edges.
 - **Observability** — the read surface is now driven by real need. The CLI
-  (`runs`, `summary`, `diff`, `trace`, `replay`) serves two audiences: humans
-  doing quick check-ins, and agents reasoning about data (via `--json`). It
-  surfaces data without interpreting it — visualization and structured analysis
-  views are deferred to a dashboard. What's there now earned its place through
-  dogfooding against real experiment data.
+  (`runs`, `summary`, `diff`, `trace`, `query`, `replay`) serves two audiences:
+  humans doing quick check-ins, and agents reasoning about data (via
+  `--json`). The typed `TrackingClient` serves programs. The dashboard —
+  monitoring, cross-sweep analysis, artifact and stored-log views — is
+  mounted read-only on the server behind an API-key login. What's there now
+  earned its place through dogfooding against real experiment data.
 - **Ergonomics** — make the CLI and trial-authoring UX as smooth as the
   mechanical parts of research allow.
 

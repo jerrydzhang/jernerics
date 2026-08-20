@@ -14,7 +14,7 @@ from jernerics.backend.submission import build_submission_events
 from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
-from jernerics.tracking.batch_sync import replay_tracking
+from jernerics.tracking.batch_sync import replay_tracking, ship_events_file
 from jernerics.tracking.infra import resolve_tracking_ship
 from jernerics.tracking.jsonl_io import TrackingWriter
 
@@ -53,7 +53,8 @@ class LocalBackend:
             for combo in itertools.product(*[spec.grid[k] for k in keys]):
                 study.enqueue_trial(dict(zip(keys, combo, strict=True)))
 
-        self._emit_submission_events(spec, tracker_dir)
+        submission_events_path = self._emit_submission_events(spec, tracker_dir)
+        self._ship_submission_events(spec, submission_events_path)
 
         any_failed = False
 
@@ -103,9 +104,27 @@ class LocalBackend:
             study=spec.study_name,
         )
 
-    def _emit_submission_events(self, spec: SweepSubmission, tracker_dir: Path) -> None:
-        if not spec.project_name:
+    def _ship_submission_events(self, spec: SweepSubmission, path: Path | None) -> None:
+        """Land the submission events before trials stream live.
+
+        Ingest validates every trial event against a known sweep, so
+        the sweep snapshot must be on the server when the first trial
+        ships. Best-effort: the post-hook replay stays the delivery
+        guarantee.
+        """
+        if path is None:
             return
+        ship = resolve_tracking_ship(spec.server_addr or self.tracking_server or "")
+        if not ship:
+            return
+        base_url, api_key = ship
+        ship_events_file(path, base_url, api_key)
+
+    def _emit_submission_events(
+        self, spec: SweepSubmission, tracker_dir: Path
+    ) -> Path | None:
+        if not spec.project_name:
+            return None
         result = SubmitResult(
             submissions=[JobSubmission(job_id="local", n_trials=spec.n_trials)]
         )
@@ -114,3 +133,4 @@ class LocalBackend:
         with TrackingWriter(path) as writer:
             for event in events:
                 writer.write_event(event)
+        return path

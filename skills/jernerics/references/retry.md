@@ -18,6 +18,10 @@ affected trials.
 5. If trials exhaust their max retry count, they are marked as
    permanently failed.
 
+Retried trials carry lineage attrs (`retry_of`, `retry_root`,
+`retry_index`), so a family reads as generations in the client, CLI,
+and dashboard.
+
 ## Retry context
 
 A `RetryContext` JSON file is written alongside the sweep submission.
@@ -73,8 +77,11 @@ trigger the heartbeat-based retry path.
 After a sweep completes, the post-hook runs:
 
 1. **Retry check** — detect stale heartbeats, submit retry job if needed
-2. **Tracking replay** — replay local JSONL events to the HTTP tracking server
-3. **Artifact sync** — upload artifacts to the tracking server's disk
+2. **Reconciliation** — snapshot every optimizer-journal trial as a
+   terminal trial snapshot; conflicts with already-terminal server
+   state abort without overwriting anything
+3. **Tracking replay** — replay local JSONL events to the HTTP tracking server
+4. **Artifact sync** — upload pending artifact blobs to the server's disk
 
 If a retry job is submitted, the post-hook returns early. The retry
 job will run its own post-hook when it completes.

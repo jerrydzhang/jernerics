@@ -82,7 +82,7 @@ jernerics run --backend hpc trial.py config.py
 - **Trial** — A `trial(config, tracker)` function authored by the user. `config` is the merged hyperparameters; `tracker` records metrics/params/results/artifacts.
 - **Sweep** — An Optuna-driven search over a `search_space` function. Each sample is one trial invocation.
 - **Backend** — An execution target: local, Slurm, or Pueue. Configured in `pyproject.toml`.
-- **Tracking** — An HTTP tracking server that ingests trial events (JSONL over HTTP) and serves them via a SQL `/query` endpoint. Live metrics stream during the run; a final replay guarantees delivery.
+- **Tracking** — An HTTP tracking server ingesting tagged events (JSONL over HTTP) and serving typed domain reads, a dashboard, and a raw SQL escape hatch. Live metrics stream during the run; a final replay guarantees delivery.
 - **Artifact storage** — Artifact files served from the tracking server's disk over HTTP.
 - **Retry** — Heartbeat-based failure detection with automatic resubmission for node deaths.
 
@@ -104,10 +104,12 @@ jernerics run --backend hpc trial.py config.py
 | `jernerics backend build --backend <name>` | Build the container on the remote |
 | `jernerics backend clean --backend <name>` | Delete remote artifacts (`--full`, `--force`) |
 | `jernerics tracking replay [--backend <name>]` | Replay local cache (or pull from a backend) to the server (`--study`, `--dry-run`, `--json`) |
-| `jernerics tracking runs` | List recorded runs (`--json`) |
-| `jernerics tracking summary <run>` | Show params, metrics, and artifacts (`--json`) |
-| `jernerics tracking diff <a> <b>` | Compare two runs (`--json`) |
-| `jernerics tracking trace <run> [metric]` | Show a metric series (`--json`) |
+| `jernerics tracking runs` | List this project's trials with derived monitoring (`--json`) |
+| `jernerics tracking summary <ref>` | One trial: lineage, params, values, artifacts, executions (`--json`) |
+| `jernerics tracking diff <a> <b>` | Compare two trials: params, latest values, objective (`--json`) |
+| `jernerics tracking trace <ref> <key>` | One value key's step series (`--json`) |
+| `jernerics tracking query "<sql>"` | Raw read-only SQL escape hatch (`--json`) |
+
 
 ## Configuration
 
@@ -213,6 +215,92 @@ tailscale funnel --https=443 http://localhost:8000
 
 On clients, set `JERNERICS_TRACKING_SERVER` to the Funnel URL (e.g. `https://your-host.ts.net`) and `JERNERICS_API_KEY` to the shared bearer.
 
+
+## Tracking
+
+### Server and dashboard
+
+```bash
+python -m jernerics_server --db /path/to/jernerics.sqlite --host 127.0.0.1 --http-port 8000 [--artifacts-dir /path/to/artifacts]
+```
+
+One process: SQLite store, artifacts on disk, the mounted dashboard.
+With `JERNERICS_API_KEY` set, every endpoint requires
+`Authorization: Bearer <key>` — and the dashboard's browser login
+exchanges that key once for a signed session cookie, so the key itself
+never stays in the browser. The dashboard is read-only: monitoring
+counts, sweep/trial/execution pages, artifact and stored-log viewers,
+and cross-sweep analysis views.
+
+### Reading data back
+
+```bash
+jernerics tracking runs                  # trials + derived monitoring
+jernerics tracking summary my-sweep:3    # lineage, params, values, artifacts
+jernerics tracking diff my-sweep:3 my-sweep:7
+jernerics tracking trace my-sweep:3 loss
+jernerics tracking query "SELECT key, COUNT(*) FROM tracked_values GROUP BY key"
+```
+
+Programmatically, use the typed client — no SQL, no dataframe
+dependency:
+
+```python
+from jernerics.tracking import TrackingClient, decode_selection, encode_selection
+
+with TrackingClient("http://host:8000", api_key="...") as client:
+    proj = client.project("my-project")
+    trials = proj.trials(proj.selection())
+    latest = proj.latest_values(proj.for_trials(trials[0].trial_id))
+    print(proj.reduce("loss", fn="min"))
+
+    # Selection handoff: the dashboard URL carries an opaque token;
+    # decode it and read exactly what the page showed.
+    token = encode_selection(proj.selection())
+    assert decode_selection(token) == proj.selection()
+```
+
+`raw_query` is the one explicit SQL escape hatch for questions the
+typed reads cannot answer.
+
+### The tracker API
+
+Inside a trial, `tracker` records what matters:
+
+```python
+def trial(config, tracker):
+    tracker.log_param("seed", config["seed"])            # manual param
+    for step in range(10):
+        tracker.log_value("loss", loss(step), step=step, context={"phase": "train"})
+    tracker.log_json("summary", {"accuracy": acc})        # JSON observation
+    tracker.set_progress(step, 10, "epoch")               # explicit progress
+    tracker.log_artifact("model", "model.pt")             # immutable artifact
+    return {"loss": final_loss}
+```
+
+Values are scalars or JSON observations under a flat scalar `context`
+(e.g. `{"phase": "train"}`) that becomes a queryable dimension. A JSON
+observation is bounded to 64 KiB encoded — anything larger belongs in
+an artifact, not a value.
+
+### Artifacts, logs, and retries
+
+- **Artifacts are immutable and two-phase**: the declaration (name,
+  size, sha256) ships with the event log; the blob follows via HTTP.
+  Repeating a key (`log_artifact("model", ...)` twice) creates
+  versions v1..vN under that key — never an overwrite.
+- **Stored stdout/stderr**: the runner captures each trial's child
+  output and ships it as `system` artifacts keyed `stdout`/`stderr`,
+  downloadable like any artifact.
+- **Retry families**: a retried trial carries lineage
+  (`retry_of`, `retry_root`, `retry_index`), so a family renders as
+  generations in the CLI, client, and dashboard rather than loose
+  duplicates.
+- **Heartbeats**: running executions touch heartbeats; staleness
+  (active / quiet / stale / ended) is derived on read from the last
+  heartbeat and the execution's outcome — never stored, so it can
+  never go stale itself.
+
 ## Container starters
 
 `jernerics init` copies both `container.def` (Apptainer) and `Dockerfile` into the project. The format used depends on the backend's `container_type`:
@@ -245,7 +333,7 @@ The returned dict is passed to the config's `objective` lambda (e.g. `lambda res
 
 ## Features
 
-- **Tracking server** — A single HTTP process: ingests trial events (`POST /ingest`, JSONL), serves them via SQL (`POST /query`), and serves artifact files (`GET /artifact/...`) from disk. Live metrics stream during the run; a final replay guarantees delivery.
-- **Artifact storage** — Logged artifacts upload to the tracking server's disk over HTTP and are served back the same way — no external object storage.
-- **Retry system** — Heartbeat-based staleness detection for node deaths; configurable retries with persistent failure handling.
-- **Post-hook pipeline** — After a sweep completes, automatically replays tracking data and syncs artifacts to the server.
+- **Tracking server** — A single HTTP process: ingests tagged events (`POST /ingest`), serves typed domain reads plus a read-only dashboard, raw SQL via `POST /query`, and artifact files (`GET /artifact/{id}`) from disk. Live metrics stream during the run; a final replay guarantees delivery.
+- **Artifact storage** — Immutable two-phase artifacts with versions by repeated key, stored on the tracking server's disk over HTTP — no external object storage.
+- **Retry system** — Heartbeat-based staleness detection for node deaths; retries carry lineage so families read as generations; configurable retries with persistent failure handling.
+- **Post-hook pipeline** — After a sweep completes, reconciles the optuna journal with server state, replays tracking data, and uploads pending artifact blobs.

@@ -115,6 +115,46 @@ def _replay_file(
     return result
 
 
+def ship_events_file(
+    path: Path,
+    base_url: str,
+    api_key: str | None = None,
+    *,
+    max_retries: int = 3,
+    transport: Transport | None = None,
+) -> bool:
+    """Best-effort immediate ship of one events file, cursor-honoring.
+
+    Deploy-time use: land sweep/submission/job (or checker snapshot)
+    events on the server the moment they are written, so live trial
+    streams validate from their first batch instead of 409-retrying
+    until the post-hook replay. Reuses the replay batch/cursor logic;
+    never deletes the file. A missing file is a silent no-op (remote
+    backends write it on the host, not here); any failure only leaves a
+    stderr note — the post-hook replay remains the delivery guarantee
+    and the cursor stays where it was.
+    """
+    if not path.is_file():
+        return False
+    try:
+        result = _replay_file(path, base_url, api_key, max_retries, transport)
+    except Exception as e:
+        print(
+            f"jernerics: immediate ship of {path.name} failed: {e!r}; "
+            "the post-hook replay will deliver it.",
+            file=sys.stderr,
+        )
+        return False
+    if result.error:
+        print(
+            f"jernerics: immediate ship of {path.name} failed: "
+            f"{result.error}; the post-hook replay will deliver it.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
 def discover_jsonl_files(
     tracking_dir: Path,
     study: str | None = None,
