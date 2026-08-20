@@ -3,11 +3,33 @@
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .events import TrackingEvent
+from .ids import EventId, TrialId
 
 PROTOCOL_VERSION = 3
 """The wire protocol version defined by this schema package."""
 
 MAX_EVENTS_PER_REQUEST = 100
+
+
+class ConflictRecord(BaseModel):
+    """A reconciliation conflict detected while applying a batch."""
+
+    model_config = ConfigDict(frozen=True)
+
+    trial_id: TrialId
+    kind: str
+    detail: str
+
+
+class IngestError(BaseModel):
+    """Structured failure body for a rejected batch."""
+
+    model_config = ConfigDict(frozen=True)
+
+    error: str
+    event_index: int | None = None
+    event_id: EventId | None = None
+    detail: str = ""
 
 
 class IngestRequest(BaseModel):
@@ -37,3 +59,4 @@ class IngestResponse(BaseModel):
 
     accepted: int = Field(ge=0)
     duplicates: int = Field(default=0, ge=0)
+    conflicts: tuple[ConflictRecord, ...] = ()

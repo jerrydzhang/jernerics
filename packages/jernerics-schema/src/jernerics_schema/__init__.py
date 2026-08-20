@@ -24,7 +24,13 @@ from .ids import (
     SweepId,
     TrialId,
 )
-from .ingest import PROTOCOL_VERSION, IngestRequest, IngestResponse
+from .ingest import (
+    PROTOCOL_VERSION,
+    ConflictRecord,
+    IngestError,
+    IngestRequest,
+    IngestResponse,
+)
 from .lifecycle import ExecutionOutcome, FailureKind, SubmissionState, TrialState
 from .lineage import RetryLineage
 from .records import (
@@ -50,6 +56,7 @@ __all__ = [
     "ArtifactDeclarationEvent",
     "ArtifactId",
     "ArtifactRecord",
+    "ConflictRecord",
     "Event",
     "EventId",
     "ExecutionEndEvent",
@@ -61,6 +68,7 @@ __all__ = [
     "ExecutionStartEvent",
     "FailureKind",
     "FlatContext",
+    "IngestError",
     "IngestRequest",
     "IngestResponse",
     "JobId",
