@@ -13,8 +13,8 @@ from jernerics.backend.models import (
 from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
-from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
-from jernerics.tracking.infra import resolve_artifact_storage, resolve_tracking_ship
+from jernerics.tracking.batch_sync import replay_tracking
+from jernerics.tracking.infra import resolve_tracking_ship
 
 
 class LocalBackend:
@@ -65,7 +65,6 @@ class LocalBackend:
                     tracking_dir=str(tracker_dir),
                     project_name=spec.project_name,
                     server_addr=spec.server_addr or self.tracking_server,
-                    git_hash=spec.git_hash,
                 )
             except SystemExit as e:
                 if e.code != 0:
@@ -77,7 +76,7 @@ class LocalBackend:
         if any_failed:
             raise RuntimeError("One or more trials failed")
 
-        # Post-hook pipeline: sync tracking and artifacts
+        # Post-hook pipeline: sync tracking events to the server
         if self.tracking_server:
             tracking_parent = tracker_dir.parent
             self._run_post_hook(tracking_parent, spec)
@@ -99,12 +98,3 @@ class LocalBackend:
             api_key=api_key,
             study=spec.study_name,
         )
-
-        upload_fn = resolve_artifact_storage(base_url)
-        if upload_fn:
-            sync_artifacts(
-                tracking_dir=tracking_dir,
-                upload_fn=upload_fn,
-                project=spec.project_name or "",
-                study=spec.study_name,
-            )

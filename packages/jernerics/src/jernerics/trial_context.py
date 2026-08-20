@@ -1,8 +1,10 @@
 import json
 import os
+import uuid
 from pathlib import Path
 from typing import Protocol
 
+from jernerics.tracking.artifact_manifest import ArtifactManifest
 from jernerics.tracking.tracker import JsonlTracker
 
 TRIAL_CONFIG_ENV = "JERNERICS_TRIAL_CONFIG"
@@ -11,6 +13,8 @@ PROJECT_NAME_ENV = "JERNERICS_PROJECT_NAME"
 STUDY_NAME_ENV = "JERNERICS_STUDY_NAME"
 TRIAL_NUMBER_ENV = "JERNERICS_TRIAL_NUMBER"
 RUN_ID_ENV = "JERNERICS_RUN_ID"
+TRIAL_ID_ENV = "JERNERICS_TRIAL_ID"
+EXECUTION_ID_ENV = "JERNERICS_EXECUTION_ID"
 
 type JsonValue = (
     bool | int | float | str | list[JsonValue] | dict[str, JsonValue] | None
@@ -61,10 +65,13 @@ class _JobTracker:
         self._tracker.log_param(key, value)
 
     def log_value(self, key: str, value: JsonValue, *, step: int | None = None) -> None:
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if isinstance(value, bool | int | float | str):
             self._tracker.log_value(key, value, step=step)
-        else:
+        elif isinstance(value, dict):
             self._tracker.log_json(key, value, step=step)
+        else:
+            msg = f"cannot track {type(value).__name__} observation for {key!r}"
+            raise TypeError(msg)
 
     def log_artifact(self, key: str, path: str) -> None:
         self._tracker.log_artifact(key, path)
@@ -101,10 +108,9 @@ def trial_tracker() -> TrackerProtocol:
         return ConsoleTracker()
 
     tracking_dir = _required_env(TRACKING_DIR_ENV)
-    project_name = _required_env(PROJECT_NAME_ENV)
-    study_name = _required_env(STUDY_NAME_ENV)
     trial_number = _required_int(TRIAL_NUMBER_ENV)
-    run_id = _optional_int(RUN_ID_ENV, 0)
+    trial_id = _required_uuid(TRIAL_ID_ENV)
+    execution_id = _required_uuid(EXECUTION_ID_ENV)
 
     root = Path(tracking_dir)
     events_dir = root / "events"
@@ -114,12 +120,10 @@ def trial_tracker() -> TrackerProtocol:
 
     return _JobTracker(
         JsonlTracker(
-            project_name,
-            study_name,
-            trial_number,
             events_dir / f"{trial_number}.jsonl",
-            manifest_path=artifacts_dir / f"{trial_number}.manifest",
-            run_id=run_id,
+            trial_id,
+            execution_id,
+            manifest=ArtifactManifest(artifacts_dir / f"{trial_number}.manifest"),
         )
     )
 
@@ -139,11 +143,9 @@ def _required_int(name: str) -> int:
         raise RuntimeError(f"{name} must be an integer") from exc
 
 
-def _optional_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
-    if value is None:
-        return default
+def _required_uuid(name: str) -> uuid.UUID:
+    value = _required_env(name)
     try:
-        return int(value)
+        return uuid.UUID(value)
     except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer") from exc
+        raise RuntimeError(f"{name} must be a UUID") from exc

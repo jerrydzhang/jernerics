@@ -1,344 +1,429 @@
+import json
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import Any
+from uuid import uuid4
 
 import httpx
-import pytest
-from jernerics.tracking.jsonl_io import TrackingWriter
+from jernerics.tracking.jsonl_io import read_cursor, write_cursor
 from jernerics.tracking.stream_client import StreamClient
+from jernerics_schema import (
+    PROTOCOL_VERSION,
+    TrackingEvent,
+    ValueEvent,
+)
 
 BASE_URL = "http://localhost:8000"
 
 
-def _param_envelope(seq: int, key: str, value: float) -> dict:
-    return {
-        "project": "p",
-        "study_name": "s",
-        "trial_id": 0,
-        "timestamp_ns": 1000 + seq,
-        "seq": seq,
-        "param": {"key": key, "value": {"float_val": value}},
-    }
+@dataclass
+class _FakeResponse:
+    status_code: int
 
 
-def _value_envelope(seq: int, key: str, value: float, step: int) -> dict:
-    return {
-        "project": "p",
-        "study_name": "s",
-        "trial_id": 0,
-        "timestamp_ns": 1000 + seq,
-        "seq": seq,
-        "value": {"key": key, "value": value, "step": step, "context": "{}"},
-    }
+class FakeTransport:
+    """Records requests; replies from a scripted list of statuses/exceptions."""
+
+    def __init__(self, responses=None, always=None):
+        self.requests: list[tuple[str, str, dict, float]] = []
+        self.responses = list(responses or [])
+        self.always = always
+
+    def post(self, url, *, content, headers, timeout):
+        self.requests.append((url, content, dict(headers or {}), timeout))
+        if self.responses:
+            response = self.responses.pop(0)
+        else:
+            response = self.always if self.always is not None else 200
+        if isinstance(response, Exception):
+            raise response
+        return _FakeResponse(response)
+
+    @property
+    def bodies(self) -> list[str]:
+        return [content for _, content, _, _ in self.requests]
 
 
-def _trial_end_envelope(seq: int) -> dict:
-    return {
-        "project": "p",
-        "study_name": "s",
-        "trial_id": 0,
-        "timestamp_ns": 1000 + seq,
-        "seq": seq,
-        "trial_end": {},
-    }
+def _value_event(key: str = "loss", value: float = 0.5) -> ValueEvent:
+    return ValueEvent(
+        event_id=uuid4(),
+        recorded_at=datetime.now(timezone.utc),
+        trial_id=uuid4(),
+        key=key,
+        step=0,
+        value=value,
+    )
 
 
-def _write_envelopes(path: Path, envelopes: list[dict]) -> None:
+def _write_events(path: Path, events: Sequence[TrackingEvent]) -> None:
+    from jernerics.tracking.jsonl_io import TrackingWriter
+
     with TrackingWriter(path) as writer:
-        for env in envelopes:
-            writer.write_envelope(env)
+        for event in events:
+            writer.write_event(event)
 
 
-def _ok_response() -> MagicMock:
-    """A mocked httpx.Response: raise_for_status is a no-op, status 200."""
-    return MagicMock(status_code=200)
+def _make_client(
+    path: Path,
+    transport: FakeTransport,
+    **kwargs: Any,
+) -> StreamClient:
+    options: dict[str, Any] = {
+        "poll_interval": 0.05,
+        "flush_timeout": 5.0,
+        "send_deadline": 2.0,
+        "max_retry_time": 1.0,
+        "batch_window": 0.3,
+        "transport": transport,
+    }
+    options.update(kwargs)
+    return StreamClient(BASE_URL, path, **options)
 
 
-class TestHappyPath:
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_posts_each_envelope_to_ingest(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        envelopes = [
-            _param_envelope(0, "lr", 0.01),
-            _value_envelope(1, "loss", 0.5, 10),
-            _trial_end_envelope(2),
-        ]
-        _write_envelopes(events_file, envelopes)
+def _ids(body: str) -> list[str]:
+    return [event["event_id"] for event in json.loads(body)["events"]]
 
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.01,
-            flush_timeout=5.0,
-        )
+
+def _wait_for(predicate, timeout: float = 5.0, what: str = "condition") -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise TimeoutError(f"timed out waiting for {what}")
+
+
+class TestBatching:
+    def test_partial_batch_flushes_after_window(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event(f"m{i}") for i in range(3)])
+        transport = FakeTransport()
+        client = _make_client(path, transport)
+
+        started = time.monotonic()
         client.start()
+        _wait_for(lambda: transport.requests, what="first flush")
+        elapsed = time.monotonic() - started
         client.join()
 
-        assert mock_post.call_count == len(envelopes)
-        for call, env in zip(mock_post.call_args_list, envelopes, strict=False):
-            assert call.args[0] == f"{BASE_URL}/ingest"
-            assert call.kwargs["json"] == env
-            # No api key -> no auth header.
-            assert call.kwargs["headers"] is None
+        assert len(transport.requests) == 1
+        assert len(json.loads(transport.bodies[0])["events"]) == 3
+        # flush was triggered by the 300ms window, not by reaching batch size
+        assert elapsed >= 0.2
 
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_trial_end_terminates_shipping(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        _write_envelopes(
-            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
-        )
+    def test_full_batch_flushes_immediately(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event(f"m{i}") for i in range(100)])
+        transport = FakeTransport()
+        client = _make_client(path, transport, batch_window=10.0)
 
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.01,
-            flush_timeout=5.0,
-        )
+        started = time.monotonic()
         client.start()
+        _wait_for(lambda: transport.requests, what="full batch flush")
+        elapsed = time.monotonic() - started
         client.join()
 
-        # Both threads exit once trial_end has shipped.
-        assert not client.producer_thread.is_alive()
-        assert not client.consumer.is_alive()
-        # Exactly one POST per envelope and no more.
-        assert mock_post.call_count == 2
+        assert len(transport.requests) == 1
+        assert len(json.loads(transport.bodies[0])["events"]) == 100
+        assert elapsed < 5.0
 
+    def test_more_than_batch_size_splits_into_batches(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event(f"m{i}") for i in range(250)])
+        transport = FakeTransport()
+        client = _make_client(path, transport)
 
-class TestSendDeadline:
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_each_post_carries_send_deadline(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        _write_envelopes(
-            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
-        )
-
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.01,
-            flush_timeout=5.0,
-            send_deadline=12.5,
-        )
         client.start()
+        _wait_for(lambda: len(transport.requests) == 3, what="three batches")
         client.join()
 
-        for call in mock_post.call_args_list:
-            assert call.kwargs["timeout"] == pytest.approx(client.send_deadline)
+        sizes = [len(json.loads(body)["events"]) for body in transport.bodies]
+        assert sizes == [100, 100, 50]
+        assert read_cursor(path) == path.stat().st_size
 
 
-class TestAuthHeader:
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_sends_bearer_header_when_api_key_set(
-        self, mock_post, tmp_path: Path
+class TestRequestShape:
+    def test_protocol_version_and_headers(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event()])
+        transport = FakeTransport()
+        client = _make_client(path, transport, api_key="secret")
+        client.start()
+        _wait_for(lambda: transport.requests, what="request")
+        client.join()
+
+        url, body, headers, timeout = transport.requests[0]
+        assert url == f"{BASE_URL}/ingest"
+        assert json.loads(body)["protocol_version"] == PROTOCOL_VERSION == 3
+        assert headers["content-type"] == "application/json"
+        assert headers["authorization"] == "Bearer secret"
+        assert timeout == client.send_deadline
+
+    def test_cursor_advances_to_acknowledged_offset(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event(f"m{i}") for i in range(5)])
+        transport = FakeTransport()
+        client = _make_client(path, transport)
+        client.start()
+        _wait_for(lambda: transport.requests, what="ack")
+        client.join()
+
+        assert read_cursor(path) == path.stat().st_size
+
+
+class TestRetry:
+    def test_failed_batch_retries_same_body_and_advances_once(
+        self, tmp_path: Path
     ) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        _write_envelopes(
-            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
-        )
-
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            api_key="secret-key",
-            poll_interval=0.01,
-            flush_timeout=5.0,
-        )
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event(f"m{i}") for i in range(4)])
+        transport = FakeTransport([500, 200])
+        client = _make_client(path, transport)
         client.start()
+        _wait_for(lambda: len(transport.requests) == 2, what="retry")
         client.join()
 
-        for call in mock_post.call_args_list:
-            assert call.kwargs["headers"] == {"authorization": "Bearer secret-key"}
+        assert transport.bodies[0] == transport.bodies[1]
+        assert read_cursor(path) == path.stat().st_size
+        assert len(transport.requests) == 2
 
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_no_header_without_api_key(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        _write_envelopes(
-            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
+    def test_connection_errors_retry_with_same_event_ids(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event(f"m{i}") for i in range(4)])
+        transport = FakeTransport(
+            [httpx.ConnectError("down"), httpx.ConnectError("down"), 200]
         )
-
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.01,
-            flush_timeout=5.0,
-        )
+        client = _make_client(path, transport)
         client.start()
+        _wait_for(lambda: len(transport.requests) == 3, what="retries")
         client.join()
 
-        for call in mock_post.call_args_list:
-            assert call.kwargs["headers"] is None
+        first_ids = _ids(transport.bodies[0])
+        assert _ids(transport.bodies[1]) == first_ids
+        assert _ids(transport.bodies[2]) == first_ids
+        assert read_cursor(path) == path.stat().st_size
+
+    def test_gives_up_after_max_retry_time_leaving_cursor(
+        self, tmp_path, capfd
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event()])
+        transport = FakeTransport(always=httpx.ConnectError("down"))
+        client = _make_client(path, transport, max_retry_time=0.2)
+
+        client.start()
+        client._thread.join(timeout=5.0)
+
+        assert not client._thread.is_alive()
+        assert read_cursor(path) == 0
+        assert "max retry time" in capfd.readouterr().err
+
+
+class TestCrashRestart:
+    def test_new_instance_resumes_at_cursor_without_reshipping(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        events = [_value_event(f"m{i}") for i in range(150)]
+        _write_events(path, events)
+
+        # first instance: batch 1 (100 events) acks; the server then dies
+        first_transport = FakeTransport([200], always=httpx.ConnectError("gone"))
+        first = _make_client(path, first_transport, max_retry_time=0.3)
+        first.start()
+        _wait_for(lambda: len(first_transport.requests) >= 2, what="failed batch")
+        first.join()  # drain fails; thread exits via retry budget
+        first._thread.join(timeout=10.0)
+        assert not first._thread.is_alive()
+
+        acked_ids = _ids(first_transport.bodies[0])
+        assert len(acked_ids) == 100
+        assert read_cursor(path) != 0
+        for retried in first_transport.bodies[1:]:
+            assert _ids(retried) == [str(event.event_id) for event in events[100:]]
+
+        # second instance (fresh process stand-in): only the remainder ships,
+        # with byte-identical event ids from the JSONL
+        second_transport = FakeTransport()
+        second = _make_client(path, second_transport)
+        second.start()
+        _wait_for(lambda: second_transport.requests, what="resume flush")
+        second.join()
+
+        assert len(second_transport.requests) == 1
+        resumed_ids = _ids(second_transport.bodies[0])
+        expected_ids = [str(event.event_id) for event in events[100:]]
+        assert resumed_ids == expected_ids
+        assert not set(resumed_ids) & set(acked_ids)
+        assert read_cursor(path) == path.stat().st_size
 
 
 class TestShutdown:
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_join_returns_after_trial_end(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        _write_envelopes(
-            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
-        )
-
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.01,
-            flush_timeout=5.0,
-        )
+    def test_join_drains_pending_events(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        transport = FakeTransport()
+        client = _make_client(path, transport, batch_window=60.0)
         client.start()
+
+        _write_events(path, [_value_event(f"m{i}") for i in range(3)])
         client.join()
 
-        assert not client.producer_thread.is_alive()
-        assert not client.consumer.is_alive()
+        assert len(transport.requests) == 1
+        assert len(json.loads(transport.bodies[0])["events"]) == 3
+        assert read_cursor(path) == path.stat().st_size
 
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_threads_stay_alive_without_trial_end(
-        self, mock_post, tmp_path: Path
+    def test_join_with_offline_server_exits_and_keeps_cursor(
+        self, tmp_path, capfd
     ) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        # No trial_end: the producer keeps tailing the file forever.
-        _write_envelopes(events_file, [_param_envelope(0, "lr", 0.01)])
-
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.01,
-            flush_timeout=0.5,
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event()])
+        transport = FakeTransport(always=httpx.ConnectError("down"))
+        client = _make_client(
+            path,
+            transport,
+            flush_timeout=0.4,
+            max_retry_time=60.0,
         )
+
         client.start()
+        _wait_for(lambda: transport.requests, what="first attempt")
+        client.join()  # returns within flush timeout
+        client._thread.join(timeout=5.0)
+
+        assert not client._thread.is_alive()
+        assert read_cursor(path) == 0
+        assert (tmp_path / "events.jsonl").exists()
+
+    def test_join_without_start_is_noop(self, tmp_path: Path) -> None:
+        client = _make_client(tmp_path / "events.jsonl", FakeTransport())
         client.join()
 
-        # join() times out; the producer is still polling.
-        assert client.producer_thread.is_alive()
 
-
-class TestRetryOnFailure:
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_retries_on_connect_error_then_succeeds(
-        self, mock_post, tmp_path: Path
-    ) -> None:
-        call_count = 0
-
-        def post_side_effect(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                raise httpx.ConnectError("boom")
-            return _ok_response()
-
-        mock_post.side_effect = post_side_effect
-
-        events_file = tmp_path / "0.jsonl"
-        _write_envelopes(
-            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
-        )
-
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.01,
-            flush_timeout=5.0,
-            max_retry_time=10.0,
-        )
+class TestLiveTail:
+    def test_deferred_file_creation(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        transport = FakeTransport()
+        client = _make_client(path, transport)
         client.start()
+
+        assert not transport.requests
+        _write_events(path, [_value_event()])
+        _wait_for(lambda: transport.requests, what="flush after create")
         client.join()
 
-        # param event: 2 failed attempts + 1 success; trial_end: 1 success.
-        assert mock_post.call_count == 4
-        # trial_end shipped -> consumer exited cleanly.
-        assert not client.consumer.is_alive()
+        assert len(transport.requests) == 1
 
-
-class TestDeferredFileCreation:
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_waits_for_file_to_exist(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.05,
-            flush_timeout=5.0,
-        )
+    def test_partial_line_waited_until_complete(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        transport = FakeTransport()
+        client = _make_client(path, transport)
         client.start()
 
+        first = _value_event()
+        second = _value_event("acc")
+        second_line = second.model_dump_json() + "\n"
+        with open(path, "a") as f:
+            f.write(first.model_dump_json() + "\n")
+            f.write(second_line[:20])
+
+        _wait_for(lambda: transport.requests, what="first event flush")
+        client.join()
+        assert len(transport.requests) == 1
+        assert _ids(transport.bodies[0]) == [str(first.event_id)]
+
+        with open(path, "a") as f:
+            f.write(second_line[20:])
+        transport2 = FakeTransport()
+        client2 = _make_client(path, transport2)
+        client2.start()
+        _wait_for(lambda: transport2.requests, what="completed line flush")
+        client2.join()
+        assert _ids(transport2.bodies[0]) == [str(second.event_id)]
+
+
+class TestCursorInterplay:
+    def test_resumes_from_preexisting_cursor_not_zero(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        events = [_value_event(f"m{i}") for i in range(6)]
+        _write_events(path, events)
+        from jernerics.tracking.jsonl_io import scan_events
+
+        scanned, _ = scan_events(path, 0, max_events=4)
+        write_cursor(path, scanned[3][1])
+
+        transport = FakeTransport()
+        client = _make_client(path, transport)
+        client.start()
+        _wait_for(lambda: transport.requests, what="flush")
+        client.join()
+
+        assert _ids(transport.bodies[0]) == [
+            str(event.event_id) for event in events[4:]
+        ]
+
+    def test_empty_file_ships_nothing(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        path.touch()
+        transport = FakeTransport()
+        client = _make_client(path, transport)
+        client.start()
         time.sleep(0.2)
-        assert not events_file.exists()
-        assert client.producer_thread.is_alive()
-
-        _write_envelopes(
-            events_file, [_param_envelope(0, "lr", 0.01), _trial_end_envelope(1)]
-        )
-
         client.join()
 
-        assert not client.producer_thread.is_alive()
-        assert mock_post.call_count == 2
+        assert not transport.requests
 
 
-class TestPartialEvent:
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_truncated_trailing_line_does_not_crash_producer(
-        self, mock_post, tmp_path: Path
+class TestBadLines:
+    def test_corrupt_complete_line_stops_shipper_without_advancing_cursor(
+        self, tmp_path, capfd
     ) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event()])
+        with open(path, "a") as f:
+            f.write('{"tag": "value"}\n')  # complete but invalid
 
-        with TrackingWriter(events_file) as writer:
-            writer.write_envelope(_param_envelope(0, "lr", 0.01))
-            writer.write_envelope(_trial_end_envelope(1))
-
-        # Append a truncated JSON line (writer crashed mid-flush). It sits
-        # after trial_end, so the producer never reaches it; this confirms a
-        # partial line trailing valid events doesn't trip the producer.
-        with open(events_file, "a") as f:
-            f.write('{"project":"p","study_name"')
-
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.01,
-            flush_timeout=5.0,
-        )
+        transport = FakeTransport()
+        client = _make_client(path, transport)
         client.start()
+        client._thread.join(timeout=5.0)
+
+        assert not transport.requests
+        assert read_cursor(path) == 0
+        assert "shipper stopped" in capfd.readouterr().err
+
+
+class TestAuthOptional:
+    def test_no_api_key_omits_authorization_header(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event()])
+        transport = FakeTransport()
+        client = _make_client(path, transport)
+        client.start()
+        _wait_for(lambda: transport.requests, what="request")
         client.join()
 
-        assert not client.consumer.is_alive()
-        # The two complete envelopes shipped; the truncated line was ignored.
-        assert mock_post.call_count == 2
+        assert "authorization" not in transport.requests[0][2]
 
-    @patch("jernerics.tracking.stream_client.httpx.post")
-    def test_partial_line_is_waited_for_not_crashed(
-        self, mock_post, tmp_path: Path
-    ) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
 
-        # A partial line (writer crashed mid-flush): no newline, invalid JSON.
-        with open(events_file, "w") as f:
-            f.write('{"project":"p","study_name"')
+class TestTwoShippersOneFile:
+    def test_second_shipper_reships_only_unacked(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        events = [_value_event(f"m{i}") for i in range(10)]
+        _write_events(path, events)
+        from jernerics.tracking.jsonl_io import scan_events
 
-        client = StreamClient(
-            base_url=BASE_URL,
-            path=events_file,
-            poll_interval=0.02,
-            flush_timeout=0.5,
-        )
+        scanned, _ = scan_events(path, 0, max_events=5)
+        write_cursor(path, scanned[4][1])
+
+        transport = FakeTransport()
+        client = _make_client(path, transport)
         client.start()
-
-        time.sleep(0.2)
-        # The producer did not crash and has shipped nothing yet.
-        assert client.producer_thread.is_alive()
-        assert mock_post.call_count == 0
-
+        _wait_for(lambda: transport.requests, what="flush")
         client.join()
 
-        # No trial_end -> the producer keeps waiting on the partial line,
-        # past join()'s timeout. Graceful, not crashed.
-        assert client.producer_thread.is_alive()
+        assert _ids(transport.bodies[0]) == [
+            str(event.event_id) for event in events[5:]
+        ]

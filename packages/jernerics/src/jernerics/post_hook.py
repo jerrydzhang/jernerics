@@ -1,4 +1,4 @@
-"""Post-hook pipeline: retry → optuna sync → artifact sync.
+"""Post-hook pipeline: retry detection → tracking replay.
 
 Invoked via ``python -m jernerics.post_hook`` after each sweep batch.
 """
@@ -10,8 +10,8 @@ from pathlib import Path
 
 from jernerics.retry import RetryContext
 from jernerics.retry_checker import run_checker
-from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
-from jernerics.tracking.infra import resolve_artifact_storage, resolve_tracking_ship
+from jernerics.tracking.batch_sync import replay_tracking
+from jernerics.tracking.infra import resolve_tracking_ship
 
 
 class PipelineResult(enum.Enum):
@@ -23,9 +23,7 @@ def run_pipeline(
     ctx_path: str,
     chain_depth: int,
     tracking_dir: str,
-    storage_path: str,
     *,
-    upload_fn=None,
     base_url: str | None = None,
     api_key: str | None = None,
 ) -> PipelineResult:
@@ -34,25 +32,12 @@ def run_pipeline(
     if submitted:
         return PipelineResult.RETRY_SUBMITTED
 
-    if upload_fn is not None or base_url is not None:
-        ctx = RetryContext.from_json(Path(ctx_path).read_text())
-
-    if upload_fn is not None:
-        artifact_key = f"{ctx.project_name}/{ctx.study_name}/optuna.journal"
-        upload_fn(artifact_key, storage_path)
-
     if base_url is not None:
-        tracking_dir_path = Path(tracking_dir)
+        ctx = RetryContext.from_json(Path(ctx_path).read_text())
         replay_tracking(
-            tracking_dir=tracking_dir_path.parent,
+            tracking_dir=Path(tracking_dir).parent,
             base_url=base_url,
             api_key=api_key,
-            study=ctx.study_name,
-        )
-        sync_artifacts(
-            tracking_dir=tracking_dir_path.parent,
-            upload_fn=upload_fn,
-            project=ctx.project_name or "",
             study=ctx.study_name,
         )
 
@@ -64,7 +49,6 @@ if __name__ == "__main__":
     parser.add_argument("--context", required=True)
     parser.add_argument("--chain-depth", type=int, required=True)
     parser.add_argument("--tracking-dir", required=True)
-    parser.add_argument("--storage-path", required=True)
     parser.add_argument("--server-addr", default=None)
     args = parser.parse_args()
 
@@ -75,14 +59,10 @@ if __name__ == "__main__":
         if ship:
             base_url, api_key = ship
 
-    upload_fn = resolve_artifact_storage(base_url)
-
     result = run_pipeline(
         ctx_path=args.context,
         chain_depth=args.chain_depth,
         tracking_dir=args.tracking_dir,
-        storage_path=args.storage_path,
-        upload_fn=upload_fn,
         base_url=base_url,
         api_key=api_key,
     )

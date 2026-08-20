@@ -139,19 +139,7 @@ class TestBuildSweepCommandsBasics:
         )
         assert "--heartbeat-interval 30.0" in trial
 
-    def test_git_hash_passed_to_trial(self):
-        spec = _make_spec()
-        paths = _make_paths()
-        _, trial, _ = build_sweep_commands(
-            spec=spec,
-            container=NoContainer(),
-            paths=paths,
-            direction="minimize",
-            git_hash="abc123def4567890abc123def4567890abc123de",
-        )
-        assert "--git-hash abc123def4567890abc123def4567890abc123de" in trial
-
-    def test_git_hash_omitted_when_none(self):
+    def test_trial_command_has_no_git_hash_flag(self):
         spec = _make_spec()
         paths = _make_paths()
         _, trial, _ = build_sweep_commands(
@@ -160,6 +148,7 @@ class TestBuildSweepCommandsBasics:
             paths=paths,
             direction="minimize",
         )
+        assert "--git-hash" not in trial
         assert "--git-hash" not in trial
 
 
@@ -378,7 +367,6 @@ class TestBuildPostHookTrackingServer:
             ctx_path="/cache/ctx.json",
             chain_depth=0,
             tracking_dir="/cache/tracking/study",
-            storage_path="/cache/optuna/study.journal",
             tracking_server="http://server:8080",
         )
         assert "--server-addr http://server:8080" in cmd
@@ -390,9 +378,9 @@ class TestBuildPostHookTrackingServer:
             ctx_path="/cache/ctx.json",
             chain_depth=0,
             tracking_dir="/cache/tracking/study",
-            storage_path="/cache/optuna/study.journal",
         )
         assert "--server-addr" not in cmd
+        assert "--storage-path" not in cmd
 
     def test_post_hook_in_sweep_receives_tracking_server(self):
         spec = _make_spec()

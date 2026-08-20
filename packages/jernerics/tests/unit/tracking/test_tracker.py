@@ -1,364 +1,387 @@
-import json
+import hashlib
+import socket
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID, uuid4
 
-import numpy as np
 import pytest
+from jernerics.tracking.artifact_manifest import ArtifactManifest
 from jernerics.tracking.jsonl_io import TrackingReader
-from jernerics.tracking.tracker import JsonlTracker
+from jernerics.tracking.tracker import JsonlTracker, NullTracker
+from jernerics_schema import (
+    JSON_VALUE_MAX_BYTES,
+    ExecutionOutcome,
+    FlatContext,
+    TrackingEvent,
+    ValueEvent,
+)
+from pydantic import TypeAdapter, ValidationError
+
+_ADAPTER = TypeAdapter(TrackingEvent)
 
 
-def read_all(path: Path) -> list[dict]:
+def make_tracker(tmp_path: Path, name: str = "0.jsonl", execution_id=None):
+    return JsonlTracker(
+        tmp_path / name,
+        uuid4(),
+        execution_id if execution_id is not None else uuid4(),
+        manifest=ArtifactManifest(tmp_path / "0.manifest"),
+    )
+
+
+def read_events(path: Path) -> list[TrackingEvent]:
     with TrackingReader(path) as reader:
         return list(reader)
 
 
-def read_events(path: Path) -> list[dict]:
-    """Read all events excluding the trailing trial_end sentinel."""
-    return [e for e in read_all(path) if "trial_end" not in e]
-
-
 class TestLogParam:
-    def test_float(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("lr", 0.001)
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            (0.25, 0.25),
+            (3, 3),
+            ("mlp", "mlp"),
+            (True, True),
+            (None, None),
+        ],
+    )
+    def test_scalar_variants(self, tmp_path, value, expected) -> None:
+        tracker = make_tracker(tmp_path)
 
-        [env] = read_events(p)
-        assert env["param"]["key"] == "lr"
-        assert env["param"]["value"] == {"float_val": pytest.approx(0.001)}
+        event = tracker.log_param("model", value)
 
-    def test_int(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("batch_size", 64)
+        assert event.value == expected
+        assert event.key == "model"
+        assert event.trial_id == tracker.trial_id
+        assert read_events(tmp_path / "0.jsonl") == [event]
 
-        [env] = read_events(p)
-        assert env["param"]["value"] == {"int_val": 64}
+    def test_nested_value_raises_validation_error(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-    def test_str(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("model", "gpt")
+        with pytest.raises(ValidationError):
+            tracker.log_param("bad", [1, 2, 3])
 
-        [env] = read_events(p)
-        assert env["param"]["value"] == {"string_val": "gpt"}
+    def test_ids_are_unique(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-    def test_bool(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("use_amp", True)
+        first = tracker.log_param("a", 1)
+        second = tracker.log_param("a", 1)
 
-        [env] = read_events(p)
-        assert env["param"]["value"] == {"bool_val": True}
-
-    def test_bool_before_int(self, tmp_path: Path) -> None:
-        """bool is a subclass of int — must serialize as bool_val, not int_val."""
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("flag", False)
-
-        [env] = read_events(p)
-        assert env["param"]["value"] == {"bool_val": False}
-
-    def test_unsupported_type_raises(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p):  # noqa: SIM117
-            with pytest.raises(TypeError, match="Unsupported"):
-                t = JsonlTracker("project", "study", 1, p)
-                t.log_param("bad", [1, 2, 3])  # ty: ignore[invalid-argument-type]
+        assert first.event_id != second.event_id
 
 
 class TestLogValue:
-    def test_with_step(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("loss", 0.42, step=100)
+    def test_step_auto_increments_per_key_from_zero(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-        [env] = read_events(p)
-        assert env["value"]["key"] == "loss"
-        assert env["value"]["value"] == pytest.approx(0.42)
-        assert env["value"]["step"] == 100
+        tracker.log_value("loss", 0.5)
+        tracker.log_value("loss", 0.4)
+        tracker.log_value("acc", 0.9)
 
-    def test_without_step_or_context(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("accuracy", 0.95)
+        events = read_events(tmp_path / "0.jsonl")
+        assert all(isinstance(e, ValueEvent) for e in events)
+        assert [e.step for e in events if isinstance(e, ValueEvent)] == [0, 1, 0]
 
-        [env] = read_events(p)
-        assert env["value"]["step"] is None
-        assert env["value"]["context"] == "{}"
-        assert env["value"]["value"] == pytest.approx(0.95)
+    def test_explicit_step_honored_and_autos_continue_after_it(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-    def test_with_context(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("loss", 0.5, context={"seed": 3})
+        tracker.log_value("loss", 0.5, step=7)
+        tracker.log_value("loss", 0.4)
 
-        [env] = read_events(p)
-        assert env["value"]["context"] == '{"seed":3}'
+        events = read_events(tmp_path / "0.jsonl")
+        assert all(isinstance(e, ValueEvent) for e in events)
+        assert [e.step for e in events if isinstance(e, ValueEvent)] == [7, 8]
 
-    def test_with_step_and_context(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("loss", 0.5, step=100, context={"seed": 3, "fold": 1})
+    def test_scalar_kinds_round_trip(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-        [env] = read_events(p)
-        assert env["value"]["step"] == 100
-        assert env["value"]["context"] == '{"fold":1,"seed":3}'
+        tracker.log_value("f", 1.5)
+        tracker.log_value("i", 3)
+        tracker.log_value("b", True)
+        tracker.log_value("s", "text")
 
-    def test_negative_value(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("score", -3.14)
+        events = read_events(tmp_path / "0.jsonl")
+        assert all(isinstance(e, ValueEvent) for e in events)
+        assert [e.value for e in events if isinstance(e, ValueEvent)] == [
+            1.5,
+            3,
+            True,
+            "text",
+        ]
 
-        [env] = read_events(p)
-        assert env["value"]["value"] == pytest.approx(-3.14)
+    def test_flat_context_round_trips(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-    def test_int_coerced_to_float(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("epochs", 10)
+        tracker.log_value("loss", 0.5, context={"seed": 3})
 
-        [env] = read_events(p)
-        val = env["value"]["value"]
-        assert val == pytest.approx(10.0)
-        assert isinstance(val, float)
+        [event] = read_events(tmp_path / "0.jsonl")
+        assert isinstance(event, ValueEvent)
+        assert event.context == FlatContext({"seed": 3})
 
-    def test_bool_coerced_before_int(self, tmp_path: Path) -> None:
-        """bool is a subclass of int — must coerce to float, not int."""
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("flag", True)
+    def test_nested_context_raises_validation_error(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-        [env] = read_events(p)
-        assert env["value"]["value"] == pytest.approx(1.0)
+        with pytest.raises(ValidationError):
+            tracker.log_value("loss", 0.5, context={"a": {"b": 1}})
 
-    def test_numpy_float(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("loss", np.float64(0.32))
+    def test_none_value_rejected_by_exactly_one_rule(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-        [env] = read_events(p)
-        assert env["value"]["value"] == pytest.approx(0.32)
+        with pytest.raises(ValidationError):
+            tracker.log_value("loss", None)
 
-    def test_numpy_int(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("tokens", np.int32(4096))  # ty: ignore[invalid-argument-type]
+    def test_non_finite_value_raises(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-        [env] = read_events(p)
-        assert env["value"]["value"] == pytest.approx(4096.0)
-
-    def test_nan_becomes_null(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("nanv", float("nan"))
-
-        [env] = read_events(p)
-        assert env["value"]["value"] is None
-
-    def test_inf_becomes_null(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("infv", float("inf"))
-
-        [env] = read_events(p)
-        assert env["value"]["value"] is None
-
-    def test_unsupported_type_raises(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        tracker = JsonlTracker("project", "study", 1, p)
-        with pytest.raises(TypeError, match="Unsupported"):
-            tracker.log_value("bad", "not a number")  # ty: ignore[invalid-argument-type]
+        with pytest.raises(ValueError, match="non-finite"):
+            tracker.log_value("loss", float("nan"))
+        with pytest.raises(ValueError, match="non-finite"):
+            tracker.log_value("loss", float("inf"))
 
 
 class TestLogJson:
-    def test_dict(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        data = {"x": [1, 2], "y": [3, 4]}
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_json("pareto", data)
+    def test_observation_round_trips(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
 
-        [env] = read_events(p)
-        assert env["value"]["key"] == "pareto"
-        assert "value_json" in env["value"]
-        assert json.loads(env["value"]["value_json"]) == data
+        tracker.log_json("results", {"loss": 0.5, "ok": True}, step=2)
 
-    def test_list(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        data = [1, 2, 3]
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_json("ranks", data)
+        [event] = read_events(tmp_path / "0.jsonl")
+        assert isinstance(event, ValueEvent)
+        assert event.observation == {"loss": 0.5, "ok": True}
+        assert event.value is None
+        assert event.step == 2
 
-        [env] = read_events(p)
-        assert json.loads(env["value"]["value_json"]) == data
+    def test_observation_at_size_boundary_passes(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        blob = {"pad": "x" * (JSON_VALUE_MAX_BYTES - 12)}
 
-    def test_nested(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        data = {"matrix": [[1, 0], [0, 1]], "labels": ["a", "b"]}
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_json("confusion", data)
+        tracker.log_json("results", blob)
 
-        [env] = read_events(p)
-        assert json.loads(env["value"]["value_json"]) == data
+        [event] = read_events(tmp_path / "0.jsonl")
+        assert isinstance(event, ValueEvent)
+        assert event.observation == blob
 
-    def test_with_context(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_json("summary", {"a": 1}, context={"seed": 3})
+    def test_oversize_observation_raises(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        blob = {"pad": "x" * (JSON_VALUE_MAX_BYTES + 1)}
 
-        [env] = read_events(p)
-        assert env["value"]["context"] == '{"seed":3}'
+        with pytest.raises(ValidationError, match="exceeding"):
+            tracker.log_json("results", blob)
+
+    def test_step_counter_shared_with_log_value(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        tracker.log_value("loss", 0.5)
+        tracker.log_json("loss", {"epoch": 1})
+        tracker.log_value("loss", 0.4)
+
+        events = read_events(tmp_path / "0.jsonl")
+        assert all(isinstance(e, ValueEvent) for e in events)
+        assert [e.step for e in events if isinstance(e, ValueEvent)] == [0, 1, 2]
+
+    def test_nested_context_raises(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        with pytest.raises(ValidationError):
+            tracker.log_json("results", {"a": 1}, context={"meta": [1]})
+
+
+class TestSetProgress:
+    def test_serializes_with_execution_id(self, tmp_path) -> None:
+        execution_id = uuid4()
+        tracker = make_tracker(tmp_path, execution_id=execution_id)
+
+        event = tracker.set_progress(4, 10, "epochs")
+
+        assert event.execution_id == execution_id
+        assert (event.current, event.total, event.unit) == (4, 10, "epochs")
+        assert read_events(tmp_path / "0.jsonl") == [event]
+
+    def test_repeated_calls_emit_new_events(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        first = tracker.set_progress(1, 10, "epochs")
+        second = tracker.set_progress(2, 10, "epochs")
+
+        events = read_events(tmp_path / "0.jsonl")
+        assert events == [first, second]
+        assert first.event_id != second.event_id
+
+    def test_requires_execution_id(self, tmp_path) -> None:
+        tracker = JsonlTracker(tmp_path / "0.jsonl", uuid4())
+
+        with pytest.raises(RuntimeError, match="execution_id"):
+            tracker.set_progress(1, 10, "epochs")
+
+
+class TestHeartbeat:
+    def test_emits_with_default_now(self, tmp_path) -> None:
+        execution_id = uuid4()
+        tracker = make_tracker(tmp_path, execution_id=execution_id)
+        before = datetime.now(timezone.utc)
+
+        event = tracker.emit_heartbeat()
+
+        assert event.execution_id == execution_id
+        assert before <= event.at
+
+    def test_explicit_at_honored(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+        event = tracker.emit_heartbeat(at)
+
+        assert event.at == at
+
+
+class TestExecutionLifecycleEvents:
+    def test_execution_start_defaults_to_socket_hostname(self, tmp_path) -> None:
+        execution_id = uuid4()
+        tracker = make_tracker(tmp_path, execution_id=execution_id)
+
+        event = tracker.emit_execution_start()
+
+        assert event.hostname == socket.gethostname()
+        assert event.execution_id == execution_id
+        assert event.trial_id == tracker.trial_id
+        assert event.started_at.tzinfo is not None
+
+    def test_execution_end_carries_outcome_fields(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        event = tracker.emit_execution_end(
+            ExecutionOutcome.FAILURE,
+            exit_code=1,
+            failure_summary="boom",
+        )
+
+        assert event.outcome == ExecutionOutcome.FAILURE
+        assert event.exit_code == 1
+        assert event.failure_summary == "boom"
 
 
 class TestLogArtifact:
-    def test_basic(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_artifact("model", "/work/model.pt")
+    def test_declares_size_sha256_and_content_type(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "model.json"
+        payload = b'{"weights": [1, 2, 3]}'
+        artifact.write_bytes(payload)
 
-        [env] = read_events(p)
-        assert env["artifact"]["key"] == "model"
+        event = tracker.log_artifact("model", str(artifact))
 
-    def test_filename_is_basename(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_artifact("model", "/work/checkpoints/model.pt")
+        assert event.filename == "model.json"
+        assert event.content_type == "application/json"
+        assert event.size_bytes == len(payload)
+        assert event.sha256 == hashlib.sha256(payload).hexdigest()
+        assert event.trial_id == tracker.trial_id
+        assert event.execution_id == tracker.execution_id
 
-        [env] = read_events(p)
-        assert env["artifact"]["filename"] == "model.pt"
+    def test_unknown_extension_falls_back_to_octet_stream(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "weights.bin"
+        artifact.write_bytes(b"\x00\x01")
 
-    def test_filename_from_bare_name(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_artifact("model", "model.pt")
+        event = tracker.log_artifact("weights", str(artifact))
 
-        [env] = read_events(p)
-        assert env["artifact"]["filename"] == "model.pt"
+        assert event.content_type == "application/octet-stream"
 
-    def test_context_default_empty(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_artifact("model", "/work/model.pt")
+    def test_streams_large_file_sha256(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "big.bin"
+        payload = bytes(range(256)) * (1024 * 64)
+        artifact.write_bytes(payload)
 
-        [env] = read_events(p)
-        assert env["artifact"]["context"] == "{}"
+        event = tracker.log_artifact("big", str(artifact))
 
-    def test_with_context(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_artifact("model", "/work/model.pt", context={"seed": 3})
+        assert event.size_bytes == len(payload)
+        assert event.sha256 == hashlib.sha256(payload).hexdigest()
 
-        [env] = read_events(p)
-        assert env["artifact"]["context"] == '{"seed":3}'
+    def test_appends_manifest_entry(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "model.json"
+        artifact.write_bytes(b"{}")
 
-    def test_writes_to_manifest(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        manifest_path = tmp_path / "1.manifest"
-        with JsonlTracker("project", "study", 1, p, manifest_path=manifest_path) as t:
-            t.log_artifact("model", "/work/model.pt")
+        tracker.log_artifact("model", str(artifact))
 
-        lines = manifest_path.read_text().strip().split("\n")
-        assert len(lines) == 1
-        entry = json.loads(lines[0])
-        assert entry["key"] == "model"
-        assert entry["path"] == "/work/model.pt"
+        manifest = tmp_path / "0.manifest"
+        assert "model" in manifest.read_text()
+        assert str(artifact) in manifest.read_text()
 
+    def test_nested_context_raises(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "model.json"
+        artifact.write_bytes(b"{}")
 
-class TestRunId:
-    def test_run_id_in_every_envelope(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p, run_id=99) as t:
-            t.log_param("lr", 0.01)
-            t.log_value("loss", 0.5, step=1)
-            t.log_json("summary", [1])
-            t.log_artifact("model", "/work/m.pt")
-
-        for env in read_all(p):
-            assert env["run_id"] == 99
-
-    def test_run_id_default_zero(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("loss", 0.5)
-
-        [env] = read_events(p)
-        assert env["run_id"] == 0
+        with pytest.raises(ValidationError):
+            tracker.log_artifact("model", str(artifact), context={"a": {"b": 1}})
 
 
-class TestSeq:
-    def test_seq_starts_at_zero(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("lr", 0.01)
+class TestRoundTripThroughAdapter:
+    def test_every_emitted_event_parses_back_and_equals_the_model(
+        self, tmp_path
+    ) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "model.bin"
+        artifact.write_bytes(b"payload")
 
-        [env] = read_events(p)
-        assert env["seq"] == 0
+        emitted = [
+            tracker.emit_execution_start("host"),
+            tracker.log_param("lr", 0.1),
+            tracker.log_value("loss", 0.5),
+            tracker.log_json("results", {"a": 1}),
+            tracker.set_progress(1, 2, "epochs"),
+            tracker.emit_heartbeat(),
+            tracker.log_artifact("model", str(artifact)),
+            tracker.emit_execution_end(ExecutionOutcome.SUCCESS),
+        ]
+        tracker.close()
 
-    def test_seq_increments_monotonically(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("lr", 0.01)
-            t.log_value("loss", 0.5)
-            t.log_json("data", [1])
+        lines = (tmp_path / "0.jsonl").read_text().splitlines()
+        assert len(lines) == len(emitted)
+        for line, source in zip(lines, emitted, strict=True):
+            parsed = _ADAPTER.validate_json(line)
+            assert parsed == source
 
-        envs = read_events(p)
-        assert [e["seq"] for e in envs] == [0, 1, 2]
+    def test_event_and_artifact_ids_are_uuids(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "m.bin"
+        artifact.write_bytes(b"x")
 
+        value_event = tracker.log_value("loss", 0.5)
+        artifact_event = tracker.log_artifact("m", str(artifact))
 
-class TestTrialEnd:
-    def test_close_writes_trial_end(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("lr", 0.01)
-
-        envs = read_all(p)
-        assert len(envs) == 2
-        assert "param" in envs[0]
-        assert "trial_end" in envs[1]
-        assert envs[1]["trial_end"] == {}
-
-    def test_trial_end_has_next_seq(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("lr", 0.01)
-
-        envs = read_all(p)
-        assert envs[0]["seq"] == 0
-        assert envs[1]["seq"] == 1
+        assert isinstance(value_event.event_id, UUID)
+        assert isinstance(artifact_event.artifact_id, UUID)
+        assert value_event.event_id != artifact_event.artifact_id
 
 
-class TestTimestamp:
-    def test_timestamp_set(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("loss", 0.5)
+class TestClose:
+    def test_close_closes_the_writer(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        tracker.log_value("loss", 0.5)
+        tracker.close()
 
-        [env] = read_events(p)
-        assert env["timestamp_ns"] > 0
+        with pytest.raises(ValueError):
+            tracker.log_value("loss", 0.4)
 
-    def test_timestamps_are_monotonic(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_value("loss", 0.5, step=1)
-            t.log_value("loss", 0.3, step=2)
+    def test_context_manager_closes_on_exit(self, tmp_path) -> None:
+        with make_tracker(tmp_path) as tracker:
+            tracker.log_value("loss", 0.5)
 
-        envs = read_events(p)
-        assert envs[1]["timestamp_ns"] >= envs[0]["timestamp_ns"]
+        assert tracker.writer.file.closed
 
 
-class TestMultipleCalls:
-    def test_mixed_events(self, tmp_path: Path) -> None:
-        p = tmp_path / "events.jsonl"
-        with JsonlTracker("project", "study", 1, p) as t:
-            t.log_param("lr", 0.01)
-            t.log_value("loss", 0.5, step=10)
-            t.log_artifact("model", "/work/m.pt")
-            t.log_json("pareto", [1, 2, 3])
+class TestNullTracker:
+    def test_all_surface_methods_are_no_ops(self, tmp_path) -> None:
+        tracker = NullTracker()
 
-        envs = read_events(p)
-        assert len(envs) == 4
-        assert "param" in envs[0]
-        assert "value" in envs[1]
-        assert "artifact" in envs[2]
-        assert "value" in envs[3]
+        with tracker:
+            tracker.log_param("a", 1)
+            tracker.log_value("b", 2)
+            tracker.log_json("c", {"d": 1})
+            tracker.set_progress(1, 2, "epochs")
+            tracker.emit_heartbeat()
+            tracker.emit_execution_start()
+            tracker.emit_execution_end(ExecutionOutcome.SUCCESS)
+            tracker.log_artifact("m", str(tmp_path))
+        tracker.close()

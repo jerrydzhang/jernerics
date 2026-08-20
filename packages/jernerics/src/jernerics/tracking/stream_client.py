@@ -1,23 +1,61 @@
+"""Live batched shipper for the local JSONL event log.
+
+Tails the trial's event file from the durable byte cursor and ships batches
+to ``POST /ingest``: up to ``batch_size`` events, or every ``batch_window``
+seconds after the first pending event, whichever comes first. The cursor
+advances only after a 2xx acknowledgement, so a crashed or timed-out shipper
+leaves unacked events to be re-read with unchanged event ids (the ids live in
+the JSONL bytes). A failed batch is retried with exponential backoff and a
+byte-identical request body; server-side idempotence makes re-sends — e.g.
+overlapping with a later replay — duplicates.
+"""
+
 import sys
 import time
 from pathlib import Path
-from queue import Queue
-from threading import Thread
+from threading import Event, Thread
+from typing import Protocol
 
 import httpx
+from jernerics_schema import PROTOCOL_VERSION, IngestRequest, TrackingEvent
+from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
 
-from .jsonl_io import TrackingReader
+from .jsonl_io import read_cursor, scan_events, write_cursor
+
+RETRY_BASE_INTERVAL = 0.5
+RETRY_MAX_WAIT = 10.0
+
+
+class TransportResponse(Protocol):
+    status_code: int
+
+
+class Transport(Protocol):
+    def post(
+        self,
+        url: str,
+        *,
+        content: str,
+        headers: dict[str, str] | None,
+        timeout: float,
+    ) -> TransportResponse: ...
+
+
+class HttpTransport:
+    """httpx POST wrapper; tests substitute fakes with the same shape."""
+
+    def post(
+        self,
+        url: str,
+        *,
+        content: str,
+        headers: dict[str, str] | None,
+        timeout: float,
+    ) -> httpx.Response:
+        return httpx.post(url, content=content, headers=headers, timeout=timeout)
 
 
 class StreamClient:
-    """Tails the local JSONL buffer and ships each envelope to /ingest live.
-
-    Live observability is first-class: metrics appear on the server as the
-    trial runs. The local file remains the durable source of truth; a later
-    replay (batch_sync) re-sends anything this client failed to confirm, and
-    the server's INSERT OR IGNORE makes the overlap safe.
-    """
-
     def __init__(
         self,
         base_url: str,
@@ -27,6 +65,9 @@ class StreamClient:
         flush_timeout: float = 60.0,
         send_deadline: float = 30.0,
         max_retry_time: float = 300.0,
+        batch_size: int = MAX_EVENTS_PER_REQUEST,
+        batch_window: float = 0.5,
+        transport: Transport | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.path = path
@@ -35,80 +76,126 @@ class StreamClient:
         self.flush_timeout = flush_timeout
         self.send_deadline = send_deadline
         self.max_retry_time = max_retry_time
-        self._headers = {"authorization": f"Bearer {api_key}"} if api_key else None
-        self.producer_thread = Thread(target=self._read_file_buffer, daemon=True)
-        self.consumer = Thread(target=self._consume_buffer, daemon=True)
-        self.buffer: Queue[dict] = Queue(maxsize=10000)
+        self.batch_size = batch_size
+        self.batch_window = batch_window
+        self.transport = transport if transport is not None else HttpTransport()
+        self._headers = {"content-type": "application/json"}
+        if api_key:
+            self._headers["authorization"] = f"Bearer {api_key}"
+        self._stop = Event()
+        self._drain_deadline: float | None = None
+        self._thread = Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
-        self.producer_thread.start()
-        self.consumer.start()
+        self._thread.start()
 
     def join(self) -> None:
-        self.producer_thread.join(timeout=self.flush_timeout)
-        self.consumer.join(timeout=self.flush_timeout)
+        """Stop shipping: drain what is readable, bounded by flush_timeout."""
+        self._drain_deadline = time.monotonic() + self.flush_timeout
+        self._stop.set()
+        if self._thread.ident is not None:
+            self._thread.join(timeout=self.flush_timeout)
+            if self._thread.is_alive():
+                print(
+                    "Warning: shipper did not finish within flush timeout. "
+                    "Unacked events stay in the JSONL for replay.",
+                    file=sys.stderr,
+                )
 
-        if self.producer_thread.is_alive() or self.consumer.is_alive():
+    def _run(self) -> None:
+        try:
+            self._ship_loop()
+        except Exception as exc:
+            print(f"jernerics: tracking shipper stopped: {exc!r}", file=sys.stderr)
+
+    def _ship_loop(self) -> None:
+        url = f"{self.base_url}/ingest"
+        offset = read_cursor(self.path)
+        pending: list[tuple[TrackingEvent, int]] = []
+        while True:
+            if not pending:
+                events, offset = scan_events(self.path, offset, self.batch_size)
+                if not events:
+                    if self._stop.is_set():
+                        return
+                    self._stop.wait(self.poll_interval)
+                    continue
+                pending = events
+            if not self._stop.is_set():
+                window_deadline = time.monotonic() + self.batch_window
+                while len(pending) < self.batch_size:
+                    remaining = window_deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    events, offset = scan_events(
+                        self.path, offset, self.batch_size - len(pending)
+                    )
+                    if events:
+                        pending.extend(events)
+                        continue
+                    self._stop.wait(min(remaining, self.poll_interval))
+                    if self._stop.is_set():
+                        break
+            batch = pending[: self.batch_size]
+            rest = pending[self.batch_size :]
+            if self._ship_batch(url, batch):
+                write_cursor(self.path, batch[-1][1])
+                pending = rest
+            else:
+                return
+
+    def _ship_batch(self, url: str, batch: list[tuple[TrackingEvent, int]]) -> bool:
+        body = IngestRequest(
+            protocol_version=PROTOCOL_VERSION,
+            events=[event for event, _ in batch],
+        ).model_dump_json()
+        retry_count = 0
+        first_failure: float | None = None
+        while True:
+            if self._drain_exceeded():
+                print(
+                    f"Warning: flush timeout reached with {len(batch)} events "
+                    "unacked; leaving them for replay.",
+                    file=sys.stderr,
+                )
+                return False
+            try:
+                response = self.transport.post(
+                    url,
+                    content=body,
+                    headers=self._headers,
+                    timeout=self.send_deadline,
+                )
+                if 200 <= response.status_code < 300:
+                    return True
+                detail = f"HTTP {response.status_code}"
+            except httpx.HTTPError as exc:
+                detail = repr(exc)
+            now = time.monotonic()
+            if first_failure is None:
+                first_failure = now
+            if now - first_failure > self.max_retry_time:
+                print(
+                    f"Warning: exceeded max retry time ({self.max_retry_time}s). "
+                    f"Leaving {len(batch)} events for replay.",
+                    file=sys.stderr,
+                )
+                return False
+            wait_time = min(self.poll_interval * 2**retry_count, RETRY_MAX_WAIT)
+            retry_count += 1
             print(
-                "Warning: Sync threads did not finish within flush timeout. "
-                "There may be unsent events.",
+                f"Failed to ship batch ({detail}); "
+                f"retry {retry_count} in {wait_time:.1f}s ...",
                 file=sys.stderr,
             )
+            if self._stop.is_set():
+                time.sleep(wait_time)
+            else:
+                self._stop.wait(wait_time)
 
-    def _read_file_buffer(self) -> None:
-        while not self.path.exists():
-            time.sleep(self.poll_interval)
-
-        reader = TrackingReader(self.path)
-        with reader:
-            while True:
-                event = reader.try_read_envelope()
-
-                if not event:
-                    time.sleep(self.poll_interval)
-                    continue
-
-                self.buffer.put(event)
-
-                if "trial_end" in event:
-                    break
-
-    def _consume_buffer(self) -> None:
-        retry_count = 0
-        retry_start = time.monotonic()
-        while True:
-            event = self.buffer.get()
-
-            sent = False
-            while not sent:
-                elapsed = time.monotonic() - retry_start
-                if elapsed > self.max_retry_time:
-                    print(
-                        f"Warning: exceeded max retry time ({self.max_retry_time}s)."
-                        " Dropping remaining events.",
-                        file=sys.stderr,
-                    )
-                    return
-
-                try:
-                    response = httpx.post(
-                        f"{self.base_url}/ingest",
-                        json=event,
-                        headers=self._headers,
-                        timeout=self.send_deadline,
-                    )
-                    response.raise_for_status()
-                    retry_count = 0
-                    retry_start = time.monotonic()
-                    sent = True
-                except httpx.HTTPError:
-                    print(
-                        f"Failed to send event, retry {retry_count + 1} ...",
-                        file=sys.stderr,
-                    )
-                    wait_time: float = min(self.poll_interval * 2**retry_count, 10)
-                    retry_count += 1
-                    time.sleep(wait_time)
-
-            if "trial_end" in event:
-                break
+    def _drain_exceeded(self) -> bool:
+        return (
+            self._stop.is_set()
+            and self._drain_deadline is not None
+            and time.monotonic() > self._drain_deadline
+        )

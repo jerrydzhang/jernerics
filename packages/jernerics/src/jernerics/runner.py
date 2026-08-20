@@ -7,17 +7,20 @@ from pathlib import Path
 from typing import Any
 
 import optuna
+from jernerics_schema import ExecutionId, TrialId, ValueEvent
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.config import load_config
 from jernerics.tracking.jsonl_io import TrackingReader
 from jernerics.tracking.trial_environment import TrialEnvironment
 from jernerics.trial_context import (
+    EXECUTION_ID_ENV,
     PROJECT_NAME_ENV,
     RUN_ID_ENV,
     STUDY_NAME_ENV,
     TRACKING_DIR_ENV,
     TRIAL_CONFIG_ENV,
+    TRIAL_ID_ENV,
     TRIAL_NUMBER_ENV,
 )
 
@@ -35,10 +38,8 @@ def run_trial(
     project_name: str | None = None,
     server_addr: str | None = None,
     heartbeat_interval_s: float = 60.0,
-    git_hash: str | None = None,
 ) -> None:
     sweep = load_config(config_file)
-    sweep_config_text = Path(config_file).read_text()
 
     study = optuna.load_study(
         study_name=study_name,
@@ -49,15 +50,10 @@ def run_trial(
     def objective(trial: optuna.trial.Trial) -> float:
         with TrialEnvironment(
             tracking_dir=tracking_dir or "",
-            project_name=project_name or "",
-            study_name=study_name,
             trial_number=trial.number,
             server_addr=server_addr,
             heartbeat_interval_s=heartbeat_interval_s,
-            git_hash=git_hash,
-            sweep_config=sweep_config_text,
-            run_id=run_id,
-        ):
+        ) as environment:
             params: dict[str, Any] = (
                 sweep.search_space(trial) if sweep.search_space else {}
             )
@@ -84,6 +80,8 @@ def run_trial(
                     study_name=study_name,
                     trial_number=trial.number,
                     run_id=run_id,
+                    trial_id=environment.trial_id,
+                    execution_id=environment.execution_id,
                 ),
                 check=False,
             )
@@ -128,8 +126,10 @@ def _trial_env(
     study_name: str,
     trial_number: int,
     run_id: int,
+    trial_id: TrialId | None,
+    execution_id: ExecutionId | None,
 ) -> dict[str, str]:
-    return {
+    env = {
         **os.environ,
         TRIAL_CONFIG_ENV: str(config_path),
         TRACKING_DIR_ENV: tracking_dir,
@@ -138,16 +138,24 @@ def _trial_env(
         TRIAL_NUMBER_ENV: str(trial_number),
         RUN_ID_ENV: str(run_id),
     }
+    if trial_id is not None:
+        env[TRIAL_ID_ENV] = str(trial_id)
+    if execution_id is not None:
+        env[EXECUTION_ID_ENV] = str(execution_id)
+    return env
 
 
 def _read_trial_results(events_path: Path) -> dict[str, Any]:
     if not events_path.exists():
         return {}
     with TrackingReader(events_path) as reader:
-        for envelope in reader:
-            value = envelope.get("value")
-            if isinstance(value, dict) and value.get("key") == "results":
-                return json.loads(value["value_json"])
+        for event in reader:
+            if isinstance(event, ValueEvent) and event.key == "results":
+                if event.observation is not None:
+                    return event.observation
+                if isinstance(event.value, str):
+                    return json.loads(event.value)
+                return {}
     return {}
 
 
@@ -163,7 +171,6 @@ if __name__ == "__main__":
     parser.add_argument("--project-name", default=None)
     parser.add_argument("--server-addr", default=None)
     parser.add_argument("--heartbeat-interval", type=float, default=60.0)
-    parser.add_argument("--git-hash", default=None)
     args = parser.parse_args()
 
     run_trial(
@@ -175,5 +182,4 @@ if __name__ == "__main__":
         project_name=args.project_name,
         server_addr=args.server_addr,
         heartbeat_interval_s=args.heartbeat_interval,
-        git_hash=args.git_hash,
     )

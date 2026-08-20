@@ -4,20 +4,16 @@ from jernerics.config import SweepConfig
 
 
 class TestLocalBackendPostHook:
-    @patch("jernerics.backend.local_backend.sync_artifacts")
     @patch("jernerics.backend.local_backend.replay_tracking")
-    @patch("jernerics.backend.local_backend.resolve_artifact_storage")
     @patch("jernerics.backend.local_backend.resolve_tracking_ship")
     @patch("jernerics.backend.local_backend.run_trial")
     @patch("jernerics.backend.local_backend.cache_dir")
-    def test_calls_sync_after_trials(
+    def test_calls_replay_after_trials(
         self,
         mock_cache_dir,
         mock_run_trial,
         mock_resolve_tracking_ship,
-        mock_resolve_artifacts,
         mock_replay,
-        mock_sync_artifacts,
         tmp_path,
     ):
         from jernerics.backend.local_backend import LocalBackend
@@ -34,7 +30,6 @@ class TestLocalBackendPostHook:
             "http://localhost:8000",
             None,
         )  # (base_url, api_key)
-        mock_resolve_artifacts.return_value = lambda *a: None  # truthy upload_fn
 
         backend = LocalBackend(tracking_server="localhost:50051")
         storage_path = str(tmp_path / "optuna" / "mystudy.journal")
@@ -59,14 +54,12 @@ class TestLocalBackendPostHook:
         backend.submit_sweep(spec, direction="minimize")
 
         mock_replay.assert_called_once()
-        mock_sync_artifacts.assert_called_once()
 
-    @patch("jernerics.backend.local_backend.sync_artifacts")
     @patch("jernerics.backend.local_backend.replay_tracking")
     @patch("jernerics.backend.local_backend.run_trial")
     @patch("jernerics.backend.local_backend.cache_dir")
     def test_skips_sync_without_tracking_server(
-        self, mock_cache_dir, mock_run_trial, mock_replay, mock_sync_artifacts, tmp_path
+        self, mock_cache_dir, mock_run_trial, mock_replay, tmp_path
     ):
         from jernerics.backend.local_backend import LocalBackend
         from jernerics.backend.models import SweepSubmission
@@ -101,7 +94,6 @@ class TestLocalBackendPostHook:
         backend.submit_sweep(spec, direction="minimize")
 
         mock_replay.assert_not_called()
-        mock_sync_artifacts.assert_not_called()
 
 
 class TestRunLocalSingleConfig:

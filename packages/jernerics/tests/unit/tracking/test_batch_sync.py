@@ -1,354 +1,303 @@
 import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import httpx
 from jernerics.tracking.batch_sync import (
-    ReplayResult,
+    FileResult,
     _replay_file,
     discover_jsonl_files,
-    discover_manifest_files,
     replay_tracking,
-    sync_artifacts,
 )
-from jernerics.tracking.jsonl_io import TrackingWriter
+from jernerics.tracking.jsonl_io import (
+    TrackingWriter,
+    cursor_path,
+    read_cursor,
+    scan_events,
+)
+from jernerics_schema import TrackingEvent, ValueEvent
 
 BASE_URL = "http://localhost:8000"
 
 
-def _param_envelope(seq: int, key: str, value: float) -> dict:
-    return {
-        "project": "p",
-        "study_name": "s",
-        "trial_id": 0,
-        "timestamp_ns": 1000 + seq,
-        "seq": seq,
-        "param": {"key": key, "value": {"float_val": value}},
-    }
+@dataclass
+class _FakeResponse:
+    status_code: int
 
 
-def _value_envelope(seq: int, key: str, value: float, step: int) -> dict:
-    return {
-        "project": "p",
-        "study_name": "s",
-        "trial_id": 0,
-        "timestamp_ns": 1000 + seq,
-        "seq": seq,
-        "value": {"key": key, "value": value, "step": step, "context": "{}"},
-    }
+class FakeTransport:
+    def __init__(self, responses=None, always=None):
+        self.requests: list[tuple[str, str, dict]] = []
+        self.responses = list(responses or [])
+        self.always = always
+
+    def post(self, url, *, content, headers, timeout):
+        self.requests.append((url, content, dict(headers or {})))
+        if self.responses:
+            response = self.responses.pop(0)
+        else:
+            response = self.always if self.always is not None else 200
+        if isinstance(response, Exception):
+            raise response
+        return _FakeResponse(response)
+
+    @property
+    def bodies(self) -> list[str]:
+        return [content for _, content, _ in self.requests]
 
 
-def _trial_end_envelope(seq: int) -> dict:
-    return {
-        "project": "p",
-        "study_name": "s",
-        "trial_id": 0,
-        "timestamp_ns": 1000 + seq,
-        "seq": seq,
-        "trial_end": {},
-    }
+def _value_event(key: str = "loss", value: float = 0.5) -> ValueEvent:
+    return ValueEvent(
+        event_id=uuid4(),
+        recorded_at=datetime.now(timezone.utc),
+        trial_id=uuid4(),
+        key=key,
+        step=0,
+        value=value,
+    )
 
 
-def _write_events(path: Path, events: list[dict]) -> None:
+def _write_events(path: Path, events: Sequence[TrackingEvent]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     with TrackingWriter(path) as writer:
         for event in events:
-            writer.write_envelope(event)
+            writer.write_event(event)
+    return path
 
 
-def _ok_response() -> MagicMock:
-    """A mocked httpx.Response: raise_for_status is a no-op, status 200."""
-    return MagicMock(status_code=200)
+def _ids(body: str) -> list[str]:
+    return [event["event_id"] for event in json.loads(body)["events"]]
 
 
-class TestReplayFileWithAuth:
-    @patch("jernerics.tracking.batch_sync.httpx.post")
-    def test_sends_bearer_header_with_api_key(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        _write_events(events_file, [_param_envelope(0, "lr", 0.01)])
+class TestReplayFile:
+    def test_ships_all_events_in_one_batch(self, tmp_path: Path) -> None:
+        events = [_value_event(f"m{i}") for i in range(5)]
+        path = _write_events(tmp_path / "0.jsonl", events)
+        transport = FakeTransport()
 
-        result = _replay_file(events_file, BASE_URL, "secret", max_retries=3)
-
-        assert result.error is None
-        assert mock_post.call_args.kwargs["headers"] == {
-            "authorization": "Bearer secret"
-        }
-
-    @patch("jernerics.tracking.batch_sync.httpx.post")
-    def test_no_header_without_api_key(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        _write_events(events_file, [_param_envelope(0, "lr", 0.01)])
-
-        result = _replay_file(events_file, BASE_URL, None, max_retries=3)
+        result = _replay_file(path, BASE_URL, transport=transport)
 
         assert result.error is None
-        assert mock_post.call_args.kwargs["headers"] is None
+        assert result.events_sent == 5
+        assert result.events_total == 5
+        assert len(transport.requests) == 1
+        assert len(json.loads(transport.bodies[0])["events"]) == 5
+        assert read_cursor(path) == path.stat().st_size
+
+    def test_splits_into_max_size_batches(self, tmp_path: Path) -> None:
+        events = [_value_event(f"m{i}") for i in range(250)]
+        path = _write_events(tmp_path / "0.jsonl", events)
+        transport = FakeTransport()
+
+        result = _replay_file(path, BASE_URL, transport=transport)
+
+        sizes = [len(json.loads(body)["events"]) for body in transport.bodies]
+        assert sizes == [100, 100, 50]
+        assert result.events_sent == 250
+        assert read_cursor(path) == path.stat().st_size
+
+    def test_starts_at_cursor_and_ships_only_remainder(self, tmp_path: Path) -> None:
+        events = [_value_event(f"m{i}") for i in range(10)]
+        path = _write_events(tmp_path / "0.jsonl", events)
+        scanned, _ = scan_events(path, 0, max_events=4)
+        from jernerics.tracking.jsonl_io import write_cursor
+
+        write_cursor(path, scanned[3][1])
+        transport = FakeTransport()
+
+        result = _replay_file(path, BASE_URL, transport=transport)
+
+        assert _ids(transport.bodies[0]) == [
+            str(event.event_id) for event in events[4:]
+        ]
+        assert result.events_sent == 6
+        assert result.events_total == 10
+
+    def test_failed_batch_retries_same_body_then_advances_once(
+        self, tmp_path: Path
+    ) -> None:
+        path = _write_events(tmp_path / "0.jsonl", [_value_event()])
+        transport = FakeTransport([500, 502])
+
+        result = _replay_file(path, BASE_URL, transport=transport)
+
+        assert result.error is None
+        assert transport.bodies[0] == transport.bodies[1] == transport.bodies[2]
+        assert read_cursor(path) == path.stat().st_size
+
+    def test_retry_budget_exhaustion_reports_error_and_keeps_cursor(
+        self, tmp_path: Path
+    ) -> None:
+        events = [_value_event(f"m{i}") for i in range(150)]
+        path = _write_events(tmp_path / "0.jsonl", events)
+        # batch 1 succeeds; batch 2 exhausts its retry budget on HTTP 500
+        transport = FakeTransport([200], always=500)
+
+        result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
+
+        assert result.error is not None
+        assert result.events_sent == 100
+        assert result.events_total == 150
+        scanned, _ = scan_events(path, 0, max_events=100)
+        assert read_cursor(path) == scanned[99][1]
+        # the same unacked batch was retried byte-identically
+        for retried in transport.bodies[1:]:
+            assert retried == transport.bodies[1]
+
+    def test_offline_server_reports_error_without_data_loss(
+        self, tmp_path: Path
+    ) -> None:
+        path = _write_events(tmp_path / "0.jsonl", [_value_event()])
+        transport = FakeTransport(always=httpx.ConnectError("refused"))
+
+        result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
+
+        assert result.error is not None
+        assert "refused" in result.error
+        assert result.events_sent == 0
+        assert path.exists()
+        assert read_cursor(path) == 0
+
+    def test_auth_header_sent_when_api_key_given(self, tmp_path: Path) -> None:
+        path = _write_events(tmp_path / "0.jsonl", [_value_event()])
+        transport = FakeTransport()
+
+        _replay_file(path, BASE_URL, api_key="secret", transport=transport)
+
+        headers = transport.requests[0][2]
+        assert headers["authorization"] == "Bearer secret"
+        assert headers["content-type"] == "application/json"
+
+    def test_request_carries_protocol_version_3(self, tmp_path: Path) -> None:
+        path = _write_events(tmp_path / "0.jsonl", [_value_event()])
+        transport = FakeTransport()
+
+        _replay_file(path, BASE_URL, transport=transport)
+
+        assert json.loads(transport.bodies[0])["protocol_version"] == 3
 
 
 class TestDiscoverJsonlFiles:
     def test_finds_all_studies(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        (tracking / "study_a" / "events").mkdir(parents=True)
-        (tracking / "study_b" / "events").mkdir(parents=True)
-        (tracking / "study_a" / "events" / "0.jsonl").touch()
-        (tracking / "study_a" / "events" / "1.jsonl").touch()
-        (tracking / "study_b" / "events" / "0.jsonl").touch()
+        _write_events(tmp_path / "alpha" / "events" / "0.jsonl", [_value_event()])
+        _write_events(tmp_path / "beta" / "events" / "0.jsonl", [_value_event()])
+        _write_events(tmp_path / "beta" / "events" / "1.jsonl", [_value_event()])
 
-        result = discover_jsonl_files(tracking)
+        found = discover_jsonl_files(tmp_path)
 
-        names = [p.name for p in result]
-        assert names == ["0.jsonl", "1.jsonl", "0.jsonl"]
+        assert [p.name for p in found] == ["0.jsonl", "0.jsonl", "1.jsonl"]
 
-    def test_scopes_to_single_study(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        (tracking / "study_a" / "events").mkdir(parents=True)
-        (tracking / "study_b" / "events").mkdir(parents=True)
-        (tracking / "study_a" / "events" / "0.jsonl").touch()
-        (tracking / "study_b" / "events" / "0.jsonl").touch()
-
-        result = discover_jsonl_files(tracking, study="study_b")
-
-        assert len(result) == 1
-        assert result[0].parent.parent.name == "study_b"
-
-    def test_returns_empty_for_no_files(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        tracking.mkdir()
-
-        result = discover_jsonl_files(tracking)
-
-        assert result == []
-
-    def test_ignores_non_jsonl_files(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        (tracking / "study_a" / "events").mkdir(parents=True)
-        (tracking / "study_a" / "events" / "0.jsonl").touch()
-        (tracking / "study_a" / "events" / "0.db").touch()
-
-        result = discover_jsonl_files(tracking)
-
-        assert len(result) == 1
-
-
-class TestReplayFile:
-    @patch("jernerics.tracking.batch_sync.httpx.post")
-    def test_sends_all_events(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        events_file = tmp_path / "0.jsonl"
-        events = [
-            _param_envelope(0, "lr", 0.01),
-            _value_envelope(1, "loss", 0.5, 10),
-            _trial_end_envelope(2),
-        ]
-        _write_events(events_file, events)
-
-        result = _replay_file(events_file, BASE_URL, None, max_retries=3)
-
-        assert result.events_sent == 3
-        assert result.events_total == 3
-        assert result.error is None
-        assert mock_post.call_count == 3
-        for call, env in zip(mock_post.call_args_list, events, strict=False):
-            assert call.args[0] == f"{BASE_URL}/ingest"
-            assert call.kwargs["json"] == env
-            assert call.kwargs["headers"] is None
-
-    @patch("jernerics.tracking.batch_sync.httpx.post")
-    def test_retries_on_failure(self, mock_post, tmp_path: Path) -> None:
-        call_count = 0
-
-        def post_side_effect(*args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if call_count <= 2:
-                raise httpx.ConnectError("boom")
-            return _ok_response()
-
-        mock_post.side_effect = post_side_effect
-
-        events_file = tmp_path / "0.jsonl"
-        _write_events(events_file, [_param_envelope(0, "lr", 0.01)])
-
-        with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
-            result = _replay_file(events_file, BASE_URL, None, max_retries=5)
-
-        assert result.events_sent == 1
-        assert result.error is None
-        assert mock_post.call_count == 3
-
-    @patch("jernerics.tracking.batch_sync.httpx.post")
-    def test_records_error_on_max_retries_exceeded(
-        self, mock_post, tmp_path: Path
-    ) -> None:
-        mock_post.side_effect = httpx.ConnectError("boom")
-
-        events_file = tmp_path / "0.jsonl"
-        _write_events(
-            events_file,
-            [_param_envelope(0, "lr", 0.01), _value_envelope(1, "loss", 0.5, 10)],
+    def test_ignores_cursor_sidecars(self, tmp_path: Path) -> None:
+        path = _write_events(
+            tmp_path / "alpha" / "events" / "0.jsonl", [_value_event()]
         )
+        cursor_path(path).write_text("0")
 
-        with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
-            result = _replay_file(events_file, BASE_URL, None, max_retries=2)
+        assert discover_jsonl_files(tmp_path) == [path]
 
-        assert result.events_sent == 0
-        assert result.error is not None
-        assert result.events_total == 2
+    def test_scopes_to_study(self, tmp_path: Path) -> None:
+        alpha = _write_events(
+            tmp_path / "alpha" / "events" / "0.jsonl", [_value_event()]
+        )
+        _write_events(tmp_path / "beta" / "events" / "0.jsonl", [_value_event()])
+
+        assert discover_jsonl_files(tmp_path, study="alpha") == [alpha]
+
+    def test_empty_dir_returns_empty_list(self, tmp_path: Path) -> None:
+        assert discover_jsonl_files(tmp_path) == []
 
 
 class TestReplayTracking:
-    @patch("jernerics.tracking.batch_sync.httpx.post")
-    def test_replays_all_files_and_deletes_on_success(
-        self, mock_post, tmp_path: Path
+    def test_ships_every_file_and_deletes_files_and_cursors(
+        self, tmp_path, capfd
     ) -> None:
-        mock_post.return_value = _ok_response()
-        tracking = tmp_path / "tracking"
-        events_dir = tracking / "study_a" / "events"
-        events_dir.mkdir(parents=True)
-
-        _write_events(events_dir / "0.jsonl", [_param_envelope(0, "lr", 0.01)])
-        _write_events(events_dir / "1.jsonl", [_value_envelope(0, "loss", 0.5, 10)])
-
-        result = replay_tracking(tracking, BASE_URL, max_workers=2, max_retries=3)
-
-        assert result.files_processed == 2
-        assert result.events_sent == 2
-        assert result.errors == []
-        assert not (events_dir / "0.jsonl").exists()
-        assert not (events_dir / "1.jsonl").exists()
-
-    @patch("jernerics.tracking.batch_sync.httpx.post")
-    def test_scopes_to_study(self, mock_post, tmp_path: Path) -> None:
-        mock_post.return_value = _ok_response()
-        tracking = tmp_path / "tracking"
-        (tracking / "study_a" / "events").mkdir(parents=True)
-        (tracking / "study_b" / "events").mkdir(parents=True)
-        _write_events(
-            tracking / "study_a" / "events" / "0.jsonl",
-            [_param_envelope(0, "x", 1.0)],
-        )
-        _write_events(
-            tracking / "study_b" / "events" / "0.jsonl",
-            [_param_envelope(0, "y", 2.0)],
-        )
+        events_dir = tmp_path / "study" / "events"
+        path = _write_events(events_dir / "0.jsonl", [_value_event()])
+        cursor_path(path).write_text("0")
 
         result = replay_tracking(
-            tracking, BASE_URL, study="study_b", max_workers=2, max_retries=3
+            tracking_dir=tmp_path,
+            base_url=BASE_URL,
+            study="study",
+            transport=FakeTransport(),
         )
 
         assert result.files_processed == 1
         assert result.events_sent == 1
-        assert not (tracking / "study_b" / "events" / "0.jsonl").exists()
-        assert (tracking / "study_a" / "events" / "0.jsonl").exists()
+        assert result.errors == []
+        assert not path.exists()
+        assert not cursor_path(path).exists()
+        assert "Done." in capfd.readouterr().err
 
-    def test_returns_empty_result_for_no_files(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        tracking.mkdir()
+    def test_error_keeps_files_and_reports_per_file(self, tmp_path, capfd) -> None:
+        path = _write_events(
+            tmp_path / "study" / "events" / "0.jsonl", [_value_event()]
+        )
 
-        result = replay_tracking(tracking, BASE_URL, max_retries=3)
+        result = replay_tracking(
+            tracking_dir=tmp_path,
+            base_url=BASE_URL,
+            max_retries=2,
+            transport=FakeTransport(always=httpx.ConnectError("refused")),
+        )
 
-        assert result == ReplayResult()
-        assert not result.errors
-
-    @patch("jernerics.tracking.batch_sync.httpx.post")
-    def test_records_partial_failure_and_keeps_files(
-        self, mock_post, tmp_path: Path
-    ) -> None:
-        tracking = tmp_path / "tracking"
-        events_dir = tracking / "study_a" / "events"
-        events_dir.mkdir(parents=True)
-
-        # File 0 replays cleanly; file 1 fails every POST permanently.
-        _write_events(events_dir / "0.jsonl", [_param_envelope(0, "ok", 1.0)])
-        _write_events(events_dir / "1.jsonl", [_param_envelope(0, "fail", 2.0)])
-
-        def post_side_effect(*args, **kwargs):
-            event = kwargs["json"]
-            if event.get("param", {}).get("key") == "fail":
-                raise httpx.ConnectError("boom")
-            return _ok_response()
-
-        mock_post.side_effect = post_side_effect
-
-        with patch("jernerics.tracking.batch_sync._RETRY_BASE_INTERVAL", 0.01):
-            result = replay_tracking(tracking, BASE_URL, max_workers=2, max_retries=3)
-
-        assert result.files_processed == 2
+        assert result.files_processed == 1
+        assert result.events_failed == 1
         assert len(result.errors) == 1
-        assert result.events_sent == 1
-        # Errors present -> no files deleted.
-        assert (events_dir / "0.jsonl").exists()
-        assert (events_dir / "1.jsonl").exists()
+        assert str(path) in result.errors[0]
+        assert path.exists()
+        assert read_cursor(path) == 0
+        assert "FAIL" in capfd.readouterr().err
 
-
-class TestDiscoverManifestFiles:
-    def test_finds_all_studies(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        (tracking / "study_a" / "artifacts").mkdir(parents=True)
-        (tracking / "study_b" / "artifacts").mkdir(parents=True)
-        (tracking / "study_a" / "artifacts" / "0.manifest").touch()
-        (tracking / "study_b" / "artifacts" / "0.manifest").touch()
-
-        result = discover_manifest_files(tracking)
-
-        assert len(result) == 2
-
-    def test_scopes_to_single_study(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        (tracking / "study_a" / "artifacts").mkdir(parents=True)
-        (tracking / "study_b" / "artifacts").mkdir(parents=True)
-        (tracking / "study_a" / "artifacts" / "0.manifest").touch()
-        (tracking / "study_b" / "artifacts" / "0.manifest").touch()
-
-        result = discover_manifest_files(tracking, study="study_b")
-
-        assert len(result) == 1
-
-    def test_returns_empty_when_no_artifacts_dir(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        (tracking / "study_a" / "events").mkdir(parents=True)
-
-        result = discover_manifest_files(tracking)
-
-        assert result == []
-
-
-class TestSyncArtifacts:
-    def test_uploads_from_manifests(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        artifacts_dir = tracking / "study_a" / "artifacts"
-        artifacts_dir.mkdir(parents=True)
-
-        # Write a manifest with one entry
-        manifest = artifacts_dir / "0.manifest"
-        manifest.write_text(
-            json.dumps({"key": "model.pt", "path": "/work/m.pt"}) + "\n"
+    def test_no_files_reports_and_returns_empty(self, tmp_path, capfd) -> None:
+        result = replay_tracking(
+            tracking_dir=tmp_path, base_url=BASE_URL, transport=FakeTransport()
         )
 
-        mock_upload = MagicMock()
-        sync_artifacts(
-            tracking,
-            upload_fn=mock_upload,
-            project="proj",
-            study="study_a",
-            trial_id=0,
+        assert result == type(result)()
+        assert "No .jsonl files found." in capfd.readouterr().err
+
+    def test_already_shipped_file_reports_zero_sent_and_is_deleted(
+        self, tmp_path
+    ) -> None:
+        path = _write_events(
+            tmp_path / "study" / "events" / "0.jsonl", [_value_event()]
+        )
+        from jernerics.tracking.jsonl_io import write_cursor
+
+        write_cursor(path, path.stat().st_size)
+
+        result = replay_tracking(
+            tracking_dir=tmp_path,
+            base_url=BASE_URL,
+            transport=FakeTransport(),
         )
 
-        assert mock_upload.call_count == 1
-        assert mock_upload.call_args[0][0] == "proj/study_a/0/model.pt"
+        assert result.events_sent == 0
+        assert result.errors == []
+        assert not path.exists()
 
-    def test_noop_when_no_manifests(self, tmp_path: Path) -> None:
-        tracking = tmp_path / "tracking"
-        (tracking / "study_a" / "events").mkdir(parents=True)
 
-        mock_upload = MagicMock()
-        sync_artifacts(
-            tracking,
-            upload_fn=mock_upload,
-            project="proj",
-            study="study_a",
-            trial_id=0,
-        )
+class TestFileResultShape:
+    def test_defaults(self, tmp_path: Path) -> None:
+        result = FileResult(path=tmp_path / "x.jsonl")
 
-        assert mock_upload.call_count == 0
+        assert result.events_sent == 0
+        assert result.events_total == 0
+        assert result.error is None
+
+    def test_missing_file_is_a_clean_no_op(self, tmp_path) -> None:
+        result = _replay_file(tmp_path / "missing.jsonl", BASE_URL)
+
+        assert result.error is None
+        assert result.events_sent == 0
+        assert result.events_total == 0
+
+
+def test_replay_uses_batches_of_at_most_100(tmp_path: Path) -> None:
+    from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
+
+    assert MAX_EVENTS_PER_REQUEST == 100

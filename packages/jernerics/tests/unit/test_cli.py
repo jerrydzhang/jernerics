@@ -1,6 +1,8 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from jernerics.commands.project import (
@@ -10,6 +12,7 @@ from jernerics.commands.project import (
 from jernerics.sync.mutagen_sync import SessionInfo
 from jernerics.tracking.batch_sync import ReplayResult
 from jernerics.tracking.jsonl_io import TrackingWriter
+from jernerics_schema import ValueEvent
 
 
 class TestGetDefaultJernericsConfig:
@@ -543,23 +546,22 @@ class TestDiffCommand:
         assert exc_info.value.code == 1
 
 
-def _value_envelope(seq: int, study: str = "sweep1") -> dict:
-    return {
-        "project": "p",
-        "study_name": study,
-        "trial_id": 0,
-        "run_id": 0,
-        "timestamp_ns": 1000 + seq,
-        "seq": seq,
-        "value": {"key": "loss", "value": 0.5, "step": 0, "context": "{}"},
-    }
+def _value_event(seq: int) -> ValueEvent:
+    return ValueEvent(
+        event_id=uuid4(),
+        recorded_at=datetime.now(timezone.utc),
+        trial_id=uuid4(),
+        key="loss",
+        step=seq,
+        value=0.5,
+    )
 
 
 def _write_jsonl(path: Path, n: int, study: str = "sweep1") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with TrackingWriter(path) as writer:
         for i in range(n):
-            writer.write_envelope(_value_envelope(i, study))
+            writer.write_event(_value_event(i))
 
 
 class TestReplayCommand:
@@ -620,76 +622,65 @@ class TestReplayCommand:
 
         assert exc_info.value.code == ExitCode.CONFIG_ERROR
 
-    def test_dry_run_computes_delta_json(self, tmp_path, capsys):
+    def test_dry_run_counts_local_events_json(self, tmp_path, capsys):
         from jernerics.commands.tracking import replay
 
         _write_jsonl(tmp_path / "sweep1" / "events" / "0.jsonl", 10)
-        store = MagicMock()
-        store.query.return_value = (["COUNT(*)"], [(1,)])
 
-        with patch("jernerics.commands.tracking.RemoteStore", return_value=store):
-            replay(
-                server="http://srv:8000",
-                tracking_dir=tmp_path,
-                dry_run=True,
-                json_output=True,
-            )
+        replay(
+            server="http://srv:8000",
+            tracking_dir=tmp_path,
+            dry_run=True,
+            json_output=True,
+        )
 
         report = json.loads(capsys.readouterr().out)
-        assert report == [{"study": "sweep1", "local": 10, "synced": 5, "new": 5}]
+        assert report == [{"study": "sweep1", "local": 10}]
 
     def test_dry_run_scoped_to_study(self, tmp_path, capsys):
         from jernerics.commands.tracking import replay
 
         _write_jsonl(tmp_path / "alpha" / "events" / "0.jsonl", 4)
         _write_jsonl(tmp_path / "beta" / "events" / "0.jsonl", 6)
-        store = MagicMock()
-        store.query.return_value = (["COUNT(*)"], [(0,)])
 
-        with patch("jernerics.commands.tracking.RemoteStore", return_value=store):
-            replay(
-                server="http://srv:8000",
-                tracking_dir=tmp_path,
-                study="beta",
-                dry_run=True,
-                json_output=True,
-            )
+        replay(
+            server="http://srv:8000",
+            tracking_dir=tmp_path,
+            study="beta",
+            dry_run=True,
+            json_output=True,
+        )
 
         report = json.loads(capsys.readouterr().out)
-        assert report == [{"study": "beta", "local": 6, "synced": 0, "new": 6}]
+        assert report == [{"study": "beta", "local": 6}]
 
     def test_dry_run_text_output(self, tmp_path, capsys):
         from jernerics.commands.tracking import replay
 
         _write_jsonl(tmp_path / "sweep1" / "events" / "0.jsonl", 10)
-        store = MagicMock()
-        store.query.return_value = (["COUNT(*)"], [(3,)])
 
-        with patch("jernerics.commands.tracking.RemoteStore", return_value=store):
-            replay(
-                server="http://srv:8000",
-                tracking_dir=tmp_path,
-                dry_run=True,
-            )
+        replay(
+            server="http://srv:8000",
+            tracking_dir=tmp_path,
+            dry_run=True,
+        )
 
         out = capsys.readouterr().out
-        assert "sweep1: 10 local, 15 synced, 0 would be new" in out
+        assert "sweep1: 10 local events" in out
+        assert "Total: 10 local events" in out
         assert "dry run" in out
 
     def test_dry_run_no_local_events(self, tmp_path, capsys):
         from jernerics.commands.tracking import replay
 
-        store = MagicMock()
-        with patch("jernerics.commands.tracking.RemoteStore", return_value=store):
-            replay(
-                server="http://srv:8000",
-                tracking_dir=tmp_path,
-                dry_run=True,
-                json_output=True,
-            )
+        replay(
+            server="http://srv:8000",
+            tracking_dir=tmp_path,
+            dry_run=True,
+            json_output=True,
+        )
 
         assert json.loads(capsys.readouterr().out) == []
-        store.query.assert_not_called()
 
     def test_backend_mode_syncs_from_backend(self):
         from jernerics.commands.tracking import replay

@@ -1,4 +1,4 @@
-"""CLI entry point for replaying JSONL files and syncing artifacts.
+"""CLI entry point for replaying JSONL tracking files to the server.
 
 Invoked on HPC via SSH from the sync command.
 
@@ -8,12 +8,11 @@ Usage:
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
-from jernerics.tracking.batch_sync import replay_tracking, sync_artifacts
-from jernerics.tracking.infra import resolve_artifact_storage, resolve_tracking_ship
+from jernerics.tracking.batch_sync import replay_tracking
+from jernerics.tracking.infra import resolve_tracking_ship
 
 
 def main() -> None:
@@ -47,19 +46,6 @@ def main() -> None:
 
     if result.errors:
         sys.exit(1)
-
-    upload_fn = resolve_artifact_storage(base_url)
-    if upload_fn:
-        print("Syncing artifacts...", file=sys.stderr)
-        sync_artifacts(
-            Path(args.tracking_dir),
-            upload_fn=upload_fn,
-            project=os.environ.get("JERNERICS_PROJECT", ""),
-            study=args.study or "",
-        )
-        print("Artifact sync complete.", file=sys.stderr)
-    else:
-        print("Artifact sync skipped (no storage configured).", file=sys.stderr)
 
 
 if __name__ == "__main__":

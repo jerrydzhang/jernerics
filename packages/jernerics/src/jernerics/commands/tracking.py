@@ -33,17 +33,6 @@ from jernerics.tracking.jsonl_io import TrackingReader
 
 # ── replay ───────────────────────────────────────────────────────────────────
 
-# Server tables that hold one row per ingested tracking event. Counting their
-# rows per study approximates "events already synced" — there is no single
-# events table; each envelope lands in exactly one of these via insert_event.
-_EVENT_TABLES = (
-    "tracked_values",
-    "params",
-    "artifacts",
-    "sweep_meta",
-    "trial_end",
-)
-
 
 def _count_local_events(tracking_dir: Path, study: str | None) -> dict[str, int]:
     counts: dict[str, int] = {}
@@ -54,35 +43,15 @@ def _count_local_events(tracking_dir: Path, study: str | None) -> dict[str, int]
     return counts
 
 
-def _count_synced_events(store: RemoteStore, study: str) -> int:
-    total = 0
-    for table in _EVENT_TABLES:
-        _, rows = store.query(
-            f"SELECT COUNT(*) FROM {table} WHERE study_name = ?", [study]
-        )
-        total += rows[0][0]
-    return total
-
-
 def _run_dry_run(
     tracking_dir: Path,
-    store: RemoteStore,
     study: str | None,
     json_output: bool,
 ) -> None:
     local_counts = _count_local_events(tracking_dir, study)
-    report = []
-    for name in sorted(local_counts):
-        synced = _count_synced_events(store, name)
-        local_n = local_counts[name]
-        report.append(
-            {
-                "study": name,
-                "local": local_n,
-                "synced": synced,
-                "new": max(local_n - synced, 0),
-            }
-        )
+    report = [
+        {"study": name, "local": count} for name, count in sorted(local_counts.items())
+    ]
 
     if json_output:
         print(json.dumps(report, indent=2))
@@ -93,17 +62,9 @@ def _run_dry_run(
         return
 
     total_local = sum(r["local"] for r in report)
-    total_synced = sum(r["synced"] for r in report)
-    total_new = sum(r["new"] for r in report)
     for r in report:
-        print(
-            f"  {r['study']}: {r['local']} local, {r['synced']} synced, "
-            f"{r['new']} would be new"
-        )
-    print(
-        f"\nTotal: {total_local} local, {total_synced} synced, "
-        f"{total_new} would be new (dry run — nothing sent)"
-    )
+        print(f"  {r['study']}: {r['local']} local events")
+    print(f"\nTotal: {total_local} local events (dry run — nothing sent)")
 
 
 def replay(
@@ -172,13 +133,7 @@ def replay(
     api_key = os.environ.get("JERNERICS_API_KEY")
 
     if dry_run:
-        try:
-            _run_dry_run(
-                resolved_dir, RemoteStore(base_url, api_key=api_key), study, json_output
-            )
-        except (RuntimeError, httpx.HTTPError) as e:
-            print(f"Error: {e}")
-            raise SystemExit(ExitCode.GENERAL_ERROR) from None
+        _run_dry_run(resolved_dir, study, json_output)
         return
 
     result = replay_tracking(

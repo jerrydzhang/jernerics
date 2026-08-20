@@ -61,7 +61,6 @@ def build_trial_command(
     project_name: str | None = None,
     tracking_server: str | None = None,
     heartbeat_interval_s: float = -1.0,
-    git_hash: str | None = None,
     multiline: bool = False,
 ) -> str:
     args = [
@@ -83,8 +82,6 @@ def build_trial_command(
         args.extend(["--server-addr", tracking_server])
     if heartbeat_interval_s > 0:
         args.extend(["--heartbeat-interval", str(heartbeat_interval_s)])
-    if git_hash:
-        args.extend(["--git-hash", git_hash])
     if multiline:
         return " \\\n        ".join(args)
     return " ".join(args)
@@ -94,7 +91,6 @@ def build_post_hook_command(
     ctx_path: str,
     chain_depth: int,
     tracking_dir: str,
-    storage_path: str,
     tracking_server: str | None = None,
 ) -> str:
     args = [
@@ -107,8 +103,6 @@ def build_post_hook_command(
         str(chain_depth),
         "--tracking-dir",
         tracking_dir,
-        "--storage-path",
-        storage_path,
     ]
     if tracking_server:
         args.extend(["--server-addr", tracking_server])
@@ -122,7 +116,6 @@ def build_sweep_commands(
     direction: str,
     tracking_server: str | None = None,
     heartbeat_interval_s: float = -1.0,
-    git_hash: str | None = None,
     multiline: bool = False,
     retry_ctx_path: str | None = None,
     chain_depth: int = 0,
@@ -155,7 +148,6 @@ def build_sweep_commands(
         tracking_dir=tracking_dir,
         tracking_server=tracking_server,
         heartbeat_interval_s=heartbeat_interval_s,
-        git_hash=git_hash,
         work_prefix=paths.work_prefix,
         multiline=multiline,
     )
@@ -166,7 +158,6 @@ def build_sweep_commands(
         ctx_path,
         chain_depth,
         tracking_dir,
-        spec.storage_url,
         tracking_server=tracking_server,
     )
     retry_script = f"/tmp/jernerics_{spec.study_name}_retry_d{chain_depth}.sh"

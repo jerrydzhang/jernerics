@@ -1,4 +1,6 @@
 import json
+from datetime import datetime, timezone
+from uuid import uuid4
 
 import optuna
 import pytest
@@ -9,7 +11,11 @@ from jernerics.runner import (
     run_trial,
 )
 from jernerics.tracking.jsonl_io import TrackingWriter
+from jernerics_schema import ValueEvent
 from optuna.storages.journal import JournalFileBackend, JournalStorage
+
+trial_id = uuid4()
+execution_id = uuid4()
 
 _HEADER = (
     "from jernerics import trial_config, trial_tracker\n"
@@ -136,6 +142,8 @@ class TestTrialEnv:
             study_name="study",
             trial_number=7,
             run_id=99,
+            trial_id=trial_id,
+            execution_id=execution_id,
         )
 
         assert env["JERNERICS_TRIAL_CONFIG"] == str(config_path)
@@ -144,41 +152,52 @@ class TestTrialEnv:
         assert env["JERNERICS_STUDY_NAME"] == "study"
         assert env["JERNERICS_TRIAL_NUMBER"] == "7"
         assert env["JERNERICS_RUN_ID"] == "99"
+        assert env["JERNERICS_TRIAL_ID"] == str(trial_id)
+        assert env["JERNERICS_EXECUTION_ID"] == str(execution_id)
         assert env["KEEP_ME"] == "yes"
 
 
+def _value_event(key: str, *, value=None, observation=None) -> ValueEvent:
+    return ValueEvent(
+        event_id=uuid4(),
+        recorded_at=datetime.now(timezone.utc),
+        trial_id=uuid4(),
+        key=key,
+        step=0,
+        value=value,
+        observation=observation,
+    )
+
+
 class TestReadTrialResults:
-    def test_reads_results_envelope(self, tmp_path):
+    def test_reads_results_observation(self, tmp_path):
         events = tmp_path / "0.jsonl"
-        writer = TrackingWriter(events)
-        writer.write_envelope({"value": {"key": "loss", "value": 0.5}})
-        writer.write_envelope(
-            {"value": {"key": "results", "value_json": '{"loss": 0.5}'}}
-        )
-        writer.write_envelope({"trial_end": {}})
-        writer.close()
+        with TrackingWriter(events) as writer:
+            writer.write_event(_value_event("loss", value=0.5))
+            writer.write_event(_value_event("results", observation={"loss": 0.5}))
+
+        assert _read_trial_results(events) == {"loss": 0.5}
+
+    def test_reads_results_from_json_string_value(self, tmp_path):
+        events = tmp_path / "0.jsonl"
+        with TrackingWriter(events) as writer:
+            writer.write_event(_value_event("results", value='{"loss": 0.5}'))
 
         assert _read_trial_results(events) == {"loss": 0.5}
 
     def test_missing_file_returns_empty(self, tmp_path):
         assert _read_trial_results(tmp_path / "missing.jsonl") == {}
 
-    def test_no_results_envelope_returns_empty(self, tmp_path):
+    def test_no_results_event_returns_empty(self, tmp_path):
         events = tmp_path / "0.jsonl"
-        writer = TrackingWriter(events)
-        writer.write_envelope({"value": {"key": "loss", "value": 0.5}})
-        writer.write_envelope({"trial_end": {}})
-        writer.close()
+        with TrackingWriter(events) as writer:
+            writer.write_event(_value_event("loss", value=0.5))
 
         assert _read_trial_results(events) == {}
 
-    def test_results_envelope_value_must_be_dict(self, tmp_path):
+    def test_scalar_results_value_returns_empty(self, tmp_path):
         events = tmp_path / "0.jsonl"
-        writer = TrackingWriter(events)
-        writer.write_envelope({"value": "not-a-dict"})
-        writer.write_envelope(
-            {"value": {"key": "results", "value_json": '{"loss": 0.5}'}}
-        )
-        writer.close()
+        with TrackingWriter(events) as writer:
+            writer.write_event(_value_event("results", value=0.5))
 
-        assert _read_trial_results(events) == {"loss": 0.5}
+        assert _read_trial_results(events) == {}

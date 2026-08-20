@@ -1,16 +1,23 @@
+"""Runner-side trial environment: execution lifecycle, heartbeats, live shipping."""
+
 import threading
 from pathlib import Path
 from typing import Self
+from uuid import uuid4
+
+from jernerics_schema import ExecutionId, ExecutionOutcome, TrialId
 
 from jernerics.tracking import Tracker
-from jernerics.tracking.artifact_uploader import ArtifactUploader
-from jernerics.tracking.infra import resolve_artifact_storage, resolve_tracking_ship
+from jernerics.tracking.infra import resolve_tracking_ship
 from jernerics.tracking.stream_client import StreamClient
 
 
-def _heartbeat_loop(path: Path, interval: float, stop: threading.Event) -> None:
+def _heartbeat_loop(
+    path: Path, interval: float, stop: threading.Event, heartbeat
+) -> None:
     while not stop.wait(interval):
         path.touch()
+        heartbeat()
 
 
 class TrialEnvironment:
@@ -18,104 +25,86 @@ class TrialEnvironment:
         self,
         *,
         tracking_dir: str,
-        project_name: str,
-        study_name: str,
         trial_number: int,
         server_addr: str | None = None,
         heartbeat_interval_s: float = 60.0,
-        git_hash: str | None = None,
-        sweep_config: str | None = None,
-        run_id: int = 0,
+        trial_id: TrialId | None = None,
     ) -> None:
         self._tracking_dir = tracking_dir
-        self._project_name = project_name
-        self._study_name = study_name
         self._trial_number = trial_number
         self._server_addr = server_addr
         self._heartbeat_interval_s = heartbeat_interval_s
-        self._git_hash = git_hash
-        self._sweep_config = sweep_config
-        self._run_id = run_id
+        self._trial_id = trial_id
 
-        self._sync_client: StreamClient | None = None
-        self._artifact_uploader: ArtifactUploader | None = None
-        self._heartbeat_stop: threading.Event | None = None
-
+        self.trial_id: TrialId | None = None
+        self.execution_id: ExecutionId | None = None
         self.tracker: Tracker | None = None
+        self._sync_client: StreamClient | None = None
+        self._heartbeat_stop: threading.Event | None = None
+        self._heartbeat_thread: threading.Thread | None = None
 
     def __enter__(self) -> Self:
         if not self._tracking_dir:
             return self
 
         tracking_dir = Path(self._tracking_dir)
-
         events_dir = tracking_dir / "events"
         events_dir.mkdir(parents=True, exist_ok=True)
 
-        artifacts_dir = tracking_dir / "artifacts"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = artifacts_dir / f"{self._trial_number}.manifest"
-        cursor_path = artifacts_dir / f"{self._trial_number}.cursor"
-
         from jernerics.tracking.tracker import JsonlTracker
 
+        self.trial_id = self._trial_id if self._trial_id is not None else uuid4()
+        self.execution_id = uuid4()
         events_path = events_dir / f"{self._trial_number}.jsonl"
-
-        tracker = JsonlTracker(
-            self._project_name,
-            self._study_name,
-            self._trial_number,
-            events_path,
-            manifest_path=manifest_path,
-            run_id=self._run_id,
-        )
-        if self._sweep_config is not None:
-            tracker.log_sweep_meta(self._git_hash, self._sweep_config)
+        tracker = JsonlTracker(events_path, self.trial_id, self.execution_id)
+        tracker.emit_execution_start()
         self.tracker = tracker
 
-        ship = resolve_tracking_ship(self._server_addr) if self._server_addr else None
-        if ship:
-            base_url, api_key = ship
-            self._sync_client = StreamClient(
-                base_url=base_url,
-                path=events_path,
-                api_key=api_key,
-            )
-            self._sync_client.start()
-        else:
-            base_url = None
-
-        upload_fn = resolve_artifact_storage(base_url)
-        if upload_fn:
-            self._artifact_uploader = ArtifactUploader(
-                manifest_path=manifest_path,
-                cursor_path=cursor_path,
-                upload_fn=upload_fn,
-                project=self._project_name,
-                study=self._study_name,
-                trial_id=self._trial_number,
-            )
-            self._artifact_uploader.start()
+        if self._server_addr:
+            ship = resolve_tracking_ship(self._server_addr)
+            if ship:
+                base_url, api_key = ship
+                self._sync_client = StreamClient(
+                    base_url=base_url,
+                    path=events_path,
+                    api_key=api_key,
+                )
+                self._sync_client.start()
 
         hb_dir = tracking_dir / "heartbeats"
         hb_dir.mkdir(parents=True, exist_ok=True)
         hb_path = hb_dir / f"{self._trial_number}.heartbeat"
         hb_path.touch()
         self._heartbeat_stop = threading.Event()
-        threading.Thread(
+        self._heartbeat_thread = threading.Thread(
             target=_heartbeat_loop,
-            args=(hb_path, self._heartbeat_interval_s, self._heartbeat_stop),
+            args=(
+                hb_path,
+                self._heartbeat_interval_s,
+                self._heartbeat_stop,
+                tracker.emit_heartbeat,
+            ),
             daemon=True,
-        ).start()
+        )
+        self._heartbeat_thread.start()
 
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         if self._heartbeat_stop:
             self._heartbeat_stop.set()
-        if self._artifact_uploader:
-            self._artifact_uploader.join()
+        if self._heartbeat_thread:
+            self._heartbeat_thread.join(timeout=5.0)
         if self.tracker:
+            if exc_type is None:
+                self.tracker.emit_execution_end(outcome=ExecutionOutcome.SUCCESS)
+            else:
+                self.tracker.emit_execution_end(
+                    outcome=ExecutionOutcome.FAILURE,
+                    failure_summary=(
+                        repr(exc_val)[:2000] if exc_val is not None else None
+                    ),
+                )
             self.tracker.close()
         if self._sync_client:
             self._sync_client.join()

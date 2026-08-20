@@ -1,6 +1,9 @@
 import json
+import os
+import uuid
 
 import pytest
+from jernerics.tracking.jsonl_io import TrackingReader
 from jernerics.trial_context import (
     ConsoleTracker,
     is_job,
@@ -11,7 +14,8 @@ from jernerics.trial_context import (
 
 def _read_events(tmp_path, trial_number=7):
     path = tmp_path / "tracking" / "events" / f"{trial_number}.jsonl"
-    return [json.loads(line) for line in path.read_text().splitlines()]
+    with TrackingReader(path) as reader:
+        return list(reader)
 
 
 class TestIsJob:
@@ -20,10 +24,8 @@ class TestIsJob:
 
         assert is_job() is False
 
-    def test_returns_true_with_trial_config_env(self, monkeypatch, tmp_path):
-        config_path = tmp_path / "config.json"
-        config_path.write_text("{}")
-        monkeypatch.setenv("JERNERICS_TRIAL_CONFIG", str(config_path))
+    def test_returns_true_with_trial_config_env(self, monkeypatch):
+        monkeypatch.setenv("JERNERICS_TRIAL_CONFIG", "/tmp/config.json")
 
         assert is_job() is True
 
@@ -31,27 +33,23 @@ class TestIsJob:
 class TestTrialConfig:
     def test_reads_json_in_job_mode(self, monkeypatch, tmp_path):
         config_path = tmp_path / "config.json"
-        config_path.write_text('{"lr": 0.1, "epochs": 3}')
+        config_path.write_text('{"lr": 0.1}')
         monkeypatch.setenv("JERNERICS_TRIAL_CONFIG", str(config_path))
 
-        assert trial_config() == {"lr": 0.1, "epochs": 3}
+        assert trial_config() == {"lr": 0.1}
 
-    def test_returns_defaults_as_is_in_standalone_mode(self, monkeypatch):
-        monkeypatch.delenv("JERNERICS_TRIAL_CONFIG", raising=False)
-        defaults = {"lr": 0.1}
-
-        assert trial_config(defaults) is defaults
-
-    def test_raises_when_standalone_without_defaults(self, monkeypatch):
+    def test_raises_without_defaults_outside_job(self, monkeypatch):
         monkeypatch.delenv("JERNERICS_TRIAL_CONFIG", raising=False)
 
         with pytest.raises(ValueError):
             trial_config()
 
-    def test_raises_when_job_config_file_missing(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("JERNERICS_TRIAL_CONFIG", str(tmp_path / "missing.json"))
+    def test_non_dict_config_raises_type_error(self, monkeypatch, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text("[1, 2]")
+        monkeypatch.setenv("JERNERICS_TRIAL_CONFIG", str(config_path))
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(TypeError):
             trial_config()
 
 
@@ -72,36 +70,73 @@ def job_tracker(monkeypatch, tmp_path):
     monkeypatch.setenv("JERNERICS_STUDY_NAME", "study")
     monkeypatch.setenv("JERNERICS_TRIAL_NUMBER", "7")
     monkeypatch.setenv("JERNERICS_RUN_ID", "123")
+    monkeypatch.setenv("JERNERICS_TRIAL_ID", str(uuid.uuid4()))
+    monkeypatch.setenv("JERNERICS_EXECUTION_ID", str(uuid.uuid4()))
     return trial_tracker(), tmp_path
 
 
 class TestJobTracker:
-    def test_logs_numeric_observations_as_scalars(self, job_tracker):
+    def test_logs_numeric_observations_as_scalar_values(self, job_tracker):
         tracker, tmp_path = job_tracker
         tracker.log_value("loss", 0.5, step=3)
         tracker.log_value("acc", 0.9)
 
         loss, acc = _read_events(tmp_path)
-        assert loss["value"]["key"] == "loss"
-        assert loss["value"]["value"] == pytest.approx(0.5)
-        assert loss["value"]["step"] == 3
-        assert "value_json" not in loss["value"]
-        assert acc["value"]["key"] == "acc"
-        assert acc["value"]["value"] == pytest.approx(0.9)
-        assert acc["value"]["step"] is None
 
-    def test_logs_structured_and_boolean_observations_as_value_json(self, job_tracker):
+        assert loss.tag == "value"
+        assert loss.key == "loss"
+        assert loss.value == pytest.approx(0.5)
+        assert loss.step == 3
+        assert acc.key == "acc"
+        assert acc.value == pytest.approx(0.9)
+        assert acc.step == 0
+
+    def test_logs_structured_and_boolean_observations_as_observations(
+        self, job_tracker
+    ):
         tracker, tmp_path = job_tracker
         tracker.log_value("pred", {"a": 1}, step=5)
         tracker.log_value("flag", True)
 
         pred, flag = _read_events(tmp_path)
-        assert pred["value"]["key"] == "pred"
-        assert json.loads(pred["value"]["value_json"]) == {"a": 1}
-        assert pred["value"]["step"] == 5
-        assert flag["value"]["key"] == "flag"
-        assert json.loads(flag["value"]["value_json"]) is True
-        assert flag["value"]["step"] is None
+
+        assert pred.observation == {"a": 1}
+        assert pred.value is None
+        assert pred.step == 5
+        assert flag.value is True
+        assert flag.observation is None
+
+    def test_events_carry_job_identity(self, job_tracker, monkeypatch):
+        tracker, tmp_path = job_tracker
+        tracker.log_param("model", "mlp")
+
+        [event] = _read_events(tmp_path)
+
+        assert event.tag == "manual_param"
+        assert str(event.trial_id) == os.environ["JERNERICS_TRIAL_ID"]
+
+    def test_missing_identity_env_raises(self, monkeypatch, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}")
+        monkeypatch.setenv("JERNERICS_TRIAL_CONFIG", str(config_path))
+        monkeypatch.setenv("JERNERICS_TRACKING_DIR", str(tmp_path))
+        monkeypatch.setenv("JERNERICS_TRIAL_NUMBER", "7")
+        monkeypatch.delenv("JERNERICS_TRIAL_ID", raising=False)
+
+        with pytest.raises(RuntimeError, match="JERNERICS_TRIAL_ID"):
+            trial_tracker()
+
+    def test_malformed_identity_env_raises(self, monkeypatch, tmp_path):
+        config_path = tmp_path / "config.json"
+        config_path.write_text("{}")
+        monkeypatch.setenv("JERNERICS_TRIAL_CONFIG", str(config_path))
+        monkeypatch.setenv("JERNERICS_TRACKING_DIR", str(tmp_path))
+        monkeypatch.setenv("JERNERICS_TRIAL_NUMBER", "7")
+        monkeypatch.setenv("JERNERICS_TRIAL_ID", "not-a-uuid")
+        monkeypatch.setenv("JERNERICS_EXECUTION_ID", str(uuid.uuid4()))
+
+        with pytest.raises(RuntimeError, match="UUID"):
+            trial_tracker()
 
     def test_logs_artifact_event_and_manifest(self, job_tracker):
         tracker, tmp_path = job_tracker
@@ -110,8 +145,10 @@ class TestJobTracker:
         tracker.log_artifact("model", str(artifact))
 
         [event] = _read_events(tmp_path)
-        assert event["artifact"]["key"] == "model"
-        assert event["artifact"]["filename"] == "model.pt"
+        assert event.tag == "artifact_declaration"
+        assert event.key == "model"
+        assert event.filename == "model.pt"
+        assert event.size_bytes == 7
 
         manifest = tmp_path / "tracking" / "artifacts" / "7.manifest"
         entries = [json.loads(line) for line in manifest.read_text().splitlines()]
@@ -122,8 +159,9 @@ class TestJobTracker:
         tracker.finish({"score": 1.0})
 
         [event] = _read_events(tmp_path)
-        assert event["value"]["key"] == "results"
-        assert json.loads(event["value"]["value_json"]) == {"score": 1.0}
+        assert event.tag == "value"
+        assert event.key == "results"
+        assert event.observation == {"score": 1.0}
 
         with pytest.raises(ValueError):
             tracker.log_value("late", 1.0)
@@ -135,37 +173,22 @@ class TestConsoleTracker:
 
         assert capsys.readouterr().out == "param: model=mlp\n"
 
-    def test_numeric_observation_without_step(self, capsys):
-        ConsoleTracker().log_value("loss", 0.25)
+    def test_log_value_without_step(self, capsys):
+        ConsoleTracker().log_value("loss", 0.5)
 
-        assert capsys.readouterr().out == "[value] loss=0.25\n"
+        assert capsys.readouterr().out == "[value] loss=0.5\n"
 
-    def test_numeric_observation_with_step(self, capsys):
-        ConsoleTracker().log_value("loss", 0.25, step=3)
+    def test_log_value_with_step(self, capsys):
+        ConsoleTracker().log_value("loss", 0.5, step=2)
 
-        assert capsys.readouterr().out == "[step 3] loss=0.25\n"
+        assert capsys.readouterr().out == "[step 2] loss=0.5\n"
 
-    def test_non_numeric_observations_serialize_as_json(self, capsys):
-        tracker = ConsoleTracker()
-        tracker.log_value("note", "ok")
-        tracker.log_value("flag", True)
-        tracker.log_value("none", None)
-        tracker.log_value("xs", [1, 2])
-        tracker.log_value("d", {"a": 1})
+    def test_log_artifact_prints_artifact(self, capsys):
+        ConsoleTracker().log_artifact("model", "/tmp/model.pt")
 
-        out = capsys.readouterr().out
-        assert '[value] note="ok"\n' in out
-        assert "[value] flag=true\n" in out
-        assert "[value] none=null\n" in out
-        assert "[value] xs=[1, 2]\n" in out
-        assert '[value] d={"a": 1}\n' in out
+        assert capsys.readouterr().out == "[artifact] model=/tmp/model.pt\n"
 
-    def test_artifact_output(self, capsys):
-        ConsoleTracker().log_artifact("model.pt", "/tmp/model.pt")
-
-        assert capsys.readouterr().out == "[artifact] model.pt=/tmp/model.pt\n"
-
-    def test_finish_prints_summary(self, capsys):
+    def test_finish_prints_results(self, capsys):
         ConsoleTracker().finish({"score": 0.9, "status": "ok"})
 
         assert capsys.readouterr().out == "results:\n  score=0.9\n  status=ok\n"
