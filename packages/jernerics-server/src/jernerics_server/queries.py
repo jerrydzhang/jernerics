@@ -37,6 +37,10 @@ from jernerics_schema import (
 
 from .store import Store
 
+_CONTEXT_SAMPLE_LIMIT = 5
+"""Context-dimension sample values shown in the data catalog."""
+
+
 _MonitoringLabel = Literal["active", "quiet", "stale", "ended", "unknown"]
 _QUIET_FRACTION = 0.25
 """Heartbeats fresher than this fraction of the stale threshold are
@@ -976,6 +980,65 @@ class QueryService:
                 "objective": row[4],
                 "number": row[5],
                 "generations": row[6],
+            }
+            for row in rows
+        ]
+
+    def context_catalog(self, selection: Selection) -> list[dict[str, Any]]:
+        """Flat context dimensions across the selection's tracked values.
+
+        One row per context key: distinct-value cardinality plus up to
+        five sample values, discovered purely from the stored context
+        JSON via ``json_each`` — no key is special-cased.
+        """
+        where, params = self._trial_scope(selection)
+        _, rows = self._store.query(
+            "SELECT DISTINCT je.key, CAST(je.value AS TEXT) "
+            "FROM tracked_values v "
+            "JOIN executions e ON v.execution_id = e.execution_id "
+            "JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            "CROSS JOIN json_each(v.context) je "
+            f"WHERE {where} ORDER BY je.key, 2",
+            params,
+        )
+        grouped: dict[str, list[str]] = {}
+        for key, value in rows:
+            grouped.setdefault(key, []).append(value)
+        return [
+            {
+                "key": key,
+                "cardinality": len(values),
+                "samples": values[:_CONTEXT_SAMPLE_LIMIT],
+            }
+            for key, values in sorted(grouped.items())
+        ]
+
+    def trial_numbers_objectives(self, selection: Selection) -> list[dict[str, Any]]:
+        """Optimizer-neutral trial rows for study-style figures: number,
+        state, objective, retry identity, timestamps, and flat params in
+        one batched query."""
+        where, params = self._trial_scope(selection)
+        _, rows = self._store.query(
+            "SELECT t.trial_id, t.sweep_id, t.number, t.state, t.objective, "
+            "t.created_ns, t.updated_ns, t.retry_index, "
+            "COALESCE((SELECT json_group_object(p.key, json(p.value_json)) "
+            "FROM trial_params p WHERE p.trial_id = t.trial_id), '{}') "
+            "FROM trials t JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            f"WHERE {where} ORDER BY t.sweep_id, t.number, t.retry_index",
+            params,
+        )
+        return [
+            {
+                "trial_id": row[0],
+                "sweep_id": row[1],
+                "number": row[2],
+                "state": row[3],
+                "objective": row[4],
+                "created_ns": row[5],
+                "updated_ns": row[6],
+                "retry_index": row[7],
+                "params": json.loads(row[8]),
             }
             for row in rows
         ]

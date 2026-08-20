@@ -2,9 +2,11 @@
 
 Deep links: ``/dashboard`` (project catalog), ``/dashboard/project/<name>``
 (workspace sweep grid), ``/dashboard/sweep/<id>``, ``/dashboard/trial/<id>``,
-``/dashboard/execution/<id>``. Unknown paths render the not-found surface.
-``polls`` on a PageSpec is only the route-level default; live pages decide
-from fetched facts (see callbacks.page_content).
+``/dashboard/execution/<id>``, and ``/dashboard/analysis`` (cross-sweep
+analysis; its query string carries the selection token). Unknown paths
+render the not-found surface. ``polls`` on a PageSpec is only the
+route-level default; live pages decide from fetched facts (see
+callbacks.page_content).
 """
 
 from dataclasses import dataclass
@@ -12,9 +14,19 @@ from typing import Literal
 
 ROUTES_BASE = "/dashboard"
 
-PageKind = Literal["project", "workspace", "sweep", "trial", "execution", "not-found"]
+PageKind = Literal[
+    "project",
+    "workspace",
+    "sweep",
+    "trial",
+    "execution",
+    "analysis",
+    "not-found",
+]
 
 _KINDS: tuple[PageKind, ...] = ("sweep", "trial", "execution")
+
+_PROJECT_PREFIX = f"{ROUTES_BASE}/project/"
 
 
 @dataclass(frozen=True)
@@ -31,9 +43,10 @@ def parse_route(pathname: str | None) -> PageSpec:
     path = pathname or f"{ROUTES_BASE}/"
     if path in (ROUTES_BASE, f"{ROUTES_BASE}/"):
         return PageSpec(kind="project")
-    project_prefix = f"{ROUTES_BASE}/project/"
-    if path.startswith(project_prefix):
-        project = path[len(project_prefix) :].strip("/")
+    if path == f"{ROUTES_BASE}/analysis":
+        return PageSpec(kind="analysis")
+    if path.startswith(_PROJECT_PREFIX):
+        project = path[len(_PROJECT_PREFIX) :].strip("/")
         if project:
             return PageSpec(kind="workspace", object_id=project)
     for kind in _KINDS:

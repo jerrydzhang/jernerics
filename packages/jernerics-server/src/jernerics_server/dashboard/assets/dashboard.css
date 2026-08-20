@@ -278,3 +278,58 @@ a.project-row:hover {
   color: #b00020;
   margin: 0;
 }
+
+.nav .nav-link {
+  color: #444;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.nav .nav-link:hover {
+  color: #000;
+}
+
+.analysis-controls {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 0.8rem;
+}
+
+.analysis-controls > * {
+  min-width: 12rem;
+  flex: 1;
+}
+
+.analysis-controls .dash-radiogroup {
+  min-width: 0;
+  flex: none;
+}
+
+.expand-toggle {
+  margin: 0.8rem 0;
+}
+
+.figure-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(26rem, 1fr));
+  gap: 1rem;
+}
+
+.figure-grid h4 {
+  margin: 0 0 0.4rem;
+}
+
+.snippet-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.snippet-row pre {
+  flex: 1;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

@@ -55,6 +55,11 @@ def shell() -> html.Div:
                 className="nav",
                 children=[
                     html.A("jernerics", href=f"{ROUTES_BASE}/", className="brand"),
+                    html.A(
+                        "Analysis",
+                        href=f"{ROUTES_BASE}/analysis",
+                        className="nav-link",
+                    ),
                     dcc.Dropdown(
                         id="project-picker",
                         placeholder="Project…",

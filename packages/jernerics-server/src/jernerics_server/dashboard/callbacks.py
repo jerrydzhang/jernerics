@@ -11,10 +11,11 @@ never poll.
 import time
 
 import dash
-from dash import Input, Output, State
+from dash import Input, Output, State, no_update
 from dash.exceptions import PreventUpdate
 
-from . import layout
+from . import analysis, layout
+from .components import Error
 from .routes import parse_route
 from .service import DashboardService, TrialDetail
 
@@ -71,6 +72,10 @@ def page_content(
                 False,
             )
         return layout.execution_page(detail, now), detail.context["ended_ns"] is None
+    if spec.kind == "analysis":
+        # Interactive, user-driven exploration: no polling, so tab state
+        # survives until the next navigation.
+        return analysis.analysis_page(), False
     return layout.not_found_page(pathname or ""), False
 
 
@@ -120,6 +125,18 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             selected_sweeps=(selection or {}).get("sweeps") or [],
         )
         return page, not polls
+
+    @app.callback(
+        Output("url", "search", allow_duplicate=True),
+        Input("url", "pathname"),
+        State("url", "search"),
+        prevent_initial_call=True,
+    )
+    def _clear_search_off_analysis(pathname: str | None, search: str | None):
+        """Leaving the analysis page drops its ?sel= token from the URL."""
+        if search and parse_route(pathname).kind != "analysis":
+            return ""
+        raise PreventUpdate
 
     @app.callback(
         Output("project-picker", "options"),
@@ -188,3 +205,157 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _show_lineage(rows: list[dict] | None, data: dict | None):
         return lineage_panel(rows, data)
+
+    # -- Analysis page (jernerics-h5d.13) ---------------------------------
+
+    @app.callback(
+        Output("analysis-selection-store", "data"),
+        Output("analysis-expand", "value"),
+        Output("analysis-error", "children"),
+        Input("url", "pathname"),
+        Input("url", "search"),
+        State("project-store", "data"),
+        State("analysis-selection-store", "data"),
+    )
+    def _hydrate_analysis_tray(
+        pathname: str | None,
+        search: str | None,
+        project: str | None,
+        current: dict | None,
+    ):
+        tray, expand, error = analysis.hydrate_tray(
+            service, project, pathname, search, current
+        )
+        if error is not None:
+            return no_update, no_update, Error(error)
+        if tray is None:
+            raise PreventUpdate
+        return tray, expand or [], ""
+
+    @app.callback(
+        Output("analysis-selection-store", "data", allow_duplicate=True),
+        Input("analysis-sweep-grid", "selectedRows"),
+        Input("analysis-family-grid", "selectedRows"),
+        Input("analysis-expand", "value"),
+        State("analysis-selection-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_analysis_tray(
+        sweep_rows: list[dict] | None,
+        family_rows: list[dict] | None,
+        expand_values: list[str] | None,
+        current: dict | None,
+    ):
+        return analysis.tray_from_picks(sweep_rows, family_rows, expand_values, current)
+
+    @app.callback(
+        Output("url", "search"),
+        Input("analysis-selection-store", "data"),
+        State("project-store", "data"),
+        State("url", "search"),
+        prevent_initial_call=True,
+    )
+    def _write_analysis_search(
+        tray: dict | None, project: str | None, current_search: str | None
+    ):
+        target = analysis.search_from_tray(service, project, tray, current_search)
+        if target is None:
+            raise PreventUpdate
+        return target
+
+    @app.callback(
+        Output("analysis-sweep-grid", "rowData"),
+        Output("analysis-sweep-grid", "selectedRows"),
+        Input("project-store", "data"),
+        Input("analysis-selection-store", "data"),
+    )
+    def _load_analysis_sweeps(project: str | None, tray: dict | None):
+        if not project:
+            return [], []
+        return analysis.sweep_picker_rows(service.sweep_overview(project), tray)
+
+    @app.callback(
+        Output("analysis-family-grid", "rowData"),
+        Output("analysis-family-grid", "selectedRows"),
+        Input("analysis-selection-store", "data"),
+        State("project-store", "data"),
+    )
+    def _load_analysis_families(tray: dict | None, project: str | None):
+        if not project:
+            return [], []
+        return analysis.family_picker_rows(
+            service.analysis_families(project, (tray or {}).get("sweeps") or []),
+            tray,
+        )
+
+    @app.callback(
+        Output("analysis-tray-summary", "children"),
+        Input("analysis-selection-store", "data"),
+    )
+    def _summarize_analysis_tray(tray: dict | None):
+        return analysis.tray_summary(tray)
+
+    @app.callback(
+        Output("analysis-catalog", "children"),
+        Input("analysis-selection-store", "data"),
+        State("project-store", "data"),
+    )
+    def _render_analysis_catalog(tray: dict | None, project: str | None):
+        return analysis.catalog_tab(service, project, tray)
+
+    @app.callback(
+        Output("analysis-series-figure", "figure"),
+        Output("analysis-key", "options"),
+        Output("analysis-color", "options"),
+        Output("analysis-facet", "options"),
+        Input("analysis-selection-store", "data"),
+        Input("analysis-key", "value"),
+        Input("analysis-color", "value"),
+        Input("analysis-facet", "value"),
+        Input("analysis-reduction", "value"),
+        State("project-store", "data"),
+    )
+    def _render_analysis_series(
+        tray: dict | None,
+        key: str | None,
+        color: str | None,
+        facet: str | None,
+        reduction: str | None,
+        project: str | None,
+    ):
+        return analysis.series_outputs(
+            service, project, tray, key, color, facet, reduction
+        )
+
+    @app.callback(
+        Output("analysis-points", "children"),
+        Input("analysis-selection-store", "data"),
+        State("project-store", "data"),
+    )
+    def _render_analysis_points(tray: dict | None, project: str | None):
+        return analysis.points_tab(service, project, tray)
+
+    @app.callback(
+        Output("analysis-optuna", "children"),
+        Output("analysis-contour-x", "options"),
+        Output("analysis-contour-y", "options"),
+        Input("analysis-selection-store", "data"),
+        Input("analysis-contour-x", "value"),
+        Input("analysis-contour-y", "value"),
+        State("project-store", "data"),
+    )
+    def _render_analysis_optuna(
+        tray: dict | None,
+        x_param: str | None,
+        y_param: str | None,
+        project: str | None,
+    ):
+        return analysis.optuna_tab_content(service, project, tray, x_param, y_param)
+
+    @app.callback(
+        Output("analysis-python", "children"),
+        Input("analysis-selection-store", "data"),
+        State("project-store", "data"),
+    )
+    def _render_analysis_python(tray: dict | None, project: str | None):
+        return analysis.python_tab(service, project, tray)

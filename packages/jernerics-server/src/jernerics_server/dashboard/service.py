@@ -11,19 +11,25 @@ never schema-package wire models.
 """
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from jernerics_schema import (
     ExecutionRecord,
+    Page,
     ProvenanceRecord,
     Selection,
     TrialParamRecord,
     ValueCatalogRecord,
+    ValueRecord,
 )
 
 from jernerics_server.queries import QueryService
+
+ANALYSIS_REDUCTIONS = ("none", "mean", "min", "max")
+"""Explicit execution-reduction choices for the series overlay; "none"
+shows every (trial, execution) series as logged."""
 
 
 @dataclass(frozen=True)
@@ -333,3 +339,328 @@ class DashboardService:
             provenance=self.queries.provenance(sweep_selection),
             resolved_config=resolved,
         )
+
+    # -- Analysis page (jernerics-h5d.13) ---------------------------------
+
+    _PAGE_FOLLOW_LIMIT = 100
+    """Pages followed per analysis read before giving up (100k records)."""
+
+    def _follow_pages(
+        self,
+        fetch: Callable[..., tuple[list[Any], str | None]],
+        selection: Selection,
+    ) -> list[Any]:
+        """Follow keyset pages of a paginated query to exhaustion."""
+        page = Page(limit=1000)
+        token: str | None = None
+        records: list[Any] = []
+        for _ in range(self._PAGE_FOLLOW_LIMIT):
+            batch, token = fetch(selection, page, token)
+            records.extend(batch)
+            if token is None:
+                return records
+        raise ValueError("analysis read exceeded the pagination follow limit")
+
+    def _follow_values(
+        self, selection: Selection, keys: tuple[str, ...] | None
+    ) -> list[ValueRecord]:
+        return self._follow_pages(
+            lambda sel, page, token: self.queries.values(
+                sel, keys=keys, page=page, page_token=token
+            ),
+            selection,
+        )
+
+    def _follow_params(self, selection: Selection) -> list[TrialParamRecord]:
+        return self._follow_pages(
+            lambda sel, page, token: self.queries.trial_params(
+                sel, page=page, page_token=token
+            ),
+            selection,
+        )
+
+    def _sweep_names(self, project: str) -> dict[str, str]:
+        records = self._follow_pages(
+            lambda sel, page, token: self.queries.sweeps(
+                sel, page=page, page_token=token
+            ),
+            Selection(project=project),
+        )
+        return {str(record.sweep_id): record.name for record in records}
+
+    def analysis_selection(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> Selection:
+        """Typed selection for the analysis tray.
+
+        The tray holds sweep ids, explicit trial ids, retry-family roots
+        picked in the family grid, and the family-expansion toggle.
+        Expansion is resolved client-of-SQL here: with the toggle on,
+        roots expand to every generation via :meth:`QueryService.lineage`;
+        with it off, a picked family contributes only its current trial.
+        """
+        tray = tray or {}
+        if not project:
+            raise ValueError("no project selected")
+        trials = [uuid.UUID(value) for value in tray.get("trials") or ()]
+        families = [uuid.UUID(value) for value in tray.get("families") or ()]
+        if families:
+            family = Selection(project=project, retry_roots=tuple(families))
+            if tray.get("expand"):
+                trials.extend(
+                    record.trial_id for record in self.queries.lineage(family)
+                )
+            else:
+                trials.extend(
+                    uuid.UUID(row["current_trial"])
+                    for row in self.queries.trial_families(family)
+                )
+        return Selection(
+            project=project,
+            sweeps=tuple(uuid.UUID(v) for v in tray.get("sweeps") or ()) or None,
+            trials=tuple(trials) or None,
+            executions=tuple(uuid.UUID(v) for v in tray.get("executions") or ())
+            or None,
+        )
+
+    def analysis_families(
+        self, project: str | None, sweep_ids: Sequence[str]
+    ) -> list[dict[str, Any]]:
+        """Family-picker rows (one per retry root) for the given sweeps."""
+        if not project or not sweep_ids:
+            return []
+        selection = Selection(
+            project=project, sweeps=tuple(uuid.UUID(s) for s in sweep_ids)
+        )
+        return self.queries.trial_families(selection)
+
+    def analysis_value_keys(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Value keys under the selection: kind, volume, and whether the
+        key logs more than step 0 (series vs single point)."""
+        if not project:
+            return []
+        selection = self.analysis_selection(project, tray)
+        return [
+            {
+                "key": record.key,
+                "kind": record.kind,
+                "points": record.n_points,
+                "trials": record.n_trials,
+                "steps": (record.latest_step or 0) > 0,
+            }
+            for record in self.queries.value_catalog(selection)
+        ]
+
+    def analysis_context_dims(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        if not project:
+            return []
+        return self.queries.context_catalog(self.analysis_selection(project, tray))
+
+    def analysis_param_coverage(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Param key x sweep matrix: where each param exists, missing
+        cells marked ``None`` (never silently dropped)."""
+        if not project:
+            return {"sweeps": [], "names": {}, "rows": []}
+        selection = self.analysis_selection(project, tray)
+        names = self._sweep_names(project)
+        sweep_of = {
+            str(record.trial_id): str(record.sweep_id)
+            for record in self.queries.lineage(selection)
+        }
+        coverage: dict[str, dict[str, dict[str, Any]]] = {}
+        for record in self._follow_params(selection):
+            sweep = sweep_of.get(str(record.trial_id))
+            if sweep is None:
+                continue
+            cell = coverage.setdefault(record.key, {}).setdefault(
+                sweep, {"trials": 0, "kinds": set()}
+            )
+            cell["trials"] += 1
+            cell["kinds"].add(record.kind)
+        sweep_ids = sorted(
+            set(sweep_of.values()) | {str(value) for value in selection.sweeps or ()}
+        )
+        return {
+            "sweeps": sweep_ids,
+            "names": names,
+            "rows": [
+                {
+                    "key": key,
+                    "cells": {
+                        sweep: (
+                            {
+                                "trials": cell["trials"],
+                                "kinds": ",".join(sorted(cell["kinds"])),
+                            }
+                            if (cell := per_sweep.get(sweep)) is not None
+                            else None
+                        )
+                        for sweep in sweep_ids
+                    },
+                }
+                for key, per_sweep in sorted(coverage.items())
+            ],
+        }
+
+    def analysis_artifacts(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        if not project:
+            return []
+        records = self._follow_pages(
+            lambda sel, page, token: self.queries.artifacts(
+                sel, page=page, page_token=token
+            ),
+            self.analysis_selection(project, tray),
+        )
+        grouped: dict[str, dict[str, Any]] = {}
+        for record in records:
+            entry = grouped.setdefault(
+                record.key, {"key": record.key, "count": 0, "sources": set()}
+            )
+            entry["count"] += 1
+            entry["sources"].add(record.source)
+        return [
+            {**entry, "sources": sorted(entry["sources"])}
+            for entry in sorted(grouped.values(), key=lambda e: e["key"])
+        ]
+
+    def analysis_series(
+        self,
+        project: str | None,
+        tray: dict[str, Any] | None,
+        key: str | None,
+        reduction: str = "none",
+    ) -> list[dict[str, Any]]:
+        """Numeric series for one value key under the selection.
+
+        ``reduction="none"`` returns one series per (trial, execution)
+        pair — every logged point, never a silently chosen latest value.
+        ``mean``/``min``/``max`` fold executions within each trial, per
+        step, as an explicit user-chosen reduction.
+        """
+        if not project or not key:
+            return []
+        if reduction not in ANALYSIS_REDUCTIONS:
+            raise ValueError(f"unknown reduction {reduction!r}")
+        selection = self.analysis_selection(project, tray)
+        numeric: list[tuple[ValueRecord, float]] = []
+        for record in self._follow_values(selection, (key,)):
+            if isinstance(record.value, int | float) and not isinstance(
+                record.value, bool
+            ):
+                numeric.append((record, float(record.value)))
+        grouped: dict[tuple[str, str | None], list[tuple[ValueRecord, float]]] = {}
+        for record, number in numeric:
+            identity = (
+                (str(record.trial_id), str(record.execution_id))
+                if reduction == "none"
+                else (str(record.trial_id), None)
+            )
+            grouped.setdefault(identity, []).append((record, number))
+        series: list[dict[str, Any]] = []
+        for (trial, execution), group in sorted(grouped.items()):
+            by_step: dict[int, list[float]] = {}
+            context: dict[str, Any] = {}
+            for record, number in group:
+                by_step.setdefault(record.step, []).append(number)
+                if not context and record.context is not None:
+                    context = record.context.root
+            if reduction == "mean":
+                points = [
+                    (step, sum(values) / len(values))
+                    for step, values in sorted(by_step.items())
+                ]
+            elif reduction == "min":
+                points = [(step, min(v)) for step, v in sorted(by_step.items())]
+            elif reduction == "max":
+                points = [(step, max(v)) for step, v in sorted(by_step.items())]
+            else:
+                points = [(step, values[0]) for step, values in sorted(by_step.items())]
+            series.append(
+                {
+                    "trial": trial,
+                    "execution": execution,
+                    "points": points,
+                    "context": context,
+                }
+            )
+        return series
+
+    def analysis_points(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Grid data for the points tab: non-step value keys (kind and
+        per-trial payloads — several executions' points are all kept) and
+        flat params per trial for comparison."""
+        empty = {
+            "trials": [],
+            "value_keys": [],
+            "values": {},
+            "param_keys": [],
+            "params": {},
+        }
+        if not project:
+            return empty
+        selection = self.analysis_selection(project, tray)
+        value_keys = [
+            {"key": record.key, "kind": record.kind}
+            for record in self.queries.value_catalog(selection)
+            if (record.latest_step or 0) == 0
+        ]
+        trials = [
+            {
+                "trial_id": str(record.trial_id),
+                "sweep_id": str(record.sweep_id),
+                "number": record.number,
+            }
+            for record in sorted(
+                self.queries.lineage(selection),
+                key=lambda record: (str(record.sweep_id), record.number),
+            )
+        ]
+        values: dict[str, dict[str, list[Any]]] = {}
+        if value_keys:
+            wanted = tuple(entry["key"] for entry in value_keys)
+            for record in self._follow_values(selection, wanted):
+                payload = (
+                    record.observation
+                    if record.observation is not None
+                    else record.value
+                )
+                values.setdefault(str(record.trial_id), {}).setdefault(
+                    record.key, []
+                ).append(payload)
+        params: dict[str, dict[str, Any]] = {}
+        for record in self._follow_params(selection):
+            params.setdefault(str(record.trial_id), {})[record.key] = record.value
+        return {
+            "trials": trials,
+            "value_keys": value_keys,
+            "values": values,
+            "param_keys": sorted(
+                {key for per_trial in params.values() for key in per_trial}
+            ),
+            "params": params,
+        }
+
+    def analysis_trials(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Optimizer-neutral trial rows (number, state, objective, flat
+        params, timestamps) with sweep names attached."""
+        if not project:
+            return []
+        rows = self.queries.trial_numbers_objectives(
+            self.analysis_selection(project, tray)
+        )
+        names = self._sweep_names(project)
+        for row in rows:
+            row["sweep_name"] = names.get(row["sweep_id"], row["sweep_id"])
+        return rows
