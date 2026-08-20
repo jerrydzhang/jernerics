@@ -134,6 +134,16 @@ def _monitoring(
     return "stale"
 
 
+_ZERO_COUNTS: dict[str, int] = {
+    "active": 0,
+    "quiet": 0,
+    "stale": 0,
+    "unknown": 0,
+    "succeeded": 0,
+    "failed": 0,
+}
+
+
 class QueryService:
     """Every domain read over the v3 store, shared by HTTP and callbacks."""
 
@@ -703,3 +713,371 @@ class QueryService:
             )
             for row in rows
         ]
+
+    def _monitoring_case(self) -> tuple[str, list[int]]:
+        """SQL CASE + params mirroring :func:`_monitoring` exactly."""
+        now_ns = time.time_ns()
+        stale_ns = int(self.heartbeat_stale_s * 1_000_000_000)
+        quiet_ns = int(stale_ns * _QUIET_FRACTION)
+        sql = (
+            "CASE WHEN e.ended_ns IS NOT NULL THEN 'ended' "
+            "WHEN e.last_heartbeat_ns IS NULL THEN 'unknown' "
+            "WHEN ? - e.last_heartbeat_ns <= ? THEN 'active' "
+            "WHEN ? - e.last_heartbeat_ns <= ? THEN 'quiet' "
+            "ELSE 'stale' END"
+        )
+        return sql, [now_ns, quiet_ns, now_ns, stale_ns]
+
+    def project_catalog(self) -> list[dict[str, Any]]:
+        """Per-project operational rollup: execution health counts, the most
+        recently updated sweep, and last activity across all records.
+
+        Three batched queries (no per-project loops); monitoring labels are
+        derived in SQL with the same thresholds as :func:`_monitoring`.
+        """
+        case_sql, case_params = self._monitoring_case()
+        _, count_rows = self._store.query(
+            "SELECT ex.project, "
+            "SUM(ex.label = 'active'), SUM(ex.label = 'quiet'), "
+            "SUM(ex.label = 'stale'), SUM(ex.label = 'unknown'), "
+            "SUM(ex.label = 'ended' AND ex.outcome = 'success'), "
+            "SUM(ex.label = 'ended' AND ex.outcome = 'failure') "
+            "FROM (SELECT s.project AS project, e.outcome AS outcome, "
+            f"{case_sql} AS label "
+            "FROM executions e JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sweeps s ON t.sweep_id = s.sweep_id) ex "
+            "GROUP BY ex.project",
+            case_params,
+        )
+        counts = {
+            row[0]: dict(
+                zip(
+                    ("active", "quiet", "stale", "unknown", "succeeded", "failed"),
+                    (value or 0 for value in row[1:]),
+                    strict=True,
+                )
+            )
+            for row in count_rows
+        }
+        _, activity_rows = self._store.query(
+            "SELECT project, MAX(updated_ns) FROM ("
+            "SELECT project, updated_ns FROM sweeps "
+            "UNION ALL SELECT s.project, t.updated_ns FROM trials t "
+            "JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            "UNION ALL SELECT s.project, e.updated_ns FROM executions e "
+            "JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sweeps s ON t.sweep_id = s.sweep_id) "
+            "GROUP BY project"
+        )
+        activity = {row[0]: row[1] for row in activity_rows}
+        _, sweep_rows = self._store.query(
+            "SELECT s.project, s.name FROM sweeps s "
+            "JOIN (SELECT project, MAX(updated_ns) AS mx FROM sweeps "
+            "GROUP BY project) m ON m.project = s.project "
+            "AND s.updated_ns = m.mx ORDER BY s.project, s.name"
+        )
+        recent: dict[str, str] = {}
+        for row in sweep_rows:
+            recent.setdefault(row[0], row[1])
+        return [
+            {
+                "project": project,
+                **(_ZERO_COUNTS | counts.get(project, {})),
+                "recent_sweep": recent.get(project),
+                "last_activity_ns": activity.get(project),
+            }
+            for project in sorted(activity)
+        ]
+
+    def sweep_overview(self, selection: Selection) -> list[dict[str, Any]]:
+        """Per-sweep operational rollup: submission/job facts, execution
+        monitoring distribution, and trial liveness counts in one query."""
+        sweep_ids = self._selected_sweep_ids(selection)
+        if sweep_ids == []:
+            return []
+        scope = "s.project = ?"
+        params: list[Any] = [selection.project]
+        if sweep_ids is not None:
+            params.extend(sweep_ids)
+            scope += f" AND s.sweep_id IN ({_placeholders(len(sweep_ids))})"
+        case_sql, case_params = self._monitoring_case()
+        _, rows = self._store.query(
+            "WITH sel AS ("
+            "SELECT s.sweep_id AS sweep_id, s.name AS name, s.state AS state, "
+            "s.updated_ns AS updated_ns FROM sweeps s "
+            f"WHERE {scope}), "
+            "latest_sub AS ("
+            "SELECT sweep_id, submitted_ns, backend, expected_trials FROM ("
+            "SELECT sub.sweep_id AS sweep_id, sub.submitted_ns AS submitted_ns, "
+            "sub.backend AS backend, sub.expected_trials AS expected_trials, "
+            "ROW_NUMBER() OVER (PARTITION BY sub.sweep_id ORDER BY "
+            "COALESCE(sub.submitted_ns, sub.created_ns) DESC, "
+            "sub.submission_id) AS rn "
+            "FROM submissions sub JOIN sel ON sub.sweep_id = sel.sweep_id) "
+            "WHERE rn = 1), "
+            "jobs AS ("
+            "SELECT sub.sweep_id AS sweep_id, COUNT(*) AS n_jobs "
+            "FROM submission_jobs j JOIN submissions sub "
+            "ON j.submission_id = sub.submission_id "
+            "JOIN sel ON sub.sweep_id = sel.sweep_id GROUP BY sub.sweep_id), "
+            "mon AS ("
+            "SELECT x.sweep_id AS sweep_id, COUNT(*) AS started, "
+            "SUM(x.label = 'ended') AS terminal, "
+            "SUM(x.label = 'active') AS n_active, "
+            "SUM(x.label = 'quiet') AS n_quiet, "
+            "SUM(x.label = 'stale') AS n_stale, "
+            "SUM(x.label = 'unknown') AS n_unknown, "
+            "SUM(x.label = 'ended' AND x.outcome = 'success') AS n_succeeded, "
+            "SUM(x.label = 'ended' AND x.outcome = 'failure') AS n_failed "
+            "FROM (SELECT t.sweep_id AS sweep_id, e.outcome AS outcome, "
+            f"{case_sql} AS label "
+            "FROM executions e JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sel ON t.sweep_id = sel.sweep_id) x GROUP BY x.sweep_id), "
+            "trial_states AS ("
+            "SELECT t.sweep_id AS sweep_id, "
+            "SUM(t.state = 'waiting') AS waiting, "
+            "SUM(t.state = 'running') AS running "
+            "FROM trials t JOIN sel ON t.sweep_id = sel.sweep_id "
+            "GROUP BY t.sweep_id) "
+            "SELECT sel.sweep_id, sel.name, sel.state, ls.submitted_ns, "
+            "ls.backend, ls.expected_trials, COALESCE(j.n_jobs, 0), "
+            "COALESCE(m.started, 0), COALESCE(m.terminal, 0), "
+            "COALESCE(m.n_active, 0), COALESCE(m.n_quiet, 0), "
+            "COALESCE(m.n_stale, 0), COALESCE(m.n_unknown, 0), "
+            "COALESCE(m.n_succeeded, 0), COALESCE(m.n_failed, 0), "
+            "COALESCE(ts.waiting, 0), COALESCE(ts.running, 0) "
+            "FROM sel LEFT JOIN latest_sub ls ON ls.sweep_id = sel.sweep_id "
+            "LEFT JOIN jobs j ON j.sweep_id = sel.sweep_id "
+            "LEFT JOIN mon m ON m.sweep_id = sel.sweep_id "
+            "LEFT JOIN trial_states ts ON ts.sweep_id = sel.sweep_id "
+            "ORDER BY sel.updated_ns DESC, sel.sweep_id",
+            [*params, *case_params],
+        )
+        return [
+            dict(
+                zip(
+                    (
+                        "sweep_id",
+                        "name",
+                        "state",
+                        "latest_submitted_ns",
+                        "backend",
+                        "expected_trials",
+                        "submitted_jobs",
+                        "started",
+                        "terminal",
+                        "active",
+                        "quiet",
+                        "stale",
+                        "unknown",
+                        "succeeded",
+                        "failed",
+                        "waiting_trials",
+                        "running_trials",
+                    ),
+                    row,
+                    strict=True,
+                )
+            )
+            for row in rows
+        ]
+
+    def submission_jobs(self, selection: Selection) -> list[dict[str, Any]]:
+        """Submission rows with their scheduler jobs attached (LEFT JOIN so
+        job-less submissions stay visible); one dict per job-or-submission."""
+        sweep_ids = self._selected_sweep_ids(selection)
+        if sweep_ids == []:
+            return []
+        clauses = ["s.project = ?"]
+        params: list[Any] = [selection.project]
+        if sweep_ids is not None:
+            params.extend(sweep_ids)
+            clauses.append(f"sub.sweep_id IN ({_placeholders(len(sweep_ids))})")
+        _, rows = self._store.query(
+            "SELECT sub.submission_id, sub.backend, sub.state, "
+            "sub.submitted_ns, sub.expected_trials, j.job_id, "
+            "j.scheduler_job_id, j.role, j.state "
+            "FROM submissions sub JOIN sweeps s ON sub.sweep_id = s.sweep_id "
+            "LEFT JOIN submission_jobs j ON j.submission_id = sub.submission_id "
+            f"WHERE {' AND '.join(clauses)} "
+            "ORDER BY COALESCE(sub.submitted_ns, sub.created_ns), "
+            "sub.submission_id, j.scheduler_job_id",
+            params,
+        )
+        return [
+            dict(
+                zip(
+                    (
+                        "submission_id",
+                        "backend",
+                        "submission_state",
+                        "submitted_ns",
+                        "expected_trials",
+                        "job_id",
+                        "scheduler_job_id",
+                        "role",
+                        "job_state",
+                    ),
+                    row,
+                    strict=True,
+                )
+            )
+            for row in rows
+        ]
+
+    def execution_progress(self, selection: Selection) -> list[dict[str, Any]]:
+        """Explicit progress rows (current/total/unit) for the selection's
+        executions, with ended_ns so callers can keep in-flight rows only."""
+        where, params = self._trial_scope(selection)
+        _, rows = self._store.query(
+            "SELECT p.execution_id, p.current, p.total, p.unit, e.ended_ns "
+            "FROM execution_progress p "
+            "JOIN executions e ON p.execution_id = e.execution_id "
+            "JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            f"WHERE {where} ORDER BY p.execution_id",
+            params,
+        )
+        return [
+            {
+                "execution_id": row[0],
+                "current": row[1],
+                "total": row[2],
+                "unit": row[3],
+                "ended_ns": row[4],
+            }
+            for row in rows
+        ]
+
+    def trial_families(self, selection: Selection) -> list[dict[str, Any]]:
+        """One row per retry family (root trial): the current (latest
+        generation) trial with its state/objective plus generation count."""
+        where, params = self._trial_scope(selection)
+        _, rows = self._store.query(
+            "SELECT trial_id, retry_root_trial_id, retry_index, state, "
+            "objective, number, generations FROM ("
+            "SELECT t.trial_id AS trial_id, "
+            "t.retry_root_trial_id AS retry_root_trial_id, "
+            "t.retry_index AS retry_index, t.state AS state, "
+            "t.objective AS objective, t.number AS number, "
+            "ROW_NUMBER() OVER (PARTITION BY t.retry_root_trial_id "
+            "ORDER BY t.retry_index DESC, t.trial_id) AS rn, "
+            "COUNT(*) OVER (PARTITION BY t.retry_root_trial_id) AS generations "
+            "FROM trials t JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            f"WHERE {where}) WHERE rn = 1 ORDER BY retry_root_trial_id",
+            params,
+        )
+        return [
+            {
+                "root": row[1],
+                "current_trial": row[0],
+                "retry_index": row[2],
+                "state": row[3],
+                "objective": row[4],
+                "number": row[5],
+                "generations": row[6],
+            }
+            for row in rows
+        ]
+
+    def sweep_context(self, sweep_id: uuid.UUID) -> dict[str, Any] | None:
+        """Identity facts for one sweep (deep-link entry point)."""
+        _, rows = self._store.query(
+            "SELECT sweep_id, project, name, state FROM sweeps WHERE sweep_id = ?",
+            [str(sweep_id)],
+        )
+        if not rows:
+            return None
+        sweep_id_text, project, name, state = rows[0]
+        return {
+            "sweep_id": sweep_id_text,
+            "project": project,
+            "name": name,
+            "state": state,
+        }
+
+    def trial_context(self, trial_id: uuid.UUID) -> dict[str, Any] | None:
+        """Identity + lineage facts for one trial (deep-link entry point)."""
+        _, rows = self._store.query(
+            "SELECT t.trial_id, t.sweep_id, t.number, t.state, t.objective, "
+            "t.retry_of_trial_id, t.retry_root_trial_id, t.retry_index, "
+            "s.project, s.name, s.state "
+            "FROM trials t JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            "WHERE t.trial_id = ?",
+            [str(trial_id)],
+        )
+        if not rows:
+            return None
+        keys = (
+            "trial_id",
+            "sweep_id",
+            "number",
+            "state",
+            "objective",
+            "retry_of_trial_id",
+            "retry_root_trial_id",
+            "retry_index",
+            "project",
+            "sweep_name",
+            "sweep_state",
+        )
+        return dict(zip(keys, rows[0], strict=True))
+
+    def execution_context(self, execution_id: uuid.UUID) -> dict[str, Any] | None:
+        """Every stored fact for one execution plus its trial/sweep context,
+        the derived monitoring label, and its explicit progress row."""
+        _, rows = self._store.query(
+            "SELECT e.execution_id, e.trial_id, e.hostname, e.started_ns, "
+            "e.ended_ns, e.last_heartbeat_ns, e.last_observation_ns, "
+            "e.outcome, e.exit_code, e.failure_kind, e.failure_summary, "
+            "t.sweep_id, t.number, t.state, t.objective, "
+            "t.retry_of_trial_id, t.retry_root_trial_id, t.retry_index, "
+            "s.project, s.name, s.state "
+            "FROM executions e JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            "WHERE e.execution_id = ?",
+            [str(execution_id)],
+        )
+        if not rows:
+            return None
+        keys = (
+            "execution_id",
+            "trial_id",
+            "hostname",
+            "started_ns",
+            "ended_ns",
+            "last_heartbeat_ns",
+            "last_observation_ns",
+            "outcome",
+            "exit_code",
+            "failure_kind",
+            "failure_summary",
+            "sweep_id",
+            "number",
+            "trial_state",
+            "objective",
+            "retry_of_trial_id",
+            "retry_root_trial_id",
+            "retry_index",
+            "project",
+            "sweep_name",
+            "sweep_state",
+        )
+        row = rows[0]
+        context = dict(zip(keys, row, strict=True))
+        context["monitoring"] = _monitoring(row[4], row[5], self.heartbeat_stale_s)
+        _, progress_rows = self._store.query(
+            "SELECT current, total, unit FROM execution_progress "
+            "WHERE execution_id = ?",
+            [str(execution_id)],
+        )
+        context["progress"] = (
+            {
+                "current": progress_rows[0][0],
+                "total": progress_rows[0][1],
+                "unit": progress_rows[0][2],
+            }
+            if progress_rows
+            else None
+        )
+        return context

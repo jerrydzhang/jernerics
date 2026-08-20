@@ -296,14 +296,20 @@ class TestRoutesAndPages:
         assert parse_route("/dashboard/execution/abc").kind == "execution"
         assert parse_route("/dashboard/whatever").kind == "not-found"
 
-    def test_object_pages_show_id_and_construction_placeholder(self, tmp_path):
+    def test_object_pages_with_unknown_ids_render_empty_surface(self, tmp_path):
         client = _build(tmp_path)
         service = _ctx(client).service
-        page, polls = page_content("/dashboard/sweep/0123456789abcdef", service)
-        rendered = str(page)
-        assert "0123456789abcdef" in rendered
-        assert "view under construction (h5d.12/13/14)" in rendered
-        assert polls is False
+        for kind in ("sweep", "trial", "execution"):
+            page, polls = page_content(f"/dashboard/{kind}/0123456789abcdef", service)
+            rendered = str(page)
+            assert "0123456789abcdef" in rendered
+            assert "Nothing here yet" in rendered
+            assert polls is False
+
+    def test_workspace_route_parses(self):
+        spec = parse_route("/dashboard/project/ops")
+        assert spec.kind == "workspace"
+        assert spec.object_id == "ops"
 
     def test_tray_summary_counts_selected_sweeps(self):
         assert tray_summary(None) == "0 sweep(s) in tray"

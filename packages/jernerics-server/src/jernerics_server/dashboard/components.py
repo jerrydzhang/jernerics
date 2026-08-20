@@ -1,11 +1,85 @@
-"""Shared presentational pieces: loading, error, and empty surfaces."""
+"""Shared presentational pieces: badges, tables, and time formatting."""
 
+import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 from dash import dcc, html
+from dash.development.base_component import Component
+
+UNKNOWN = "unknown"
+MISSING = "—"
 
 
-def Loading(*children: html.Base | str) -> dcc.Loading:
+def short_id(identifier: str | None) -> str:
+    """Compact identity for grids and tables (first 8 hex chars)."""
+    if not identifier:
+        return MISSING
+    return identifier.replace("-", "")[:8]
+
+
+def relative_time(ns: int | None, now_ns: int | None = None) -> str:
+    """ "3m ago"-style recency; ``unknown`` when the fact is missing."""
+    if ns is None:
+        return UNKNOWN
+    now_ns = time.time_ns() if now_ns is None else now_ns
+    seconds = max(0, (now_ns - ns) // 1_000_000_000)
+    if seconds < 10:
+        return "just now"
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86_400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86_400}d ago"
+
+
+def absolute_time(ns: int | None) -> str:
+    """UTC wall-clock rendering; ``unknown`` when the fact is missing."""
+    if ns is None:
+        return UNKNOWN
+    moment = datetime.fromtimestamp(ns / 1_000_000_000, tz=UTC)
+    return moment.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def time_cell(ns: int | None, now_ns: int) -> str:
+    """Absolute plus relative recency in one table cell string."""
+    if ns is None:
+        return UNKNOWN
+    return f"{absolute_time(ns)} ({relative_time(ns, now_ns)})"
+
+
+def datetime_to_ns(moment: datetime) -> int:
+    """Exact datetime-to-nanoseconds (no float epoch loss)."""
+    delta = moment - datetime(1970, 1, 1, tzinfo=UTC)
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + (
+        delta.microseconds * 1_000
+    )
+
+
+def Badge(label: str, *, kind: str | None = None) -> html.Span:
+    """State/monitoring pill; the CSS class comes from ``kind`` (default
+    the label's first word)."""
+    css_kind = kind or label.split()[0]
+    return html.Span(label, className=f"badge badge-{css_kind}")
+
+
+def DataTable(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str | int | float | Component | None]],
+) -> html.Table:
+    """Plain string-matrix table; cells may be Dash components."""
+    return html.Table(
+        [
+            html.Thead(html.Tr([html.Th(header) for header in headers])),
+            html.Tbody([html.Tr([html.Td(cell) for cell in row]) for row in rows]),
+        ],
+        className="data-table",
+    )
+
+
+def Loading(*children: Component | str) -> dcc.Loading:
     """Wrap content in the standard spinner surface."""
     return dcc.Loading(children=list(children), parent_style={"minHeight": "12rem"})
 
@@ -23,19 +97,4 @@ def Empty(message: str) -> html.Div:
     return html.Div(
         [html.H3("Nothing here yet"), html.P(message)],
         className="surface surface-empty",
-    )
-
-
-def UnderConstruction(label: str, lines: Sequence[str] = ()) -> html.Div:
-    """Placeholder surface for views landing in h5d.12/.13/.14."""
-    return html.Div(
-        [
-            html.P(label, className="construction-label"),
-            html.P(
-                "view under construction (h5d.12/13/14)",
-                className="construction-note",
-            ),
-            *(html.P(line) for line in lines),
-        ],
-        className="surface surface-construction",
     )
