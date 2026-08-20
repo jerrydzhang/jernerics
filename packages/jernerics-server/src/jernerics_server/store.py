@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import tempfile
 import threading
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import Enum
@@ -27,7 +28,7 @@ from jernerics_schema import (
     TrialState,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _V2_TABLES = ("sweep_meta", "trial_end", "params")
 
@@ -221,10 +222,19 @@ def _migrate_to_v5(con: sqlite3.Connection) -> None:
         con.execute(statement)
 
 
+def _migrate_to_v6(con: sqlite3.Connection) -> None:
+    for statement in (
+        "ALTER TABLE artifacts ADD COLUMN context_json TEXT",
+        "ALTER TABLE artifacts ADD COLUMN source TEXT NOT NULL DEFAULT 'user'",
+    ):
+        con.execute(statement)
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_to_v3,
     4: _migrate_to_v4,
     5: _migrate_to_v5,
+    6: _migrate_to_v6,
 }
 
 
@@ -342,6 +352,48 @@ class Store:
             return columns, rows
         finally:
             con.close()
+
+    def artifact_declaration(self, artifact_id: str) -> tuple | None:
+        """(filename, content_type, sha256, size_bytes, received_ns) or None."""
+        with self._lock:
+            return self._con.execute(
+                "SELECT filename, content_type, sha256, size_bytes, received_ns "
+                "FROM artifacts WHERE artifact_id = ?",
+                [artifact_id],
+            ).fetchone()
+
+    def artifact_blob(self, artifact_id: str) -> tuple | None:
+        """(rel_path, sha256, size_bytes) of the received blob or None."""
+        with self._lock:
+            return self._con.execute(
+                "SELECT rel_path, sha256, size_bytes FROM artifact_blobs "
+                "WHERE artifact_id = ?",
+                [artifact_id],
+            ).fetchone()
+
+    def record_artifact_blob(
+        self, artifact_id: str, rel_path: str, sha256: str, size_bytes: int
+    ) -> None:
+        """Idempotently record a received blob; first receipt wins."""
+        received_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                self._con.execute(
+                    "INSERT INTO artifact_blobs (artifact_id, rel_path, sha256, "
+                    "size_bytes, received_ns) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(artifact_id) DO NOTHING",
+                    [artifact_id, rel_path, sha256, size_bytes, received_ns],
+                )
+                self._con.execute(
+                    "UPDATE artifacts SET received_ns = ? WHERE artifact_id = ? "
+                    "AND received_ns IS NULL",
+                    [received_ns, artifact_id],
+                )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
 
     def backup_to(self, dest: str | Path) -> None:
         dest = Path(dest)

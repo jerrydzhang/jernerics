@@ -1,4 +1,5 @@
 import hashlib
+import json
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
@@ -296,16 +297,45 @@ class TestLogArtifact:
         assert event.size_bytes == len(payload)
         assert event.sha256 == hashlib.sha256(payload).hexdigest()
 
-    def test_appends_manifest_entry(self, tmp_path) -> None:
+    def test_appends_manifest_entry_with_same_artifact_id(self, tmp_path) -> None:
         tracker = make_tracker(tmp_path)
         artifact = tmp_path / "model.json"
         artifact.write_bytes(b"{}")
 
-        tracker.log_artifact("model", str(artifact))
+        event = tracker.log_artifact("model", str(artifact))
 
         manifest = tmp_path / "0.manifest"
-        assert "model" in manifest.read_text()
-        assert str(artifact) in manifest.read_text()
+        entry = json.loads(manifest.read_text().strip())
+        assert entry == {
+            "artifact_id": event.artifact_id.hex,
+            "key": "model",
+            "path": str(artifact),
+        }
+
+    def test_system_source_and_content_type_override(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "trial-0.stdout"
+        artifact.write_bytes(b"out")
+
+        event = tracker.log_artifact(
+            "stdout",
+            str(artifact),
+            source="system",
+            content_type="text/plain",
+        )
+
+        assert event.source == "system"
+        assert event.content_type == "text/plain"
+
+    def test_context_flows_into_declaration(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "model.json"
+        artifact.write_bytes(b"{}")
+
+        event = tracker.log_artifact("model", str(artifact), context={"stage": "final"})
+
+        assert event.context is not None
+        assert event.context.root == {"stage": "final"}
 
     def test_nested_context_raises(self, tmp_path) -> None:
         tracker = make_tracker(tmp_path)

@@ -1,88 +1,105 @@
+import json
 from pathlib import Path
 
-from jernerics.tracking.artifact_manifest import ArtifactManifest
+from jernerics.tracking.artifact_manifest import (
+    ArtifactManifest,
+    ManifestEntry,
+    manifest_cursor_path,
+)
+
+ARTIFACT_ID = "a" * 32
 
 
 class TestAppend:
-    def test_appends_json_line(self, tmp_path: Path):
+    def test_appends_json_line_with_artifact_id(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"
-        ArtifactManifest(manifest_path).append("model.pt", "/work/model.pt")
+        ArtifactManifest(manifest_path).append(ARTIFACT_ID, "model.pt", "/work/m.pt")
 
-        lines = manifest_path.read_text().strip().split("\n")
-        assert len(lines) == 1
-        import json
-
-        entry = json.loads(lines[0])
-        assert entry["key"] == "model.pt"
-        assert entry["path"] == "/work/model.pt"
+        entry = json.loads(manifest_path.read_text().strip())
+        assert entry == {
+            "artifact_id": ARTIFACT_ID,
+            "key": "model.pt",
+            "path": "/work/m.pt",
+        }
 
 
 class TestReadFromCursor:
-    def test_reads_entries_after_cursor(self, tmp_path: Path):
+    def test_yields_typed_entries_with_end_offsets(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"
-        cursor_path = tmp_path / "0.cursor"
-
-        m = ArtifactManifest(manifest_path, cursor_path=cursor_path)
-        m.append("a.pt", "/work/a.pt")
-        m.append("b.pt", "/work/b.pt")
+        m = ArtifactManifest(manifest_path)
+        m.append(ARTIFACT_ID, "a.pt", "/work/a.pt")
+        m.append("b" * 32, "b.pt", "/work/b.pt")
 
         entries = m.read_from_cursor()
-        assert len(entries) == 2
-        assert entries[0]["key"] == "a.pt"
-        assert entries[1]["key"] == "b.pt"
+        first_line, second_line = manifest_path.read_text().splitlines()
+
+        assert entries[0] == ManifestEntry(
+            ARTIFACT_ID, "a.pt", "/work/a.pt", len(first_line) + 1
+        )
+        assert entries[1] == ManifestEntry(
+            "b" * 32, "b.pt", "/work/b.pt", len(first_line) + len(second_line) + 2
+        )
+        assert manifest_path.read_bytes()[: entries[1].end_offset] == (
+            manifest_path.read_bytes()
+        )
 
     def test_resumes_from_saved_cursor(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"
-        cursor_path = tmp_path / "0.cursor"
+        m = ArtifactManifest(manifest_path)
+        m.append(ARTIFACT_ID, "a.pt", "/work/a.pt")
+        m.append("b" * 32, "b.pt", "/work/b.pt")
 
-        m = ArtifactManifest(manifest_path, cursor_path=cursor_path)
-        m.append("a.pt", "/work/a.pt")
-        m.append("b.pt", "/work/b.pt")
-
-        # Simulate: first entry was uploaded, cursor advanced
-        m.advance_cursor(len(manifest_path.read_text().split("\n")[0]) + 1)
+        m.advance_cursor(m.read_from_cursor()[0].end_offset)
 
         entries = m.read_from_cursor()
-        assert len(entries) == 1
-        assert entries[0]["key"] == "b.pt"
+        assert [entry.key for entry in entries] == ["b.pt"]
+
+    def test_legacy_line_without_artifact_id_is_skipped(self, tmp_path: Path):
+        manifest_path = tmp_path / "0.manifest"
+        with open(manifest_path, "w") as f:
+            f.write(json.dumps({"key": "legacy.pt", "path": "/old/legacy.pt"}) + "\n")
+        m = ArtifactManifest(manifest_path)
+        m.append(ARTIFACT_ID, "new.pt", "/work/new.pt")
+
+        entries = m.read_from_cursor()
+
+        assert [entry.artifact_id for entry in entries] == [ARTIFACT_ID]
 
 
 class TestCursorFileIO:
     def test_advance_cursor_writes_offset(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"
-        cursor_path = tmp_path / "0.cursor"
+        m = ArtifactManifest(manifest_path)
+        m.append(ARTIFACT_ID, "a.pt", "/work/a.pt")
+        first_end = m.read_from_cursor()[0].end_offset
 
-        m = ArtifactManifest(manifest_path, cursor_path=cursor_path)
-        m.append("a.pt", "/work/a.pt")
-        first_line_len = len(manifest_path.read_text().split("\n")[0]) + 1
-        m.advance_cursor(first_line_len)
+        m.advance_cursor(first_end)
 
-        assert cursor_path.read_text().strip() == str(first_line_len)
+        assert manifest_cursor_path(manifest_path).read_text().strip() == str(first_end)
 
     def test_cursor_defaults_to_zero(self, tmp_path: Path):
+        m = ArtifactManifest(tmp_path / "0.manifest")
+        m.append(ARTIFACT_ID, "a.pt", "/work/a.pt")
+
+        assert len(m.read_from_cursor()) == 1
+
+    def test_corrupt_cursor_treated_as_zero(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"
-        cursor_path = tmp_path / "0.cursor"
+        m = ArtifactManifest(manifest_path)
+        m.append(ARTIFACT_ID, "a.pt", "/work/a.pt")
+        manifest_cursor_path(manifest_path).write_text("not-a-number")
 
-        m = ArtifactManifest(manifest_path, cursor_path=cursor_path)
-        m.append("a.pt", "/work/a.pt")
-
-        # Cursor file doesn't exist yet, should start from 0
-        entries = m.read_from_cursor()
-        assert len(entries) == 1
+        assert len(m.read_from_cursor()) == 1
 
 
 class TestCrashRecovery:
     def test_discards_incomplete_last_line(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"
-        cursor_path = tmp_path / "0.cursor"
-
-        m = ArtifactManifest(manifest_path, cursor_path=cursor_path)
-        m.append("a.pt", "/work/a.pt")
-
-        # Simulate crash: append incomplete line
+        m = ArtifactManifest(manifest_path)
+        m.append(ARTIFACT_ID, "a.pt", "/work/a.pt")
         with open(manifest_path, "a") as f:
-            f.write('{"key": "incomplete')
+            f.write('{"artifact_id": "incomplete')
 
         entries = m.read_from_cursor()
-        assert len(entries) == 1
-        assert entries[0]["key"] == "a.pt"
+
+        assert [entry.artifact_id for entry in entries] == [ARTIFACT_ID]

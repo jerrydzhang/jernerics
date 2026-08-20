@@ -5,6 +5,7 @@ Invoked via ``python -m jernerics.post_hook`` after each sweep batch.
 
 import argparse
 import enum
+import json
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from jernerics.optuna_mirror import frozen_trial_snapshot
 from jernerics.retry import RetryContext
 from jernerics.retry_checker import run_checker
 from jernerics.tracking.batch_sync import replay_tracking
+from jernerics.tracking.blob_uploader import upload_pending_blobs
 from jernerics.tracking.infra import resolve_tracking_ship
 
 
@@ -78,6 +80,77 @@ def reconcile_study(ctx: RetryContext, tracking_dir: str | Path) -> Path | None:
     return path
 
 
+def _sweep_manifest_blobs(
+    tracking_dir: str | Path, base_url: str, api_key: str | None
+) -> None:
+    """Upload every study's pending manifest blobs under the tracking root."""
+    tracking_root = Path(tracking_dir).parent
+    manifests = sorted(tracking_root.glob("*/artifacts/*.manifest"))
+    if not manifests:
+        return
+    result = upload_pending_blobs(base_url, api_key, manifests)
+    print(
+        f"Blobs: {len(manifests)} manifest(s) swept — {result.uploaded} "
+        f"uploaded, {result.skipped_conflict} conflict(s) skipped, "
+        f"{result.failed} failed.",
+        file=sys.stderr,
+    )
+
+
+def _scheduler_task_log_files(cache_dir: Path) -> list[Path]:
+    """Scheduler-written per-task log files derivable from job metadata."""
+    jobs_dir = cache_dir / "jobs"
+    if not jobs_dir.is_dir():
+        return []
+    found: list[Path] = []
+    for meta_file in sorted(jobs_dir.glob("*.json")):
+        try:
+            meta = json.loads(meta_file.read_text())
+        except (OSError, ValueError):
+            continue
+        job_id = str(meta.get("job_id") or meta_file.stem)
+        remote_dir = str(meta.get("remote_dir") or cache_dir)
+        for pattern in (meta.get("output_pattern"), meta.get("error_pattern")):
+            if not pattern:
+                continue
+            expanded = pattern.replace("%A", job_id).replace("%j", job_id)
+            if "%a" in expanded:
+                expanded = expanded.replace("%a", "*")
+            candidate = Path(expanded).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path(remote_dir).expanduser() / candidate
+            if "*" in candidate.name:
+                found.extend(sorted(candidate.parent.glob(candidate.name)))
+            elif candidate.is_file():
+                found.append(candidate)
+    return sorted(set(found))
+
+
+def _report_scheduler_task_logs(cache_dir: Path) -> None:
+    """Map scheduler task logs to executions — or say why that is not possible.
+
+    Job metadata records where the scheduler wrote per-task logs, but no
+    trial or execution identity for any task: every backend launches the
+    same generic runner command per task and trial numbers are drawn from
+    the optimizer journal at runtime. Nothing in the metadata (or the
+    events) ties a scheduler task index to a trial, so the logs are left
+    in place with a note instead of an invented association. Execution
+    stdout/stderr still arrive through the runner-declared system
+    artifacts.
+    """
+    logs = _scheduler_task_log_files(cache_dir)
+    if not logs:
+        return
+    print(
+        f"jernerics: {len(logs)} scheduler task log file(s) found under "
+        f"{cache_dir}, but job metadata records no trial association for "
+        "scheduler tasks; leaving them in place rather than inventing one. "
+        "Execution stdout/stderr are tracked via runner-declared system "
+        "artifacts.",
+        file=sys.stderr,
+    )
+
+
 def run_pipeline(
     ctx_path: str,
     chain_depth: int,
@@ -112,6 +185,8 @@ def run_pipeline(
             conflicts.extend(result.conflicts)
         if conflicts:
             raise ReconciliationConflictError(conflicts)
+        _sweep_manifest_blobs(tracking_dir, base_url, api_key)
+        _report_scheduler_task_logs(Path(tracking_dir).parent.parent)
 
     return PipelineResult.SWEEP_COMPLETE
 

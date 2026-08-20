@@ -4,6 +4,8 @@ import uuid
 from pathlib import Path
 from typing import Protocol
 
+from jernerics_schema import ArtifactSource
+
 from jernerics.tracking.artifact_manifest import ArtifactManifest
 from jernerics.tracking.tracker import JsonlTracker
 
@@ -28,7 +30,14 @@ class TrackerProtocol(Protocol):
         self, key: str, value: JsonValue, *, step: int | None = None
     ) -> None: ...
 
-    def log_artifact(self, key: str, path: str) -> None: ...
+    def log_artifact(
+        self,
+        key: str,
+        path: str,
+        *,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> None: ...
 
     def finish(self, results: dict[str, JsonValue]) -> None: ...
 
@@ -46,7 +55,14 @@ class ConsoleTracker:
         else:
             print(f"[step {step}] {key}={encoded}")
 
-    def log_artifact(self, key: str, path: str) -> None:
+    def log_artifact(
+        self,
+        key: str,
+        path: str,
+        *,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> None:
         print(f"[artifact] {key}={path}")
 
     def finish(self, results: dict[str, JsonValue]) -> None:
@@ -73,8 +89,15 @@ class _JobTracker:
             msg = f"cannot track {type(value).__name__} observation for {key!r}"
             raise TypeError(msg)
 
-    def log_artifact(self, key: str, path: str) -> None:
-        self._tracker.log_artifact(key, path)
+    def log_artifact(
+        self,
+        key: str,
+        path: str,
+        *,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> None:
+        self._tracker.log_artifact(key, path, source=source, content_type=content_type)
 
     def finish(self, results: dict[str, JsonValue]) -> None:
         self._tracker.log_json("results", results)

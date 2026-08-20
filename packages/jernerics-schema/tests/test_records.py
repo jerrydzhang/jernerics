@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import pytest
 from jernerics_schema import (
+    ArtifactRecord,
     ExecutionOutcome,
     ExecutionRecord,
     JobRecord,
@@ -61,6 +62,16 @@ def _records() -> list[BaseModel]:
             key="pred",
             step=3,
             observation={"expr": "x ** 2"},
+        ),
+        ArtifactRecord(
+            artifact_id=uuid.uuid4(),
+            trial_id=trial_id,
+            execution_id=execution_id,
+            key="stdout",
+            filename="trial-0.stdout",
+            content_type="text/plain",
+            size_bytes=16,
+            source="system",
         ),
     ]
 

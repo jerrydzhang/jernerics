@@ -152,7 +152,13 @@ class TestJobTracker:
 
         manifest = tmp_path / "tracking" / "artifacts" / "7.manifest"
         entries = [json.loads(line) for line in manifest.read_text().splitlines()]
-        assert entries == [{"key": "model", "path": str(artifact)}]
+        assert entries == [
+            {
+                "artifact_id": event.artifact_id.hex,
+                "key": "model",
+                "path": str(artifact),
+            }
+        ]
 
     def test_finish_records_results_and_closes_tracking(self, job_tracker):
         tracker, tmp_path = job_tracker

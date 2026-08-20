@@ -1,11 +1,13 @@
 """Validated, atomic materialization of v3 tracking events into the store."""
 
+import hashlib
 import json
 import sqlite3
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from jernerics_schema import (
@@ -164,8 +166,9 @@ def _lineage_order(
 class IngestService:
     """Applies validated event batches atomically to the store."""
 
-    def __init__(self, store: Store) -> None:
+    def __init__(self, store: Store, *, artifacts_root: Path | None = None) -> None:
         self._store = store
+        self._artifacts_root = artifacts_root
 
     def apply(self, request: IngestRequest) -> IngestResult:
         with self._store._lock:
@@ -231,7 +234,7 @@ class IngestService:
             case ExecutionEndEvent():
                 return self._apply_execution_end(con, index, event)
             case ArtifactDeclarationEvent():
-                return self._apply_artifact_declaration(con, index, event)
+                return self._apply_artifact_declaration(con, index, event, conflicts)
         raise IngestValidationError(
             f"unsupported event tag {event.tag!r}",
             event_index=index,
@@ -982,13 +985,17 @@ class IngestService:
         return changed
 
     def _apply_artifact_declaration(
-        self, con: sqlite3.Connection, index: int, event: ArtifactDeclarationEvent
+        self,
+        con: sqlite3.Connection,
+        index: int,
+        event: ArtifactDeclarationEvent,
+        conflicts: list[ConflictRecord],
     ) -> bool:
         ns = _to_ns(event.recorded_at)
         row = con.execute(
             "SELECT trial_id, execution_id, key, filename, content_type, "
-            "size_bytes, sha256, declared_ns FROM artifacts "
-            "WHERE artifact_id = ?",
+            "size_bytes, sha256, declared_ns, context_json, source "
+            "FROM artifacts WHERE artifact_id = ?",
             [str(event.artifact_id)],
         ).fetchone()
         incoming = (
@@ -1000,6 +1007,8 @@ class IngestService:
             event.size_bytes,
             event.sha256,
             ns,
+            _optional_json(event.context),
+            event.source,
         )
         if row is None:
             if not self._trial_exists(con, event.trial_id):
@@ -1026,16 +1035,86 @@ class IngestService:
             con.execute(
                 "INSERT INTO artifacts (artifact_id, trial_id, execution_id, "
                 "key, filename, content_type, size_bytes, sha256, "
-                "declared_ns, received_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                "declared_ns, received_ns, context_json, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
                 [str(event.artifact_id), *incoming],
             )
-            return True
-        if tuple(row) == incoming:
-            return False
-        raise self._conflict(
-            index,
-            event,
-            f"artifact {event.artifact_id} already declared with differing facts",
+            applied = True
+        elif tuple(row) == incoming:
+            applied = False
+        else:
+            raise self._conflict(
+                index,
+                event,
+                f"artifact {event.artifact_id} already declared with differing facts",
+            )
+        self._join_declared_blob(con, event, ns, conflicts)
+        return applied
+
+    def _join_declared_blob(
+        self,
+        con: sqlite3.Connection,
+        event: ArtifactDeclarationEvent,
+        ns: int,
+        conflicts: list[ConflictRecord],
+    ) -> None:
+        """Receipt for a blob that arrived before (or with) its declaration.
+
+        Closes the upload/declaration race in the declaration-after-upload
+        order: the blob already sits at its final path, so verify it against
+        the declared facts and record the receipt. A mismatch is reported as
+        an ``artifact_blob_mismatch`` conflict without rejecting the batch;
+        the blob stays orphaned for operator action.
+        """
+        if self._artifacts_root is None:
+            return
+        artifact_id = str(event.artifact_id)
+        final = self._artifacts_root / artifact_id[:2] / artifact_id
+        if not final.is_file():
+            return
+        if (
+            con.execute(
+                "SELECT 1 FROM artifact_blobs WHERE artifact_id = ?", [artifact_id]
+            ).fetchone()
+            is not None
+        ):
+            return
+        digest = hashlib.sha256()
+        size = 0
+        with open(final, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        if (event.sha256 is not None and digest.hexdigest() != event.sha256) or (
+            size != event.size_bytes
+        ):
+            conflicts.append(
+                ConflictRecord(
+                    trial_id=event.trial_id,
+                    kind="artifact_blob_mismatch",
+                    detail=(
+                        f"artifact {artifact_id}: blob at {final} has "
+                        f"sha256 {digest.hexdigest()} / size {size}, "
+                        f"declaration says {event.sha256} / {event.size_bytes}"
+                    ),
+                )
+            )
+            return
+        con.execute(
+            "INSERT INTO artifact_blobs (artifact_id, rel_path, sha256, "
+            "size_bytes, received_ns) VALUES (?, ?, ?, ?, ?)",
+            [
+                artifact_id,
+                f"{artifact_id[:2]}/{artifact_id}",
+                digest.hexdigest(),
+                size,
+                ns,
+            ],
+        )
+        con.execute(
+            "UPDATE artifacts SET received_ns = ? WHERE artifact_id = ? "
+            "AND received_ns IS NULL",
+            [ns, artifact_id],
         )
 
 

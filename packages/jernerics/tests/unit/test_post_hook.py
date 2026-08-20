@@ -1,8 +1,13 @@
+import json
 from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
-from jernerics.post_hook import PipelineResult, run_pipeline
+from jernerics.post_hook import (
+    PipelineResult,
+    ReconciliationConflictError,
+    run_pipeline,
+)
 from jernerics.retry import RetryContext
 from jernerics.tracking.batch_sync import ReplayResult
 from jernerics_schema import SweepSnapshotEvent, TrialSnapshotEvent, TrialState
@@ -115,6 +120,136 @@ class TestRunPipeline:
 
         assert result == PipelineResult.RETRY_SUBMITTED
         mock_replay.assert_not_called()
+
+
+class TestBlobSweep:
+    @patch("jernerics.post_hook.upload_pending_blobs")
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_sweeps_all_study_manifests_after_replay(
+        self, mock_run_checker, mock_replay, mock_upload, tmp_path
+    ):
+        mock_run_checker.return_value = None
+        mock_replay.return_value = ReplayResult()
+        tracking_root = tmp_path / "tracking"
+        study_manifest = tracking_root / "mystudy" / "artifacts" / "0.manifest"
+        other_manifest = tracking_root / "otherstudy" / "artifacts" / "3.manifest"
+        for path in (study_manifest, other_manifest):
+            path.parent.mkdir(parents=True)
+            path.write_text('{"artifact_id": "%s"}\n' % ("a" * 32))
+
+        run_pipeline(
+            ctx_path=str(_write_ctx(tmp_path)),
+            chain_depth=0,
+            tracking_dir=str(tracking_root / "mystudy"),
+            base_url="http://localhost:8000",
+            api_key="sekret",
+        )
+
+        mock_upload.assert_called_once_with(
+            "http://localhost:8000",
+            "sekret",
+            [study_manifest, other_manifest],
+        )
+
+    @patch("jernerics.post_hook.upload_pending_blobs")
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_conflicts_skip_the_blob_sweep(
+        self, mock_run_checker, mock_replay, mock_upload, tmp_path
+    ):
+        from jernerics_schema import ConflictRecord
+
+        mock_run_checker.return_value = None
+        mock_replay.return_value = ReplayResult(
+            conflicts=[ConflictRecord(trial_id=uuid4(), kind="k", detail="d")]
+        )
+
+        with pytest.raises(ReconciliationConflictError):
+            run_pipeline(
+                ctx_path=str(_write_ctx(tmp_path)),
+                chain_depth=0,
+                tracking_dir=str(tmp_path / "tracking" / "mystudy"),
+                base_url="http://localhost:8000",
+            )
+
+        mock_upload.assert_not_called()
+
+    @patch("jernerics.post_hook.upload_pending_blobs")
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_no_manifests_means_no_sweep(
+        self, mock_run_checker, mock_replay, mock_upload, tmp_path
+    ):
+        mock_run_checker.return_value = None
+        mock_replay.return_value = ReplayResult()
+
+        run_pipeline(
+            ctx_path=str(_write_ctx(tmp_path)),
+            chain_depth=0,
+            tracking_dir=str(tmp_path / "tracking" / "mystudy"),
+            base_url="http://localhost:8000",
+        )
+
+        mock_upload.assert_not_called()
+
+
+class TestSchedulerTaskLogs:
+    @patch("jernerics.post_hook.upload_pending_blobs")
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_unmappable_task_logs_skip_with_stderr_note(
+        self, mock_run_checker, mock_replay, mock_upload, tmp_path, capsys
+    ):
+        mock_run_checker.return_value = None
+        mock_replay.return_value = ReplayResult()
+        cache = tmp_path
+        tracking_dir = cache / "tracking" / "mystudy"
+        tracking_dir.mkdir(parents=True)
+        logs_dir = cache / "logs"
+        logs_dir.mkdir()
+        (logs_dir / "123_1.out").write_text("task log")
+        (cache / "jobs").mkdir()
+        (cache / "jobs" / "123.json").write_text(
+            json.dumps(
+                {
+                    "job_id": "123",
+                    "remote_dir": str(tmp_path),
+                    "n_trials": 1,
+                    "output_pattern": f"{logs_dir}/%A_%a.out",
+                    "error_pattern": f"{logs_dir}/%A_%a.err",
+                }
+            )
+        )
+
+        run_pipeline(
+            ctx_path=str(_write_ctx(tmp_path)),
+            chain_depth=0,
+            tracking_dir=str(tracking_dir),
+            base_url="http://localhost:8000",
+        )
+
+        err = capsys.readouterr().err
+        assert "scheduler task log" in err
+        assert "no trial association" in err
+        assert (logs_dir / "123_1.out").read_text() == "task log"
+
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_no_job_metadata_means_no_note(
+        self, mock_run_checker, mock_replay, tmp_path, capsys
+    ):
+        mock_run_checker.return_value = None
+        mock_replay.return_value = ReplayResult()
+
+        run_pipeline(
+            ctx_path=str(_write_ctx(tmp_path)),
+            chain_depth=0,
+            tracking_dir=str(tmp_path / "tracking" / "mystudy"),
+            base_url="http://localhost:8000",
+        )
+
+        assert "scheduler task log" not in capsys.readouterr().err
 
 
 class TestReconcileStudy:

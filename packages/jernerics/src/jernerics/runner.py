@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -104,21 +105,42 @@ def run_trial(
             state=TrialState.RUNNING,
         )
 
-        completed = subprocess.run(
-            [sys.executable, str(Path(trial_file).resolve())],
-            env=_trial_env(
-                config_path=config_path,
-                tracking_dir=tracking_dir or "",
-                project_name=project_name or "",
-                study_name=study_name,
-                trial_number=trial.number,
-                sweep_id=sweep_id,
-                trial_id=environment.trial_id,
-                execution_id=environment.execution_id,
-            ),
-            check=False,
-        )
+        logs_dir = Path(tracking_dir) / "logs" if tracking_dir else None
+        stdout_path = stderr_path = None
+        if logs_dir is not None:
+            logs_dir.mkdir(parents=True, exist_ok=True)
+            stdout_path = logs_dir / f"trial-{trial.number}.stdout"
+            stderr_path = logs_dir / f"trial-{trial.number}.stderr"
+
+        with ExitStack() as stack:
+            completed = subprocess.run(
+                [sys.executable, str(Path(trial_file).resolve())],
+                env=_trial_env(
+                    config_path=config_path,
+                    tracking_dir=tracking_dir or "",
+                    project_name=project_name or "",
+                    study_name=study_name,
+                    trial_number=trial.number,
+                    sweep_id=sweep_id,
+                    trial_id=environment.trial_id,
+                    execution_id=environment.execution_id,
+                ),
+                check=False,
+                stdout=(
+                    stack.enter_context(open(stdout_path, "wb"))
+                    if stdout_path
+                    else None
+                ),
+                stderr=(
+                    stack.enter_context(open(stderr_path, "wb"))
+                    if stderr_path
+                    else None
+                ),
+            )
         run["exit_code"] = completed.returncode
+        _declare_system_logs(
+            environment.tracker, trial.number, stdout_path, stderr_path
+        )
 
         if completed.returncode != 0:
             print(
@@ -163,6 +185,30 @@ def run_trial(
         raise
     if run["environment"] is not None:
         run["environment"].finish_execution(ExecutionOutcome.SUCCESS)
+
+
+def _declare_system_logs(
+    tracker: Tracker | None,
+    trial_number: int,
+    stdout_path: Path | None,
+    stderr_path: Path | None,
+) -> None:
+    """Declare captured child stdout/stderr as system artifacts.
+
+    The files flow through the normal manifest/upload path keyed
+    ``stdout``/``stderr`` with source ``system``, bound to the current
+    execution.
+    """
+    if tracker is None:
+        return
+    for key, path in (("stdout", stdout_path), ("stderr", stderr_path)):
+        if path is not None and path.exists():
+            tracker.log_artifact(
+                key,
+                str(path),
+                source="system",
+                content_type="text/plain",
+            )
 
 
 def _emit_trial_snapshot(

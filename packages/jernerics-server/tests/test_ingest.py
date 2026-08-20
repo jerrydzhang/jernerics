@@ -1472,3 +1472,95 @@ class TestOptimizerMirrorColumns:
 
         assert result.duplicates == 1
         assert rows(store, "SELECT objective FROM trials") == [(0.25,)]
+
+
+class TestArtifactDeclarationColumns:
+    """context/source carried by artifact declarations."""
+
+    def _seed(
+        self,
+        service,
+        sweep,
+        trial,
+        artifact,
+        *,
+        source="user",
+        context=None,
+    ):
+        events = [
+            SweepSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(0),
+                project="proj",
+                sweep_id=sweep,
+                name="alpha",
+                state="running",
+            ),
+            TrialSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(1),
+                trial_id=trial,
+                sweep_id=sweep,
+                number=0,
+                state=TrialState.RUNNING,
+                retry_root_trial_id=trial,
+            ),
+            ArtifactDeclarationEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                artifact_id=artifact,
+                trial_id=trial,
+                key="stdout",
+                filename="trial-0.stdout",
+                content_type="text/plain",
+                size_bytes=3,
+                sha256="a" * 64,
+                source=source,
+                context=context,
+            ),
+        ]
+        return service.apply(request_of(events)), events
+
+    def test_context_and_source_materialize(self, store, service):
+        sweep, trial, artifact = eid(), eid(), eid()
+
+        self._seed(
+            service,
+            sweep,
+            trial,
+            artifact,
+            source="system",
+            context=FlatContext({"stage": "final"}),
+        )
+
+        assert rows(store, "SELECT context_json, source FROM artifacts") == [
+            ('{"stage":"final"}', "system")
+        ]
+
+    def test_defaults_are_user_and_null_context(self, store, service):
+        sweep, trial, artifact = eid(), eid(), eid()
+
+        self._seed(service, sweep, trial, artifact)
+
+        assert rows(store, "SELECT context_json, source FROM artifacts") == [
+            (None, "user")
+        ]
+
+    def test_differing_source_conflicts(self, store, service):
+        sweep, trial, artifact = eid(), eid(), eid()
+        self._seed(service, sweep, trial, artifact, source="system")
+
+        with pytest.raises(IngestConflictError, match="differing facts"):
+            self._seed(service, sweep, trial, artifact, source="user")
+
+        assert rows(store, "SELECT source FROM artifacts") == [("system",)]
+
+    def test_identical_replay_is_duplicate(self, store, service):
+        sweep, trial, artifact = eid(), eid(), eid()
+        self._seed(service, sweep, trial, artifact, context=FlatContext({"a": 1}))
+
+        result, _ = self._seed(
+            service, sweep, trial, artifact, context=FlatContext({"a": 1})
+        )
+
+        assert (result.applied, result.duplicates) == (0, 3)

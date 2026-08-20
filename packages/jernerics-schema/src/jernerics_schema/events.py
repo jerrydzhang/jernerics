@@ -144,6 +144,10 @@ class ValueEvent(Event):
         return self
 
 
+ArtifactSource = Literal["user", "system"]
+"""Who declared an artifact: the user's code or jernerics infrastructure."""
+
+
 class ArtifactDeclarationEvent(Event):
     tag: Literal["artifact_declaration"] = "artifact_declaration"
     artifact_id: ArtifactId
@@ -154,6 +158,8 @@ class ArtifactDeclarationEvent(Event):
     content_type: str
     size_bytes: int = Field(ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    context: FlatContext | None = None
+    source: ArtifactSource = "user"
 
 
 TrackingEvent = Annotated[

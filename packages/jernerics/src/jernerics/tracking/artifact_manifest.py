@@ -1,43 +1,85 @@
+"""Per-trial artifact manifest: pending blob uploads with a durable cursor.
+
+Each line is one JSON object naming an immutable artifact:
+``{"artifact_id": ..., "key": ..., "path": ...}``. The sidecar
+``<manifest>.cursor`` records the byte offset after the last uploaded
+entry, so a crashed uploader resumes exactly where it was acknowledged.
+Legacy v2 lines (no ``artifact_id``) are skipped: their artifacts belong
+to the archived era and are never re-uploaded.
+"""
+
 import json
+from dataclasses import dataclass
 from pathlib import Path
+
+
+def manifest_cursor_path(manifest_path: Path) -> Path:
+    return manifest_path.with_name(manifest_path.name + ".cursor")
+
+
+@dataclass(frozen=True)
+class ManifestEntry:
+    artifact_id: str
+    key: str
+    path: str
+    end_offset: int
 
 
 class ArtifactManifest:
     def __init__(self, path: Path, *, cursor_path: Path | None = None) -> None:
         self.path = path
-        self.cursor_path = cursor_path
+        self.cursor_path = (
+            manifest_cursor_path(path) if cursor_path is None else cursor_path
+        )
 
-    def append(self, key: str, local_path: str) -> None:
+    def append(self, artifact_id: str, key: str, local_path: str) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        entry = json.dumps({"key": key, "path": local_path})
+        entry = json.dumps(
+            {"artifact_id": artifact_id, "key": key, "path": local_path},
+            separators=(",", ":"),
+        )
         with open(self.path, "a") as f:
             f.write(entry + "\n")
 
-    def read_from_cursor(self) -> list[dict]:
+    def read_from_cursor(self) -> list[ManifestEntry]:
         if not self.path.exists():
             return []
 
         offset = self._read_cursor()
-        entries = []
-        with open(self.path) as f:
+        entries: list[ManifestEntry] = []
+        with open(self.path, "rb") as f:
             f.seek(offset)
-            for line in f:
-                line = line.strip()
+            pos = offset
+            for raw in f:
+                pos += len(raw)
+                line = raw.strip()
                 if not line:
                     continue
                 try:
-                    entries.append(json.loads(line))
+                    data = json.loads(line)
                 except json.JSONDecodeError:
                     break
+                artifact_id = data.get("artifact_id")
+                if not artifact_id:
+                    continue
+                entries.append(
+                    ManifestEntry(
+                        artifact_id=str(artifact_id),
+                        key=str(data.get("key", "")),
+                        path=str(data.get("path", "")),
+                        end_offset=pos,
+                    )
+                )
         return entries
 
     def advance_cursor(self, offset: int) -> None:
-        if self.cursor_path is None:
-            return
         self.cursor_path.parent.mkdir(parents=True, exist_ok=True)
         self.cursor_path.write_text(str(offset))
 
     def _read_cursor(self) -> int:
-        if self.cursor_path is None or not self.cursor_path.exists():
+        if not self.cursor_path.exists():
             return 0
-        return int(self.cursor_path.read_text().strip())
+        try:
+            return int(self.cursor_path.read_text().strip())
+        except ValueError:
+            return 0

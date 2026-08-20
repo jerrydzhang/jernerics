@@ -2,6 +2,7 @@
 
 from .events import (
     ArtifactDeclarationEvent,
+    ArtifactSource,
     Event,
     ExecutionEndEvent,
     ExecutionHeartbeatEvent,
@@ -60,6 +61,7 @@ __all__ = [
     "ArtifactDeclarationEvent",
     "ArtifactId",
     "ArtifactRecord",
+    "ArtifactSource",
     "ConflictRecord",
     "Event",
     "EventId",

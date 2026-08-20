@@ -2,7 +2,7 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .events import UtcDatetime
+from .events import ArtifactSource, UtcDatetime
 from .ids import ArtifactId, ExecutionId, JobId, SubmissionId, SweepId, TrialId
 from .lifecycle import ExecutionOutcome, FailureKind, SubmissionState, TrialState
 from .lineage import RetryLineage
@@ -89,3 +89,5 @@ class ArtifactRecord(BaseModel):
     content_type: str
     size_bytes: int = Field(ge=0)
     sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    context: FlatContext | None = None
+    source: ArtifactSource = "user"

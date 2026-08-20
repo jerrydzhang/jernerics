@@ -2,6 +2,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 from uuid import UUID
 
 from jernerics.tracking.jsonl_io import TrackingReader
@@ -206,3 +207,52 @@ class TestEventValidity:
                 "execution_heartbeat",
                 "execution_end",
             }
+
+    @patch("jernerics.tracking.trial_environment.StreamClient")
+    @patch("jernerics.tracking.trial_environment.upload_pending_blobs")
+    def test_finish_execution_uploads_this_trials_manifest(
+        self, mock_upload, mock_stream, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("JERNERICS_API_KEY", raising=False)
+        env = TrialEnvironment(
+            tracking_dir=str(tmp_path), trial_number=4, server_addr="http://srv"
+        )
+
+        with env:
+            assert env.tracker is not None
+            artifact = tmp_path / "model.pt"
+            artifact.write_bytes(b"weights")
+            env.tracker.log_artifact("model", str(artifact))
+            env.finish_execution(ExecutionOutcome.SUCCESS)
+
+        mock_upload.assert_called_once_with(
+            "http://srv", None, [tmp_path / "artifacts" / "4.manifest"]
+        )
+
+    @patch("jernerics.tracking.trial_environment.upload_pending_blobs")
+    def test_no_server_skips_upload(self, mock_upload, tmp_path):
+        env = TrialEnvironment(tracking_dir=str(tmp_path), trial_number=0)
+
+        with env:
+            env.finish_execution(ExecutionOutcome.SUCCESS)
+
+        mock_upload.assert_not_called()
+
+    @patch("jernerics.tracking.trial_environment.StreamClient")
+    @patch(
+        "jernerics.tracking.trial_environment.upload_pending_blobs",
+        side_effect=OSError("disk gone"),
+    )
+    def test_upload_failure_is_swallowed_into_stderr(
+        self, mock_upload, mock_stream, tmp_path, capsys
+    ):
+        env = TrialEnvironment(
+            tracking_dir=str(tmp_path), trial_number=0, server_addr="http://srv"
+        )
+
+        env.start()
+        end = env.finish_execution(ExecutionOutcome.SUCCESS)
+
+        assert end is not None
+        assert end.outcome == ExecutionOutcome.SUCCESS
+        assert "disk gone" in capsys.readouterr().err

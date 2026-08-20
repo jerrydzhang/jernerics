@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -11,7 +12,11 @@ from jernerics.runner import (
     run_trial,
 )
 from jernerics.tracking.jsonl_io import TrackingWriter
-from jernerics_schema import ValueEvent, sweep_id_for
+from jernerics_schema import (
+    ArtifactDeclarationEvent,
+    ValueEvent,
+    sweep_id_for,
+)
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 trial_id = uuid4()
@@ -618,3 +623,87 @@ class TestReadTrialResults:
             writer.write_event(_value_event("results", value=0.5))
 
         assert _read_trial_results(events) == {}
+
+
+class TestSystemLogArtifacts:
+    def _run(self, tmp_path, trial_body):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(trial_body)
+        config_file = _config_file(tmp_path)
+        storage_url = _make_study(tmp_path)
+        tracking_dir = tmp_path / "tracking" / "s"
+        tracking_dir.mkdir(parents=True)
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+        )
+        return tracking_dir
+
+    def test_child_logs_declared_as_system_artifacts_bound_to_execution(self, tmp_path):
+        tracking_dir = self._run(
+            tmp_path,
+            _HEADER
+            + "import sys\n"
+            + 'print("child-out")\n'
+            + 'print("child-err", file=sys.stderr)\n'
+            + 'tracker.finish({"loss": 0.5})\n',
+        )
+
+        events = _read_events(tracking_dir / "events" / "0.jsonl")
+        execution = _first(events, "execution_start")[1]
+        declarations = [
+            event for event in events if isinstance(event, ArtifactDeclarationEvent)
+        ]
+        by_key = {event.key: event for event in declarations}
+
+        assert set(by_key) == {"stdout", "stderr"}
+        stdout_file = tracking_dir / "logs" / "trial-0.stdout"
+        stderr_file = tracking_dir / "logs" / "trial-0.stderr"
+        assert stdout_file.read_text() == "child-out\n"
+        assert stderr_file.read_text() == "child-err\n"
+        for key, path in (("stdout", stdout_file), ("stderr", stderr_file)):
+            event = by_key[key]
+            assert event.source == "system"
+            assert event.filename == path.name
+            assert event.execution_id == execution.execution_id
+            payload = path.read_bytes()
+            assert event.size_bytes == len(payload)
+            assert event.sha256 == hashlib.sha256(payload).hexdigest()
+
+        manifest_lines = (
+            (tracking_dir / "artifacts" / "0.manifest").read_text().splitlines()
+        )
+        assert {json.loads(line)["artifact_id"] for line in manifest_lines} == {
+            event.artifact_id.hex for event in declarations
+        }
+
+    def test_failed_child_still_declares_its_logs(self, tmp_path):
+        with pytest.raises(SystemExit):
+            self._run(tmp_path, "import sys; sys.exit(3)\n")
+
+        events = _read_events(tmp_path / "tracking" / "s" / "events" / "0.jsonl")
+        declarations = [
+            event for event in events if isinstance(event, ArtifactDeclarationEvent)
+        ]
+        assert {event.key for event in declarations} == {"stdout", "stderr"}
+
+    def test_no_tracking_dir_means_no_log_capture(self, tmp_path, capfd, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text('print("passthrough")\n')
+        config_file = _config_file(tmp_path, objective=False)
+        storage_url = _make_study(tmp_path)
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            project_name="proj",
+        )
+
+        assert "passthrough" in capfd.readouterr().out

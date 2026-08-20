@@ -1,5 +1,6 @@
 """Runner-side trial environment: execution lifecycle, heartbeats, live shipping."""
 
+import sys
 import threading
 from pathlib import Path
 from typing import Self
@@ -14,6 +15,8 @@ from jernerics_schema import (
 )
 
 from jernerics.tracking import Tracker
+from jernerics.tracking.artifact_manifest import ArtifactManifest
+from jernerics.tracking.blob_uploader import upload_pending_blobs
 from jernerics.tracking.infra import resolve_tracking_ship
 from jernerics.tracking.stream_client import StreamClient
 
@@ -48,6 +51,9 @@ class TrialEnvironment:
         self._sync_client: StreamClient | None = None
         self._heartbeat_stop: threading.Event | None = None
         self._heartbeat_thread: threading.Thread | None = None
+        self._manifest_path: Path | None = None
+        self._base_url: str | None = None
+        self._api_key: str | None = None
         self._finished = False
         self._closed = False
 
@@ -64,7 +70,14 @@ class TrialEnvironment:
         self.trial_id = self._trial_id if self._trial_id is not None else uuid4()
         self.execution_id = uuid4()
         events_path = events_dir / f"{self._trial_number}.jsonl"
-        tracker = JsonlTracker(events_path, self.trial_id, self.execution_id)
+        manifest_dir = tracking_dir / "artifacts"
+        self._manifest_path = manifest_dir / f"{self._trial_number}.manifest"
+        tracker = JsonlTracker(
+            events_path,
+            self.trial_id,
+            self.execution_id,
+            manifest=ArtifactManifest(self._manifest_path),
+        )
         tracker.emit_execution_start()
         self.tracker = tracker
 
@@ -72,6 +85,8 @@ class TrialEnvironment:
             ship = resolve_tracking_ship(self._server_addr)
             if ship:
                 base_url, api_key = ship
+                self._base_url = base_url
+                self._api_key = api_key
                 self._sync_client = StreamClient(
                     base_url=base_url,
                     path=events_path,
@@ -131,7 +146,31 @@ class TrialEnvironment:
                 failure_summary=failure_summary,
             )
         self.close()
+        self._upload_blobs()
         return end
+
+    def _upload_blobs(self) -> None:
+        """Best-effort upload of this trial's declared blobs after the end.
+
+        Declarations ship with the event log; blobs follow here once. Any
+        failure only delays the upload — the post-hook sweeps every
+        manifest again after the sweep batch completes.
+        """
+        if self._manifest_path is None or self._base_url is None:
+            return
+        try:
+            result = upload_pending_blobs(
+                self._base_url, self._api_key, [self._manifest_path]
+            )
+        except Exception as exc:
+            print(f"jernerics: blob upload failed: {exc!r}", file=sys.stderr)
+            return
+        if result.failed:
+            print(
+                f"jernerics: {result.failed} blob upload(s) failed; "
+                "the post-hook will retry",
+                file=sys.stderr,
+            )
 
     def close(self) -> None:
         if self._closed:

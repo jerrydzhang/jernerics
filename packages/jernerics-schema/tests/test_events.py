@@ -255,6 +255,34 @@ def test_artifact_sha256_must_be_lowercase_hex() -> None:
         )
 
 
+def test_artifact_source_and_context_defaults_and_values() -> None:
+    base: dict[str, Any] = {
+        "event_id": uuid.uuid4(),
+        "recorded_at": NOW,
+        "artifact_id": uuid.uuid4(),
+        "trial_id": uuid.uuid4(),
+        "key": "stdout",
+        "filename": "trial-0.stdout",
+        "content_type": "text/plain",
+        "size_bytes": 3,
+    }
+
+    default = ArtifactDeclarationEvent(**base)
+    assert default.source == "user"
+    assert default.context is None
+
+    system = ArtifactDeclarationEvent(
+        **base, source="system", context=FlatContext({"role": "logs"})
+    )
+    assert system.source == "system"
+    assert system.context is not None
+    assert system.context.root == {"role": "logs"}
+
+    invalid_source: Any = "scheduler"
+    with pytest.raises(ValidationError):
+        ArtifactDeclarationEvent(**base, source=invalid_source)
+
+
 def test_events_are_frozen() -> None:
     event = _heartbeat()
     with pytest.raises(ValidationError):

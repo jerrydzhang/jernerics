@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from jernerics_schema import (
     ArtifactDeclarationEvent,
+    ArtifactSource,
     ExecutionEndEvent,
     ExecutionHeartbeatEvent,
     ExecutionId,
@@ -90,7 +91,13 @@ class Tracker(Protocol):
         failure_summary: str | None = None,
     ) -> ExecutionEndEvent | None: ...
     def log_artifact(
-        self, key: str, local_path: str, context: dict | None = None
+        self,
+        key: str,
+        local_path: str,
+        context: dict | None = None,
+        *,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
     ) -> ArtifactDeclarationEvent | None: ...
     def close(self) -> None: ...
 
@@ -301,13 +308,15 @@ class JsonlTracker:
         )
 
     def log_artifact(
-        self, key: str, local_path: str, context: dict | None = None
+        self,
+        key: str,
+        local_path: str,
+        context: dict | None = None,
+        *,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
     ) -> ArtifactDeclarationEvent:
         local = Path(local_path)
-        if context is not None:
-            # Declarations carry no context on the wire; validate anyway so
-            # invalid input fails here instead of being silently dropped.
-            FlatContext(context)
         event = ArtifactDeclarationEvent(
             event_id=uuid4(),
             recorded_at=_now(),
@@ -316,13 +325,19 @@ class JsonlTracker:
             execution_id=self.execution_id,
             key=key,
             filename=local.name,
-            content_type=mimetypes.guess_type(local.name)[0] or _FALLBACK_CONTENT_TYPE,
+            content_type=(
+                content_type
+                if content_type is not None
+                else mimetypes.guess_type(local.name)[0] or _FALLBACK_CONTENT_TYPE
+            ),
             size_bytes=local.stat().st_size,
             sha256=_sha256_file(local),
+            context=self._context(context),
+            source=source,
         )
         self._emit(event)
         if self._manifest is not None:
-            self._manifest.append(key, str(local_path))
+            self._manifest.append(event.artifact_id.hex, key, str(local_path))
         return event
 
     def close(self) -> None:
@@ -397,7 +412,13 @@ class NullTracker:
         pass
 
     def log_artifact(
-        self, key: str, local_path: str, context: dict | None = None
+        self,
+        key: str,
+        local_path: str,
+        context: dict | None = None,
+        *,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
     ) -> None:
         pass
 

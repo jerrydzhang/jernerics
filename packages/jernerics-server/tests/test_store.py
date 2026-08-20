@@ -110,7 +110,7 @@ class TestInit:
     def test_fresh_store_creates_current_schema(self, tmp_path):
         path = tmp_path / "store.sqlite"
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(5,)]
+            assert store.query("PRAGMA user_version")[1] == [(6,)]
             con = sqlite3.connect(path)
             assert _table_names(con) - {"sqlite_sequence"} == TABLES
             con.close()
@@ -122,7 +122,7 @@ class TestInit:
 
     def test_reopen_existing_store_is_noop_and_keeps_data(self, db_path):
         with Store(db_path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(5,)]
+            assert store.query("PRAGMA user_version")[1] == [(6,)]
             assert store.query("SELECT trial_id FROM trials")[1] == [("t1",)]
             assert store.query("SELECT COUNT(*) FROM tracked_values")[1] == [(1,)]
 
@@ -396,9 +396,9 @@ class TestFutureSchema:
     def test_user_version_beyond_supported_refused(self, tmp_path):
         path = tmp_path / "store.sqlite"
         con = sqlite3.connect(path)
-        con.execute("PRAGMA user_version=6")
+        con.execute("PRAGMA user_version=7")
         con.close()
-        with pytest.raises(FutureSchemaError, match="version 6"):
+        with pytest.raises(FutureSchemaError, match="version 7"):
             Store(path)
 
 
@@ -428,7 +428,7 @@ class TestMigrationV3ToV4:
         self._make_v3_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(5,)]
+            assert store.query("PRAGMA user_version")[1] == [(6,)]
             submission_cols = {
                 row[1] for row in store.query("PRAGMA table_info(submissions)")[1]
             }
@@ -501,7 +501,7 @@ class TestMigrationV4ToV5:
         self._make_v4_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(5,)]
+            assert store.query("PRAGMA user_version")[1] == [(6,)]
             trial_cols = {row[1] for row in store.query("PRAGMA table_info(trials)")[1]}
             assert {"objective", "distributions_json", "attrs_json"} <= trial_cols
             store.verify()
@@ -532,6 +532,51 @@ class TestMigrationV4ToV5:
             )[1] == [(0.5, "{}", "{}")]
 
 
+class TestMigrationV5ToV6:
+    def _make_v5_file(self, path: Path) -> None:
+        con = sqlite3.connect(path)
+        for version in (3, 4, 5):
+            store_module._MIGRATIONS[version](con)
+        con.execute("PRAGMA user_version=5")
+        con.execute("PRAGMA foreign_keys=ON")
+        con.executescript(
+            """
+            INSERT INTO sweeps (sweep_id, project, name, state, created_ns, updated_ns)
+            VALUES ('sw', 'p', 'n', 'running', 1, 2);
+            INSERT INTO trials (trial_id, sweep_id, number, state,
+            retry_root_trial_id, retry_index, created_ns, updated_ns)
+            VALUES ('t1', 'sw', 0, 'completed', 't1', 0, 1, 2);
+            INSERT INTO artifacts (artifact_id, trial_id, execution_id, key,
+            filename, content_type, size_bytes, sha256, declared_ns)
+            VALUES ('a1', 't1', NULL, 'model', 'model.pt',
+            'application/octet-stream', 3, NULL, 5);
+            """
+        )
+        con.commit()
+        con.close()
+
+    def test_v5_file_upgrades_in_place(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v5_file(path)
+
+        with Store(path) as store:
+            assert store.query("PRAGMA user_version")[1] == [(6,)]
+            artifact_cols = {
+                row[1] for row in store.query("PRAGMA table_info(artifacts)")[1]
+            }
+            assert {"context_json", "source"} <= artifact_cols
+            store.verify()
+
+    def test_v5_artifacts_get_source_default_and_keep_data(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v5_file(path)
+
+        with Store(path) as store:
+            assert store.query(
+                "SELECT artifact_id, key, context_json, source FROM artifacts"
+            )[1] == [("a1", "model", None, "user")]
+
+
 class TestMigrationAtomicity:
     def test_failing_migration_rolls_back_completely(self, tmp_path, monkeypatch):
         def failing(con: sqlite3.Connection) -> None:
@@ -558,7 +603,7 @@ class TestMigrationAtomicity:
         monkeypatch.undo()
         with Store(path) as store:
             store.verify()
-            assert store.query("PRAGMA user_version")[1] == [(5,)]
+            assert store.query("PRAGMA user_version")[1] == [(6,)]
 
 
 def _make_v2_db(path: Path) -> None:
