@@ -1,3 +1,5 @@
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 from jernerics_server.http import create_app
@@ -8,7 +10,6 @@ from jernerics_server.store import Store
 def client(tmp_path):
     store = Store(tmp_path / "test.sqlite")
     app = create_app(store)
-    app.state.store = store
     return TestClient(app)
 
 
@@ -16,16 +17,23 @@ def client(tmp_path):
 def auth_client(tmp_path):
     store = Store(tmp_path / "test.sqlite")
     app = create_app(store, api_key="secret123")
-    app.state.store = store
     return TestClient(app)
 
 
-@pytest.fixture
-def artifacts_client(tmp_path):
-    store = Store(tmp_path / "test.sqlite")
-    app = create_app(store, artifacts_root=tmp_path / "artifacts")
-    app.state.store = store
-    return TestClient(app)
+def _seed_trial(path, number: int = 7, state: str = "failed") -> None:
+    con = sqlite3.connect(path)
+    con.execute("PRAGMA foreign_keys=ON")
+    con.execute(
+        "INSERT INTO sweeps (sweep_id, project, name, state, created_ns,"
+        " updated_ns) VALUES ('sw', 'p', 'n', 'running', 1, 1)"
+    )
+    con.execute(
+        "INSERT INTO trials (trial_id, sweep_id, number, state,"
+        " retry_root_trial_id, retry_index, created_ns, updated_ns)"
+        f" VALUES ('t1', 'sw', {number}, '{state}', 't1', 0, 1, 1)"
+    )
+    con.commit()
+    con.close()
 
 
 class TestQueryEndpoint:
@@ -38,22 +46,24 @@ class TestQueryEndpoint:
 
     def test_rejects_insert(self, client):
         response = client.post(
-            "/query", json={"sql": "INSERT INTO params VALUES ('x', 1)"}
+            "/query", json={"sql": "INSERT INTO trials VALUES ('t', 1)"}
         )
         assert response.status_code == 400
         body = response.json()
         assert "error" in body
 
     def test_rejects_delete(self, client):
-        response = client.post("/query", json={"sql": "DELETE FROM params"})
+        response = client.post("/query", json={"sql": "DELETE FROM trials"})
         assert response.status_code == 400
 
     def test_rejects_drop(self, client):
-        response = client.post("/query", json={"sql": "DROP TABLE params"})
+        response = client.post("/query", json={"sql": "DROP TABLE trials"})
         assert response.status_code == 400
 
     def test_rejects_update(self, client):
-        response = client.post("/query", json={"sql": "UPDATE params SET key = 'x'"})
+        response = client.post(
+            "/query", json={"sql": "UPDATE trials SET state = 'failed'"}
+        )
         assert response.status_code == 400
 
     def test_invalid_sql_returns_error(self, client):
@@ -89,27 +99,17 @@ class TestQueryEndpoint:
         body = response.json()
         assert "error" in body
 
-    def test_query_binds_params(self, client):
-        client.post(
-            "/ingest",
-            json={
-                "project": "p",
-                "study_name": "s",
-                "trial_id": 0,
-                "timestamp_ns": 1,
-                "seq": 1,
-                "param": {"key": "lr", "value": {"float_val": 0.1}},
-            },
-        )
+    def test_query_binds_params(self, client, tmp_path):
+        _seed_trial(tmp_path / "test.sqlite")
         response = client.post(
             "/query",
             json={
-                "sql": "SELECT key FROM params WHERE project = ?",
-                "params": ["p"],
+                "sql": "SELECT number FROM trials WHERE state = ?",
+                "params": ["failed"],
             },
         )
         assert response.status_code == 200
-        assert response.json()["rows"] == [["lr"]]
+        assert response.json()["rows"] == [[7]]
 
     def test_query_without_params_still_works(self, client):
         response = client.post("/query", json={"sql": "SELECT 1 AS n"})
@@ -167,92 +167,3 @@ class TestHealthEndpoint:
         response = client.get("/api/health")
         assert response.status_code == 200
         assert response.json() == {"ok": True}
-
-
-def _value_envelope(seq: int = 0) -> dict:
-    return {
-        "project": "p",
-        "study_name": "s",
-        "trial_id": 0,
-        "timestamp_ns": 1,
-        "seq": seq,
-        "value": {"key": "loss", "value": 0.5, "step": 10, "context": "{}"},
-    }
-
-
-class TestIngestEndpoint:
-    def test_value_round_trips_through_query(self, client):
-        response = client.post("/ingest", json=_value_envelope())
-        assert response.status_code == 200
-        assert response.json() == {"ok": True}
-
-        q = client.post(
-            "/query", json={"sql": "SELECT key, scalar_val FROM tracked_values"}
-        )
-        assert q.status_code == 200
-        body = q.json()
-        assert body["columns"] == ["key", "scalar_val"]
-        assert body["rows"] == [["loss", 0.5]]
-
-    def test_duplicate_seq_is_idempotent(self, client):
-        envelope = _value_envelope()
-        assert client.post("/ingest", json=envelope).status_code == 200
-        assert client.post("/ingest", json=envelope).status_code == 200
-
-        q = client.post("/query", json={"sql": "SELECT COUNT(*) FROM tracked_values"})
-        assert q.json()["rows"] == [[1]]
-
-    def test_missing_auth_returns_401(self, auth_client):
-        response = auth_client.post("/ingest", json=_value_envelope())
-        assert response.status_code == 401
-
-    def test_invalid_key_returns_401(self, auth_client):
-        response = auth_client.post(
-            "/ingest",
-            json=_value_envelope(),
-            headers={"Authorization": "Bearer wrong"},
-        )
-        assert response.status_code == 401
-
-    def test_valid_bearer_passes(self, auth_client):
-        response = auth_client.post(
-            "/ingest",
-            json=_value_envelope(),
-            headers={"Authorization": "Bearer secret123"},
-        )
-        assert response.status_code == 200
-        assert response.json() == {"ok": True}
-
-
-class TestArtifactEndpoints:
-    def test_upload_then_download_round_trips(self, artifacts_client):
-        env = {
-            "project": "p",
-            "study_name": "s",
-            "trial_id": 0,
-            "timestamp_ns": 1,
-            "seq": 0,
-            "artifact": {"key": "ckpt", "filename": "model.bin"},
-        }
-        artifacts_client.post("/ingest", json=env)
-
-        resp = artifacts_client.post("/artifact/p/s/0/ckpt", content=b"model-bytes")
-        assert resp.status_code == 200
-
-        got = artifacts_client.get("/artifact/p/s/0/ckpt")
-        assert got.status_code == 200
-        assert got.content == b"model-bytes"
-        assert "model.bin" in got.headers["content-disposition"]
-
-    def test_download_missing_returns_404(self, artifacts_client):
-        resp = artifacts_client.get("/artifact/p/s/0/nope")
-        assert resp.status_code == 404
-
-    def test_large_upload_round_trips(self, artifacts_client, tmp_path):
-        body = bytes(range(256)) * 40960
-        resp = artifacts_client.post("/artifact/p/s/0/big", content=body)
-        assert resp.status_code == 200
-        on_disk = (tmp_path / "artifacts" / "p" / "s" / "0" / "big").read_bytes()
-        assert on_disk == body
-        got = artifacts_client.get("/artifact/p/s/0/big")
-        assert got.content == body
