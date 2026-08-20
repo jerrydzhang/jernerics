@@ -1,7 +1,8 @@
-"""Rich-based text rendering for runs/summary/diff.
+"""Rich renderers for the tracking observability CLI commands.
 
-JSON output is handled by the CLI directly (it dumps the raw analysis
-dicts); these functions own the human-readable, colourised views.
+Every renderer takes the same plain payload the command's ``--json``
+output emits (plus the derived listing columns) and prints colourised
+tables; JSON formatting itself stays in the CLI.
 """
 
 import time
@@ -37,20 +38,12 @@ def _format_number(v: Any) -> str:
     return str(v)
 
 
-def _format_params(params: dict[str, Any]) -> str:
-    return "  ".join(f"{k}={_format_number(v)}" for k, v in sorted(params.items()))
-
-
-def _format_duration(seconds: float | None) -> str:
-    if seconds is None:
+def _format_value(v: Any) -> str:
+    if v is None:
         return "-"
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    if seconds < 3600:
-        return f"{seconds / 60:.0f}m"
-    if seconds < 86400:
-        return f"{seconds / 3600:.1f}h"
-    return f"{seconds / 86400:.1f}d"
+    if isinstance(v, str):
+        return v
+    return _format_number(v)
 
 
 def _format_relative(ns: int | None) -> str:
@@ -68,216 +61,204 @@ def _format_relative(ns: int | None) -> str:
     return f"{secs / 86400:.0f}d ago"
 
 
-def _format_slope(slope: float | None) -> str:
-    if slope is None:
+def _format_instant(iso: str | None) -> str:
+    if iso is None:
         return "-"
-    return f"{slope:+.4g}/step"
+    return iso.replace("T", " ").removesuffix("+00:00")
 
 
-def _slope_header(label: str, rng: list[int] | None) -> str:
-    if rng is None:
-        return f"Slope ({label})"
-    return f"Slope [{rng[0]}-{rng[1]}]"
+def _short_id(value: str) -> str:
+    return value[:8]
 
 
-def _step_count(run: dict[str, Any]) -> str:
-    lo, hi = run.get("min_step"), run.get("max_step")
-    if hi is None:
-        return "-"
-    if lo is None:
-        return str(hi)
-    return str(hi - lo + 1)
-
-
-def _priority_column_key(runs: list[dict[str, Any]]) -> str | None:
-    for run in runs:
-        key = run.get("priority_key")
-        if key is not None:
-            return key
-    return None
-
-
-def render_runs(runs: list[dict[str, Any]], console: Console) -> None:
-    if not runs:
-        console.print("No runs found.")
+def render_runs(rows: list[dict[str, Any]], console: Console) -> None:
+    if not rows:
+        console.print("No trials found.")
         return
 
-    priority_key = _priority_column_key(runs)
+    show_lineage = any(row["trial"]["retry_index"] for row in rows)
     table = Table(show_header=True, header_style="bold")
-    table.add_column("RUN")
-    table.add_column("STATUS")
-    table.add_column("STEPS", justify="right")
-    if priority_key is not None:
-        table.add_column(priority_key.upper(), justify="right")
-    table.add_column("DURATION", justify="right")
-    table.add_column("CREATED", justify="right")
-    table.add_column("PARAMS", overflow="fold")
+    table.add_column("SWEEP")
+    table.add_column("TRIAL", justify="right")
+    table.add_column("STATE")
+    table.add_column("MONITORING")
+    table.add_column("OBJECTIVE", justify="right")
+    table.add_column("PARAMS", justify="right")
+    table.add_column("VALUES", justify="right")
+    table.add_column("UPDATED", justify="right")
+    if show_lineage:
+        table.add_column("RETRY", justify="right")
+        table.add_column("ROOT")
 
-    for run in runs:
+    for row in rows:
         cells = [
-            run["label"],
-            run["status"],
-            _step_count(run),
+            row["sweep"],
+            str(row["number"]),
+            row["trial"]["state"],
+            row["monitoring"],
+            _format_number(row["trial"]["objective"]),
+            str(row["params"]),
+            str(row["values"]),
+            _format_relative(row["updated_ns"]),
         ]
-        if priority_key is not None:
-            if run.get("priority_key") == priority_key:
-                cells.append(_format_number(run.get("priority_value")))
-            else:
-                cells.append("-")
-        cells += [
-            _format_duration(run.get("duration_s")),
-            _format_relative(run.get("created_ns")),
-            _format_params(run["params"]),
-        ]
+        if show_lineage:
+            cells += [str(row["trial"]["retry_index"]), row["root"]]
         table.add_row(*cells)
 
     console.print(table)
 
 
-def render_summary(summary: dict[str, Any], console: Console) -> None:
-    label = summary["label"]
-    duration = summary.get("duration_s")
-    lo, hi = summary.get("min_step"), summary.get("max_step")
-    step_range = f"{lo}-{hi}" if lo is not None and hi is not None else "-"
-
-    console.print(f"[bold]Run {label}[/bold]")
-    git_hash = summary.get("git_hash")
-    git_segment = f"    git: {git_hash[:7]}" if git_hash else ""
+def render_summary(data: dict[str, Any], console: Console) -> None:
+    trial = data["trial"]
+    console.print(f"[bold]Trial {data['label']}[/bold] (sweep {data['sweep']})")
     console.print(
-        f"  status: {summary['status']}    steps: {step_range}    "
-        f"duration: {_format_duration_seconds(duration)}{git_segment}"
+        f"  state: {trial['state']}    objective: {_format_number(trial['objective'])}"
     )
 
-    params = summary["params"]
+    lineage = data["lineage"]
+    console.print(
+        f"\nRetry lineage ({len(lineage)} generations, sweep {data['sweep']}):"
+    )
+    numbers = {record["trial_id"]: str(record["number"]) for record in lineage}
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("GEN", justify="right")
+    table.add_column("TRIAL", justify="right")
+    table.add_column("PARENT", justify="right")
+    table.add_column("ROOT", justify="right")
+    for record in lineage:
+        current = "*" if record["trial_id"] == trial["trial_id"] else ""
+        parent = (
+            numbers.get(record["retry_of_trial_id"])
+            if record["retry_of_trial_id"]
+            else "-"
+        ) or _short_id(record["retry_of_trial_id"] or "")
+        root = numbers.get(record["retry_root_trial_id"]) or _short_id(
+            record["retry_root_trial_id"]
+        )
+        table.add_row(
+            str(record["retry_index"]),
+            str(record["number"]) + current,
+            parent,
+            root,
+        )
+    console.print(table)
+
+    params = data["params"]
     console.print(f"\nParams ({len(params)}):")
-    console.print(f"  {_format_params(params)}")
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("KEY")
+    table.add_column("KIND")
+    table.add_column("VALUE")
+    for record in params:
+        table.add_row(record["key"], record["kind"], _format_value(record["value"]))
+    console.print(table)
 
-    metrics = summary["metrics"]
-    if metrics:
-        console.print("\nMetrics:")
-        table = Table(show_header=True, header_style="bold")
-        table.add_column("Metric")
-        table.add_column("First", justify="right")
-        table.add_column("Last", justify="right")
-        table.add_column("Change", justify="right")
-        early_rng = next(
-            (m["early_range"] for m in metrics.values() if m["early_range"]),
-            None,
+    values = data["values"]
+    console.print(f"\nValues ({len(values)}):")
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("KEY")
+    table.add_column("KIND")
+    table.add_column("POINTS", justify="right")
+    table.add_column("LATEST STEP", justify="right")
+    for record in values:
+        table.add_row(
+            record["key"],
+            record["kind"],
+            str(record["n_points"]),
+            str(record["latest_step"]),
         )
-        recent_rng = next(
-            (m["recent_range"] for m in metrics.values() if m["recent_range"]),
-            None,
+    console.print(table)
+
+    artifacts = data["artifacts"]
+    console.print(f"\nArtifacts ({len(artifacts)}):")
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("KEY")
+    table.add_column("FILENAME")
+    table.add_column("SIZE", justify="right")
+    table.add_column("RECEIVED")
+    table.add_column("SOURCE")
+    for record in artifacts:
+        table.add_row(
+            record["key"],
+            record["filename"],
+            _format_number(record["size_bytes"]),
+            "yes" if record["received_ns"] is not None else "no",
+            record["source"],
         )
-        table.add_column(_slope_header("early", early_rng), justify="right")
-        table.add_column(_slope_header("recent", recent_rng), justify="right")
-        for key, m in metrics.items():
-            table.add_row(
-                key,
-                _format_number(m["first"]),
-                _format_number(m["last"]),
-                _format_number(m["change"]),
-                _format_slope(m["early_slope"]),
-                _format_slope(m["recent_slope"]),
-            )
-        console.print(table)
+    console.print(table)
 
-    text_metrics = summary.get("text_metrics") or []
-    if text_metrics:
-        console.print("\nText metrics:")
-        for tm in text_metrics:
-            console.print(f"  {tm['key']} ({tm['n_points']} points)")
-
-    artifacts = summary["artifacts"]
-    if artifacts:
-        console.print("\nArtifacts:")
-        for key in artifacts:
-            console.print(f"  {key}")
+    executions = data["executions"]
+    console.print(f"\nExecutions ({len(executions)}):")
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("HOST")
+    table.add_column("STARTED")
+    table.add_column("ENDED")
+    table.add_column("OUTCOME")
+    table.add_column("MONITORING")
+    for record in executions:
+        table.add_row(
+            record["hostname"],
+            _format_instant(record["started_at"]),
+            _format_instant(record["ended_at"]),
+            record["outcome"] or "-",
+            record["monitoring"] or "-",
+        )
+    console.print(table)
 
 
-def _format_duration_seconds(seconds: float | None) -> str:
-    if seconds is None:
-        return "-"
-    return f"{seconds:.1f}s"
+def render_diff(data: dict[str, Any], console: Console) -> None:
+    a, b = data["a"], data["b"]
+    console.print(f"A: {data['a_label']} ({a['state']})")
+    console.print(f"B: {data['b_label']} ({b['state']})")
 
+    console.print(f"\nParams (union of {len(data['params'])}):")
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("KEY")
+    table.add_column("A", justify="right")
+    table.add_column("B", justify="right")
+    for entry in data["params"]:
+        table.add_row(
+            entry["key"],
+            "(missing)" if entry["a"] is None else _format_value(entry["a"]),
+            "(missing)" if entry["b"] is None else _format_value(entry["b"]),
+        )
+    console.print(table)
 
-def render_diff(diff: dict[str, Any], console: Console) -> None:
-    a, b = diff["run_a"], diff["run_b"]
+    console.print(f"\nValues (latest, union of {len(data['values'])}):")
+    table = Table(show_header=True, header_style="bold", show_lines=False)
+    table.add_column("KEY")
+    table.add_column("A", justify="right")
+    table.add_column("B", justify="right")
+    for entry in data["values"]:
+        table.add_row(
+            entry["key"],
+            "(missing)" if entry["a"] is None else _format_value(entry["a"]),
+            "(missing)" if entry["b"] is None else _format_value(entry["b"]),
+        )
+    console.print(table)
+
     console.print(
-        f"Run A: {a['label']}  ({a['status']}, "
-        f"{_step_count_from_max(a['max_step'])} steps)"
-    )
-    console.print(
-        f"Run B: {b['label']}  ({b['status']}, "
-        f"{_step_count_from_max(b['max_step'])} steps)"
+        f"\nObjective: A {_format_number(data['objective']['a'])}    "
+        f"B {_format_number(data['objective']['b'])}"
     )
 
-    param_diff = diff["param_diff"]
-    if param_diff:
-        console.print("\nParams that differ:")
-        table = Table(show_header=True, header_style="bold", show_lines=False)
-        table.add_column("Param")
-        table.add_column("Run A", justify="right")
-        table.add_column("Run B", justify="right")
-        for entry in param_diff:
-            table.add_row(
-                entry["key"],
-                _format_number(entry["a"]),
-                _format_number(entry["b"]),
-            )
-        console.print(table)
-    else:
-        console.print("\nNo differing params.")
 
-    matched = diff["param_match"]
-    console.print(f"\nParams that match ({diff['param_match_count']}):")
-    if matched:
-        console.print("  " + "  ".join(sorted(matched)))
-
-    metric_diff = diff["metric_diff"]
-    if metric_diff:
-        console.print("")
-        table = Table(show_header=True, header_style="bold")
-        table.add_column("Metric")
-        table.add_column("A (Last)", justify="right")
-        table.add_column("B (Last)", justify="right")
-        table.add_column("Change", justify="right")
-        for entry in metric_diff:
-            table.add_row(
-                entry["key"],
-                _format_number(entry["a"]),
-                _format_number(entry["b"]),
-                _format_number(entry["change"]),
-            )
-        console.print(table)
-
-
-def _step_count_from_max(max_step: int | None) -> str:
-    if max_step is None:
-        return "?"
-    return str(max_step + 1)
-
-
-def render_trace(
-    label: str,
-    metric: str,
-    series: list[dict[str, Any]],
-    console: Console,
-) -> None:
-    """Human-readable trace: one line per step/value pair."""
+def render_trace(data: dict[str, Any], console: Console) -> None:
+    series = data["series"]
+    console.print(f"Trace: {data['label']} / {data['key']} ({len(series)} points)")
     if not series:
-        console.print(f"Trace: {label} / {metric} — no data")
         return
+    step_width = len(str(max(point["step"] for point in series)))
+    for point in series:
+        console.print(
+            f"  step {point['step']:>{step_width}}: {_format_value(point['value'])}"
+        )
 
-    console.print(f"Trace: {label} / {metric} ({len(series)} points)")
-    max_step = max((p["step"] for p in series if p["step"] is not None), default=None)
-    step_width = len(str(max_step)) if max_step is not None else 1
 
-    for p in series:
-        step = p["step"]
-        value = p["value"]
-        step_str = " " * step_width + "-" if step is None else f"{step:>{step_width}}"
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            value_str = _format_number(value)
-        else:
-            value_str = str(value)
-        console.print(f"  step {step_str}: {value_str}")
+def render_query(columns: list[str], rows: list[list[Any]], console: Console) -> None:
+    table = Table(show_header=True, header_style="bold")
+    for column in columns:
+        table.add_column(column)
+    for row in rows:
+        table.add_row(*(_format_value(value) for value in row))
+    console.print(table)
