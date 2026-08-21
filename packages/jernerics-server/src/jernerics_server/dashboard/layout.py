@@ -4,7 +4,8 @@ The shell owns all client-side state: ``dcc.Location`` carries the URL,
 ``project-store`` the active project, ``selection-store`` the unified
 selection tray (sweeps picked on any grid, retry families, and the
 expansion toggle — the typed ``Selection`` is built per query call in
-the service), and ``poll`` is the conditional refresh interval pages
+the service), ``analysis-message-store`` the analysis URL-hydration
+message, and ``poll`` is the conditional refresh interval pages
 enable or disable through the router callback.
 
 Every page function is pure: data in, Dash components out. Callbacks
@@ -90,6 +91,7 @@ def shell() -> html.Div:
             dcc.Store(
                 id="selection-store", storage_type="session", data=dict(EMPTY_TRAY)
             ),
+            dcc.Store(id="analysis-message-store"),
             dcc.Interval(id="poll", interval=POLL_INTERVAL_MS, disabled=True),
         ],
         className="shell",

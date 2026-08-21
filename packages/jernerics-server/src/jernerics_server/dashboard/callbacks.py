@@ -135,18 +135,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return page, not polls
 
     @app.callback(
-        Output("url", "search", allow_duplicate=True),
-        Input("url", "pathname"),
-        State("url", "search"),
-        prevent_initial_call=True,
-    )
-    def _clear_search_off_analysis(pathname: str | None, search: str | None):
-        """Leaving the analysis page drops its ?sel= token from the URL."""
-        if search and parse_route(pathname).kind != "analysis":
-            return ""
-        raise PreventUpdate
-
-    @app.callback(
         Output("project-picker", "options"),
         Input("url", "pathname"),
     )
@@ -226,8 +214,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("selection-store", "data"),
-        Output("analysis-expand", "value"),
-        Output("analysis-error", "children"),
+        Output("analysis-message-store", "data"),
         Input("url", "pathname"),
         Input("url", "search"),
         Input("project-store", "data"),
@@ -239,46 +226,76 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         project: str | None,
         current: dict | None,
     ):
-        tray, expand, error = analysis.hydrate_tray(
-            service, project, pathname, search, current
+        # Shell-only outputs: this fires on every navigation, and Dash
+        # raises ReferenceError when a dispatched callback writes a
+        # component the current page does not mount (jernerics-8c9).
+        tray, error = analysis.hydrate_tray(service, project, pathname, search, current)
+        return no_update if tray is None else tray, error or ""
+
+    @app.callback(
+        Output("url", "search"),
+        Input("url", "pathname"),
+        Input("selection-store", "data"),
+        State("url", "search"),
+        State("project-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _sync_selection_url(
+        pathname: str | None,
+        tray: dict | None,
+        current_search: str | None,
+        project: str | None,
+    ):
+        """Sole owner of ``url.search``: mints ``?sel=`` from tray edits
+        on the analysis page and drops it when navigating away. Only
+        shell-resident ids, so it can fire on any page."""
+        triggered = {item["prop_id"] for item in dash.callback_context.triggered}
+        target = analysis.synced_search(
+            service,
+            pathname,
+            tray,
+            current_search,
+            project,
+            url_navigated="url.pathname" in triggered,
         )
-        if error is not None:
-            return no_update, no_update, Error(error)
-        if tray is None:
+        if target is None:
             raise PreventUpdate
-        return tray, expand or [], ""
+        return target
 
     @app.callback(
         Output("selection-store", "data", allow_duplicate=True),
-        Output("url", "search", allow_duplicate=True),
         Input("analysis-sweep-grid", "selectedRows"),
         Input("analysis-family-grid", "selectedRows"),
         Input("analysis-expand", "value"),
         State("selection-store", "data"),
-        State("url", "pathname"),
-        State("project-store", "data"),
-        State("url", "search"),
         prevent_initial_call=True,
     )
     def _edit_analysis_tray(
         sweep_rows: list[dict] | None,
         family_rows: list[dict] | None,
-        expand_values: list[str] | None,
+        expand_flags: list[str] | None,
         current: dict | None,
-        pathname: str | None,
-        project: str | None,
-        current_search: str | None,
     ):
-        tray = analysis.tray_from_picks(sweep_rows, family_rows, expand_values, current)
+        tray = analysis.tray_from_picks(sweep_rows, family_rows, expand_flags, current)
         # AG Grid echoes its programmatic selectedRows back on mount, and
-        # session restore replays the stored tray; neither is an edit,
-        # and firing here would rewrite ?sel= over a hydrated token.
+        # session restore replays the stored tray; neither is an edit.
         if tray == (current or {}):
             raise PreventUpdate
-        if parse_route(pathname).kind != "analysis":
-            return tray, no_update
-        target = analysis.search_from_tray(service, project, tray, current_search)
-        return tray, no_update if target is None else target
+        return tray
+
+    @app.callback(
+        Output("analysis-expand", "value"),
+        Input("selection-store", "data"),
+    )
+    def _sync_expand_toggle(tray: dict | None):
+        return analysis.expand_values(tray)
+
+    @app.callback(
+        Output("analysis-error", "children"),
+        Input("analysis-message-store", "data"),
+    )
+    def _show_analysis_message(message: str | None):
+        return Error(message) if message else ""
 
     @app.callback(
         Output("analysis-sweep-grid", "rowData"),

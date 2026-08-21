@@ -40,10 +40,12 @@ from jernerics.post_hook import PipelineResult, run_pipeline
 from jernerics.retry import RetryContext
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import ship_events_file
+from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.artifacts import raw_href, viewer_href
 from jernerics_server.dashboard.auth import COOKIE_NAME
 from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.components import short_id
+from jernerics_server.dashboard.layout import shell
 from jernerics_server.dashboard.routes import ROUTES_BASE, parse_route
 from jernerics_server.http import create_app
 from jernerics_server.store import Store
@@ -248,6 +250,7 @@ def scenario(tmp_path_factory):
 
     model_path = tracking_dir.parent / "artifacts-out" / "model-0.txt"
     yield SimpleNamespace(
+        app=app,
         base_url=base_url,
         db_path=tmp_path / "server.sqlite",
         service=app.state.dashboard.service,
@@ -494,6 +497,31 @@ class TestMountedDashboardHttp:
         )
         assert landed.status_code == 200
         assert "jernerics dashboard" in landed.text
+
+    def test_mounted_callback_graph_keeps_url_search_shell_owned(self, scenario):
+        """jernerics-8c9: the mounted app registers exactly one owner of
+        ``url.search`` and it references only always-mounted shell ids,
+        so no navigation can dispatch a callback into unmounted page
+        components (the analysis-exit ReferenceError)."""
+        dash_app = build_dash_app(scenario.app.state.dashboard)
+
+        def output_specs(key: str) -> set[str]:
+            stripped = key.removeprefix("..").removesuffix("..")
+            return {part.split("@")[0] for part in stripped.split("...") if part}
+
+        owners = [
+            key for key in dash_app.callback_map if output_specs(key) == {"url.search"}
+        ]
+        assert owners == ["url.search"]
+        owner = dash_app.callback_map["url.search"]
+        shell_ids = {
+            node.id
+            for node in _components(shell())
+            if isinstance(getattr(node, "id", None), str)
+        }
+        referenced = {dep["id"] for dep in owner["inputs"]}
+        referenced |= {dep["id"] for dep in owner.get("state", [])}
+        assert referenced <= shell_ids
 
 
 class TestArtifactRowClickNavigation:

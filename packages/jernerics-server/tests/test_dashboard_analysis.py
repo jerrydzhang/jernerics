@@ -36,6 +36,7 @@ from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
     analysis_page,
     catalog_tab,
+    expand_values,
     hydrate_tray,
     optuna_tab_content,
     points_tab,
@@ -43,16 +44,21 @@ from jernerics_server.dashboard.analysis import (
     python_tab,
     search_from_tray,
     series_outputs,
+    synced_search,
     tray_from_picks,
     tray_summary,
 )
+from jernerics_server.dashboard.app import build_dash_app
+from jernerics_server.dashboard.auth import DashboardContext
 from jernerics_server.dashboard.callbacks import page_content, tray_from_grid
+from jernerics_server.dashboard.layout import shell
 from jernerics_server.dashboard.selection_tokens import (
     SelectionTokenError,
     decode_selection_token,
     encode_selection_token,
 )
 from jernerics_server.dashboard.service import DashboardService
+from jernerics_server.dashboard.sessions import SessionSigner
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
 from jernerics_server.queries import QueryService
@@ -557,7 +563,7 @@ class TestSelectionTokens:
     def test_cross_project_token_surfaces_error_not_mixed_results(self, service):
         with pytest.raises(SelectionTokenError, match="project 'other'"):
             decode_selection_token(CROSS_PROJECT_TOKEN, project=PROJECT)
-        tray, _expand, error = hydrate_tray(
+        tray, error = hydrate_tray(
             service=service,
             project=PROJECT,
             pathname="/dashboard/analysis",
@@ -572,7 +578,7 @@ class TestUnifiedSelectionStore:
     def test_token_hydration_feeds_tray_and_summary(self, service):
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A, SWEEP_B))
         token = encode_selection_token(selection)
-        tray, _expand, error = hydrate_tray(
+        tray, error = hydrate_tray(
             service, PROJECT, "/dashboard/analysis", f"?sel={token}", None
         )
         assert error is None and tray is not None
@@ -581,7 +587,7 @@ class TestUnifiedSelectionStore:
         assert tray_summary(tray).startswith(f"{len(selection.sweeps or ())} sweep(s)")
         # The same token against the hydrated store is a no-op, so the
         # ?sel= write-back stays stable instead of rewriting forever.
-        again, _expand, error = hydrate_tray(
+        again, error = hydrate_tray(
             service, PROJECT, "/dashboard/analysis", f"?sel={token}", tray
         )
         assert again is None and error is None
@@ -609,7 +615,7 @@ class TestUnifiedSelectionStore:
 
     def test_workspace_grid_rows_reflect_the_unified_store(self, service):
         token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
-        store, _expand, error = hydrate_tray(
+        store, error = hydrate_tray(
             service, PROJECT, "/dashboard/analysis", f"?sel={token}", None
         )
         assert error is None and store is not None
@@ -888,16 +894,16 @@ class TestUrlReload:
     def test_token_hydrates_equal_tray_selection(self, service):
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A,), trials=(RA2,))
         search = f"?sel={encode_selection_token(selection)}"
-        tray, expand, error = hydrate_tray(
+        tray, error = hydrate_tray(
             service, PROJECT, "/dashboard/analysis", search, None
         )
         assert error is None and tray is not None
         assert service.analysis_selection(PROJECT, tray) == selection
-        assert expand == []
+        assert expand_values(tray) == []
 
     def test_retry_root_token_hydrates_with_expansion(self, service):
         selection = Selection(project=PROJECT, retry_roots=(RA0,))
-        tray, expand, error = hydrate_tray(
+        tray, error = hydrate_tray(
             service,
             PROJECT,
             "/dashboard/analysis",
@@ -905,7 +911,7 @@ class TestUrlReload:
             None,
         )
         assert error is None and tray is not None
-        assert expand == ["expand"]
+        assert expand_values(tray) == ["expand"]
         assert _selected_trial_ids(
             service, service.analysis_selection(PROJECT, tray)
         ) == _selected_trial_ids(service, selection)
@@ -914,7 +920,7 @@ class TestUrlReload:
         tray = tray_from_picks([], [{"root": str(RA0)}], ["expand"], None)
         search = search_from_tray(service, PROJECT, tray, "")
         assert search is not None and search.startswith("?sel=")
-        hydrated, _expand, error = hydrate_tray(
+        hydrated, error = hydrate_tray(
             service, PROJECT, "/dashboard/analysis", search, None
         )
         assert error is None
@@ -929,14 +935,157 @@ class TestUrlReload:
         assert search_from_tray(service, PROJECT, tray, search) is None
 
     def test_non_analysis_url_is_ignored(self, service):
-        tray, expand, error = hydrate_tray(
+        tray, error = hydrate_tray(
             service,
             PROJECT,
             "/dashboard/sweep/x",
             f"?sel={encode_selection_token(Selection(project=PROJECT))}",
             None,
         )
-        assert tray is None and expand is None and error is None
+        assert tray is None and error is None
+
+
+class TestUrlSync:
+    """jernerics-8c9: one shell-only callback owns ``url.search`` — tray
+    edits mint ``?sel=`` on the analysis page, navigations strip it, and
+    a navigation never mints (a stale session tray would clobber a
+    freshly opened deep link before hydration lands)."""
+
+    def test_tray_edit_on_analysis_mints_the_token(self, service):
+        tray = tray_from_picks([{"sweep_id": str(SWEEP_A)}], [], [], None)
+        target = synced_search(
+            service, "/dashboard/analysis", tray, "", PROJECT, url_navigated=False
+        )
+        assert target is not None and target.startswith("?sel=")
+        assert decode_selection_token(target.removeprefix("?sel=")) == (
+            service.analysis_selection(PROJECT, tray)
+        )
+
+    def test_unchanged_tray_edit_leaves_the_search_alone(self, service):
+        tray = _tray()
+        search = search_from_tray(service, PROJECT, tray, "")
+        assert (
+            synced_search(
+                service,
+                "/dashboard/analysis",
+                tray,
+                search,
+                PROJECT,
+                url_navigated=False,
+            )
+            is None
+        )
+
+    def test_tray_edit_off_analysis_leaves_the_search_alone(self, service):
+        tray = tray_from_picks([{"sweep_id": str(SWEEP_A)}], [], [], None)
+        assert (
+            synced_search(
+                service,
+                "/dashboard/project/lab",
+                tray,
+                "?sel=tok",
+                PROJECT,
+                url_navigated=False,
+            )
+            is None
+        )
+
+    def test_navigation_off_analysis_strips_the_token(self, service):
+        assert (
+            synced_search(
+                service, "/dashboard/", None, "?sel=tok", PROJECT, url_navigated=True
+            )
+            == ""
+        )
+
+    def test_navigation_with_no_search_leaves_the_url_alone(self, service):
+        assert (
+            synced_search(
+                service, "/dashboard/sweep/x", None, "", None, url_navigated=True
+            )
+            is None
+        )
+
+    def test_navigation_onto_analysis_never_mints_over_a_deep_link(self, service):
+        session_tray = tray_from_picks([{"sweep_id": str(SWEEP_A)}], [], [], None)
+        deep_link = "?sel=" + encode_selection_token(
+            Selection(project=PROJECT, sweeps=(SWEEP_B,))
+        )
+        assert (
+            synced_search(
+                service,
+                "/dashboard/analysis",
+                session_tray,
+                deep_link,
+                PROJECT,
+                url_navigated=True,
+            )
+            is None
+        )
+
+
+class TestCallbackGraphSafety:
+    """jernerics-8c9 regression: a callback firable on any page — one
+    with an input id mounted in the shell — must reference only
+    shell-mounted ids in its states and may not mix shell and page-local
+    outputs. Dash raises ReferenceError for exactly that shape when the
+    page-local component is unmounted (fully page-local outputs are
+    pruned silently, so they are allowed)."""
+
+    @pytest.fixture(scope="class")
+    def callback_map(self, tmp_path_factory):
+        service = DashboardService(
+            QueryService(_seeded_store(tmp_path_factory.mktemp("callback-graph")))
+        )
+        ctx = DashboardContext(
+            api_key="secret123",
+            queries=service.queries,
+            service=service,
+            signer=SessionSigner(b"\x00" * 32),
+        )
+        return build_dash_app(ctx).callback_map
+
+    @staticmethod
+    def _outputs(key: str) -> set[str]:
+        """The ``id.property`` output specs behind a callback_map key
+        (``...``-joined multi-outputs, ``@<hash>`` duplicate suffixes)."""
+        stripped = key.removeprefix("..").removesuffix("..")
+        return {part.split("@")[0] for part in stripped.split("...") if part}
+
+    def test_url_search_has_exactly_one_owner(self, callback_map):
+        owners = [key for key in callback_map if self._outputs(key) == {"url.search"}]
+        assert owners == ["url.search"]
+
+    def test_everywhere_firable_callbacks_never_mix_shell_and_page_ids(
+        self, callback_map
+    ):
+        shell_ids = {
+            node.id
+            for node in _walk(
+                shell(), lambda node: isinstance(getattr(node, "id", None), str)
+            )
+        }
+        for key, spec in callback_map.items():
+            inputs = {dep["id"] for dep in spec["inputs"]}
+            if not inputs & shell_ids:
+                continue
+            output_ids = {spec.rsplit(".", 1)[0] for spec in self._outputs(key)}
+            assert not (output_ids & shell_ids and output_ids - shell_ids), (
+                key,
+                sorted(output_ids),
+            )
+            states = {dep["id"] for dep in spec.get("state", [])}
+            assert states <= shell_ids, key
+
+    def test_analysis_grids_write_the_shell_selection_store(self, callback_map):
+        grid_writers = [
+            key
+            for key, spec in callback_map.items()
+            if {"analysis-sweep-grid", "analysis-family-grid"}
+            & {dep["id"] for dep in spec["inputs"]}
+        ]
+        assert len(grid_writers) == 1
+        assert self._outputs(grid_writers[0]) == {"selection-store.data"}
 
 
 class TestContinueInPython:

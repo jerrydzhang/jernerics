@@ -331,24 +331,49 @@ def hydrate_tray(
     pathname: str | None,
     search: str | None,
     current: dict[str, Any] | None,
-) -> tuple[dict[str, Any] | None, list[str] | None, str | None]:
-    """(tray, expand flag values, error) for a URL carrying ``?sel=``.
-
-    A ``None`` tray means "leave the current state alone" (no token, a
-    different page, or a token equal to what is already shown). A token
-    scoped to another project surfaces as an error instead of mixing.
-    """
+) -> tuple[dict[str, Any] | None, str | None]:
+    """(tray, error) for a URL carrying ``?sel=``. A ``None`` tray means
+    "leave the current state alone" (no token, a different page, or a
+    token equal to what is already shown). A token scoped to another
+    project surfaces as an error instead of mixing."""
     token = _sel_param(search)
     if not token or parse_route(pathname).kind != "analysis" or not project:
-        return None, None, None
+        return None, None
     try:
         selection = decode_selection_token(token, project=project)
     except SelectionTokenError as error:
-        return None, None, str(error)
+        return None, str(error)
     if current and service.analysis_selection(project, current) == selection:
-        return None, None, None
-    tray = tray_from_selection(selection)
-    return tray, (["expand"] if tray["expand"] else []), None
+        return None, None
+    return tray_from_selection(selection), None
+
+
+def expand_values(tray: dict[str, Any] | None) -> list[str]:
+    """Expansion-toggle checklist values matching the tray's flag."""
+    return ["expand"] if (tray or {}).get("expand") else []
+
+
+def synced_search(
+    service: DashboardService,
+    pathname: str | None,
+    tray: dict[str, Any] | None,
+    current_search: str | None,
+    project: str | None,
+    *,
+    url_navigated: bool,
+) -> str | None:
+    """The URL search after a navigation or a tray edit; ``None`` leaves
+    it alone. Navigations may only drop the analysis token — minting on
+    navigation would let a stale session tray clobber a freshly opened
+    deep link before hydration lands. Tray edits mint the token, and
+    only on the analysis page whose grids are the sole editors."""
+    if url_navigated:
+        if current_search and parse_route(pathname).kind != "analysis":
+            return ""
+        return None
+    if parse_route(pathname).kind != "analysis":
+        return None
+    return search_from_tray(service, project, tray, current_search)
 
 
 def search_from_tray(
