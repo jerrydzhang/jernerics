@@ -33,6 +33,7 @@ body {
 .nav .tray {
   color: #555;
   font-size: 0.9rem;
+  white-space: nowrap;
 }
 
 .nav form {
@@ -101,6 +102,13 @@ a.project-row:hover {
   display: flex;
   gap: 0.4rem;
   flex-wrap: wrap;
+}
+
+.project-sweep {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .badge {
@@ -211,6 +219,8 @@ a.project-row:hover {
 }
 
 .lineage-panel {
+  min-width: 0;
+  overflow-x: auto;
   border: 1px dashed #ccc;
   border-radius: 6px;
   padding: 0.6rem 0.75rem;

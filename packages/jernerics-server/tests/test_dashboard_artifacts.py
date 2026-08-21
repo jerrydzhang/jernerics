@@ -311,6 +311,7 @@ class TestCellTextSelection:
         options = _find(page, AgGrid, "artifact-grid")[0].dashGridOptions
         assert options["enableCellTextSelection"] is True
         assert options["ensureDomOrder"] is True
+        assert options["pagination"] is False
 
     def test_rows_grid_keeps_quick_filter_and_carries_the_pair(self, env):
         page, _ = page_content(
@@ -320,6 +321,7 @@ class TestCellTextSelection:
         assert options == {
             "enableCellTextSelection": True,
             "ensureDomOrder": True,
+            "pagination": False,
             "quickFilterText": "",
         }
 
@@ -349,6 +351,7 @@ class TestCellTextSelection:
         assert options == {
             "enableCellTextSelection": True,
             "ensureDomOrder": True,
+            "pagination": False,
             "quickFilterText": "train",
         }
 

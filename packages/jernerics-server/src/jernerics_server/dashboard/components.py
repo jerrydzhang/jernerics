@@ -119,5 +119,12 @@ def grid_options(**options: Any) -> dict[str, Any]:
     """``dashGridOptions`` base shared by every AG Grid: cell text stays
     selectable so identifiers (sweep names, trial ids, sha256) can be
     copied, with DOM order preserved so selection spans virtualized
-    rows. Per-grid keys override the base."""
-    return {"enableCellTextSelection": True, "ensureDomOrder": True, **options}
+    rows. Pagination stays explicitly off — no grid pages, so the AG
+    Grid pagination footer can never appear with a phantom row count.
+    Per-grid keys override the base."""
+    return {
+        "enableCellTextSelection": True,
+        "ensureDomOrder": True,
+        "pagination": False,
+        **options,
+    }

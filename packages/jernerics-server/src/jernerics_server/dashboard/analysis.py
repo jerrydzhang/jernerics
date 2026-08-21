@@ -208,8 +208,6 @@ _SWEEP_PICKER_COLUMNS: list[dict[str, Any]] = [
     {
         "headerName": "Sweep",
         "field": "name",
-        "checkboxSelection": True,
-        "headerCheckboxSelection": True,
     },
     {"headerName": "Id", "field": "sweep_id"},
     {"headerName": "State", "field": "state"},

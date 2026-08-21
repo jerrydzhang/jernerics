@@ -213,8 +213,6 @@ _SWEEP_GRID_COLUMNS = [
         "headerName": "Sweep",
         "field": "name",
         "cellRenderer": "markdown",
-        "checkboxSelection": True,
-        "headerCheckboxSelection": True,
     },
     {"headerName": "State", "field": "state"},
     {"headerName": "Submitted jobs", "field": "submitted_jobs"},

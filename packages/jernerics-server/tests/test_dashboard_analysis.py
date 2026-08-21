@@ -663,6 +663,7 @@ class TestCellTextSelection:
             assert grid.dashGridOptions == {
                 "enableCellTextSelection": True,
                 "ensureDomOrder": True,
+                "pagination": False,
                 "rowSelection": {"mode": "multiRow"},
             }
 
@@ -678,6 +679,7 @@ class TestCellTextSelection:
             assert grid.dashGridOptions == {
                 "enableCellTextSelection": True,
                 "ensureDomOrder": True,
+                "pagination": False,
             }
 
 

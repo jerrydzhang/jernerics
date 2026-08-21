@@ -465,13 +465,16 @@ class TestSweepGrid:
             link = f"[{summary.name}](/dashboard/sweep/{summary.sweep_id})"
             assert link in rendered
 
-    def test_sweep_column_links_without_disturbing_selection(self, service):
+    def test_sweep_column_links_without_a_second_checkbox(self, service):
+        """jernerics-sey: AG Grid 35's rowSelection multiRow already
+        renders the selection column; a columnDef checkboxSelection
+        duplicated it (two checkboxes per row)."""
         page, _ = page_content("/dashboard/project/ops", service)
         sweep_column = _grid(page, "sweep-grid").columnDefs[0]
         assert sweep_column["field"] == "name"
         assert sweep_column["cellRenderer"] == "markdown"
-        assert sweep_column["checkboxSelection"] is True
-        assert sweep_column["headerCheckboxSelection"] is True
+        assert "checkboxSelection" not in sweep_column
+        assert "headerCheckboxSelection" not in sweep_column
 
 
 class TestCellTextSelection:
@@ -483,10 +486,12 @@ class TestCellTextSelection:
         assert grid_options() == {
             "enableCellTextSelection": True,
             "ensureDomOrder": True,
+            "pagination": False,
         }
         assert grid_options(quickFilterText="x") == {
             "enableCellTextSelection": True,
             "ensureDomOrder": True,
+            "pagination": False,
             "quickFilterText": "x",
         }
 
