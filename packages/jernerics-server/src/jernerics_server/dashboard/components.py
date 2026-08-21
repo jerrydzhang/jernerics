@@ -3,6 +3,7 @@
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from typing import Any
 
 from dash import dcc, html
 from dash.development.base_component import Component
@@ -112,3 +113,11 @@ def Empty(message: str) -> html.Div:
         [html.H3("Nothing here yet"), html.P(message)],
         className="surface surface-empty",
     )
+
+
+def grid_options(**options: Any) -> dict[str, Any]:
+    """``dashGridOptions`` base shared by every AG Grid: cell text stays
+    selectable so identifiers (sweep names, trial ids, sha256) can be
+    copied, with DOM order preserved so selection spans virtualized
+    rows. Per-grid keys override the base."""
+    return {"enableCellTextSelection": True, "ensureDomOrder": True, **options}

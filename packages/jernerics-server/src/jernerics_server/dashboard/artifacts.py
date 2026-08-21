@@ -127,6 +127,7 @@ def artifact_grid(rows: tuple[ArtifactRow, ...], now_ns: int) -> AgGrid | html.D
         rowData=[grid_row(row, now_ns) for row in rows],
         columnDefs=_LISTING_COLUMNS,
         defaultColDef=_GRID_DEFAULTS,
+        dashGridOptions=components.grid_options(),
         getRowId=_ROW_ID_FUNCTION,
         className="ag-theme-alpine grid",
     )
@@ -284,7 +285,7 @@ def _summary_rows_view(payload: dict[str, Any]) -> html.Div:
         rowData=rows,
         columnDefs=columns,
         defaultColDef=_GRID_DEFAULTS,
-        dashGridOptions={"quickFilterText": ""},
+        dashGridOptions=components.grid_options(quickFilterText=""),
         className="ag-theme-alpine grid",
     )
     return html.Div(

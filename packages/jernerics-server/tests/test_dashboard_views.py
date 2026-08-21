@@ -37,7 +37,7 @@ from jernerics_server.dashboard.callbacks import (
     page_content,
     tray_from_grid,
 )
-from jernerics_server.dashboard.components import short_id
+from jernerics_server.dashboard.components import grid_options, short_id
 from jernerics_server.dashboard.layout import family_grid_row, sweep_grid_row
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.http import create_app
@@ -472,6 +472,36 @@ class TestSweepGrid:
         assert sweep_column["cellRenderer"] == "markdown"
         assert sweep_column["checkboxSelection"] is True
         assert sweep_column["headerCheckboxSelection"] is True
+
+
+class TestCellTextSelection:
+    """jernerics-eqn: AG Grid defaults to user-select: none, which makes
+    identifier cells un-copyable. Every grid carries the documented pair
+    through the shared helper and keeps its own dashGridOptions keys."""
+
+    def test_grid_options_helper_is_the_documented_pair(self):
+        assert grid_options() == {
+            "enableCellTextSelection": True,
+            "ensureDomOrder": True,
+        }
+        assert grid_options(quickFilterText="x") == {
+            "enableCellTextSelection": True,
+            "ensureDomOrder": True,
+            "quickFilterText": "x",
+        }
+
+    def test_sweep_and_family_grids_stay_selectable(self, service):
+        workspace, _ = page_content("/dashboard/project/ops", service)
+        sweep_options = _grid(workspace, "sweep-grid").dashGridOptions
+        assert sweep_options["enableCellTextSelection"] is True
+        assert sweep_options["ensureDomOrder"] is True
+        assert sweep_options["rowSelection"] == {"mode": "multiRow"}
+
+        sweep_page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
+        family_options = _grid(sweep_page, "family-grid").dashGridOptions
+        assert family_options["enableCellTextSelection"] is True
+        assert family_options["ensureDomOrder"] is True
+        assert family_options["rowSelection"] == {"mode": "singleRow"}
 
 
 class TestSweepPage:

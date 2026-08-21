@@ -414,6 +414,34 @@ class TestLinkGraphJourney:
         assert served.status_code == 200
         assert served.content == scenario.model_bytes
 
+    def test_every_grid_stays_text_selectable(self, scenario):
+        """jernerics-eqn: AG Grid defaults to user-select: none; every
+        grid the link graph reaches carries the copyability pair and
+        keeps the options it already had."""
+        pages = _walk_link_graph(scenario.service)
+        grids = [
+            (url, grid)
+            for url, page in pages.items()
+            for grid in _components(page)
+            if isinstance(grid, AgGrid)
+        ]
+        assert {grid.id for _, grid in grids} >= {
+            "sweep-grid",
+            "family-grid",
+            "artifact-grid",
+        }
+        for url, grid in grids:
+            options = grid.dashGridOptions or {}
+            assert options.get("enableCellTextSelection") is True, (url, grid.id)
+            assert options.get("ensureDomOrder") is True, (url, grid.id)
+        by_id = {grid.id: grid for _, grid in grids}
+        assert by_id["sweep-grid"].dashGridOptions["rowSelection"] == {
+            "mode": "multiRow"
+        }
+        assert by_id["family-grid"].dashGridOptions["rowSelection"] == {
+            "mode": "singleRow"
+        }
+
 
 class TestMountedDashboardHttp:
     def test_login_exchanges_key_for_session_and_index_renders(self, scenario):

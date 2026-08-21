@@ -263,7 +263,9 @@ def workspace_page(
                     "resizable": True,
                     "minWidth": 100,
                 },
-                dashGridOptions={"rowSelection": {"mode": "multiRow"}},
+                dashGridOptions=components.grid_options(
+                    rowSelection={"mode": "multiRow"}
+                ),
                 selectedRows=selected,
                 className="ag-theme-alpine grid",
             ),
@@ -485,7 +487,9 @@ def sweep_page(detail: SweepDetail, now_ns: int) -> html.Div:
                                     "resizable": True,
                                     "minWidth": 90,
                                 },
-                                dashGridOptions={"rowSelection": {"mode": "singleRow"}},
+                                dashGridOptions=components.grid_options(
+                                    rowSelection={"mode": "singleRow"}
+                                ),
                                 className="ag-theme-alpine grid",
                             ),
                             html.Div(

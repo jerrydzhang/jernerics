@@ -34,6 +34,7 @@ from jernerics_schema import (
 )
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
+    analysis_page,
     catalog_tab,
     hydrate_tray,
     optuna_tab_content,
@@ -617,6 +618,38 @@ class TestUnifiedSelectionStore:
         )
         grid = _grids(page)[0]
         assert [row["sweep_id"] for row in grid.selectedRows] == [str(SWEEP_A)]
+
+
+class TestCellTextSelection:
+    """jernerics-eqn: all four analysis grids carry the copyability pair
+    through the shared helper, keeping rowSelection where present."""
+
+    def test_picker_grids_carry_the_pair_and_multi_row_selection(self):
+        pickers = _grids(analysis_page())
+        assert [grid.id for grid in pickers] == [
+            "analysis-sweep-grid",
+            "analysis-family-grid",
+        ]
+        for grid in pickers:
+            assert grid.dashGridOptions == {
+                "enableCellTextSelection": True,
+                "ensureDomOrder": True,
+                "rowSelection": {"mode": "multiRow"},
+            }
+
+    def test_points_grids_carry_the_pair(self, service):
+        page = points_tab(
+            service,
+            PROJECT,
+            _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
+        )
+        grids = _grids(page)
+        assert len(grids) == 2
+        for grid in grids:
+            assert grid.dashGridOptions == {
+                "enableCellTextSelection": True,
+                "ensureDomOrder": True,
+            }
 
 
 class TestTray:

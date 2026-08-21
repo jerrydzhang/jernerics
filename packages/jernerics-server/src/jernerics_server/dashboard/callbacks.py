@@ -16,7 +16,7 @@ from dash import Input, Output, State, no_update
 from dash.exceptions import PreventUpdate
 
 from . import analysis, artifacts, layout
-from .components import Error
+from .components import Error, grid_options
 from .routes import parse_route
 from .service import DashboardService, TrialDetail
 
@@ -398,4 +398,4 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
     def _filter_artifact_rows(text: str | None):
-        return {"quickFilterText": text or ""}
+        return grid_options(quickFilterText=text or "")

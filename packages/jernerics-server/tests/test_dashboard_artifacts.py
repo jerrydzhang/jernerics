@@ -300,6 +300,58 @@ class TestVersionList:
         } <= keys
 
 
+class TestCellTextSelection:
+    """jernerics-eqn: the listing and rows grids carry
+    enableCellTextSelection + ensureDomOrder so identifiers (ids,
+    sha256) stay copyable, without dropping existing options."""
+
+    def test_listing_grid_carries_the_pair(self, env):
+        page, _ = page_content(f"/dashboard/trial/{TRIAL}", env.service)
+        options = _find(page, AgGrid, "artifact-grid")[0].dashGridOptions
+        assert options["enableCellTextSelection"] is True
+        assert options["ensureDomOrder"] is True
+
+    def test_rows_grid_keeps_quick_filter_and_carries_the_pair(self, env):
+        page, _ = page_content(
+            f"/dashboard/artifact-view/{INSPECTION.hex}", env.service
+        )
+        options = _find(page, AgGrid, "artifact-rows-grid")[0].dashGridOptions
+        assert options == {
+            "enableCellTextSelection": True,
+            "ensureDomOrder": True,
+            "quickFilterText": "",
+        }
+
+    def test_quick_filter_rewrite_keeps_the_pair(self, env):
+        """The filter callback replaces dashGridOptions wholesale; going
+        through grid_options keeps cells selectable after filtering."""
+        response = env.client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": "artifact-rows-grid.dashGridOptions",
+                "outputs": {
+                    "id": "artifact-rows-grid",
+                    "property": "dashGridOptions",
+                },
+                "inputs": [
+                    {
+                        "id": "artifact-quick-filter",
+                        "property": "value",
+                        "value": "train",
+                    }
+                ],
+                "changedPropIds": ["artifact-quick-filter.value"],
+            },
+        )
+        assert response.status_code == 200, response.text
+        options = response.json()["response"]["artifact-rows-grid"]["dashGridOptions"]
+        assert options == {
+            "enableCellTextSelection": True,
+            "ensureDomOrder": True,
+            "quickFilterText": "train",
+        }
+
+
 class TestPendingState:
     def test_declared_only_row_is_pending_and_viewer_is_factual(self, env):
         rows = env.service.trial_artifacts(str(TRIAL))

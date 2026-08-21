@@ -109,7 +109,9 @@ def _selection_tab() -> html.Div:
                 rowData=[],
                 columnDefs=_SWEEP_PICKER_COLUMNS,
                 defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions={"rowSelection": {"mode": "multiRow"}},
+                dashGridOptions=components.grid_options(
+                    rowSelection={"mode": "multiRow"}
+                ),
                 className="ag-theme-alpine grid",
             ),
             html.H3("Trial families"),
@@ -118,7 +120,9 @@ def _selection_tab() -> html.Div:
                 rowData=[],
                 columnDefs=_FAMILY_PICKER_COLUMNS,
                 defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions={"rowSelection": {"mode": "multiRow"}},
+                dashGridOptions=components.grid_options(
+                    rowSelection={"mode": "multiRow"}
+                ),
                 className="ag-theme-alpine grid",
             ),
             dcc.Checklist(
@@ -622,6 +626,7 @@ def points_tab(
                         rowData=value_rows,
                         columnDefs=value_columns,
                         defaultColDef=_GRID_DEFAULTS,
+                        dashGridOptions=components.grid_options(),
                         className="ag-theme-alpine grid",
                     ),
                 ],
@@ -634,6 +639,7 @@ def points_tab(
                         rowData=param_rows,
                         columnDefs=param_columns,
                         defaultColDef=_GRID_DEFAULTS,
+                        dashGridOptions=components.grid_options(),
                         className="ag-theme-alpine grid",
                     ),
                 ],
