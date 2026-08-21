@@ -15,6 +15,7 @@ from urllib.parse import parse_qs
 
 from dash import dcc, html, no_update
 from dash_ag_grid import AgGrid
+from jernerics_schema import Selection
 
 from . import components, figures
 from .components import MISSING, Empty, short_id
@@ -366,10 +367,17 @@ def hydrate_tray(
     """(tray, error) for a URL carrying ``?sel=``. A ``None`` tray means
     "leave the current state alone" (no token, a different page, or a
     token equal to what is already shown). A token scoped to another
-    project surfaces as an error instead of mixing."""
+    project surfaces as an error instead of mixing. With no project
+    picked, the token only decides the cold start (jernerics-xbx): the
+    shell adopts the token's project through the picker and hydration
+    re-fires when project-store settles, while a token the dashboard
+    cannot act on surfaces its error instead of silently empty grids."""
     token = _sel_param(search)
-    if not token or parse_route(pathname).kind != "analysis" or not project:
+    if not token or parse_route(pathname).kind != "analysis":
         return None, None
+    if not project:
+        _selection, error = cold_start(service, search)
+        return None, error
     try:
         selection = decode_selection_token(token, project=project)
     except SelectionTokenError as error:
@@ -377,6 +385,30 @@ def hydrate_tray(
     if current and service.analysis_selection(project, current) == selection:
         return None, None
     return tray_from_selection(selection), None
+
+
+def cold_start(
+    service: DashboardService, search: str | None
+) -> tuple[Selection | None, str | None]:
+    """(selection, error) a shared token offers a session with no project
+    picked: the decoded selection when its project is known here — the
+    picker adopts it, running the same settle path as a manual pick —
+    an error naming a project this dashboard has no data for, or a
+    decode error. ``(None, None)`` when the URL carries no token."""
+    token = _sel_param(search)
+    if not token:
+        return None, None
+    try:
+        selection = decode_selection_token(token)
+    except SelectionTokenError as error:
+        return None, str(error)
+    if selection.project not in service.projects():
+        return (
+            None,
+            f"selection token targets project {selection.project!r}, which "
+            "this dashboard has no data for; pick a project to analyze.",
+        )
+    return selection, None
 
 
 def expand_values(tray: dict[str, Any] | None) -> list[str]:

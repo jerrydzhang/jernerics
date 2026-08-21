@@ -36,6 +36,7 @@ from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
     analysis_page,
     catalog_tab,
+    cold_start,
     expand_values,
     hydrate_tray,
     mounted_selection,
@@ -45,6 +46,7 @@ from jernerics_server.dashboard.analysis import (
     python_tab,
     search_from_tray,
     series_outputs,
+    sweep_picker_rows,
     synced_search,
     tray_from_edit,
     tray_summary,
@@ -1002,6 +1004,80 @@ class TestUrlReload:
         assert tray is None and error is None
 
 
+class TestColdStartAdoption:
+    """jernerics-xbx: a shared ``?sel=`` token opened before any project
+    is picked adopts the token's project through the picker — the same
+    settle path as a manual pick (picker -> project-store -> hydration
+    re-fires). Adoption offers only projects the dashboard has data
+    for; anything else surfaces an error naming the project instead of
+    silently empty grids."""
+
+    def test_known_project_token_offers_the_adoption(self, service):
+        selection = Selection(project=PROJECT, sweeps=(SWEEP_A, SWEEP_B))
+        adopted, error = cold_start(
+            service, f"?sel={encode_selection_token(selection)}"
+        )
+        assert error is None and adopted == selection
+
+    def test_unknown_project_token_names_itself_in_the_hint(self, service):
+        token = encode_selection_token(Selection(project="ghost", trials=(RA0,)))
+        adopted, error = cold_start(service, f"?sel={token}")
+        assert adopted is None
+        assert error is not None and "project 'ghost'" in error
+
+    def test_invalid_token_errors_and_no_token_stays_quiet(self, service):
+        _adopted, error = cold_start(service, "?sel=definitely-not-a-token-!!!")
+        assert error is not None and "malformed" in error
+        assert cold_start(service, "") == (None, None)
+        assert cold_start(service, None) == (None, None)
+
+    def test_fresh_session_hydration_waits_for_the_settle(self, service):
+        """No project picked: hydration leaves the tray alone; once the
+        picker adoption settles project-store, the ordinary path
+        hydrates, and its own settle re-fire is a no-op."""
+        token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        search = f"?sel={token}"
+        tray, error = hydrate_tray(
+            service, None, "/dashboard/analysis", search, dict(EMPTY_TRAY)
+        )
+        assert tray is None and error is None
+        adopted, _error = cold_start(service, search)
+        assert adopted is not None and adopted.project == PROJECT
+        hydrated, error = hydrate_tray(
+            service, adopted.project, "/dashboard/analysis", search, dict(EMPTY_TRAY)
+        )
+        assert error is None and hydrated is not None
+        assert hydrated["sweeps"] == [str(SWEEP_A)]
+        assert hydrate_tray(
+            service, adopted.project, "/dashboard/analysis", search, hydrated
+        ) == (None, None)
+
+    def test_unknown_project_token_hints_on_the_analysis_page(self, service):
+        token = encode_selection_token(Selection(project="ghost", trials=(RA0,)))
+        tray, error = hydrate_tray(
+            service, None, "/dashboard/analysis", f"?sel={token}", dict(EMPTY_TRAY)
+        )
+        assert tray is None
+        assert error is not None and "project 'ghost'" in error
+
+    def test_invalid_token_on_fresh_session_still_errors(self, service):
+        tray, error = hydrate_tray(
+            service,
+            None,
+            "/dashboard/analysis",
+            "?sel=definitely-not-a-token-!!!",
+            dict(EMPTY_TRAY),
+        )
+        assert tray is None
+        assert error is not None and "malformed" in error
+
+    def test_off_analysis_url_neither_adopts_nor_errors(self, service):
+        token = encode_selection_token(Selection(project=PROJECT))
+        assert hydrate_tray(
+            service, None, "/dashboard/", f"?sel={token}", dict(EMPTY_TRAY)
+        ) == (None, None)
+
+
 class TestUrlSync:
     """jernerics-8c9: one shell-only callback owns ``url.search`` — tray
     edits mint ``?sel=`` on the analysis page, navigations strip it, and
@@ -1120,6 +1196,57 @@ class TestUrlSync:
             is None
         )
 
+    def test_cold_start_deep_link_settles_through_adoption(self, service):
+        """jernerics-xbx ordering, as one callback sequence: the picker
+        adopts the token's project, project-store settles through the
+        picker's own remember callback (the manual-pick path), hydration
+        re-fires with a project and the tray lands — the clear guard
+        sees a matching project, the grid echo edits nothing, and ?sel=
+        survives untouched."""
+        search = "?sel=" + encode_selection_token(
+            Selection(project=PROJECT, sweeps=(SWEEP_A,))
+        )
+        adoption, error = cold_start(service, search)
+        assert error is None and adoption is not None
+        assert adoption.project == PROJECT
+        # project-store settled: hydration re-fires with the project
+        hydrated, error = hydrate_tray(
+            service, adoption.project, "/dashboard/analysis", search, dict(EMPTY_TRAY)
+        )
+        assert error is None and hydrated is not None
+        # _clear_selection_on_project_change: the hydrated tray already
+        # carries the settled project — nothing to wipe
+        assert hydrated["project"] == adoption.project
+        # the settle re-fire against the hydrated tray rewrites nothing
+        assert hydrate_tray(
+            service, PROJECT, "/dashboard/analysis", search, hydrated
+        ) == (None, None)
+        # loaders push the hydrated selection to the now-populated grids
+        _rows, selected = sweep_picker_rows(service.sweep_overview(PROJECT), hydrated)
+        assert [row["sweep_id"] for row in selected] == [str(SWEEP_A)]
+        # a grid echo against the settled tray edits nothing
+        echo = tray_from_edit(
+            [],
+            [],
+            [],
+            hydrated,
+            sweep_edited=False,
+            family_edited=True,
+            expand_edited=False,
+        )
+        assert echo == hydrated
+        assert (
+            synced_search(
+                service,
+                "/dashboard/analysis",
+                echo,
+                search,
+                PROJECT,
+                url_navigated=False,
+            )
+            is None
+        )
+
 
 class TestCallbackGraphSafety:
     """jernerics-8c9 regression: a callback firable on any page — one
@@ -1183,6 +1310,153 @@ class TestCallbackGraphSafety:
         ]
         assert len(grid_writers) == 1
         assert self._outputs(grid_writers[0]) == {"selection-store.data"}
+
+
+class TestColdStartMountedJourney:
+    """jernerics-xbx over the mounted app: the registered callbacks,
+    driven through Dash's own dispatch endpoint exactly as the browser
+    would on a fresh deep link — the picker adopts the token's project,
+    the remember callback settles project-store, hydration re-fires and
+    the tray lands."""
+
+    @pytest.fixture(scope="class")
+    def callback_map(self, tmp_path_factory):
+        service = DashboardService(
+            QueryService(_seeded_store(tmp_path_factory.mktemp("cold-start")))
+        )
+        ctx = DashboardContext(
+            api_key="secret123",
+            queries=service.queries,
+            service=service,
+            signer=SessionSigner(b"\x00" * 32),
+        )
+        return build_dash_app(ctx).callback_map
+
+    @staticmethod
+    def _callback_key(callback_map, wanted: set[str]) -> str:
+        def outputs_of(key):
+            stripped = key.removeprefix("..").removesuffix("..")
+            return {part.split("@")[0] for part in stripped.split("...") if part}
+
+        return next(key for key in callback_map if outputs_of(key) == wanted)
+
+    def _dispatch(self, client, callback_map, wanted, inputs, state=()):
+        key = self._callback_key(callback_map, wanted)
+        specs = [
+            part.split("@")[0]
+            for part in key.removeprefix("..").removesuffix("..").split("...")
+            if part
+        ]
+        outputs = [
+            {"id": spec.split(".")[0], "property": spec.split(".")[1]} for spec in specs
+        ]
+        response = client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": key,
+                "outputs": outputs[0] if len(outputs) == 1 else outputs,
+                "inputs": inputs,
+                "state": list(state),
+                "changedPropIds": [f"{i['id']}.{i['property']}" for i in inputs],
+            },
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["response"]
+
+    def test_cold_start_settles_picker_store_then_tray(self, authed, callback_map):
+        token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        search = f"?sel={token}"
+        # the picker callback adopts the token's project
+        picker = self._dispatch(
+            authed,
+            callback_map,
+            {"project-picker.value"},
+            [
+                {"id": "project-store", "property": "data", "value": None},
+                {"id": "url", "property": "search", "value": search},
+            ],
+        )
+        assert picker["project-picker"]["value"] == PROJECT
+        # the remember callback settles project-store (the manual-pick path)
+        store = self._dispatch(
+            authed,
+            callback_map,
+            {"project-store.data"},
+            [{"id": "project-picker", "property": "value", "value": PROJECT}],
+        )
+        assert store["project-store"]["data"] == PROJECT
+        # hydration re-fires with the project: the tray lands
+        tray = self._dispatch(
+            authed,
+            callback_map,
+            {"selection-store.data", "analysis-message-store.data"},
+            [
+                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {"id": "url", "property": "search", "value": search},
+                {"id": "project-store", "property": "data", "value": PROJECT},
+            ],
+            state=[
+                {"id": "selection-store", "property": "data", "value": dict(EMPTY_TRAY)}
+            ],
+        )
+        assert tray["selection-store"]["data"]["sweeps"] == [str(SWEEP_A)]
+        assert tray["analysis-message-store"]["data"] == ""
+
+    def test_picked_project_is_never_switched_by_a_foreign_token(
+        self, authed, callback_map
+    ):
+        token = encode_selection_token(Selection(project="other", trials=(RA0,)))
+        picker = self._dispatch(
+            authed,
+            callback_map,
+            {"project-picker.value"},
+            [
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {"id": "url", "property": "search", "value": f"?sel={token}"},
+            ],
+        )
+        assert picker["project-picker"]["value"] == PROJECT
+        message = self._dispatch(
+            authed,
+            callback_map,
+            {"selection-store.data", "analysis-message-store.data"},
+            [
+                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {"id": "url", "property": "search", "value": f"?sel={token}"},
+                {"id": "project-store", "property": "data", "value": PROJECT},
+            ],
+            state=[{"id": "selection-store", "property": "data", "value": None}],
+        )
+        assert "selection-store" not in message
+        assert "not the current project" in message["analysis-message-store"]["data"]
+
+    def test_unknown_project_neither_adopts_nor_populates(self, authed, callback_map):
+        token = encode_selection_token(Selection(project="ghost", trials=(RA0,)))
+        picker = self._dispatch(
+            authed,
+            callback_map,
+            {"project-picker.value"},
+            [
+                {"id": "project-store", "property": "data", "value": None},
+                {"id": "url", "property": "search", "value": f"?sel={token}"},
+            ],
+        )
+        assert picker["project-picker"]["value"] is None
+        cold = self._dispatch(
+            authed,
+            callback_map,
+            {"selection-store.data", "analysis-message-store.data"},
+            [
+                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {"id": "url", "property": "search", "value": f"?sel={token}"},
+                {"id": "project-store", "property": "data", "value": None},
+            ],
+            state=[
+                {"id": "selection-store", "property": "data", "value": dict(EMPTY_TRAY)}
+            ],
+        )
+        assert "selection-store" not in cold
+        assert "project 'ghost'" in cold["analysis-message-store"]["data"]
 
 
 class TestContinueInPython:

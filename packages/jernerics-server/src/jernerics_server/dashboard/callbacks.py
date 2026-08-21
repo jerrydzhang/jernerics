@@ -152,9 +152,19 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("project-picker", "value"),
         Input("project-store", "data"),
+        Input("url", "search"),
     )
-    def _show_current_project(project: str | None):
-        return project
+    def _show_current_project(project: str | None, search: str | None):
+        # The picker mirrors project-store; with nothing picked, a
+        # shared ?sel= token names the project for a fresh session
+        # (jernerics-xbx). Picking it here — a plain write through the
+        # picker's own callback — runs the exact settle path of a
+        # manual pick (picker -> project-store -> hydration re-fires),
+        # so the label follows and nothing overrides a chosen project.
+        if project:
+            return project
+        selection, _error = analysis.cold_start(service, search)
+        return selection.project if selection else None
 
     @app.callback(
         Output("project-store", "data"),
