@@ -20,8 +20,9 @@ from jernerics_schema import (
     TrialState,
 )
 from jernerics_server.dashboard import DashboardContext
+from jernerics_server.dashboard.analysis import tray_summary
 from jernerics_server.dashboard.auth import COOKIE_NAME
-from jernerics_server.dashboard.callbacks import page_content, tray_summary
+from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.routes import parse_route
 from jernerics_server.http import create_app
 from jernerics_server.store import Store
@@ -257,7 +258,11 @@ class TestMount:
         assert "react-entry-point" in index.text
         layout = authed.get("/dashboard/_dash-layout")
         assert layout.status_code == 200
-        assert layout.json()["props"]["children"][0]["props"]["id"] == "url"
+        children = layout.json()["props"]["children"]
+        link = children[0]["props"]
+        assert link["rel"] == "icon"
+        assert link["href"].endswith("/assets/favicon.svg")
+        assert children[1]["props"]["id"] == "url"
 
     def test_deep_link_routes_return_200(self, authed):
         for path in (
@@ -311,10 +316,13 @@ class TestRoutesAndPages:
         assert spec.kind == "workspace"
         assert spec.object_id == "ops"
 
-    def test_tray_summary_counts_selected_sweeps(self):
-        assert tray_summary(None) == "0 sweep(s) in tray"
-        assert tray_summary({"sweeps": []}) == "0 sweep(s) in tray"
-        assert tray_summary({"sweeps": ["a", "b"]}) == "2 sweep(s) in tray"
+    def test_tray_summary_counts_the_unified_selection(self):
+        empty = "0 sweep(s) · 0 trial(s) · 0 family/families"
+        assert tray_summary(None) == empty
+        assert tray_summary({"sweeps": []}) == empty
+        assert tray_summary({"sweeps": ["a", "b"]}) == (
+            "2 sweep(s) · 0 trial(s) · 0 family/families"
+        )
 
 
 class TestNoDashLeakage:

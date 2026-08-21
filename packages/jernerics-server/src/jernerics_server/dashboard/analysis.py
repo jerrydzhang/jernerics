@@ -27,15 +27,17 @@ from .selection_tokens import (
 from .service import ANALYSIS_REDUCTIONS, DashboardService
 
 EMPTY_TRAY: dict[str, Any] = {
+    "project": None,
     "sweeps": [],
     "trials": [],
     "families": [],
     "executions": [],
     "expand": False,
 }
-"""Shape of the analysis-selection store: sweep ids, explicit trial ids,
-picked retry-family roots, explicit execution ids, and the per-family
-expansion toggle."""
+"""Shape of the unified selection store: the active project, sweep ids,
+explicit trial ids, picked retry-family roots, explicit execution ids,
+and the per-family expansion toggle. The workspace sweep grid and the
+analysis pickers all read and write this one shape."""
 
 _GRID_DEFAULTS: dict[str, Any] = {
     "sortable": True,
@@ -46,8 +48,8 @@ _GRID_DEFAULTS: dict[str, Any] = {
 
 
 def analysis_page() -> html.Div:
-    """The tabbed analysis surface; interactive state lives in the tray
-    store and the URL token."""
+    """The tabbed analysis surface; interactive state lives in the shell's
+    unified selection store and the URL token."""
     return html.Div(
         [
             html.H2("Analysis"),
@@ -88,7 +90,6 @@ def analysis_page() -> html.Div:
                     ),
                 ],
             ),
-            dcc.Store(id="analysis-selection-store", data=EMPTY_TRAY),
         ],
         className="page",
     )
@@ -284,10 +285,12 @@ def tray_from_picks(
     expand_values: list[str] | None,
     current: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Merge grid picks into the tray; explicit trials/executions (kept
-    from a hydrated token) survive grid edits."""
+    """Merge grid picks into the unified selection store; the active
+    project and explicit trials/executions (kept from a hydrated token)
+    survive grid edits."""
     current = current or EMPTY_TRAY
     return {
+        "project": current.get("project"),
         "sweeps": sorted({str(row["sweep_id"]) for row in sweep_rows or []}),
         "trials": list(current.get("trials") or []),
         "families": sorted({str(row["root"]) for row in family_rows or []}),
@@ -297,13 +300,14 @@ def tray_from_picks(
 
 
 def tray_from_selection(selection: Any) -> dict[str, Any]:
-    """Tray matching a decoded token selection.
+    """Unified selection store matching a decoded token selection.
 
     Retry roots hydrate as picked families with the expansion toggle on:
     that is exactly what a retry-root selection means, and it keeps the
     hydrated tray's effective selection equal to the decoded one.
     """
     return {
+        "project": selection.project,
         "sweeps": [str(value) for value in selection.sweeps or ()],
         "trials": [str(value) for value in selection.trials or ()],
         "families": [str(value) for value in selection.retry_roots or ()],

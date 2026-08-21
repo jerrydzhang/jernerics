@@ -1,9 +1,10 @@
 """Top-level dashboard shell and per-page operational views.
 
 The shell owns all client-side state: ``dcc.Location`` carries the URL,
-``project-store`` the active project, ``selection-store`` the sweep-id
-tray (a plain JSON list; the typed ``Selection`` is built per query call
-in the service), and ``poll`` is the conditional refresh interval pages
+``project-store`` the active project, ``selection-store`` the unified
+selection tray (sweeps picked on any grid, retry families, and the
+expansion toggle — the typed ``Selection`` is built per query call in
+the service), and ``poll`` is the conditional refresh interval pages
 enable or disable through the router callback.
 
 Every page function is pure: data in, Dash components out. Callbacks
@@ -17,6 +18,7 @@ from dash_ag_grid import AgGrid
 from jernerics_schema import ExecutionRecord
 
 from . import artifacts, components
+from .analysis import EMPTY_TRAY
 from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
 from .routes import ROUTES_BASE
 from .service import (
@@ -52,6 +54,11 @@ def shell() -> html.Div:
     """Top-level layout: URL state, nav bar, stores, outlet, poller."""
     return html.Div(
         [
+            html.Link(
+                rel="icon",
+                type="image/svg+xml",
+                href=f"{ROUTES_BASE}/assets/favicon.svg",
+            ),
             dcc.Location(id="url", refresh=False),
             html.Header(
                 className="nav",
@@ -81,7 +88,7 @@ def shell() -> html.Div:
             html.Main(id="page-container", children=[project_page([], 0)]),
             dcc.Store(id="project-store", storage_type="session"),
             dcc.Store(
-                id="selection-store", storage_type="session", data={"sweeps": []}
+                id="selection-store", storage_type="session", data=dict(EMPTY_TRAY)
             ),
             dcc.Interval(id="poll", interval=POLL_INTERVAL_MS, disabled=True),
         ],

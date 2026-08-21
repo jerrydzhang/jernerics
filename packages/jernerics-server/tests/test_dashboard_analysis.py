@@ -33,6 +33,7 @@ from jernerics_schema import (
     ValueEvent,
 )
 from jernerics_server.dashboard.analysis import (
+    EMPTY_TRAY,
     catalog_tab,
     hydrate_tray,
     optuna_tab_content,
@@ -42,8 +43,9 @@ from jernerics_server.dashboard.analysis import (
     search_from_tray,
     series_outputs,
     tray_from_picks,
+    tray_summary,
 )
-from jernerics_server.dashboard.callbacks import page_content
+from jernerics_server.dashboard.callbacks import page_content, tray_from_grid
 from jernerics_server.dashboard.selection_tokens import (
     SelectionTokenError,
     decode_selection_token,
@@ -565,6 +567,58 @@ class TestSelectionTokens:
         assert error is not None and "project" in error
 
 
+class TestUnifiedSelectionStore:
+    def test_token_hydration_feeds_tray_and_summary(self, service):
+        selection = Selection(project=PROJECT, sweeps=(SWEEP_A, SWEEP_B))
+        token = encode_selection_token(selection)
+        tray, _expand, error = hydrate_tray(
+            service, PROJECT, "/dashboard/analysis", f"?sel={token}", None
+        )
+        assert error is None and tray is not None
+        assert tray["sweeps"] == [str(SWEEP_A), str(SWEEP_B)]
+        assert tray["project"] == PROJECT
+        assert tray_summary(tray).startswith(f"{len(selection.sweeps or ())} sweep(s)")
+        # The same token against the hydrated store is a no-op, so the
+        # ?sel= write-back stays stable instead of rewriting forever.
+        again, _expand, error = hydrate_tray(
+            service, PROJECT, "/dashboard/analysis", f"?sel={token}", tray
+        )
+        assert again is None and error is None
+
+    def test_workspace_and_analysis_edits_hit_one_store(self):
+        store = tray_from_picks(
+            [{"sweep_id": str(SWEEP_A)}],
+            [{"root": str(RA0)}],
+            [],
+            dict(EMPTY_TRAY, project=PROJECT),
+        )
+        assert store["sweeps"] == [str(SWEEP_A)]
+        assert store["families"] == [str(RA0)]
+        # Workspace sweep-grid edit: sweeps replaced, analysis picks kept.
+        store = tray_from_grid([{"sweep_id": str(SWEEP_B)}], store)
+        assert store["sweeps"] == [str(SWEEP_B)]
+        assert store["families"] == [str(RA0)]
+        # Analysis edit (grids carry the workspace's picks as selected
+        # rows): families replaced, sweeps kept, project survives.
+        store = tray_from_picks([{"sweep_id": str(SWEEP_B)}], [], ["expand"], store)
+        assert store["sweeps"] == [str(SWEEP_B)]
+        assert store["families"] == []
+        assert store["expand"] is True
+        assert store["project"] == PROJECT
+
+    def test_workspace_grid_rows_reflect_the_unified_store(self, service):
+        token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        store, _expand, error = hydrate_tray(
+            service, PROJECT, "/dashboard/analysis", f"?sel={token}", None
+        )
+        assert error is None and store is not None
+        page, _polls = page_content(
+            "/dashboard/project/lab", service, selected_sweeps=store["sweeps"]
+        )
+        grid = _grids(page)[0]
+        assert [row["sweep_id"] for row in grid.selectedRows] == [str(SWEEP_A)]
+
+
 class TestTray:
     def test_family_pick_without_expansion_selects_current_trial(self, service):
         tray = tray_from_picks([], [{"root": str(RA0)}], [], None)
@@ -899,7 +953,7 @@ class TestAnalysisRouteServes:
         page, polls = page_content("/dashboard/analysis", service)
         assert polls is False
         rendered = str(page)
-        assert "analysis-selection-store" in rendered
+        assert "analysis-selection-store" not in rendered
         assert "Selection" in rendered
         assert "Optuna views" in rendered
 

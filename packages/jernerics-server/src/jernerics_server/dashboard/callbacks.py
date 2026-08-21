@@ -99,16 +99,15 @@ def project_options(projects: list[str]) -> list[dict[str, str]]:
     return [{"label": project, "value": project} for project in projects]
 
 
-def tray_summary(data: dict | None) -> str:
-    sweeps = (data or {}).get("sweeps") or []
-    return f"{len(sweeps)} sweep(s) in tray"
-
-
 def tray_from_grid(rows: list[dict] | None, current: dict | None) -> dict:
-    """Merge AG Grid sweep selection into the tray store, keeping the
-    active project so the tray survives navigation."""
-    sweeps = sorted({str(row["sweep_id"]) for row in rows or []})
-    return {"sweeps": sweeps, "project": (current or {}).get("project")}
+    """Merge AG Grid sweep selection into the unified selection store,
+    keeping the active project and analysis-side picks so the tray
+    survives navigation."""
+    return {
+        **analysis.EMPTY_TRAY,
+        **(current or {}),
+        "sweeps": sorted({str(row["sweep_id"]) for row in rows or []}),
+    }
 
 
 def lineage_panel(rows: list[dict] | None, data: dict | None) -> list[object]:
@@ -182,12 +181,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         raise PreventUpdate
 
     @app.callback(
-        Output("selection-store", "data"),
+        Output("selection-store", "data", allow_duplicate=True),
         Input("project-store", "data"),
+        State("selection-store", "data"),
         prevent_initial_call=True,
     )
-    def _clear_selection_on_project_change(project: str | None):
-        return {"sweeps": [], "project": project}
+    def _clear_selection_on_project_change(project: str | None, current: dict | None):
+        # Session-store hydration replays the stored project on boot;
+        # only a genuine project switch invalidates the tray.
+        if (current or {}).get("project") == project:
+            raise PreventUpdate
+        return {**analysis.EMPTY_TRAY, "project": project}
 
     @app.callback(
         Output("selection-store", "data", allow_duplicate=True),
@@ -196,14 +200,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
     def _select_sweeps(rows: list[dict] | None, current: dict | None):
-        return tray_from_grid(rows, current)
+        tray = tray_from_grid(rows, current)
+        if tray == (current or {}):
+            raise PreventUpdate
+        return tray
 
     @app.callback(
         Output("selection-tray", "children"),
         Input("selection-store", "data"),
     )
     def _update_tray(data: dict | None):
-        return tray_summary(data)
+        return analysis.tray_summary(data)
 
     @app.callback(
         Output("family-lineage-panel", "children"),
@@ -217,13 +224,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     # -- Analysis page (jernerics-h5d.13) ---------------------------------
 
     @app.callback(
-        Output("analysis-selection-store", "data"),
+        Output("selection-store", "data"),
         Output("analysis-expand", "value"),
         Output("analysis-error", "children"),
         Input("url", "pathname"),
         Input("url", "search"),
-        State("project-store", "data"),
-        State("analysis-selection-store", "data"),
+        Input("project-store", "data"),
+        State("selection-store", "data"),
     )
     def _hydrate_analysis_tray(
         pathname: str | None,
@@ -241,11 +248,15 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return tray, expand or [], ""
 
     @app.callback(
-        Output("analysis-selection-store", "data", allow_duplicate=True),
+        Output("selection-store", "data", allow_duplicate=True),
+        Output("url", "search", allow_duplicate=True),
         Input("analysis-sweep-grid", "selectedRows"),
         Input("analysis-family-grid", "selectedRows"),
         Input("analysis-expand", "value"),
-        State("analysis-selection-store", "data"),
+        State("selection-store", "data"),
+        State("url", "pathname"),
+        State("project-store", "data"),
+        State("url", "search"),
         prevent_initial_call=True,
     )
     def _edit_analysis_tray(
@@ -253,29 +264,26 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         family_rows: list[dict] | None,
         expand_values: list[str] | None,
         current: dict | None,
+        pathname: str | None,
+        project: str | None,
+        current_search: str | None,
     ):
-        return analysis.tray_from_picks(sweep_rows, family_rows, expand_values, current)
-
-    @app.callback(
-        Output("url", "search"),
-        Input("analysis-selection-store", "data"),
-        State("project-store", "data"),
-        State("url", "search"),
-        prevent_initial_call=True,
-    )
-    def _write_analysis_search(
-        tray: dict | None, project: str | None, current_search: str | None
-    ):
-        target = analysis.search_from_tray(service, project, tray, current_search)
-        if target is None:
+        tray = analysis.tray_from_picks(sweep_rows, family_rows, expand_values, current)
+        # AG Grid echoes its programmatic selectedRows back on mount, and
+        # session restore replays the stored tray; neither is an edit,
+        # and firing here would rewrite ?sel= over a hydrated token.
+        if tray == (current or {}):
             raise PreventUpdate
-        return target
+        if parse_route(pathname).kind != "analysis":
+            return tray, no_update
+        target = analysis.search_from_tray(service, project, tray, current_search)
+        return tray, no_update if target is None else target
 
     @app.callback(
         Output("analysis-sweep-grid", "rowData"),
         Output("analysis-sweep-grid", "selectedRows"),
         Input("project-store", "data"),
-        Input("analysis-selection-store", "data"),
+        Input("selection-store", "data"),
     )
     def _load_analysis_sweeps(project: str | None, tray: dict | None):
         if not project:
@@ -285,7 +293,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("analysis-family-grid", "rowData"),
         Output("analysis-family-grid", "selectedRows"),
-        Input("analysis-selection-store", "data"),
+        Input("selection-store", "data"),
         State("project-store", "data"),
     )
     def _load_analysis_families(tray: dict | None, project: str | None):
@@ -298,14 +306,14 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("analysis-tray-summary", "children"),
-        Input("analysis-selection-store", "data"),
+        Input("selection-store", "data"),
     )
     def _summarize_analysis_tray(tray: dict | None):
         return analysis.tray_summary(tray)
 
     @app.callback(
         Output("analysis-catalog", "children"),
-        Input("analysis-selection-store", "data"),
+        Input("selection-store", "data"),
         State("project-store", "data"),
     )
     def _render_analysis_catalog(tray: dict | None, project: str | None):
@@ -316,7 +324,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("analysis-key", "options"),
         Output("analysis-color", "options"),
         Output("analysis-facet", "options"),
-        Input("analysis-selection-store", "data"),
+        Input("selection-store", "data"),
         Input("analysis-key", "value"),
         Input("analysis-color", "value"),
         Input("analysis-facet", "value"),
@@ -337,7 +345,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("analysis-points", "children"),
-        Input("analysis-selection-store", "data"),
+        Input("selection-store", "data"),
         State("project-store", "data"),
     )
     def _render_analysis_points(tray: dict | None, project: str | None):
@@ -347,7 +355,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("analysis-optuna", "children"),
         Output("analysis-contour-x", "options"),
         Output("analysis-contour-y", "options"),
-        Input("analysis-selection-store", "data"),
+        Input("selection-store", "data"),
         Input("analysis-contour-x", "value"),
         Input("analysis-contour-y", "value"),
         State("project-store", "data"),
@@ -362,7 +370,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("analysis-python", "children"),
-        Input("analysis-selection-store", "data"),
+        Input("selection-store", "data"),
         State("project-store", "data"),
     )
     def _render_analysis_python(tray: dict | None, project: str | None):

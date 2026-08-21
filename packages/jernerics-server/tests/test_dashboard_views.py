@@ -598,14 +598,25 @@ class TestTrialFamilies:
             assert f"Td('{trial}')" in rendered
             assert f"Td('{parent}')" in rendered
 
-    def test_tray_from_grid_keeps_project(self):
+    def test_tray_from_grid_keeps_project_and_analysis_picks(self):
         tray = tray_from_grid(
             [{"sweep_id": str(SWEEP_B)}, {"sweep_id": str(SWEEP_A)}],
-            {"sweeps": [], "project": "ops"},
+            {
+                "project": "ops",
+                "sweeps": [],
+                "trials": [str(T4)],
+                "families": [str(F0)],
+                "executions": [],
+                "expand": True,
+            },
         )
         assert tray == {
-            "sweeps": [str(SWEEP_A), str(SWEEP_B)],
             "project": "ops",
+            "sweeps": [str(SWEEP_A), str(SWEEP_B)],
+            "trials": [str(T4)],
+            "families": [str(F0)],
+            "executions": [],
+            "expand": True,
         }
 
 
