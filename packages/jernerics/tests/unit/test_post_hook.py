@@ -124,7 +124,7 @@ class TestRunPipeline:
 
 
 class TestBlobSweep:
-    @patch("jernerics.post_hook.upload_pending_blobs")
+    @patch("jernerics.tracking.blob_uploader.upload_pending_blobs")
     @patch("jernerics.post_hook.replay_tracking")
     @patch("jernerics.post_hook.run_checker")
     def test_sweeps_all_study_manifests_after_replay(
@@ -153,7 +153,7 @@ class TestBlobSweep:
             [study_manifest, other_manifest],
         )
 
-    @patch("jernerics.post_hook.upload_pending_blobs")
+    @patch("jernerics.tracking.blob_uploader.upload_pending_blobs")
     @patch("jernerics.post_hook.replay_tracking")
     @patch("jernerics.post_hook.run_checker")
     def test_conflicts_skip_the_blob_sweep(
@@ -176,7 +176,7 @@ class TestBlobSweep:
 
         mock_upload.assert_not_called()
 
-    @patch("jernerics.post_hook.upload_pending_blobs")
+    @patch("jernerics.tracking.blob_uploader.upload_pending_blobs")
     @patch("jernerics.post_hook.replay_tracking")
     @patch("jernerics.post_hook.run_checker")
     def test_no_manifests_means_no_sweep(
@@ -196,7 +196,7 @@ class TestBlobSweep:
 
 
 class TestSchedulerTaskLogs:
-    @patch("jernerics.post_hook.upload_pending_blobs")
+    @patch("jernerics.tracking.blob_uploader.upload_pending_blobs")
     @patch("jernerics.post_hook.replay_tracking")
     @patch("jernerics.post_hook.run_checker")
     def test_unmappable_task_logs_skip_with_stderr_note(

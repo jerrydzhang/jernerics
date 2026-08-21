@@ -1,8 +1,11 @@
 import itertools
 import traceback
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 import optuna
+from jernerics_schema import SweepSnapshotEvent, sweep_id_for
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
 from jernerics.backend.models import (
@@ -15,6 +18,7 @@ from jernerics.config import load_config
 from jernerics.paths import cache_dir
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import replay_tracking, ship_events_file
+from jernerics.tracking.blob_uploader import sweep_manifest_blobs
 from jernerics.tracking.infra import resolve_tracking_ship
 from jernerics.tracking.jsonl_io import TrackingWriter
 
@@ -78,13 +82,17 @@ class LocalBackend:
                 traceback.print_exc()
                 any_failed = True
 
+        terminal_events_path = self._emit_terminal_sweep_event(
+            spec, submission_events_path, failed=any_failed
+        )
+        self._ship_submission_events(spec, terminal_events_path)
+
+        # Post-hook pipeline: blob retry + tracking event replay
+        if self.tracking_server:
+            self._run_post_hook(tracker_dir, spec)
+
         if any_failed:
             raise RuntimeError("One or more trials failed")
-
-        # Post-hook pipeline: sync tracking events to the server
-        if self.tracking_server:
-            tracking_parent = tracker_dir.parent
-            self._run_post_hook(tracking_parent, spec)
 
         return SubmitResult(
             submissions=[JobSubmission(job_id="local", n_trials=spec.n_trials)]
@@ -97,8 +105,9 @@ class LocalBackend:
 
         base_url, api_key = ship
 
+        sweep_manifest_blobs(tracking_dir, base_url, api_key)
         replay_tracking(
-            tracking_dir=tracking_dir,
+            tracking_dir=Path(tracking_dir).parent,
             base_url=base_url,
             api_key=api_key,
             study=spec.study_name,
@@ -133,4 +142,22 @@ class LocalBackend:
         with TrackingWriter(path) as writer:
             for event in events:
                 writer.write_event(event)
+        return path
+
+    def _emit_terminal_sweep_event(
+        self, spec: SweepSubmission, path: Path | None, *, failed: bool
+    ) -> Path | None:
+        """Append the sweep's terminal snapshot to its submission events."""
+        if path is None:
+            return None
+        event = SweepSnapshotEvent(
+            event_id=uuid.uuid4(),
+            recorded_at=datetime.now(UTC),
+            project=spec.project_name or "",
+            sweep_id=sweep_id_for(spec.project_name or "", spec.study_name),
+            name=spec.study_name,
+            state="failed" if failed else "completed",
+        )
+        with TrackingWriter(path) as writer:
+            writer.write_event(event)
         return path

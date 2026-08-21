@@ -24,7 +24,7 @@ from jernerics.optuna_mirror import frozen_trial_snapshot
 from jernerics.retry import RetryContext
 from jernerics.retry_checker import run_checker
 from jernerics.tracking.batch_sync import replay_tracking
-from jernerics.tracking.blob_uploader import upload_pending_blobs
+from jernerics.tracking.blob_uploader import sweep_manifest_blobs
 from jernerics.tracking.infra import (
     TrackingServerSchemeError,
     resolve_tracking_ship,
@@ -81,23 +81,6 @@ def reconcile_study(ctx: RetryContext, tracking_dir: str | Path) -> Path | None:
     path = submission_dir / "reconcile.jsonl"
     path.write_text("".join(event.model_dump_json() + "\n" for event in trial_events))
     return path
-
-
-def _sweep_manifest_blobs(
-    tracking_dir: str | Path, base_url: str, api_key: str | None
-) -> None:
-    """Upload every study's pending manifest blobs under the tracking root."""
-    tracking_root = Path(tracking_dir).parent
-    manifests = sorted(tracking_root.glob("*/artifacts/*.manifest"))
-    if not manifests:
-        return
-    result = upload_pending_blobs(base_url, api_key, manifests)
-    print(
-        f"Blobs: {len(manifests)} manifest(s) swept — {result.uploaded} "
-        f"uploaded, {result.skipped_conflict} conflict(s) skipped, "
-        f"{result.failed} failed.",
-        file=sys.stderr,
-    )
 
 
 def _scheduler_task_log_files(cache_dir: Path) -> list[Path]:
@@ -188,7 +171,7 @@ def run_pipeline(
             conflicts.extend(result.conflicts)
         if conflicts:
             raise ReconciliationConflictError(conflicts)
-        _sweep_manifest_blobs(tracking_dir, base_url, api_key)
+        sweep_manifest_blobs(tracking_dir, base_url, api_key)
         _report_scheduler_task_logs(Path(tracking_dir).parent.parent)
 
     return PipelineResult.SWEEP_COMPLETE

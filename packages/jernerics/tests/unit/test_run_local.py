@@ -98,6 +98,117 @@ class TestLocalBackendPostHook:
 
         mock_replay.assert_not_called()
 
+    @patch("jernerics.backend.local_backend.sweep_manifest_blobs")
+    @patch("jernerics.backend.local_backend.replay_tracking")
+    @patch("jernerics.backend.local_backend.ship_events_file")
+    @patch("jernerics.backend.local_backend.resolve_tracking_ship")
+    @patch("jernerics.backend.local_backend.run_trial")
+    @patch("jernerics.backend.local_backend.cache_dir")
+    def test_failed_sweep_emits_failed_state_before_raising(
+        self,
+        mock_cache_dir,
+        mock_run_trial,
+        mock_resolve_tracking_ship,
+        mock_ship,
+        mock_replay,
+        mock_blobs,
+        tmp_path,
+    ):
+        from jernerics.backend.local_backend import LocalBackend
+        from jernerics.backend.models import SweepSubmission
+
+        mock_cache_dir.return_value = tmp_path
+        mock_resolve_tracking_ship.return_value = ("http://localhost:8000", None)
+        mock_run_trial.side_effect = SystemExit(1)
+        (tmp_path / "optuna").mkdir(parents=True)
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text(
+            "from optuna.samplers import TPESampler\n"
+            "base = {}\n"
+            "n_trials = 1\n"
+            "direction = 'minimize'\n"
+            "sampler = TPESampler()\n"
+        )
+
+        spec = SweepSubmission(
+            trial_path=tmp_path / "trial.py",
+            config_path=tmp_path / "config.py",
+            study_name="mystudy",
+            storage_url=str(tmp_path / "optuna" / "mystudy.journal"),
+            n_trials=1,
+            project_name="proj",
+            tracking_dir=tmp_path / "tracking" / "mystudy",
+        )
+
+        with pytest.raises(RuntimeError, match="One or more trials failed"):
+            LocalBackend(tracking_server="http://localhost:8000").submit_sweep(spec)
+
+        path = (
+            tmp_path
+            / "tracking"
+            / "mystudy"
+            / "submission"
+            / f"{spec.submission_id}.jsonl"
+        )
+        events = _read_submission_events(path)
+        assert events[-1].tag == "sweep_snapshot"
+        assert events[-1].state == "failed"
+        assert mock_ship.call_count == 2
+        mock_replay.assert_called_once()
+
+    @patch("jernerics.backend.local_backend.sweep_manifest_blobs")
+    @patch("jernerics.backend.local_backend.replay_tracking")
+    @patch("jernerics.backend.local_backend.ship_events_file")
+    @patch("jernerics.backend.local_backend.resolve_tracking_ship")
+    @patch("jernerics.backend.local_backend.run_trial")
+    @patch("jernerics.backend.local_backend.cache_dir")
+    def test_blob_retry_runs_before_replay(
+        self,
+        mock_cache_dir,
+        mock_run_trial,
+        mock_resolve_tracking_ship,
+        mock_ship,
+        mock_replay,
+        mock_blobs,
+        tmp_path,
+    ):
+        from jernerics.backend.local_backend import LocalBackend
+        from jernerics.backend.models import SweepSubmission
+
+        mock_cache_dir.return_value = tmp_path
+        mock_resolve_tracking_ship.return_value = ("http://localhost:8000", None)
+        order = []
+        mock_blobs.side_effect = lambda tracking_dir, base_url, api_key: order.append(
+            "blobs"
+        )
+        mock_replay.side_effect = lambda **kwargs: order.append("replay")
+        (tmp_path / "optuna").mkdir(parents=True)
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text(
+            "from optuna.samplers import TPESampler\n"
+            "base = {}\n"
+            "n_trials = 1\n"
+            "direction = 'minimize'\n"
+            "sampler = TPESampler()\n"
+        )
+
+        spec = SweepSubmission(
+            trial_path=tmp_path / "trial.py",
+            config_path=tmp_path / "config.py",
+            study_name="mystudy",
+            storage_url=str(tmp_path / "optuna" / "mystudy.journal"),
+            n_trials=1,
+            project_name="proj",
+            tracking_dir=tmp_path / "tracking" / "mystudy",
+        )
+
+        LocalBackend(tracking_server="http://localhost:8000").submit_sweep(spec)
+
+        assert order == ["blobs", "replay"]
+        mock_blobs.assert_called_once_with(
+            tmp_path / "tracking" / "mystudy", "http://localhost:8000", None
+        )
+
 
 class TestLocalBackendSubmissionEvents:
     @patch("jernerics.backend.local_backend.run_trial")
@@ -107,6 +218,7 @@ class TestLocalBackendSubmissionEvents:
     ):
         from jernerics.backend.local_backend import LocalBackend
         from jernerics.backend.models import SweepSubmission
+        from jernerics_schema import sweep_id_for
 
         mock_cache_dir.return_value = tmp_path
         (tmp_path / "optuna").mkdir(parents=True)
@@ -144,6 +256,7 @@ class TestLocalBackendSubmissionEvents:
             "sweep_snapshot",
             "submission_snapshot",
             "job_snapshot",
+            "sweep_snapshot",
         ]
         submission = events[1]
         assert submission.expected_trials == 1
@@ -151,6 +264,10 @@ class TestLocalBackendSubmissionEvents:
         assert submission.config_source == str(tmp_path / "config.py")
         assert events[2].role == "trials"
         assert events[2].scheduler_job_id == "local"
+        terminal = events[3]
+        assert terminal.state == "completed"
+        assert terminal.name == "mystudy"
+        assert terminal.sweep_id == sweep_id_for("proj", "mystudy")
 
     @patch("jernerics.backend.local_backend.run_trial")
     @patch("jernerics.backend.local_backend.cache_dir")
@@ -230,18 +347,18 @@ class TestLocalBackendSubmissionEvents:
 
         LocalBackend(tracking_server="http://localhost:8000").submit_sweep(spec)
 
-        shipped = [call for call in calls if call[0] == "ship"]
-        assert len(shipped) == 1
-        assert shipped[0][1] == (
+        submission_path = (
             tmp_path
             / "tracking"
             / "mystudy"
             / "submission"
             / f"{spec.submission_id}.jsonl"
         )
-        assert calls.index(("ship", shipped[0][1])) < next(
-            i for i, call in enumerate(calls) if call[0] == "trial"
-        )
+        assert calls == [
+            ("ship", submission_path),
+            ("trial", None),
+            ("ship", submission_path),
+        ]
 
     @patch("jernerics.backend.local_backend.replay_tracking")
     @patch("jernerics.backend.local_backend.ship_events_file")

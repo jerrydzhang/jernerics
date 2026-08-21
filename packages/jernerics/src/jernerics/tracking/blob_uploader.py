@@ -103,3 +103,20 @@ def upload_pending_blobs(
                 file=sys.stderr,
             )
     return result
+
+
+def sweep_manifest_blobs(
+    tracking_dir: str | Path, base_url: str, api_key: str | None
+) -> None:
+    """Upload every study's pending manifest blobs under the tracking root."""
+    tracking_root = Path(tracking_dir).parent
+    manifests = sorted(tracking_root.glob("*/artifacts/*.manifest"))
+    if not manifests:
+        return
+    result = upload_pending_blobs(base_url, api_key, manifests)
+    print(
+        f"Blobs: {len(manifests)} manifest(s) swept — {result.uploaded} "
+        f"uploaded, {result.skipped_conflict} conflict(s) skipped, "
+        f"{result.failed} failed.",
+        file=sys.stderr,
+    )
