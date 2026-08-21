@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 from dash import dcc, html
@@ -526,7 +527,10 @@ class TestSessionProtectedDownload:
             f"/dashboard/artifact/{BIGLOG.hex}", follow_redirects=False
         )
         assert denied.status_code == 303
-        assert denied.headers["location"] == "/dashboard/login"
+        assert denied.headers["location"] == (
+            "/dashboard/login?next="
+            + quote(f"/dashboard/artifact/{BIGLOG.hex}", safe="")
+        )
 
         ranged = env.client.get(
             f"/dashboard/artifact/{BIGLOG.hex}", headers={"Range": "bytes=100-199"}

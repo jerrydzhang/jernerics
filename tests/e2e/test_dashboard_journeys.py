@@ -21,7 +21,7 @@ from collections import deque
 from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import httpx
 import optuna
@@ -405,7 +405,9 @@ class TestLinkGraphJourney:
 
         denied = httpx.get(f"{scenario.base_url}{downloads[0]}", follow_redirects=False)
         assert denied.status_code == 303
-        assert denied.headers["location"] == "/dashboard/login"
+        assert denied.headers["location"] == (
+            f"{ROUTES_BASE}/login?next={quote(downloads[0], safe='')}"
+        )
 
         served = httpx.get(
             f"{scenario.base_url}{downloads[0]}",
@@ -447,7 +449,9 @@ class TestMountedDashboardHttp:
     def test_login_exchanges_key_for_session_and_index_renders(self, scenario):
         guarded = httpx.get(f"{scenario.base_url}/dashboard/", follow_redirects=False)
         assert guarded.status_code == 303
-        assert guarded.headers["location"] == "/dashboard/login"
+        assert guarded.headers["location"] == (
+            f"{ROUTES_BASE}/login?next={quote(LANDING, safe='')}"
+        )
 
         login = httpx.post(
             f"{scenario.base_url}/dashboard/login",
@@ -465,6 +469,31 @@ class TestMountedDashboardHttp:
         )
         assert index.status_code == 200
         assert "jernerics dashboard" in index.text
+
+    def test_deep_link_login_round_trip_lands_on_target(self, scenario):
+        deep = f"{ROUTES_BASE}/analysis?sel=tok%3D1"
+        guarded = httpx.get(f"{scenario.base_url}{deep}", follow_redirects=False)
+        assert guarded.status_code == 303
+        assert guarded.headers["location"] == (
+            f"{ROUTES_BASE}/login?next={quote(deep, safe='')}"
+        )
+
+        login = httpx.post(
+            f"{scenario.base_url}{ROUTES_BASE}/login",
+            data={"api_key": API_KEY, "next": deep},
+            follow_redirects=False,
+        )
+        assert login.status_code == 303
+        assert login.headers["location"] == deep
+
+        cookie = SimpleCookie()
+        cookie.load(login.headers["set-cookie"])
+        landed = httpx.get(
+            f"{scenario.base_url}{deep}",
+            headers={"Cookie": f"{COOKIE_NAME}={cookie[COOKIE_NAME].value}"},
+        )
+        assert landed.status_code == 200
+        assert "jernerics dashboard" in landed.text
 
 
 class TestArtifactRowClickNavigation:

@@ -10,10 +10,11 @@ requires no login: sessions are still issued signed, without a key check.
 """
 
 import hmac
+import html
 import secrets as secrets_module
 from dataclasses import dataclass
 from http.cookies import SimpleCookie
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
@@ -55,8 +56,13 @@ def _session_cookie(
     )
 
 
-def _login_html(ctx: DashboardContext, error: bool = False) -> str:
+def _login_html(
+    ctx: DashboardContext, error: bool = False, next_url: str | None = None
+) -> str:
     message = "<p class='login-error'>Invalid API key.</p>" if error else ""
+    hidden = ""
+    if next_url:
+        hidden = f'<input name="next" type="hidden" value="{html.escape(next_url)}">'
     return f"""<!doctype html>
 <html>
 <head><title>jernerics dashboard — log in</title></head>
@@ -64,6 +70,7 @@ def _login_html(ctx: DashboardContext, error: bool = False) -> str:
   <form class="login-card" method="post" action="{ctx.routes_base}/login">
     <h1>jernerics dashboard</h1>
     {message}
+    {hidden}
     <label for="api_key">API key</label>
     <input id="api_key" name="api_key" type="password" autofocus
            autocomplete="off">
@@ -73,22 +80,46 @@ def _login_html(ctx: DashboardContext, error: bool = False) -> str:
 </html>"""
 
 
+def _safe_next(ctx: DashboardContext, value: str) -> str | None:
+    """Open-redirect guard for the login ``next`` target.
+
+    Only a relative path at or under the dashboard base is honored. The
+    strict prefix requirement rejects absolute URLs, scheme-bearing
+    targets, ``//``-prefixed scheme-relative hosts, and off-dashboard
+    paths; control characters and backslashes (which browsers normalize
+    to path separators) are rejected outright so nothing can smuggle
+    header or authority tricks past the prefix check.
+    """
+    base = ctx.routes_base
+    if not value or any(char in value for char in "\r\n\t\\"):
+        return None
+    if value != base and not value.startswith(f"{base}/"):
+        return None
+    return value
+
+
 def register_auth_routes(app: FastAPI, ctx: DashboardContext) -> None:
     """Attach GET/POST login and POST logout under the dashboard base."""
     login_path = f"{ctx.routes_base}/login"
     logout_path = f"{ctx.routes_base}/logout"
 
     @app.get(login_path, response_model=None, include_in_schema=False)
-    async def login_page(error: int = 0) -> HTMLResponse:
-        return HTMLResponse(_login_html(ctx, error=bool(error)))
+    async def login_page(error: int = 0, next: str = "") -> HTMLResponse:
+        return HTMLResponse(
+            _login_html(ctx, error=bool(error), next_url=_safe_next(ctx, next))
+        )
 
     @app.post(login_path, response_model=None, include_in_schema=False)
     async def login_submit(request: Request) -> HTMLResponse | RedirectResponse:
         body = (await request.body()).decode("utf-8")
-        submitted = parse_qs(body).get("api_key", [""])[-1]
+        values = parse_qs(body)
+        submitted = values.get("api_key", [""])[-1]
+        target = _safe_next(ctx, values.get("next", [""])[-1])
         if ctx.api_key is not None and not hmac.compare_digest(submitted, ctx.api_key):
-            return HTMLResponse(_login_html(ctx, error=True), status_code=401)
-        response = RedirectResponse(f"{ctx.routes_base}/", status_code=303)
+            return HTMLResponse(
+                _login_html(ctx, error=True, next_url=target), status_code=401
+            )
+        response = RedirectResponse(target or f"{ctx.routes_base}/", status_code=303)
         _session_cookie(response, ctx, ctx.signer.sign(ctx.ttl_s), ctx.ttl_s)
         return response
 
@@ -121,7 +152,9 @@ def session_or_bearer_auth(ctx: DashboardContext):
 
 
 class DashboardAuthMiddleware:
-    """Redirects unauthenticated /dashboard traffic to the login page."""
+    """Redirects unauthenticated /dashboard traffic to the login page,
+    carrying the original path (and query string) as the ``next``
+    parameter so a successful login returns to the deep link."""
 
     def __init__(self, app: ASGIApp, ctx: DashboardContext) -> None:
         self.app = app
@@ -138,9 +171,12 @@ class DashboardAuthMiddleware:
                 and path != login_path
             )
             if guarded and not self._authorized(scope):
-                await RedirectResponse(login_path, status_code=303)(
-                    scope, receive, send
-                )
+                target = path
+                query = scope.get("query_string", b"").decode("latin-1")
+                if query:
+                    target = f"{target}?{query}"
+                login_url = f"{login_path}?next={quote(target, safe='')}"
+                await RedirectResponse(login_url, status_code=303)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
 

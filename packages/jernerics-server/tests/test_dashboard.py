@@ -6,6 +6,7 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 from fastapi import FastAPI
@@ -55,6 +56,10 @@ def _ctx(client: TestClient) -> DashboardContext:
     app = client.app
     assert isinstance(app, FastAPI)
     return app.state.dashboard
+
+
+def _login_url(next_value: str = "/dashboard/") -> str:
+    return f"/dashboard/login?next={quote(next_value, safe='')}"
 
 
 @pytest.fixture
@@ -114,7 +119,7 @@ class TestSession:
     def test_missing_cookie_redirects_to_login(self, client):
         response = client.get("/dashboard/", follow_redirects=False)
         assert response.status_code == 303
-        assert response.headers["location"] == "/dashboard/login"
+        assert response.headers["location"] == _login_url()
 
     def test_tampered_cookie_redirects_to_login(self, client):
         response = client.get(
@@ -123,7 +128,7 @@ class TestSession:
             cookies={COOKIE_NAME: "eyJzdWIiOiJkYXNoYm9hcmQifQ.forged"},
         )
         assert response.status_code == 303
-        assert response.headers["location"] == "/dashboard/login"
+        assert response.headers["location"] == _login_url()
 
     def test_expired_cookie_redirects_to_login(self, tmp_path):
         client = _build(tmp_path)
@@ -134,7 +139,7 @@ class TestSession:
             "/dashboard/", follow_redirects=False, cookies={COOKIE_NAME: token}
         )
         assert response.status_code == 303
-        assert response.headers["location"] == "/dashboard/login"
+        assert response.headers["location"] == _login_url()
 
 
 class TestLogout:
@@ -153,7 +158,100 @@ class TestLogout:
             cookies={COOKIE_NAME: token or ""},
         )
         assert response.status_code == 303
-        assert response.headers["location"] == "/dashboard/login"
+        assert response.headers["location"] == _login_url()
+
+
+class TestLoginNext:
+    """jernerics-wh2: deep URLs ride through the login round trip as the
+    ``next`` parameter; only dashboard-relative targets are honored."""
+
+    def test_deep_url_redirects_to_login_with_next(self, client):
+        response = client.get("/dashboard/project/symlab", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == _login_url("/dashboard/project/symlab")
+
+    def test_query_string_is_carried_inside_next(self, client):
+        response = client.get(
+            "/dashboard/analysis", params={"sel": "tok=1"}, follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == _login_url(
+            "/dashboard/analysis?sel=tok%3D1"
+        )
+
+    def test_login_page_embeds_next_as_hidden_field(self, client):
+        response = client.get(
+            "/dashboard/login", params={"next": "/dashboard/sweep/abc"}
+        )
+        assert response.status_code == 200
+        assert '<input name="next" type="hidden"' in response.text
+        assert 'value="/dashboard/sweep/abc"' in response.text
+
+    def test_login_page_drops_unsafe_next(self, client):
+        response = client.get("/dashboard/login", params={"next": "https://evil.com"})
+        assert response.status_code == 200
+        assert 'name="next"' not in response.text
+
+    def test_valid_key_lands_on_next_target_with_query(self, client):
+        response = client.post(
+            "/dashboard/login",
+            data={"api_key": API_KEY, "next": "/dashboard/analysis?sel=tok=1"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/dashboard/analysis?sel=tok=1"
+
+    def test_wrong_key_keeps_next_for_retry(self, client):
+        response = client.post(
+            "/dashboard/login",
+            data={"api_key": "nope", "next": "/dashboard/trial/abc"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 401
+        assert 'value="/dashboard/trial/abc"' in response.text
+
+    @pytest.mark.parametrize(
+        "evil",
+        [
+            "https://evil.com/dashboard",
+            "//evil.com/dashboard",
+            "/\\evil.com/dashboard",
+            "http://localhost/dashboard",
+            "/other/page",
+            "dashboard/analysis",
+            "/dashboard\nSet-Cookie: pwn=1",
+            "/dashboard%0d%0aSet-Cookie:%20pwn=1",
+            "/dashboard\\@evil.com",
+        ],
+    )
+    def test_unsafe_next_falls_back_to_dashboard_root(self, client, evil):
+        response = client.post(
+            "/dashboard/login",
+            data={"api_key": API_KEY, "next": evil},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/dashboard/"
+
+    def test_round_trip_returns_the_deep_link(self, client):
+        deep = "/dashboard/project/symlab"
+        guarded = client.get(deep, follow_redirects=False)
+        assert guarded.headers["location"] == _login_url(deep)
+
+        page = client.get(guarded.headers["location"])
+        assert page.status_code == 200
+        assert f'value="{deep}"' in page.text
+
+        submitted = client.post(
+            "/dashboard/login",
+            data={"api_key": API_KEY, "next": deep},
+            follow_redirects=False,
+        )
+        assert submitted.status_code == 303
+        assert submitted.headers["location"] == deep
+
+        landed = client.get(deep, follow_redirects=False)
+        assert landed.status_code == 200
 
 
 class TestAuthSplit:
