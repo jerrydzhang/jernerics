@@ -517,6 +517,32 @@ class TestSweepPage:
         assert "7/10 epoch" in str(page)
         assert "3/10 epoch" in str(page)
 
+    def test_executions_section_lists_and_links_every_execution(self, service):
+        detail = service.sweep_detail(str(SWEEP_A))
+        assert detail is not None
+        assert {str(record.execution_id) for record in detail.executions} == {
+            str(execution_id) for execution_id in (E1, E3, E4, E5, E6, E7)
+        }
+        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
+        rendered = str(page)
+        assert "Executions" in rendered
+        for execution_id in (E1, E3, E4, E5, E6, E7):
+            assert f"/dashboard/execution/{execution_id}" in rendered
+        assert f"/dashboard/execution/{E8}" not in rendered
+        assert "node07" not in rendered
+        finished = service.sweep_detail(str(SWEEP_B))
+        assert finished is not None
+        assert {str(record.execution_id) for record in finished.executions} == {str(E8)}
+        finished_page, _ = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
+        assert f"/dashboard/execution/{E8}" in str(finished_page)
+        assert "node07" in str(finished_page)
+
+    def test_header_breadcrumbs_to_project_workspace(self, service):
+        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
+        rendered = str(page)
+        assert "project ops" in rendered
+        assert "/dashboard/project/ops" in rendered
+
 
 class TestTrialFamilies:
     def test_one_row_per_root_with_current_generation(self, service):

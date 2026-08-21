@@ -14,6 +14,7 @@ import json
 
 from dash import dcc, html
 from dash_ag_grid import AgGrid
+from jernerics_schema import ExecutionRecord
 
 from . import artifacts, components
 from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
@@ -98,6 +99,10 @@ def _trial_href(trial_id: str) -> str:
 
 def _execution_href(execution_id: str) -> str:
     return f"{ROUTES_BASE}/execution/{execution_id}"
+
+
+def _project_href(project: str) -> str:
+    return f"{ROUTES_BASE}/project/{project}"
 
 
 def _grid_link(label: str, href: str) -> str:
@@ -319,6 +324,30 @@ def _progress_list(progress: list[dict]) -> html.Div:
     )
 
 
+def _executions_table(executions: list[ExecutionRecord], now_ns: int) -> html.Table:
+    """One row per execution: monitoring badge, deep link, host, times."""
+    return components.DataTable(
+        ("Monitoring", "Execution", "Host", "Started", "Ended"),
+        [
+            (
+                Badge(record.monitoring or UNKNOWN),
+                html.A(
+                    short_id(str(record.execution_id)),
+                    href=_execution_href(str(record.execution_id)),
+                ),
+                record.hostname,
+                time_cell(components.datetime_to_ns(record.started_at), now_ns),
+                (
+                    UNKNOWN
+                    if record.ended_at is None
+                    else time_cell(components.datetime_to_ns(record.ended_at), now_ns)
+                ),
+            )
+            for record in executions
+        ],
+    )
+
+
 def family_grid_row(family: FamilyRow) -> dict[str, object]:
     """One AG Grid row dict for the trial-family grid."""
     shown = ", ".join(f"{key}={value}" for key, value in family.params[:3])
@@ -386,8 +415,9 @@ def lineage_chain(root: str | None, lineage: list[dict]) -> list[object]:
 
 
 def sweep_page(detail: SweepDetail, now_ns: int) -> html.Div:
-    """Sweep page: submission/job correlation, monitoring, progress,
-    and the trial-family grid with its lineage side panel."""
+    """Sweep page: project breadcrumb, submission/job correlation,
+    monitoring, every execution, in-flight progress, and the trial-family
+    grid with its lineage side panel."""
     overview = detail.overview
     return html.Div(
         [
@@ -396,6 +426,10 @@ def sweep_page(detail: SweepDetail, now_ns: int) -> html.Div:
                 [
                     Badge(overview.state),
                     Badge(f"health {overview.health}", kind=overview.health),
+                    html.A(
+                        f"project {detail.context['project']}",
+                        href=_project_href(detail.context["project"]),
+                    ),
                 ]
             ),
             html.Section(
@@ -409,6 +443,13 @@ def sweep_page(detail: SweepDetail, now_ns: int) -> html.Div:
                 [
                     html.H3("Execution monitoring"),
                     _monitoring_counts(overview),
+                ],
+                className="section",
+            ),
+            html.Section(
+                [
+                    html.H3("Executions"),
+                    _executions_table(detail.executions, now_ns),
                 ],
                 className="section",
             ),
@@ -500,26 +541,7 @@ def trial_page(detail: TrialDetail, now_ns: int) -> html.Div:
             for record in detail.catalog
         ],
     )
-    executions_table = components.DataTable(
-        ("Monitoring", "Execution", "Host", "Started", "Ended"),
-        [
-            (
-                Badge(record.monitoring or UNKNOWN),
-                html.A(
-                    short_id(str(record.execution_id)),
-                    href=_execution_href(str(record.execution_id)),
-                ),
-                record.hostname,
-                time_cell(components.datetime_to_ns(record.started_at), now_ns),
-                (
-                    UNKNOWN
-                    if record.ended_at is None
-                    else time_cell(components.datetime_to_ns(record.ended_at), now_ns)
-                ),
-            )
-            for record in detail.executions
-        ],
-    )
+    executions_table = _executions_table(detail.executions, now_ns)
     return html.Div(
         [
             html.H2(f"Trial {short_id(context['trial_id'])}"),

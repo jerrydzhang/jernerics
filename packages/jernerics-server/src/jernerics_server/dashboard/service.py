@@ -111,6 +111,7 @@ class SweepDetail:
     overview: SweepSummary
     jobs: list[dict[str, Any]]
     progress: list[dict[str, Any]]
+    executions: list[ExecutionRecord]
     families: list[FamilyRow]
     lineage: list[dict[str, Any]]
 
@@ -321,6 +322,7 @@ class DashboardService:
                 for row in self.queries.execution_progress(selection)
                 if row["ended_ns"] is None
             ],
+            executions=self.sweep_executions(selection),
             families=family_rows,
             lineage=[
                 {
@@ -336,6 +338,11 @@ class DashboardService:
                 for record in self.queries.lineage(selection)
             ],
         )
+
+    def sweep_executions(self, selection: Selection) -> list[ExecutionRecord]:
+        """Every execution under the selection's sweeps, with derived
+        monitoring, for the sweep page's execution list."""
+        return self.queries.executions(selection)
 
     def trial_detail(self, trial_id: str) -> TrialDetail | None:
         """Trial page data; ``None`` when the id matches no trial."""
