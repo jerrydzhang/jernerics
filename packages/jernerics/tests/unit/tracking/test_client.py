@@ -470,6 +470,15 @@ class TestFromEnv:
         with pytest.raises(TrackingClientError, match="scheme"):
             TrackingClient.from_env()
 
+    def test_scheme_less_env_url_names_env_var_and_pyproject_key(self, monkeypatch):
+        monkeypatch.setenv("JERNERICS_TRACKING_SERVER", "atlas.example:443")
+        with pytest.raises(TrackingClientError) as excinfo:
+            TrackingClient.from_env()
+        message = str(excinfo.value)
+        assert "atlas.example:443" in message
+        assert "JERNERICS_TRACKING_SERVER" in message
+        assert "[tool.jernerics] tracking_server" in message
+
     def test_valid_env_builds_client(self, monkeypatch):
         monkeypatch.setenv("JERNERICS_TRACKING_SERVER", "http://host:8000")
         monkeypatch.setenv("JERNERICS_API_KEY", "secret")

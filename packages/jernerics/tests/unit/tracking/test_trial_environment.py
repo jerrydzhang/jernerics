@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
 
+import pytest
+from jernerics.tracking.infra import TrackingServerSchemeError
 from jernerics.tracking.jsonl_io import TrackingReader
 from jernerics.tracking.trial_environment import TrialEnvironment
 from jernerics_schema import (
@@ -174,6 +176,24 @@ class TestShipping:
 
         with env:
             assert env._sync_client is None
+
+    def test_scheme_less_server_addr_fails_fast_without_shipper(self, tmp_path) -> None:
+        env = TrialEnvironment(
+            tracking_dir=str(tmp_path),
+            trial_number=0,
+            server_addr="atlas.taile454b.ts.net:443",
+        )
+
+        with (
+            patch("jernerics.tracking.trial_environment.StreamClient") as mock_client,
+            pytest.raises(TrackingServerSchemeError) as excinfo,
+        ):
+            env.start()
+
+        mock_client.assert_not_called()
+        assert env._sync_client is None
+        message = str(excinfo.value)
+        assert "[tool.jernerics] tracking_server" in message
 
     def test_events_file_is_named_by_trial_number(self, tmp_path) -> None:
         env = TrialEnvironment(tracking_dir=str(tmp_path), trial_number=7)

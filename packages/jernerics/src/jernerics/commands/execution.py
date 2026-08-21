@@ -17,6 +17,7 @@ from jernerics.config import (
     load_tracking_server,
 )
 from jernerics.paths import cache_dir
+from jernerics.tracking.infra import TrackingServerSchemeError
 
 SAFE_RELPATH = re.compile(r"^[a-zA-Z0-9_./\-]+$")
 
@@ -105,6 +106,9 @@ def run_local(
 
     try:
         backend.submit_sweep(spec, direction=sweep.direction)
+    except TrackingServerSchemeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
     except RuntimeError:
         raise SystemExit(ExitCode.GENERAL_ERROR) from None
 

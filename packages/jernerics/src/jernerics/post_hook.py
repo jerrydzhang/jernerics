@@ -25,7 +25,10 @@ from jernerics.retry import RetryContext
 from jernerics.retry_checker import run_checker
 from jernerics.tracking.batch_sync import replay_tracking
 from jernerics.tracking.blob_uploader import upload_pending_blobs
-from jernerics.tracking.infra import resolve_tracking_ship
+from jernerics.tracking.infra import (
+    TrackingServerSchemeError,
+    resolve_tracking_ship,
+)
 
 
 class PipelineResult(enum.Enum):
@@ -191,20 +194,24 @@ def run_pipeline(
     return PipelineResult.SWEEP_COMPLETE
 
 
-if __name__ == "__main__":
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--context", required=True)
     parser.add_argument("--chain-depth", type=int, required=True)
     parser.add_argument("--tracking-dir", required=True)
     parser.add_argument("--server-addr", default=None)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     base_url = None
     api_key = None
-    if args.server_addr:
-        ship = resolve_tracking_ship(args.server_addr)
-        if ship:
-            base_url, api_key = ship
+    try:
+        if args.server_addr:
+            ship = resolve_tracking_ship(args.server_addr)
+            if ship:
+                base_url, api_key = ship
+    except TrackingServerSchemeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
     try:
         result = run_pipeline(
@@ -225,3 +232,7 @@ if __name__ == "__main__":
 
     if result == PipelineResult.RETRY_SUBMITTED:
         sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

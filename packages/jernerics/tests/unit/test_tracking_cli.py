@@ -16,12 +16,13 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import ANY
+from unittest.mock import ANY, patch
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from jernerics.cli import app as cli_app
+from jernerics.config import ExitCode
 from jernerics.tracking import TrackingClient
 from jernerics_schema import (
     PROTOCOL_VERSION,
@@ -878,6 +879,30 @@ class TestSchemelessUrl:
         assert "scheme" in result.output
         assert "http://" in result.output
         assert "Traceback" not in result.output
+
+
+class TestReplaySchemelessServer:
+    def test_replay_scheme_less_server_is_config_error(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("JERNERICS_TRACKING_SERVER", raising=False)
+        with patch("jernerics.commands.tracking.replay_tracking") as mock_replay:
+            result = runner.invoke(
+                cli_app,
+                [
+                    "tracking",
+                    "replay",
+                    "--server",
+                    "atlas.taile454b.ts.net:443",
+                    "--tracking-dir",
+                    str(tmp_path),
+                ],
+            )
+
+        assert result.exit_code == ExitCode.CONFIG_ERROR
+        assert "Error:" in result.output
+        assert "JERNERICS_TRACKING_SERVER" in result.output
+        assert "[tool.jernerics] tracking_server" in result.output
+        assert "Traceback" not in result.output
+        mock_replay.assert_not_called()
 
 
 class TestQueryCommand:

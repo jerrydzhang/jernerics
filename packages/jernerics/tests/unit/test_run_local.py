@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import pytest
 from jernerics.config import SweepConfig
 
 
@@ -290,6 +291,56 @@ class TestLocalBackendSubmissionEvents:
         mock_run_trial.assert_called_once()
 
 
+class TestSchemeLessTrackingServer:
+    @patch("jernerics.backend.local_backend.ship_events_file")
+    def test_ship_submission_events_fails_fast_without_shipping(
+        self, mock_ship, tmp_path
+    ):
+        from jernerics.backend.local_backend import LocalBackend
+        from jernerics.backend.models import SweepSubmission
+        from jernerics.tracking.infra import TrackingServerSchemeError
+
+        spec = SweepSubmission(
+            trial_path=tmp_path / "trial.py",
+            config_path=tmp_path / "config.py",
+            study_name="mystudy",
+            storage_url=str(tmp_path / "optuna" / "mystudy.journal"),
+            n_trials=1,
+        )
+
+        with pytest.raises(TrackingServerSchemeError) as excinfo:
+            LocalBackend(
+                tracking_server="atlas.taile454b.ts.net:443"
+            )._ship_submission_events(spec, tmp_path / "submission" / "s.jsonl")
+
+        mock_ship.assert_not_called()
+        message = str(excinfo.value)
+        assert "JERNERICS_TRACKING_SERVER" in message
+        assert "[tool.jernerics] tracking_server" in message
+
+    @patch("jernerics.backend.local_backend.ship_events_file")
+    def test_spec_server_addr_is_validated_too(self, mock_ship, tmp_path):
+        from jernerics.backend.local_backend import LocalBackend
+        from jernerics.backend.models import SweepSubmission
+        from jernerics.tracking.infra import TrackingServerSchemeError
+
+        spec = SweepSubmission(
+            trial_path=tmp_path / "trial.py",
+            config_path=tmp_path / "config.py",
+            study_name="mystudy",
+            storage_url=str(tmp_path / "optuna" / "mystudy.journal"),
+            n_trials=1,
+            server_addr="atlas.example:443",
+        )
+
+        with pytest.raises(TrackingServerSchemeError, match=r"atlas\.example:443"):
+            LocalBackend()._ship_submission_events(
+                spec, tmp_path / "submission" / "s.jsonl"
+            )
+
+        mock_ship.assert_not_called()
+
+
 def _read_submission_events(path):
     from jernerics.tracking.jsonl_io import TrackingReader
 
@@ -303,8 +354,9 @@ class TestRunLocalSingleConfig:
     @patch("jernerics.backend.local_backend.cache_dir")
     @patch("jernerics.commands.execution.load_config")
     def test_single_config_runs_once(
-        self, mock_load, mock_cache_dir, mock_run_trial, mock_ship
+        self, mock_load, mock_cache_dir, mock_run_trial, mock_ship, monkeypatch
     ):
+        monkeypatch.delenv("JERNERICS_TRACKING_SERVER", raising=False)
         import tempfile
         from pathlib import Path
 
@@ -341,8 +393,9 @@ class TestRunLocalSweep:
     @patch("jernerics.backend.local_backend.cache_dir")
     @patch("jernerics.commands.execution.load_config")
     def test_sweep_runs_n_trials(
-        self, mock_load, mock_cache_dir, mock_run_trial, mock_ship
+        self, mock_load, mock_cache_dir, mock_run_trial, mock_ship, monkeypatch
     ):
+        monkeypatch.delenv("JERNERICS_TRACKING_SERVER", raising=False)
         import tempfile
         from pathlib import Path
 

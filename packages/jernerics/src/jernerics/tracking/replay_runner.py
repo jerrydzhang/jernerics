@@ -12,10 +12,13 @@ import sys
 from pathlib import Path
 
 from jernerics.tracking.batch_sync import replay_tracking
-from jernerics.tracking.infra import resolve_tracking_ship
+from jernerics.tracking.infra import (
+    TrackingServerSchemeError,
+    resolve_tracking_ship,
+)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--tracking-dir", required=True, help="Path to tracking directory"
@@ -27,9 +30,13 @@ def main() -> None:
     )
     parser.add_argument("--study", default=None, help="Scope to a single study")
     parser.add_argument("--max-workers", type=int, default=16, help="Thread pool size")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    ship = resolve_tracking_ship(args.server_addr)
+    try:
+        ship = resolve_tracking_ship(args.server_addr)
+    except TrackingServerSchemeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     if not ship:
         print("Error: no tracking server configured", file=sys.stderr)
         sys.exit(1)

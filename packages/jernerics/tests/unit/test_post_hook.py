@@ -6,6 +6,7 @@ import pytest
 from jernerics.post_hook import (
     PipelineResult,
     ReconciliationConflictError,
+    main,
     run_pipeline,
 )
 from jernerics.retry import RetryContext
@@ -355,6 +356,38 @@ class TestReconcileStudy:
         assert second == first
         assert second is not None
         assert second.read_bytes() == first_bytes
+
+
+class TestMainSchemeLessServerAddr:
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_scheme_less_server_addr_exits_cleanly_before_any_work(
+        self, mock_run_checker, mock_replay, tmp_path, capsys
+    ):
+        ctx_path = _write_ctx(tmp_path)
+
+        with pytest.raises(SystemExit) as excinfo:
+            main(
+                [
+                    "--context",
+                    str(ctx_path),
+                    "--chain-depth",
+                    "0",
+                    "--tracking-dir",
+                    str(tmp_path),
+                    "--server-addr",
+                    "atlas.taile454b.ts.net:443",
+                ]
+            )
+
+        assert excinfo.value.code == 1
+        mock_run_checker.assert_not_called()
+        mock_replay.assert_not_called()
+        err = capsys.readouterr().err
+        assert "Error:" in err
+        assert "JERNERICS_TRACKING_SERVER" in err
+        assert "[tool.jernerics] tracking_server" in err
+        assert "atlas.taile454b.ts.net:443" in err
 
 
 _LIVE_ID = uuid4()

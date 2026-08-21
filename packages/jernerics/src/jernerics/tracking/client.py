@@ -54,7 +54,7 @@ from jernerics_schema import (
 )
 from pydantic import TypeAdapter
 
-from .infra import resolve_tracking_ship
+from .infra import TrackingServerSchemeError, resolve_tracking_ship
 
 SELECTION_TOKEN_VERSION = 1
 """Wire version of encoded selections; bump on breaking payload changes."""
@@ -529,9 +529,12 @@ class TrackingClient:
         ``JERNERICS_API_KEY`` for optional bearer auth — the same
         resolution the shipper and CLI use.
         """
-        resolved = resolve_tracking_ship(
-            os.environ.get("JERNERICS_TRACKING_SERVER", "")
-        )
+        try:
+            resolved = resolve_tracking_ship(
+                os.environ.get("JERNERICS_TRACKING_SERVER", "")
+            )
+        except TrackingServerSchemeError as e:
+            raise TrackingClientError(str(e)) from e
         if resolved is None:
             raise TrackingClientError(
                 "JERNERICS_TRACKING_SERVER is not set; export the tracking "

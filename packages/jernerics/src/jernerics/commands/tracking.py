@@ -31,6 +31,10 @@ from jernerics.observability.render import (
 from jernerics.paths import cache_dir
 from jernerics.tracking import ProjectHandle, TrackingClient, TrackingClientError
 from jernerics.tracking.batch_sync import discover_jsonl_files, replay_tracking
+from jernerics.tracking.infra import (
+    TrackingServerSchemeError,
+    resolve_tracking_ship,
+)
 from jernerics.tracking.jsonl_io import TrackingReader
 
 # ── replay ───────────────────────────────────────────────────────────────────
@@ -123,16 +127,20 @@ def replay(
         backend.sync(project_name, study=study)
         return
 
-    base_url = server or load_tracking_server()
-    if not base_url:
+    try:
+        ship = resolve_tracking_ship(server or load_tracking_server() or "")
+    except TrackingServerSchemeError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.CONFIG_ERROR) from None
+    if ship is None:
         print(
             "Error: No tracking server configured. Set JERNERICS_TRACKING_SERVER "
             "or [tool.jernerics] tracking_server in pyproject.toml."
         )
         raise SystemExit(ExitCode.CONFIG_ERROR)
+    base_url, api_key = ship
 
     resolved_dir = tracking_dir or (cache_dir() / "tracking")
-    api_key = os.environ.get("JERNERICS_API_KEY")
 
     if dry_run:
         _run_dry_run(resolved_dir, study, json_output)
