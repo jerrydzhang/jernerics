@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dash import dcc
+from dash import dcc, no_update
 from dash_ag_grid import AgGrid
 from fastapi.testclient import TestClient
 from jernerics_schema import (
@@ -38,6 +38,7 @@ from jernerics_server.dashboard.analysis import (
     catalog_tab,
     expand_values,
     hydrate_tray,
+    mounted_selection,
     optuna_tab_content,
     points_tab,
     python_snippet,
@@ -45,7 +46,7 @@ from jernerics_server.dashboard.analysis import (
     search_from_tray,
     series_outputs,
     synced_search,
-    tray_from_picks,
+    tray_from_edit,
     tray_summary,
 )
 from jernerics_server.dashboard.app import build_dash_app
@@ -484,6 +485,26 @@ def _tray(**overrides: Any) -> dict:
     return tray
 
 
+def _edit_tray(
+    sweep_rows: list,
+    family_rows: list,
+    expand: list,
+    current: dict | None,
+    **edited: bool,
+) -> dict:
+    """``tray_from_edit`` with every control authoritative unless an
+    explicit ``*_edited`` flag overrides it."""
+    return tray_from_edit(
+        sweep_rows,
+        family_rows,
+        expand,
+        current,
+        sweep_edited=edited.get("sweep_edited", True),
+        family_edited=edited.get("family_edited", True),
+        expand_edited=edited.get("expand_edited", True),
+    )
+
+
 def _seeded_store(tmp_path) -> Store:
     store = Store(tmp_path / "analysis.sqlite")
     _ingest(store)
@@ -593,7 +614,7 @@ class TestUnifiedSelectionStore:
         assert again is None and error is None
 
     def test_workspace_and_analysis_edits_hit_one_store(self):
-        store = tray_from_picks(
+        store = _edit_tray(
             [{"sweep_id": str(SWEEP_A)}],
             [{"root": str(RA0)}],
             [],
@@ -607,7 +628,7 @@ class TestUnifiedSelectionStore:
         assert store["families"] == [str(RA0)]
         # Analysis edit (grids carry the workspace's picks as selected
         # rows): families replaced, sweeps kept, project survives.
-        store = tray_from_picks([{"sweep_id": str(SWEEP_B)}], [], ["expand"], store)
+        store = _edit_tray([{"sweep_id": str(SWEEP_B)}], [], ["expand"], store)
         assert store["sweeps"] == [str(SWEEP_B)]
         assert store["families"] == []
         assert store["expand"] is True
@@ -660,18 +681,18 @@ class TestCellTextSelection:
 
 class TestTray:
     def test_family_pick_without_expansion_selects_current_trial(self, service):
-        tray = tray_from_picks([], [{"root": str(RA0)}], [], None)
+        tray = _edit_tray([], [{"root": str(RA0)}], [], None)
         selection = service.analysis_selection(PROJECT, tray)
         assert selection.trials == (RA2,)
         assert selection.retry_roots is None
 
     def test_expansion_uses_lineage_for_every_generation(self, service):
-        tray = tray_from_picks([], [{"root": str(RA0)}], ["expand"], None)
+        tray = _edit_tray([], [{"root": str(RA0)}], ["expand"], None)
         selection = service.analysis_selection(PROJECT, tray)
         assert set(selection.trials or ()) == {RA0, RA1, RA2}
 
     def test_grid_picks_keep_explicit_trials(self):
-        tray = tray_from_picks(
+        tray = _edit_tray(
             [{"sweep_id": str(SWEEP_B)}],
             [{"root": str(RA0)}],
             [],
@@ -680,6 +701,42 @@ class TestTray:
         assert tray["sweeps"] == [str(SWEEP_B)]
         assert tray["trials"] == [str(TC)]
         assert tray["families"] == [str(RA0)]
+
+    def test_grid_event_only_touches_its_own_dimension(self):
+        """jernerics-8c9: an edit event from one grid leaves the other
+        controls' picks alone — the sibling grid may still hold a stale
+        selection snapshot while AG Grid applies programmatic rows."""
+        tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
+        family_echo = _edit_tray([], [], [], tray, sweep_edited=False)
+        assert family_echo == tray
+
+        family_tray = _edit_tray([], [{"root": str(RA0)}], ["expand"], None)
+        expand_off = _edit_tray(
+            [],
+            [],
+            [],
+            family_tray,
+            sweep_edited=False,
+            family_edited=False,
+            expand_edited=True,
+        )
+        assert expand_off["expand"] is False
+        assert expand_off["families"] == [str(RA0)]
+
+    def test_real_uncheck_of_the_last_sweep_clears(self):
+        tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
+        unchecked = _edit_tray([], [], [], tray, family_edited=False)
+        assert unchecked["sweeps"] == []
+
+    def test_mounting_grids_are_not_pushed_an_empty_selection(self):
+        """jernerics-8c9: the loaders' initial call skips empty selectedRows
+        writes — that write echoes back as an edit against a tray
+        hydration may have landed in between."""
+        assert mounted_selection([], initial=True) is no_update
+        assert mounted_selection([], initial=False) == []
+        assert mounted_selection([{"root": str(RA0)}], initial=True) == [
+            {"root": str(RA0)}
+        ]
 
 
 class TestDataCatalog:
@@ -917,7 +974,7 @@ class TestUrlReload:
         ) == _selected_trial_ids(service, selection)
 
     def test_search_round_trip_from_tray(self, service):
-        tray = tray_from_picks([], [{"root": str(RA0)}], ["expand"], None)
+        tray = _edit_tray([], [{"root": str(RA0)}], ["expand"], None)
         search = search_from_tray(service, PROJECT, tray, "")
         assert search is not None and search.startswith("?sel=")
         hydrated, error = hydrate_tray(
@@ -952,7 +1009,7 @@ class TestUrlSync:
     freshly opened deep link before hydration lands)."""
 
     def test_tray_edit_on_analysis_mints_the_token(self, service):
-        tray = tray_from_picks([{"sweep_id": str(SWEEP_A)}], [], [], None)
+        tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
         target = synced_search(
             service, "/dashboard/analysis", tray, "", PROJECT, url_navigated=False
         )
@@ -977,7 +1034,7 @@ class TestUrlSync:
         )
 
     def test_tray_edit_off_analysis_leaves_the_search_alone(self, service):
-        tray = tray_from_picks([{"sweep_id": str(SWEEP_A)}], [], [], None)
+        tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
         assert (
             synced_search(
                 service,
@@ -1007,7 +1064,7 @@ class TestUrlSync:
         )
 
     def test_navigation_onto_analysis_never_mints_over_a_deep_link(self, service):
-        session_tray = tray_from_picks([{"sweep_id": str(SWEEP_A)}], [], [], None)
+        session_tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
         deep_link = "?sel=" + encode_selection_token(
             Selection(project=PROJECT, sweeps=(SWEEP_B,))
         )
@@ -1019,6 +1076,46 @@ class TestUrlSync:
                 deep_link,
                 PROJECT,
                 url_navigated=True,
+            )
+            is None
+        )
+
+    def test_pre_picked_deep_link_survives_the_mount_echo(self, service):
+        """The 8c9 regression ordering, as one callback sequence: with a
+        session project already settled, a deep link hydrates while the
+        picker grids are still mounting; AG Grid's stale mount echo then
+        reports empty picks. The tray survives and ?sel= is neither
+        stripped nor rewritten."""
+        session_tray = {**EMPTY_TRAY, "project": PROJECT}
+        search = "?sel=" + encode_selection_token(
+            Selection(project=PROJECT, sweeps=(SWEEP_A,))
+        )
+        hydrated, error = hydrate_tray(
+            service, PROJECT, "/dashboard/analysis", search, session_tray
+        )
+        assert error is None and hydrated is not None
+        # loaders' initial call: empty selection is not pushed to the
+        # mounting grids, so no empty-selection echo can fire
+        assert mounted_selection([], initial=True) is no_update
+        # the stale echo (family grid mounted, sweep grid not yet applied)
+        echo = tray_from_edit(
+            [],
+            [],
+            [],
+            hydrated,
+            sweep_edited=False,
+            family_edited=True,
+            expand_edited=False,
+        )
+        assert echo == hydrated  # equality guard prevents the edit
+        assert (
+            synced_search(
+                service,
+                "/dashboard/analysis",
+                echo,
+                search,
+                PROJECT,
+                url_navigated=False,
             )
             is None
         )

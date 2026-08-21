@@ -13,7 +13,7 @@ import json
 from typing import Any
 from urllib.parse import parse_qs
 
-from dash import dcc, html
+from dash import dcc, html, no_update
 from dash_ag_grid import AgGrid
 
 from . import components, figures
@@ -283,24 +283,55 @@ def tray_summary(tray: dict[str, Any] | None) -> str:
     return " · ".join(parts)
 
 
-def tray_from_picks(
+def tray_from_edit(
     sweep_rows: list[dict[str, Any]] | None,
     family_rows: list[dict[str, Any]] | None,
     expand_values: list[str] | None,
     current: dict[str, Any] | None,
+    *,
+    sweep_edited: bool,
+    family_edited: bool,
+    expand_edited: bool,
 ) -> dict[str, Any]:
-    """Merge grid picks into the unified selection store; the active
-    project and explicit trials/executions (kept from a hydrated token)
-    survive grid edits."""
+    """Merge grid/expand edits into the unified selection store; the
+    active project and explicit trials/executions (kept from a hydrated
+    token) survive edits.
+
+    Only the control the event actually carried is authoritative for its
+    dimension — every other dimension keeps the current tray. A grid
+    event fires while the OTHER grid may still hold a stale selection
+    snapshot (AG Grid applies programmatic selectedRows per grid, not
+    atomically), and a mount echo of the pre-hydration state must not
+    erase the dimensions the user did not touch (jernerics-8c9)."""
     current = current or EMPTY_TRAY
     return {
         "project": current.get("project"),
-        "sweeps": sorted({str(row["sweep_id"]) for row in sweep_rows or []}),
+        "sweeps": (
+            sorted({str(row["sweep_id"]) for row in sweep_rows or []})
+            if sweep_edited
+            else list(current.get("sweeps") or [])
+        ),
         "trials": list(current.get("trials") or []),
-        "families": sorted({str(row["root"]) for row in family_rows or []}),
+        "families": (
+            sorted({str(row["root"]) for row in family_rows or []})
+            if family_edited
+            else list(current.get("families") or [])
+        ),
         "executions": list(current.get("executions") or []),
-        "expand": bool(expand_values),
+        "expand": (
+            bool(expand_values) if expand_edited else bool(current.get("expand"))
+        ),
     }
+
+
+def mounted_selection(selected: list[Any], *, initial: bool) -> Any:
+    """Selection to push to a freshly mounted grid. An empty selection
+    write on mount is redundant — the grid starts unselected — and its
+    echo fires as an edit against a tray hydration may have landed in
+    between, wiping it (jernerics-8c9). Non-empty selections and real
+    clears (post-mount, e.g. hydrating a token that drops a dimension)
+    pass through untouched."""
+    return no_update if initial and not selected else selected
 
 
 def tray_from_selection(selection: Any) -> dict[str, Any]:

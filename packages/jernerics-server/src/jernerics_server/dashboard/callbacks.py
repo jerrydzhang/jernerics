@@ -96,6 +96,12 @@ def trial_incomplete(detail: TrialDetail) -> bool:
     return any(record.ended_at is None for record in detail.executions)
 
 
+def is_initial() -> bool:
+    """True inside a callback's initial call (nothing changed to fire
+    it) — ``callback_context.triggered`` is falsy exactly then."""
+    return not dash.callback_context.triggered
+
+
 def project_options(projects: list[str]) -> list[dict[str, str]]:
     return [{"label": project, "value": project} for project in projects]
 
@@ -276,7 +282,16 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         expand_flags: list[str] | None,
         current: dict | None,
     ):
-        tray = analysis.tray_from_picks(sweep_rows, family_rows, expand_flags, current)
+        triggered = dash.callback_context.triggered_prop_ids
+        tray = analysis.tray_from_edit(
+            sweep_rows,
+            family_rows,
+            expand_flags,
+            current,
+            sweep_edited="analysis-sweep-grid.selectedRows" in triggered,
+            family_edited="analysis-family-grid.selectedRows" in triggered,
+            expand_edited="analysis-expand.value" in triggered,
+        )
         # AG Grid echoes its programmatic selectedRows back on mount, and
         # session restore replays the stored tray; neither is an edit.
         if tray == (current or {}):
@@ -305,8 +320,11 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _load_analysis_sweeps(project: str | None, tray: dict | None):
         if not project:
-            return [], []
-        return analysis.sweep_picker_rows(service.sweep_overview(project), tray)
+            return [], analysis.mounted_selection([], initial=is_initial())
+        rows, selected = analysis.sweep_picker_rows(
+            service.sweep_overview(project), tray
+        )
+        return rows, analysis.mounted_selection(selected, initial=is_initial())
 
     @app.callback(
         Output("analysis-family-grid", "rowData"),
@@ -316,11 +334,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _load_analysis_families(tray: dict | None, project: str | None):
         if not project:
-            return [], []
-        return analysis.family_picker_rows(
+            return [], analysis.mounted_selection([], initial=is_initial())
+        rows, selected = analysis.family_picker_rows(
             service.analysis_families(project, (tray or {}).get("sweeps") or []),
             tray,
         )
+        return rows, analysis.mounted_selection(selected, initial=is_initial())
 
     @app.callback(
         Output("analysis-tray-summary", "children"),
