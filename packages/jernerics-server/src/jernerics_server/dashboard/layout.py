@@ -100,6 +100,13 @@ def _execution_href(execution_id: str) -> str:
     return f"{ROUTES_BASE}/execution/{execution_id}"
 
 
+def _grid_link(label: str, href: str) -> str:
+    """Markdown cell value; AG Grid's markdown renderer turns it into an
+    anchor, so the cell doubles as a doorway to the detail page."""
+    safe_label = label.replace("[", "\\[").replace("]", "\\]")
+    return f"[{safe_label}]({href})"
+
+
 def _objective(objective: float | None) -> str:
     return MISSING if objective is None else f"{objective:g}"
 
@@ -167,7 +174,7 @@ def sweep_grid_row(summary: SweepSummary, now_ns: int) -> dict[str, object]:
     """One AG Grid row dict for the workspace sweep grid."""
     return {
         "sweep_id": summary.sweep_id,
-        "name": summary.name,
+        "name": _grid_link(summary.name, _sweep_href(summary.sweep_id)),
         "state": summary.state,
         "submitted_jobs": summary.submitted_jobs,
         "expected_trials": (
@@ -191,6 +198,7 @@ _SWEEP_GRID_COLUMNS = [
     {
         "headerName": "Sweep",
         "field": "name",
+        "cellRenderer": "markdown",
         "checkboxSelection": True,
         "headerCheckboxSelection": True,
     },
@@ -317,9 +325,11 @@ def family_grid_row(family: FamilyRow) -> dict[str, object]:
     hidden = len(family.params) - 3
     return {
         "root": family.root,
-        "root_short": short_id(family.root),
+        "root_short": _grid_link(short_id(family.root), _trial_href(family.root)),
         "current_trial": family.current_trial,
-        "current_short": short_id(family.current_trial),
+        "current_short": _grid_link(
+            short_id(family.current_trial), _trial_href(family.current_trial)
+        ),
         "number": family.number,
         "state": family.state,
         "objective": _objective(family.objective),
@@ -330,8 +340,12 @@ def family_grid_row(family: FamilyRow) -> dict[str, object]:
 
 
 _FAMILY_GRID_COLUMNS = [
-    {"headerName": "Family root", "field": "root_short"},
-    {"headerName": "Current trial", "field": "current_short"},
+    {"headerName": "Family root", "field": "root_short", "cellRenderer": "markdown"},
+    {
+        "headerName": "Current trial",
+        "field": "current_short",
+        "cellRenderer": "markdown",
+    },
     {"headerName": "#", "field": "number"},
     {"headerName": "State", "field": "state"},
     {"headerName": "Objective", "field": "objective"},

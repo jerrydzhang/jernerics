@@ -10,8 +10,11 @@ import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
+from dash.development.base_component import Component
+from dash_ag_grid import AgGrid
 from fastapi.testclient import TestClient
 from jernerics_schema import (
     PROTOCOL_VERSION,
@@ -34,6 +37,7 @@ from jernerics_server.dashboard.callbacks import (
     page_content,
     tray_from_grid,
 )
+from jernerics_server.dashboard.components import short_id
 from jernerics_server.dashboard.layout import family_grid_row, sweep_grid_row
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.http import create_app
@@ -383,6 +387,25 @@ def authed(tmp_path) -> TestClient:
     return client
 
 
+def _walk(component: Component):
+    yield component
+    children = getattr(component, "children", None)
+    if isinstance(children, Component):
+        yield from _walk(children)
+    elif isinstance(children, list | tuple):
+        for child in children:
+            if isinstance(child, Component):
+                yield from _walk(child)
+
+
+def _grid(page: Any, grid_id: str) -> Any:
+    found = [
+        node for node in _walk(page) if isinstance(node, AgGrid) and node.id == grid_id
+    ]
+    assert found, f"{grid_id} missing from page"
+    return found[0]
+
+
 class TestProjectsPage:
     def test_counts_recent_sweep_and_relative_activity(self, service):
         catalog = service.project_catalog()
@@ -434,6 +457,21 @@ class TestSweepGrid:
         assert row["optimizer"] == "—"
         assert row["health"] == "failing"
         assert row["latest_submission"] == "10m ago"
+
+    def test_rendered_workspace_links_every_sweep_page(self, service):
+        page, _ = page_content("/dashboard/project/ops", service)
+        rendered = str(page)
+        for summary in service.sweep_overview("ops"):
+            link = f"[{summary.name}](/dashboard/sweep/{summary.sweep_id})"
+            assert link in rendered
+
+    def test_sweep_column_links_without_disturbing_selection(self, service):
+        page, _ = page_content("/dashboard/project/ops", service)
+        sweep_column = _grid(page, "sweep-grid").columnDefs[0]
+        assert sweep_column["field"] == "name"
+        assert sweep_column["cellRenderer"] == "markdown"
+        assert sweep_column["checkboxSelection"] is True
+        assert sweep_column["headerCheckboxSelection"] is True
 
 
 class TestSweepPage:
@@ -493,6 +531,30 @@ class TestTrialFamilies:
         assert family.retry_count == 2
         row = family_grid_row(family)
         assert row["params"] == "batch=32, depth=4, lr=0.1, +1"
+
+    def test_family_cells_link_root_and_current_trials(self, service):
+        detail = service.sweep_detail(str(SWEEP_A))
+        assert detail is not None
+        for family in detail.families:
+            row = family_grid_row(family)
+            assert row["root"] == family.root
+            assert row["current_trial"] == family.current_trial
+            assert row["root_short"] == (
+                f"[{short_id(family.root)}](/dashboard/trial/{family.root})"
+            )
+            assert row["current_short"] == (
+                f"[{short_id(family.current_trial)}]"
+                f"(/dashboard/trial/{family.current_trial})"
+            )
+        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
+        rendered = str(page)
+        for family in detail.families:
+            assert f"/dashboard/trial/{family.current_trial}" in rendered
+        columns = {
+            column["field"]: column for column in _grid(page, "family-grid").columnDefs
+        }
+        assert columns["root_short"]["cellRenderer"] == "markdown"
+        assert columns["current_short"]["cellRenderer"] == "markdown"
 
     def test_lineage_side_panel_chain_is_exact(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
