@@ -33,6 +33,12 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "resizable": True,
     "minWidth": 100,
 }
+_ROW_ID_FUNCTION: Any = {"function": "jernericsArtifactRowId(params)"}
+"""getRowId in the registered-function form dash-ag-grid actually
+evaluates (an inline JS string needs dangerously_allow_code). The
+package's type stub narrows getRowId to str; the runtime contract is
+wider, hence Any. The function itself lives in assets/
+dashAgGridFunctions.js."""
 
 _LISTING_COLUMNS: list[dict[str, Any]] = [
     {"headerName": "Version", "field": "version", "maxWidth": 100},
@@ -121,7 +127,7 @@ def artifact_grid(rows: tuple[ArtifactRow, ...], now_ns: int) -> AgGrid | html.D
         rowData=[grid_row(row, now_ns) for row in rows],
         columnDefs=_LISTING_COLUMNS,
         defaultColDef=_GRID_DEFAULTS,
-        getRowId="params => params.data.artifact_id",
+        getRowId=_ROW_ID_FUNCTION,
         className="ag-theme-alpine grid",
     )
 

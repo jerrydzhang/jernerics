@@ -9,6 +9,7 @@ never poll.
 """
 
 import time
+from uuid import UUID
 
 import dash
 from dash import Input, Output, State, no_update
@@ -384,9 +385,11 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
     def _open_artifact(click: dict | None):
-        artifact_id = (click or {}).get("rowId")
-        if not artifact_id:
-            raise PreventUpdate
+        row_id = (click or {}).get("rowId")
+        try:
+            artifact_id = UUID(str(row_id))
+        except ValueError:
+            raise PreventUpdate from None
         return artifacts.viewer_href(str(artifact_id))
 
     @app.callback(

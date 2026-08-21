@@ -121,7 +121,7 @@ def objective(results):
     return results["loss"]
 """
 
-_ARTIFACT_ROW_ID = "params => params.data.artifact_id"
+_ARTIFACT_ROW_ID = {"function": "jernericsArtifactRowId(params)"}
 _MARKDOWN_HREF = re.compile(r"\]\(([^)]+)\)")
 
 
@@ -437,3 +437,73 @@ class TestMountedDashboardHttp:
         )
         assert index.status_code == 200
         assert "jernerics dashboard" in index.text
+
+
+class TestArtifactRowClickNavigation:
+    """The artifact listing's row-click navigation, over the mounted
+    server. In the browser, dash-ag-grid evaluates getRowId only when it
+    is the registered-function form (an inline JS string is inert
+    without dangerously_allow_code) and fires cellClicked with the
+    evaluated row id; _open_artifact must then map only real UUIDs to
+    the viewer URL."""
+
+    @staticmethod
+    def _cell_clicked(base_url: str, row_id: str | None) -> httpx.Response:
+        """POST the _dash-update-component payload a real cellClicked
+        event produces."""
+        return httpx.post(
+            f"{base_url}{ROUTES_BASE}/_dash-update-component",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={
+                "output": "url.pathname",
+                "outputs": {"id": "url", "property": "pathname"},
+                "inputs": [
+                    {
+                        "id": "artifact-grid",
+                        "property": "cellClicked",
+                        "value": {"rowId": row_id},
+                    }
+                ],
+                "changedPropIds": ["artifact-grid.cellClicked"],
+            },
+        )
+
+    def test_row_id_expression_is_a_registered_asset_function(self, scenario):
+        trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
+        page, _polls = page_content(f"{ROUTES_BASE}/trial/{trial_id}", scenario.service)
+        grid = next(
+            component
+            for component in _components(page)
+            if isinstance(component, AgGrid) and component.id == "artifact-grid"
+        )
+        assert grid.getRowId == _ARTIFACT_ROW_ID
+
+        auth = {"Authorization": f"Bearer {API_KEY}"}
+        asset = httpx.get(
+            f"{scenario.base_url}{ROUTES_BASE}/assets/dashAgGridFunctions.js",
+            headers=auth,
+        )
+        assert asset.status_code == 200
+        assert "jernericsArtifactRowId" in asset.text
+        index = httpx.get(f"{scenario.base_url}{ROUTES_BASE}/", headers=auth)
+        assert "assets/dashAgGridFunctions.js" in index.text
+
+    def test_cell_clicked_with_artifact_uuid_navigates_to_viewer(self, scenario):
+        artifact_id = _rows(
+            scenario.db_path, "SELECT artifact_id FROM artifacts WHERE key = 'model'"
+        )[0][0]
+        response = self._cell_clicked(scenario.base_url, artifact_id)
+        assert response.status_code == 200
+        assert response.json()["response"]["url"]["pathname"] == viewer_href(
+            artifact_id
+        )
+
+        shuffled = self._cell_clicked(scenario.base_url, artifact_id.upper())
+        assert shuffled.json()["response"]["url"]["pathname"] == viewer_href(
+            artifact_id
+        )
+
+    def test_cell_clicked_with_non_uuid_row_id_never_navigates(self, scenario):
+        for row_id in ("undefined", "", "../admin", None):
+            response = self._cell_clicked(scenario.base_url, row_id)
+            assert response.status_code == 204, row_id
