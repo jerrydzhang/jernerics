@@ -8,7 +8,7 @@ class ContainerRuntime(Protocol):
         command: str,
         binds: Sequence[str],
         *,
-        env: dict[str, str] | None = None,
+        env_file: str | None = None,
     ) -> str: ...
 
     def build_command(self, project_dir: str) -> list[str]: ...
@@ -21,9 +21,9 @@ class NoContainer:
         command: str,
         binds: Sequence[str],
         *,
-        env: dict[str, str] | None = None,
+        env_file: str | None = None,
     ) -> str:
-        _ = binds, env
+        _ = binds, env_file
         return command
 
     def build_command(self, project_dir: str) -> list[str]:
@@ -41,7 +41,7 @@ class Apptainer:
         command: str,
         binds: Sequence[str],
         *,
-        env: dict[str, str] | None = None,
+        env_file: str | None = None,
         fakeroot: bool = False,
         gpu: bool = True,
         contain: bool = True,
@@ -53,8 +53,8 @@ class Apptainer:
             flags.append("--contain")
         if gpu:
             flags.append("--nv")
-        if env:
-            flags.extend(f"--env {k}={v}" for k, v in env.items())
+        if env_file:
+            flags.append(f"--env-file {env_file}")
         flags.append("--pwd /work")
 
         bind_str = " \\\n    --bind ".join(binds)
@@ -89,7 +89,7 @@ class Docker:
         command: str,
         binds: Sequence[str],
         *,
-        env: dict[str, str] | None = None,
+        env_file: str | None = None,
     ) -> str:
         bind_args = []
         for bind in binds:
@@ -98,8 +98,8 @@ class Docker:
         flags = ["--rm", "--network=host", "-u", "$(id -u):$(id -g)"]
         if self.gpu:
             flags.append("--gpus all")
-        if env:
-            flags.extend(f"-e {k}={v}" for k, v in env.items())
+        if env_file:
+            flags.append(f"--env-file {env_file}")
         flags.extend(["-w", "/work"])
 
         return (

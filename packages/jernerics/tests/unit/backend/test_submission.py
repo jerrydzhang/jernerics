@@ -1,7 +1,10 @@
+import stat
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
 from jernerics.backend.container import Apptainer, Docker, NoContainer
+from jernerics.backend.host import LocalHost
 from jernerics.backend.models import JobSubmission, SubmitResult, SweepSubmission
 from jernerics.backend.path_resolver import PathResolver
 from jernerics.config import (
@@ -17,6 +20,12 @@ from jernerics_schema import (
     SubmissionSnapshotEvent,
     SweepSnapshotEvent,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_artifact_env(monkeypatch):
+    """Keep the ambient tracking key out of tests unless they set one."""
+    monkeypatch.delenv("JERNERICS_API_KEY", raising=False)
 
 
 def _slurm_apptainer_config() -> BackendConfig:
@@ -487,3 +496,171 @@ class TestAssembleInfrastructure:
 
         assert isinstance(infra.container, NoContainer)
         assert infra.paths.work_prefix == "/home/user/experiments/proj"
+
+
+class RecordingHost(LocalHost):
+    """LocalHost that records every executed command."""
+
+    def __init__(self):
+        super().__init__()
+        self.commands = []
+
+    def run(self, command, **kwargs):
+        self.commands.append(list(command))
+        return super().run(command, **kwargs)
+
+
+class TestSubmitSweepEnvFile:
+    """The tracking API key lands in a 0600 env file, never in argv."""
+
+    def _make_infra(self, adapter, cache_dir):
+        from jernerics.backend.submission import SweepInfrastructure
+
+        container = Apptainer()
+        return SweepInfrastructure(
+            adapter=adapter,
+            container=container,
+            paths=PathResolver(
+                remote_dir="/scratch/proj",
+                cache_dir=cache_dir,
+                container=container,
+                project_name="",
+            ),
+        )
+
+    def _make_spec(self):
+        return SweepSubmission(
+            trial_path=Path("trial.py"),
+            config_path=Path("config.py"),
+            study_name="mystudy",
+            storage_url="/cache/optuna/mystudy.journal",
+            n_trials=5,
+        )
+
+    def test_writes_env_file_and_references_path(self, tmp_path, monkeypatch):
+        from jernerics.backend.submission import submit_sweep
+
+        sentinel = "argv-should-never-contain-this"
+        monkeypatch.setenv("JERNERICS_API_KEY", sentinel)
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="42", n_trials=5)]
+        )
+        cache = tmp_path / "cache"
+        infra = self._make_infra(adapter, str(cache))
+        host = RecordingHost()
+
+        submit_sweep(
+            self._make_spec(),
+            infra,
+            host=host,
+            project_dir="/work",
+            project_name="proj",
+            backend_name="hpc",
+            direction="minimize",
+        )
+
+        env_path = cache / "tracking" / "env"
+        assert env_path.read_text() == f"JERNERICS_API_KEY={sentinel}\n"
+        assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+        chmod_cmds = [c for c in host.commands if c[:2] == ["chmod", "600"]]
+        assert len(chmod_cmds) == 1
+        assert chmod_cmds[0][2].startswith(str(cache / "tracking" / "env.tmp."))
+        assert host.commands.count(["mv", "-f", chmod_cmds[0][2], str(env_path)]) == 1
+
+        params = adapter.submit_sweep.call_args[0][0]
+        for command in (
+            params.setup_command,
+            params.trial_command,
+            params.post_hook_command,
+        ):
+            assert sentinel not in command
+        assert f"--env-file {env_path}" in params.trial_command
+        assert f"--env-file {env_path}" in params.post_hook_command
+        assert "--env-file" not in params.setup_command
+
+    def test_dry_run_references_env_file_without_writing(self, tmp_path, monkeypatch):
+        from jernerics.backend.submission import submit_sweep
+
+        monkeypatch.setenv("JERNERICS_API_KEY", "secret")
+        adapter = MagicMock()
+        adapter.render_sweep.return_value = "#!/bin/bash\ntrue"
+        cache = tmp_path / "cache"
+        infra = self._make_infra(adapter, str(cache))
+        host = RecordingHost()
+
+        result = submit_sweep(
+            self._make_spec(),
+            infra,
+            host=host,
+            project_dir="/work",
+            project_name="proj",
+            backend_name="hpc",
+            direction="minimize",
+            dry_run=True,
+        )
+
+        assert result == "#!/bin/bash\ntrue"
+        env_path = cache / "tracking" / "env"
+        assert not env_path.exists()
+        assert host.commands == []
+        params = adapter.render_sweep.call_args[0][0]
+        assert f"--env-file {env_path}" in params.trial_command
+        assert "secret" not in params.trial_command
+
+    def test_no_env_file_without_env(self, tmp_path, monkeypatch):
+        from jernerics.backend.submission import submit_sweep
+
+        monkeypatch.delenv("JERNERICS_API_KEY", raising=False)
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="42", n_trials=5)]
+        )
+        cache = tmp_path / "cache"
+        infra = self._make_infra(adapter, str(cache))
+        host = RecordingHost()
+
+        submit_sweep(
+            self._make_spec(),
+            infra,
+            host=host,
+            project_dir="/work",
+            project_name="proj",
+            backend_name="hpc",
+            direction="minimize",
+        )
+
+        assert not (cache / "tracking" / "env").exists()
+        assert host.commands == []
+        params = adapter.submit_sweep.call_args[0][0]
+        assert "--env-file" not in params.trial_command
+
+
+class TestWriteEnvFile:
+    def test_writes_sorted_keys_verbatim(self, tmp_path):
+        from jernerics.backend.submission import write_env_file
+
+        path = write_env_file(
+            LocalHost(), str(tmp_path), {"B_KEY": "v b", "A_KEY": "v a"}
+        )
+
+        assert path == str(tmp_path / "tracking" / "env")
+        assert (tmp_path / "tracking" / "env").read_text() == "A_KEY=v a\nB_KEY=v b\n"
+
+    def test_raises_when_chmod_fails(self):
+        from jernerics.backend.submission import write_env_file
+
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=1)
+
+        with pytest.raises(RuntimeError, match="chmod 600 failed"):
+            write_env_file(host, "/cache", {"JERNERICS_API_KEY": "k"})
+
+    def test_raises_when_mv_fails(self):
+        from jernerics.backend.submission import write_env_file
+
+        host = MagicMock()
+        host.run.side_effect = [MagicMock(returncode=0), MagicMock(returncode=1)]
+
+        with pytest.raises(RuntimeError, match="mv -f"):
+            write_env_file(host, "/cache", {"JERNERICS_API_KEY": "k"})

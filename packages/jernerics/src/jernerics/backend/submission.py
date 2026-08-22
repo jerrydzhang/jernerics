@@ -84,6 +84,27 @@ def write_submission_events(
     )
 
 
+def write_env_file(host, cache_host: str, env: dict[str, str]) -> str:
+    """Provision container env vars as a 0600 file loaded via --env-file.
+
+    The engine CLI parses the file on the node where the wrapped command
+    runs, so this is the host-side cache path. StdoutHost's no-op write and
+    rc-0 run keep the retry path referencing the original submission's file.
+    """
+    tracking_dir = f"{cache_host}/tracking"
+    host.mkdir(tracking_dir)
+    final = f"{tracking_dir}/env"
+    tmp = f"{tracking_dir}/env.tmp.{os.getpid()}"
+    host.write_file(tmp, "".join(f"{key}={env[key]}\n" for key in sorted(env)))
+    chmod = host.run(["chmod", "600", tmp], check=False)
+    if chmod.returncode != 0:
+        raise RuntimeError(f"chmod 600 failed for {tmp}")
+    move = host.run(["mv", "-f", tmp, final], check=False)
+    if move.returncode != 0:
+        raise RuntimeError(f"mv -f {tmp} to {final} failed")
+    return final
+
+
 def _make_container(container_type: str, project_name: str = "", *, gpu: bool = False):
     if container_type == "apptainer":
         from jernerics.backend.container import Apptainer
@@ -205,6 +226,12 @@ def submit_sweep(
         or {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}
         or None
     )
+    if not artifact_env_resolved:
+        env_file = None
+    elif dry_run:
+        env_file = f"{cache_host}/tracking/env"
+    else:
+        env_file = write_env_file(host, cache_host, artifact_env_resolved)
 
     # Write retry context
     retry_dir_host = f"{cache_host}/retry"
@@ -238,8 +265,7 @@ def submit_sweep(
         heartbeat_interval_s=heartbeat_interval_s,
         multiline=not dry_run,
         retry_ctx_path=retry_ctx_path,
-        chain_depth=chain_depth,
-        artifact_env=artifact_env_resolved,
+        env_file=env_file,
     )
 
     params = SweepSubmissionParams(

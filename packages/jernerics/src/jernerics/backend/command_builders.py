@@ -119,7 +119,7 @@ def build_sweep_commands(
     multiline: bool = False,
     retry_ctx_path: str | None = None,
     chain_depth: int = 0,
-    artifact_env: dict[str, str] | None = None,
+    env_file: str | None = None,
 ) -> tuple[str, str, str | None]:
     cache_host = paths.resolve_cache()
     bind_args = paths.bind_args(cache_host)
@@ -151,7 +151,7 @@ def build_sweep_commands(
         work_prefix=paths.work_prefix,
         multiline=multiline,
     )
-    wrapped_trial = container.wrap(trial_cmd, bind_args, env=artifact_env)
+    wrapped_trial = container.wrap(trial_cmd, bind_args, env_file=env_file)
 
     ctx_path = retry_ctx_path or paths.retry_ctx_path(spec.study_name)
     checker_cmd = build_post_hook_command(
@@ -164,7 +164,7 @@ def build_sweep_commands(
     post_hook_command = container.wrap(
         f"{checker_cmd} 2>/dev/null > {retry_script} && bash {retry_script}",
         bind_args,
-        env=artifact_env,
+        env_file=env_file,
     )
 
     return wrapped_setup, wrapped_trial, post_hook_command

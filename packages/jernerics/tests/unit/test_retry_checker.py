@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import optuna
 import pytest
+from jernerics.backend.host import StdoutHost
 from jernerics.retry import RetryContext
 from jernerics_schema import TrialSnapshotEvent, sweep_id_for
 from jernerics_schema import TrialState as SchemaTrialState
@@ -150,7 +151,7 @@ def _setup_common_mocks(
 
 
 class TestRetryCheckerArtifactEnv:
-    @patch("jernerics.retry_checker.submit_sweep")
+    @patch("jernerics.backend.submission.write_env_file")
     @patch("jernerics.retry_checker.assemble_infrastructure")
     @patch("jernerics.retry_checker.load_config")
     @patch("jernerics.retry_checker.load_backend_config")
@@ -159,7 +160,7 @@ class TestRetryCheckerArtifactEnv:
         mock_load_backend,
         mock_load_config,
         mock_assemble,
-        mock_submit,
+        mock_write_env,
         tmp_path,
     ):
         from jernerics.retry_checker import run_checker
@@ -168,13 +169,13 @@ class TestRetryCheckerArtifactEnv:
             mock_load_backend,
             mock_load_config,
             mock_assemble,
-            mock_submit,
+            MagicMock(),
             tmp_path,
         )
+        infra = mock_assemble.return_value
 
-        env_vars = {
-            "JERNERICS_API_KEY": "secret",
-        }
+        sentinel = "retry-secret-key"
+        mock_write_env.return_value = "/scratch/cache/proj/tracking/env"
 
         with (
             patch("jernerics.retry_checker.optuna") as mock_optuna,
@@ -182,7 +183,7 @@ class TestRetryCheckerArtifactEnv:
             patch("jernerics.retry_checker.read_ledger", return_value={}),
             patch("jernerics.retry_checker.write_ledger"),
             patch("jernerics.retry_checker.load_tracking_server", return_value=None),
-            patch.dict(os.environ, env_vars, clear=False),
+            patch.dict(os.environ, {"JERNERICS_API_KEY": sentinel}, clear=False),
         ):
             mock_time.time.return_value = 1000.0
             mock_time.sleep = MagicMock()
@@ -193,8 +194,20 @@ class TestRetryCheckerArtifactEnv:
 
             run_checker(ctx_path=ctx_path, chain_depth=0)
 
-        # submit_sweep was called — artifact env is resolved internally
-        mock_submit.assert_called_once()
+        # The retry submission provisions the key via the env file helper —
+        # host-side cache path and sentinel env — never via rendered argv.
+        write_args = mock_write_env.call_args[0]
+        assert isinstance(write_args[0], StdoutHost)
+        assert write_args[1] == "/scratch/cache/proj"
+        assert write_args[2] == {"JERNERICS_API_KEY": sentinel}
+
+        params = infra.adapter.submit_sweep.call_args[0][0]
+        for command in (
+            params.setup_command,
+            params.trial_command,
+            params.post_hook_command,
+        ):
+            assert sentinel not in command
 
 
 class TestRetryCheckerUsesSubmitSweep:

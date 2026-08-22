@@ -10,7 +10,11 @@ from jernerics.backend.build_marker import needs_rebuild
 from jernerics.backend.host import SSHHost
 from jernerics.backend.job_meta import load_job_studies, save_job_meta
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
-from jernerics.backend.submission import SweepInfrastructure, submit_sweep
+from jernerics.backend.submission import (
+    SweepInfrastructure,
+    submit_sweep,
+    write_env_file,
+)
 from jernerics.config import ARTIFACT_ENV_VARS
 from jernerics.tracking.batch_sync import ship_events_file
 from jernerics.tracking.infra import resolve_tracking_ship
@@ -458,9 +462,8 @@ class Backend:
 
         cache_host = self.paths.resolve_cache()
         bind_args = self.paths.bind_args(cache_host)
-        artifact_env = {
-            k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))
-        } or None
+        env = {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}
+        env_file = write_env_file(self.host, cache_host, env) if env else None
 
         inner_cmd = (
             "python -m jernerics.tracking.replay_runner"
@@ -470,7 +473,7 @@ class Backend:
         if study:
             inner_cmd += f" --study {shlex.quote(study)}"
 
-        wrapped = self.container.wrap(inner_cmd, bind_args, env=artifact_env)
+        wrapped = self.container.wrap(inner_cmd, bind_args, env_file=env_file)
         cmd = f"cd {self.paths.remote_dir} && {wrapped}"
 
         host_desc = getattr(self.host, "host", "local")
