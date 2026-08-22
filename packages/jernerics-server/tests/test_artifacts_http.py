@@ -197,7 +197,7 @@ class TestReuploadSemantics:
         env.client.put(f"/artifact/{artifact_id.hex}", content=PAYLOAD)
 
         response = env.client.put(
-            f"/artifact/{artifact_id.hex}", content=b"completely-different"
+            f"/artifact/{artifact_id.hex}", content=b"X" * len(PAYLOAD)
         )
 
         assert response.status_code == 409

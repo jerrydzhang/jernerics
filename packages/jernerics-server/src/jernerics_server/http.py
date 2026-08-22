@@ -34,6 +34,7 @@ from .store import QueryResourceLimitError, Store
 _READ_ONLY_KEYWORDS = {"SELECT", "WITH", "VALUES", "EXPLAIN", "SHOW", "DESCRIBE"}
 MAX_ROWS = 10_000
 MAX_INGEST_BYTES = 8 * 1024 * 1024
+MAX_ARTIFACT_BYTES = 2 * 1024**3
 
 
 def _is_read_only(sql: str) -> bool:
@@ -105,32 +106,56 @@ def _digest_mismatches(
     return size != expected_size
 
 
+async def _reject_ingest_too_large(scope: dict, receive: Any, send: Any) -> None:
+    body = IngestError(
+        error="payload_too_large",
+        detail=f"request body exceeds the {MAX_INGEST_BYTES}-byte ingest limit",
+    ).model_dump(mode="json")
+    await JSONResponse(status_code=413, content=body)(scope, receive, send)
+
+
 class _IngestBodyLimit:
-    """Rejects oversized /ingest bodies (413) before any parsing happens."""
+    """Rejects oversized /ingest bodies (413) before any parsing happens.
+
+    Content-Length is checked up front when present; the streamed bytes are
+    metered when it is not, so a chunked body cannot bypass the cap.
+    """
 
     def __init__(self, app: Any) -> None:
         self.app = app
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if (
+        if not (
             scope["type"] == "http"
             and scope.get("method") == "POST"
             and scope.get("path") == "/ingest"
         ):
-            for name, value in scope.get("headers", []):
-                if name == b"content-length" and int(value) > MAX_INGEST_BYTES:
-                    body = IngestError(
-                        error="payload_too_large",
-                        detail=(
-                            f"request body exceeds the {MAX_INGEST_BYTES}-byte"
-                            " ingest limit"
-                        ),
-                    ).model_dump(mode="json")
-                    await JSONResponse(status_code=413, content=body)(
-                        scope, receive, send
-                    )
-                    return
-        await self.app(scope, receive, send)
+            await self.app(scope, receive, send)
+            return
+        for name, value in scope.get("headers", []):
+            if name == b"content-length" and int(value) > MAX_INGEST_BYTES:
+                await _reject_ingest_too_large(scope, receive, send)
+                return
+        messages: list[dict] = []
+        total = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] == "http.disconnect":
+                break
+            if message["type"] != "http.request":
+                continue
+            total += len(message.get("body", b""))
+            if total > MAX_INGEST_BYTES:
+                await _reject_ingest_too_large(scope, receive, send)
+                return
+            if not message.get("more_body", False):
+                break
+
+        async def replay() -> dict:
+            return messages.pop(0) if messages else await receive()
+
+        await self.app(scope, replay, send)
 
 
 def create_app(
@@ -140,6 +165,7 @@ def create_app(
     artifacts_root: str | Path | None = None,
     heartbeat_stale_s: float = 900.0,
     dashboard: bool = False,
+    max_artifact_bytes: int | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.add_middleware(_IngestBodyLimit)
@@ -319,6 +345,9 @@ def create_app(
         )
 
     if artifacts_root is not None:
+        artifact_max = (
+            MAX_ARTIFACT_BYTES if max_artifact_bytes is None else max_artifact_bytes
+        )
 
         @app.put("/artifact/{artifact_id}", response_model=None, dependencies=deps)
         async def put_artifact(artifact_id: str, request: Request) -> JSONResponse:
@@ -331,6 +360,15 @@ def create_app(
             tmp = tmp_dir / uuid_lib.uuid4().hex
             digest = hashlib.sha256()
             size = 0
+            declaration = store.artifact_declaration(canonical)
+            blob = store.artifact_blob(canonical)
+            if blob is not None:
+                bound: int | None = blob[2]
+            elif declaration is not None:
+                bound = declaration[3]
+            else:
+                bound = None
+            limit = min(artifact_max, bound) if bound is not None else artifact_max
             try:
                 # Blob streaming writes to local disk are this route's purpose;
                 # blocking writes are acceptable on the single-node server.
@@ -339,14 +377,28 @@ def create_app(
                         out.write(chunk)
                         digest.update(chunk)
                         size += len(chunk)
+                        if size > limit:
+                            # Bytes past the stored/declared size or the
+                            # artifact ceiling cannot match anyway: fail fast
+                            # with 413 instead of streaming fully to a 409.
+                            # The blob_uploader client already treats any
+                            # non-2xx/non-409 as a manifest-stopping failure
+                            # retried next sweep, so this is compatible.
+                            return JSONResponse(
+                                status_code=413,
+                                content={
+                                    "error": "payload_too_large",
+                                    "detail": (
+                                        f"artifact body exceeds the {limit}-byte limit"
+                                    ),
+                                },
+                            )
                 sha256 = digest.hexdigest()
 
-                declaration = store.artifact_declaration(canonical)
                 if declaration is not None:
                     # A received blob is the truth once written (a None
                     # declared sha adopts the first blob's hash); otherwise
                     # verify against the declaration.
-                    blob = store.artifact_blob(canonical)
                     if blob is not None:
                         expected = (blob[1], blob[2])
                     else:
