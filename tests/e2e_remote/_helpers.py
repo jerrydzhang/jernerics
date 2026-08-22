@@ -21,7 +21,7 @@ PORT = 18080
 PROJECT = "sweep-e2e"
 
 # Host-side cache dirs (the container's /cache maps onto these). The retry
-# ledger lands at <cache>/tracking/<study>/.retry_ledger.json.
+# ledger lands at <cache>/tracking/<sweep>/.retry_ledger.json.
 SCIMLAB_CACHE = "~/.cache/jernerics"
 HPC_CACHE = "/scratch/qiy18011/jez21005/jernerics"
 
@@ -32,20 +32,59 @@ SERVER_ARTIFACTS = "/tmp/jernerics-e2e-artifacts"
 SERVER_CONTAINER = "jernerics-e2e-server"
 HPC_SERVER_LOG = "/tmp/jernerics-e2e.log"
 
+# Terminal v3 trial states (jernerics_schema.TrialState); a trial in one of
+# these states never changes again.
+TERMINAL_TRIAL_STATES = ("completed", "failed", "pruned")
+
 
 def ssh(host, cmd, **kwargs):
     return subprocess.run(["ssh", host, cmd], **kwargs)
 
 
+def _build_state(backend_name):
+    """Opaque remote-side image fingerprint and build-marker mtime.
+
+    The build job rewrites the marker when it finishes, so a changed state
+    means "build completed" even when a fully cached docker build produces a
+    byte-identical image.
+    """
+    if backend_name == "hpc":
+        host, cache = HPC, HPC_CACHE
+        image = f"stat -c %Y ~/projects/jernerics-examples/{PROJECT}/container.sif"
+    else:
+        host, cache = SCIMLAB, SCIMLAB_CACHE
+        image = f"docker image inspect {PROJECT} --format '{{{{.Created}}}}'"
+    marker = f"stat -c %Y {cache}/{PROJECT}/.build_marker"
+    res = ssh(
+        host,
+        f"{image} 2>/dev/null; echo -n marker:; {marker} 2>/dev/null",
+        capture_output=True,
+        text=True,
+    )
+    return res.stdout.strip()
+
+
 def build_backend(backend_name):
-    """Build the project image on the remote (idempotent: skips if up to date)."""
-    subprocess.run(
-        ["jernerics", "build", "--backend", backend_name],
+    """Build the project image on the remote.
+
+    Idempotent: an up-to-date image skips the build entirely. Otherwise the
+    build runs as an async scheduler job, so poll the remote until the build
+    completes — the fixtures start the co-located server from the image right
+    after, and a stale image silently runs old code.
+    """
+    before = _build_state(backend_name)
+    res = subprocess.run(
+        ["jernerics", "backend", "build", "--backend", backend_name],
         cwd="example",
         check=True,
         capture_output=True,
         text=True,
     )
+    if "up to date" in res.stdout:
+        return
+    timeout = 1800 if backend_name == "hpc" else 900
+    if not wait_for(lambda: _build_state(backend_name) != before, timeout, interval=15):
+        raise RuntimeError(f"{backend_name} image build did not complete")
 
 
 # ── server queries (run via SSH curl on the remote where the server lives) ────
@@ -97,28 +136,33 @@ def wait_for_health(server, timeout=60):
     )
 
 
-# ── sweep execution + study discovery ────────────────────────────────────────
+# ── sweep execution + sweep discovery ────────────────────────────────────────
 
 
-def studies(server):
+def sweeps_since(server, floor_ns):
+    """Sweep names whose deploy timestamp is at or after ``floor_ns``."""
     return {
         r[0]
         for r in query(
             server,
-            f"SELECT DISTINCT study_name FROM metrics WHERE project='{PROJECT}'",
+            f"SELECT name FROM sweeps "
+            f"WHERE project='{PROJECT}' AND created_ns >= {floor_ns}",
         )
     }
 
 
-def run_sweep(server, backend_name, config_file, discover_timeout=180):
-    """Submit a sweep and return its study_name.
+def run_sweep(server, backend_name, config_file, discover_timeout=900):
+    """Submit a sweep and return its sweep name.
 
-    The CLI does not print the study name. Every trial logs ``cuda_available``
-    to ``metrics`` as its very first action (before any crash), so the new study
-    appears there once the first trial starts. We diff the study set before/after
-    to recover the exact name regardless of timestamp races.
+    The CLI does not print the sweep name. Sweep events only reach the
+    server via the remote post-hook's replay (deploy-time shipping is a
+    no-op for remote backends), so the new row appears in ``sweeps`` when
+    the first post-hook replays. The row's ``created_ns`` is stamped by
+    this machine at deploy time, so scoping on it identifies exactly this
+    submission — a straggler sweep from an earlier run replaying late
+    cannot be mistaken for it.
     """
-    before = studies(server)
+    floor_ns = int((time.time() - 120) * 1e9)
     env = {
         **os.environ,
         "JERNERICS_TRACKING_SERVER": server[1],
@@ -133,33 +177,36 @@ def run_sweep(server, backend_name, config_file, discover_timeout=180):
         text=True,
     )
 
-    def new_study():
-        diff = studies(server) - before
-        return diff.pop() if len(diff) == 1 else None
+    def new_sweep():
+        names = sweeps_since(server, floor_ns)
+        return names.pop() if len(names) == 1 else None
 
-    return wait_for(new_study, discover_timeout)
+    return wait_for(new_sweep, discover_timeout)
 
 
 # ── assertions against the tracking server ───────────────────────────────────
 
 
-def count(server, study, table):
+def _sweep_filter(study):
+    return f"sweeps.project='{PROJECT}' AND sweeps.name='{study}'"
+
+
+def terminal_trials(server, study):
+    states = ", ".join(f"'{s}'" for s in TERMINAL_TRIAL_STATES)
     rows = query(
         server,
-        f"SELECT COUNT(*) FROM {table} "
-        f"WHERE project='{PROJECT}' AND study_name='{study}'",
+        f"SELECT COUNT(*) FROM trials JOIN sweeps USING (sweep_id) "
+        f"WHERE {_sweep_filter(study)} AND trials.state IN ({states})",
     )
     return rows[0][0] if rows else 0
 
 
 def wait_for_trial_end(server, study, expected, timeout):
-    return wait_for(
-        lambda: count(server, study, "trial_end") == expected or None, timeout
-    )
+    return wait_for(lambda: terminal_trials(server, study) == expected or None, timeout)
 
 
 def wait_for_settled(server, study, min_count, timeout, quiet=40):
-    """Poll trial_end until it reaches min_count and stops growing for `quiet` s.
+    """Poll terminal trials until they reach min_count and stop growing.
 
     Retry sweeps have a non-deterministic terminal count (retried trials may
     succeed or exhaust), so we wait for quiescence rather than an exact number.
@@ -168,7 +215,7 @@ def wait_for_settled(server, study, min_count, timeout, quiet=40):
     last = -1
     stable_at = None
     while time.time() < deadline:
-        current = count(server, study, "trial_end")
+        current = terminal_trials(server, study)
         if current >= min_count:
             if current != last:
                 last, stable_at = current, time.time()
@@ -178,29 +225,47 @@ def wait_for_settled(server, study, min_count, timeout, quiet=40):
     return last
 
 
+def value_count(server, study):
+    rows = query(
+        server,
+        f"SELECT COUNT(*) FROM tracked_values "
+        f"JOIN executions USING (execution_id) "
+        f"JOIN trials USING (trial_id) "
+        f"JOIN sweeps USING (sweep_id) "
+        f"WHERE {_sweep_filter(study)}",
+    )
+    return rows[0][0] if rows else 0
+
+
 def metric_max(server, study, key):
     rows = query(
         server,
-        f"SELECT MAX(value) FROM metrics "
-        f"WHERE project='{PROJECT}' AND study_name='{study}' AND key='{key}'",
+        f"SELECT MAX(scalar_val) FROM tracked_values "
+        f"JOIN executions USING (execution_id) "
+        f"JOIN trials USING (trial_id) "
+        f"JOIN sweeps USING (sweep_id) "
+        f"WHERE {_sweep_filter(study)} AND tracked_values.key='{key}'",
     )
     return rows[0][0] if rows and rows[0][0] is not None else None
 
 
 def first_artifact(server, study):
+    """Return (trial_id, key, artifact_id) of the sweep's first declared artifact."""
     rows = query(
         server,
-        f"SELECT trial_id, key FROM artifacts "
-        f"WHERE project='{PROJECT}' AND study_name='{study}' LIMIT 1",
+        f"SELECT trial_id, key, artifact_id FROM artifacts "
+        f"JOIN trials USING (trial_id) "
+        f"JOIN sweeps USING (sweep_id) "
+        f"WHERE {_sweep_filter(study)} LIMIT 1",
     )
     return tuple(rows[0]) if rows else None
 
 
-def fetch_artifact(server, study, trial_id, key):
+def fetch_artifact(server, artifact_id):
     host, base_url = server
     res = ssh(
         host,
-        f"curl -s -X GET {base_url}/artifact/{PROJECT}/{study}/{trial_id}/{key} "
+        f"curl -s -f {base_url}/artifact/{artifact_id} "
         f"-H 'Authorization: Bearer {TEST_API_KEY}'",
         capture_output=True,
     )
