@@ -9,7 +9,7 @@ from .store import Store
 def serve(
     db_path: str | Path,
     *,
-    host: str = "[::]",
+    host: str = "127.0.0.1",
     http_port: int = 8000,
     api_key: str | None = None,
     artifacts_root: str | Path | None = None,
