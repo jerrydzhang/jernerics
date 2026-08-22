@@ -139,6 +139,22 @@ class TestLogValue:
         with pytest.raises(ValueError, match="non-finite"):
             tracker.log_value("loss", float("inf"))
 
+    def test_stamps_tracker_execution_id(self, tmp_path) -> None:
+        execution_id = uuid4()
+        tracker = make_tracker(tmp_path, execution_id=execution_id)
+
+        event = tracker.log_value("loss", 0.5)
+
+        assert event.execution_id == execution_id
+        assert read_events(tmp_path / "0.jsonl") == [event]
+
+    def test_without_execution_id_stays_none(self, tmp_path) -> None:
+        tracker = JsonlTracker(tmp_path / "0.jsonl", uuid4())
+
+        event = tracker.log_value("loss", 0.5)
+
+        assert event.execution_id is None
+
 
 class TestLogJson:
     def test_observation_round_trips(self, tmp_path) -> None:
@@ -185,6 +201,15 @@ class TestLogJson:
 
         with pytest.raises(ValidationError):
             tracker.log_json("results", {"a": 1}, context={"meta": [1]})
+
+    def test_stamps_tracker_execution_id(self, tmp_path) -> None:
+        execution_id = uuid4()
+        tracker = make_tracker(tmp_path, execution_id=execution_id)
+
+        event = tracker.log_json("results", {"loss": 0.5})
+
+        assert event.execution_id == execution_id
+        assert read_events(tmp_path / "0.jsonl") == [event]
 
 
 class TestSetProgress:

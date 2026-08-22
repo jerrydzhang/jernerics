@@ -1,5 +1,6 @@
 """Contract tests for the tagged v3 event union."""
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -136,6 +137,7 @@ def _samples() -> list[Event]:
             event_id=eid(),
             recorded_at=NOW,
             trial_id=trial_id,
+            execution_id=execution_id,
             key="loss",
             step=0,
             value=0.25,
@@ -225,6 +227,39 @@ def test_value_event_requires_exactly_one_payload() -> None:
         ValueEvent(**kwargs)
     with pytest.raises(ValidationError, match="exactly one"):
         ValueEvent(**kwargs, value=1.0, observation={"a": 1})
+
+
+def test_value_event_execution_id_roundtrip_and_default() -> None:
+    base: dict[str, Any] = {
+        "event_id": uuid.uuid4(),
+        "recorded_at": NOW,
+        "trial_id": uuid.uuid4(),
+        "key": "loss",
+        "step": 0,
+        "value": 0.25,
+    }
+    stamped = ValueEvent(**base, execution_id=uuid.uuid4())
+    parsed = _ADAPTER.validate_json(stamped.model_dump_json())
+    assert isinstance(parsed, ValueEvent)
+    assert parsed == stamped
+    assert ValueEvent(**base).execution_id is None
+
+
+def test_value_event_without_execution_id_still_validates() -> None:
+    legacy = ValueEvent(
+        event_id=uuid.uuid4(),
+        recorded_at=NOW,
+        trial_id=uuid.uuid4(),
+        key="loss",
+        step=0,
+        value=0.25,
+    )
+    without_field = json.loads(legacy.model_dump_json())
+    without_field.pop("execution_id")
+    parsed = _ADAPTER.validate_json(json.dumps(without_field))
+    assert isinstance(parsed, ValueEvent)
+    assert parsed.execution_id is None
+    assert parsed.trial_id == legacy.trial_id
 
 
 def test_progress_bounds_enforced() -> None:

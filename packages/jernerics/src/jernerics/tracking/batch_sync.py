@@ -21,8 +21,11 @@ import httpx
 from jernerics_schema import (
     PROTOCOL_VERSION,
     ConflictRecord,
+    IngestError,
     IngestRequest,
     IngestResponse,
+    TrackingEvent,
+    TrialId,
 )
 from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
 
@@ -60,6 +63,46 @@ class ReplayResult:
     conflicts: list[ConflictRecord] = field(default_factory=list)
 
 
+def _structured_conflict(response: TransportResponse) -> IngestError | None:
+    """Parse a structured 409 body that names a permanently rejected event.
+
+    Only ``conflict``-coded rejections qualify: they disagree with
+    immutable server state, so re-sending can never clear them.
+    ``validation`` rejections (unknown entity references) may be a
+    transient cross-file ordering race inside one replay wave — the
+    submission files of a wave ship concurrently — and keep the retry
+    path.
+    """
+    if response.status_code != 409:
+        return None
+    try:
+        error = IngestError.model_validate_json(response.content)
+    except ValueError:
+        return None
+    if error.error != "conflict" or error.event_index is None:
+        return None
+    return error
+
+
+def _named_event(
+    error: IngestError, batch: list[tuple[TrackingEvent, int]]
+) -> tuple[int, int, TrialId] | None:
+    """Locate the event a structured 409 names for drop-and-report.
+
+    The index must address the batch the 409 was returned for, and the
+    event must carry a ``trial_id`` so the conflict is recordable in a
+    ``ConflictRecord``. Returns ``(index, end_offset, trial_id)``.
+    """
+    index = error.event_index
+    if index is None or not 0 <= index < len(batch):
+        return None
+    event, end = batch[index]
+    trial_id = getattr(event, "trial_id", None)
+    if trial_id is None:
+        return None
+    return index, end, trial_id
+
+
 def _post_with_retries(
     url: str,
     body: str,
@@ -75,6 +118,8 @@ def _post_with_retries(
                 url, content=body, headers=headers, timeout=timeout
             )
             if 200 <= response.status_code < 300:
+                return response
+            if _structured_conflict(response) is not None:
                 return response
             detail = f"HTTP {response.status_code}"
         except httpx.HTTPError as exc:
@@ -105,20 +150,52 @@ def _replay_file(
     try:
         result.events_total = len(scan_events(path, 0)[0])
         offset = read_cursor(path)
+        acked = offset
         while True:
             batch, offset = scan_events(path, offset, MAX_EVENTS_PER_REQUEST)
             if not batch:
                 break
-            body = IngestRequest(
-                protocol_version=PROTOCOL_VERSION,
-                events=[event for event, _ in batch],
-            ).model_dump_json()
-            response = _post_with_retries(url, body, headers, transport, max_retries)
-            result.conflicts.extend(
-                IngestResponse.model_validate_json(response.content).conflicts
-            )
-            write_cursor(path, offset)
-            sent += len(batch)
+            while batch:
+                body = IngestRequest(
+                    protocol_version=PROTOCOL_VERSION,
+                    events=[event for event, _ in batch],
+                ).model_dump_json()
+                response = _post_with_retries(
+                    url, body, headers, transport, max_retries
+                )
+                error = _structured_conflict(response)
+                if error is not None:
+                    named = _named_event(error, batch)
+                    if named is None:
+                        raise RuntimeError(f"ingest rejected: {error.detail}")
+                    index, end, trial_id = named
+                    batch.pop(index)
+                    # A structured 409 is deterministic: re-sending can
+                    # never clear it. Drop the event, record the
+                    # conflict, and acknowledge past its bytes so the
+                    # rest of the file still ships — an event whose
+                    # immutable facts disagree is permanently
+                    # unshippable, so counting it acknowledged (and
+                    # deleting the file once fully covered) is correct.
+                    acked = max(acked, end)
+                    write_cursor(path, acked)
+                    result.conflicts.append(
+                        ConflictRecord(
+                            trial_id=trial_id,
+                            kind=error.error,
+                            detail=(
+                                f"{path.name} event {error.event_id}: {error.detail}"
+                            ),
+                        )
+                    )
+                    continue
+                result.conflicts.extend(
+                    IngestResponse.model_validate_json(response.content).conflicts
+                )
+                acked = max(acked, batch[-1][1])
+                write_cursor(path, acked)
+                sent += len(batch)
+                break
     except (httpx.HTTPError, OSError, ValueError, RuntimeError) as exc:
         result.error = str(exc)
     result.events_sent = sent

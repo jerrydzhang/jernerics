@@ -77,6 +77,19 @@ def _ids(body: str) -> list[str]:
     return [event["event_id"] for event in json.loads(body)["events"]]
 
 
+def _ingest_error_body(
+    event_id, index, detail="value is immutable", error="conflict"
+) -> bytes:
+    return json.dumps(
+        {
+            "error": error,
+            "event_index": index,
+            "event_id": str(event_id),
+            "detail": detail,
+        }
+    ).encode()
+
+
 class TestReplayFile:
     def test_ships_all_events_in_one_batch(self, tmp_path: Path) -> None:
         events = [_value_event(f"m{i}") for i in range(5)]
@@ -218,6 +231,137 @@ class TestReplayFile:
         _replay_file(path, BASE_URL, transport=transport)
 
         assert json.loads(transport.bodies[0])["protocol_version"] == 3
+
+
+class TestStructuredConflictHandling:
+    def test_drops_named_event_records_conflict_ships_rest(
+        self, tmp_path: Path
+    ) -> None:
+        from jernerics_schema import ConflictRecord
+
+        events = [_value_event(f"m{i}") for i in range(3)]
+        path = _write_events(tmp_path / "0.jsonl", events)
+        transport = FakeTransport(
+            responses=[
+                _FakeResponse(
+                    409, content=_ingest_error_body(events[1].event_id, index=1)
+                )
+            ]
+        )
+
+        result = _replay_file(path, BASE_URL, transport=transport)
+
+        assert result.error is None
+        assert result.events_sent == 2
+        assert result.events_total == 3
+        assert result.conflicts == [
+            ConflictRecord(
+                trial_id=events[1].trial_id,
+                kind="conflict",
+                detail=(f"0.jsonl event {events[1].event_id}: value is immutable"),
+            )
+        ]
+        assert _ids(transport.bodies[0]) == [str(event.event_id) for event in events]
+        assert _ids(transport.bodies[1]) == [
+            str(events[0].event_id),
+            str(events[2].event_id),
+        ]
+        assert read_cursor(path) == path.stat().st_size
+
+    def test_409_on_last_event_keeps_cursor_at_eof(self, tmp_path: Path) -> None:
+        events = [_value_event(f"m{i}") for i in range(2)]
+        path = _write_events(tmp_path / "0.jsonl", events)
+        transport = FakeTransport(
+            responses=[
+                _FakeResponse(
+                    409, content=_ingest_error_body(events[1].event_id, index=1)
+                )
+            ]
+        )
+
+        result = _replay_file(path, BASE_URL, transport=transport)
+
+        assert result.error is None
+        assert result.events_sent == 1
+        assert read_cursor(path) == path.stat().st_size
+
+    def test_file_of_only_conflicts_completes_and_is_deleted(
+        self, tmp_path: Path
+    ) -> None:
+        events = [_value_event(f"m{i}") for i in range(3)]
+        path = _write_events(tmp_path / "alpha" / "events" / "0.jsonl", events)
+        transport = FakeTransport(
+            responses=[
+                _FakeResponse(409, content=_ingest_error_body(e.event_id, index=0))
+                for e in events
+            ]
+        )
+
+        aggregated = replay_tracking(
+            tracking_dir=tmp_path, base_url=BASE_URL, transport=transport
+        )
+
+        assert aggregated.errors == []
+        assert aggregated.events_failed == 0
+        assert len(aggregated.conflicts) == 3
+        assert not path.exists()
+
+    def test_409_without_event_index_keeps_retry_and_error_path(
+        self, tmp_path: Path
+    ) -> None:
+        path = _write_events(tmp_path / "0.jsonl", [_value_event()])
+        body = json.dumps({"error": "conflict", "detail": "no index"}).encode()
+        transport = FakeTransport(always=_FakeResponse(409, content=body))
+
+        result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
+
+        assert result.error is not None
+        assert "HTTP 409" in result.error
+        assert len(transport.requests) == 2
+        assert read_cursor(path) == 0
+
+    def test_409_with_out_of_range_index_fails_without_retry(
+        self, tmp_path: Path
+    ) -> None:
+        event = _value_event()
+        path = _write_events(tmp_path / "0.jsonl", [event])
+        transport = FakeTransport(
+            responses=[_FakeResponse(409, content=_ingest_error_body(uuid4(), index=7))]
+        )
+
+        result = _replay_file(path, BASE_URL, transport=transport, max_retries=10)
+
+        assert result.error is not None
+        assert "ingest rejected" in result.error
+        assert len(transport.requests) == 1
+        assert read_cursor(path) == 0
+
+    def test_validation_409_keeps_retry_path_for_wave_ordering_race(
+        self, tmp_path: Path
+    ) -> None:
+        events = [_value_event(f"m{i}") for i in range(2)]
+        path = _write_events(tmp_path / "0.jsonl", events)
+        transport = FakeTransport(
+            responses=[
+                _FakeResponse(
+                    409,
+                    content=_ingest_error_body(
+                        events[0].event_id,
+                        index=0,
+                        detail="trial references unknown sweep",
+                        error="validation",
+                    ),
+                )
+            ]
+        )
+
+        result = _replay_file(path, BASE_URL, transport=transport)
+
+        assert result.error is None
+        assert result.conflicts == []
+        assert result.events_sent == 2
+        assert _ids(transport.bodies[0]) == _ids(transport.bodies[1])
+        assert read_cursor(path) == path.stat().st_size
 
 
 class TestDiscoverJsonlFiles:

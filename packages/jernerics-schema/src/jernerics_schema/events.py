@@ -130,6 +130,7 @@ class ManualParamEvent(Event):
 class ValueEvent(Event):
     tag: Literal["value"] = "value"
     trial_id: TrialId
+    execution_id: ExecutionId | None = None
     key: str
     step: int = Field(ge=0)
     value: ScalarValue | None = None

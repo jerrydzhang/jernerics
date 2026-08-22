@@ -651,6 +651,167 @@ class TestIngestService:
         with pytest.raises(IngestConflictError, match="no execution"):
             service.apply(request_of([orphan_value]))
 
+    def test_stamped_value_after_retry_attributes_to_named_execution(
+        self, store, service
+    ):
+        ids = Ids(sweep=eid(), trial=eid(), first=eid(), second=eid())
+        setup = [
+            SweepSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(0),
+                project="proj",
+                sweep_id=ids.sweep,
+                name="theta",
+                state="running",
+            ),
+            TrialSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(1),
+                trial_id=ids.trial,
+                sweep_id=ids.sweep,
+                number=0,
+                state=TrialState.RUNNING,
+                retry_root_trial_id=ids.trial,
+            ),
+            ExecutionStartEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                execution_id=ids.first,
+                trial_id=ids.trial,
+                hostname="node01",
+                started_at=at(2),
+            ),
+            ExecutionEndEvent(
+                event_id=eid(),
+                recorded_at=at(3),
+                execution_id=ids.first,
+                ended_at=at(3),
+                outcome=ExecutionOutcome.FAILURE,
+                exit_code=1,
+                failure_kind=FailureKind.NODE_FAILURE,
+            ),
+            ExecutionStartEvent(
+                event_id=eid(),
+                recorded_at=at(4),
+                execution_id=ids.second,
+                trial_id=ids.trial,
+                hostname="node02",
+                started_at=at(4),
+            ),
+        ]
+        # The retry (E2) is active and has already logged "loss" steps
+        # 0-2 as unstamped live events.
+        live = [
+            ValueEvent(
+                event_id=eid(),
+                recorded_at=at(10 + step),
+                trial_id=ids.trial,
+                key="loss",
+                step=step,
+                value=0.5 + step,
+            )
+            for step in range(3)
+        ]
+        service.apply(request_of(setup + live))
+        # E1's buffered values replay afterwards, stamped with their
+        # execution: same trial, same key, the same steps.
+        replayed = [
+            ValueEvent(
+                event_id=eid(),
+                recorded_at=at(2.1 + step * 0.1),
+                trial_id=ids.trial,
+                execution_id=ids.first,
+                key="loss",
+                step=step,
+                value=0.1 + step,
+            )
+            for step in range(3)
+        ]
+
+        result = service.apply(request_of(replayed))
+
+        assert result.applied == 3
+        assert rows(
+            store,
+            "SELECT step, scalar_val FROM tracked_values "
+            "WHERE execution_id = ? ORDER BY step",
+            [str(ids.first)],
+        ) == [(0, 0.1), (1, 0.1 + 1), (2, 0.1 + 2)]
+        assert rows(
+            store,
+            "SELECT step, scalar_val FROM tracked_values "
+            "WHERE execution_id = ? ORDER BY step",
+            [str(ids.second)],
+        ) == [(0, 0.5), (1, 0.5 + 1), (2, 0.5 + 2)]
+        follow_up = ValueEvent(
+            event_id=eid(),
+            recorded_at=at(20),
+            trial_id=ids.trial,
+            execution_id=ids.first,
+            key="loss",
+            step=3,
+            value=0.4,
+        )
+        assert service.apply(request_of([follow_up])).applied == 1
+
+    def test_stamped_value_unknown_execution_is_validation_error(self, store, service):
+        stamped = ValueEvent(
+            event_id=eid(),
+            recorded_at=at(5),
+            trial_id=eid(),
+            execution_id=eid(),
+            key="loss",
+            step=0,
+            value=0.9,
+        )
+        with pytest.raises(IngestValidationError, match="unknown execution"):
+            service.apply(request_of([stamped]))
+
+    def test_stamped_value_for_foreign_trial_execution_conflicts(self, store, service):
+        ids = Ids(sweep=eid(), owner=eid(), other=eid(), execution=eid())
+        service.apply(
+            request_of(
+                [
+                    SweepSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(0),
+                        project="proj",
+                        sweep_id=ids.sweep,
+                        name="iota",
+                        state="running",
+                    ),
+                    TrialSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(1),
+                        trial_id=ids.owner,
+                        sweep_id=ids.sweep,
+                        number=0,
+                        state=TrialState.RUNNING,
+                        retry_root_trial_id=ids.owner,
+                    ),
+                    ExecutionStartEvent(
+                        event_id=eid(),
+                        recorded_at=at(2),
+                        execution_id=ids.execution,
+                        trial_id=ids.owner,
+                        hostname="node01",
+                        started_at=at(2),
+                    ),
+                ]
+            )
+        )
+        mismatched = ValueEvent(
+            event_id=eid(),
+            recorded_at=at(5),
+            trial_id=ids.other,
+            execution_id=ids.execution,
+            key="loss",
+            step=0,
+            value=0.9,
+        )
+        with pytest.raises(IngestConflictError, match="owned by trial"):
+            service.apply(request_of([mismatched]))
+
     def test_rollback_on_unknown_parent_reference(self, store, service):
         sweep = SweepSnapshotEvent(
             event_id=eid(),
@@ -782,6 +943,150 @@ class TestIngestHTTP:
         assert body["error"] == "conflict"
         assert body["event_index"] == 0
         assert "no execution" in body["detail"]
+
+    def test_stamped_value_replay_after_retry_returns_200(self, store, client):
+        ids = Ids(sweep=eid(), trial=eid(), first=eid(), second=eid())
+        seed = [
+            SweepSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(0),
+                project="proj",
+                sweep_id=ids.sweep,
+                name="kappa",
+                state="running",
+            ),
+            TrialSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(1),
+                trial_id=ids.trial,
+                sweep_id=ids.sweep,
+                number=0,
+                state=TrialState.RUNNING,
+                retry_root_trial_id=ids.trial,
+            ),
+            ExecutionStartEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                execution_id=ids.first,
+                trial_id=ids.trial,
+                hostname="node01",
+                started_at=at(2),
+            ),
+            ExecutionEndEvent(
+                event_id=eid(),
+                recorded_at=at(3),
+                execution_id=ids.first,
+                ended_at=at(3),
+                outcome=ExecutionOutcome.FAILURE,
+                exit_code=1,
+                failure_kind=FailureKind.NODE_FAILURE,
+            ),
+            ExecutionStartEvent(
+                event_id=eid(),
+                recorded_at=at(4),
+                execution_id=ids.second,
+                trial_id=ids.trial,
+                hostname="node02",
+                started_at=at(4),
+            ),
+            ValueEvent(
+                event_id=eid(),
+                recorded_at=at(5),
+                trial_id=ids.trial,
+                key="loss",
+                step=0,
+                value=0.5,
+            ),
+        ]
+        assert post_events(client, request_of(seed)).status_code == 200
+        replayed = [
+            ValueEvent(
+                event_id=eid(),
+                recorded_at=at(2.5),
+                trial_id=ids.trial,
+                execution_id=ids.first,
+                key="loss",
+                step=step,
+                value=0.1 + step,
+            )
+            for step in range(2)
+        ]
+
+        response = post_events(client, request_of(replayed))
+
+        assert response.status_code == 200
+        assert response.json()["accepted"] == 2
+        assert rows(
+            store,
+            "SELECT step FROM tracked_values WHERE execution_id = ? ORDER BY step",
+            [str(ids.first)],
+        ) == [(0,), (1,)]
+        assert rows(
+            store,
+            "SELECT step FROM tracked_values WHERE execution_id = ? ORDER BY step",
+            [str(ids.second)],
+        ) == [(0,)]
+        later = ValueEvent(
+            event_id=eid(),
+            recorded_at=at(9),
+            trial_id=ids.trial,
+            key="loss",
+            step=1,
+            value=0.6,
+        )
+        assert post_events(client, request_of([later])).status_code == 200
+
+    def test_stamped_value_mismatched_trial_maps_to_409(self, store, client):
+        ids = Ids(sweep=eid(), owner=eid(), other=eid(), execution=eid())
+        seed = [
+            SweepSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(0),
+                project="proj",
+                sweep_id=ids.sweep,
+                name="lambda",
+                state="running",
+            ),
+            TrialSnapshotEvent(
+                event_id=eid(),
+                recorded_at=at(1),
+                trial_id=ids.owner,
+                sweep_id=ids.sweep,
+                number=0,
+                state=TrialState.RUNNING,
+                retry_root_trial_id=ids.owner,
+            ),
+            ExecutionStartEvent(
+                event_id=eid(),
+                recorded_at=at(2),
+                execution_id=ids.execution,
+                trial_id=ids.owner,
+                hostname="node01",
+                started_at=at(2),
+            ),
+        ]
+        assert post_events(client, request_of(seed)).status_code == 200
+        mismatched = ValueEvent(
+            event_id=eid(),
+            recorded_at=at(5),
+            trial_id=ids.other,
+            execution_id=ids.execution,
+            key="loss",
+            step=0,
+            value=0.9,
+        )
+
+        response = post_events(client, request_of([mismatched]))
+
+        assert response.status_code == 409
+        body = response.json()
+        assert body["error"] == "conflict"
+        assert body["event_index"] == 0
+        assert body["event_id"] == str(mismatched.event_id)
+        assert str(ids.execution) in body["detail"]
+        assert str(ids.other) in body["detail"]
+        assert str(ids.owner) in body["detail"]
+        assert rows(store, "SELECT count(*) FROM tracked_values") == [(0,)]
 
 
 class TestIngestLimits:

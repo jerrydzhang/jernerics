@@ -906,12 +906,34 @@ class IngestService:
     ) -> str:
         """Resolve which execution a value event belongs to.
 
-        ValueEvent carries ``trial_id`` but tracked_values keys on
-        ``execution_id``: prefer the trial's ACTIVE execution (ended_ns IS
-        NULL, latest started_ns); if none is active, the trial's most
-        recently started execution; a trial with no execution at all is a
-        structured conflict.
+        tracked_values keys on ``execution_id``. A stamped event names
+        its execution directly — replaying an older execution's values
+        after a retry is active must attribute them to that execution,
+        not the retry — but the execution must exist and belong to the
+        event's trial. A legacy unstamped event falls back to the
+        trial's ACTIVE execution (ended_ns IS NULL, latest started_ns);
+        if none is active, the trial's most recently started execution;
+        a trial with no execution at all is a structured conflict.
         """
+        if event.execution_id is not None:
+            row = con.execute(
+                "SELECT trial_id FROM executions WHERE execution_id = ?",
+                [str(event.execution_id)],
+            ).fetchone()
+            if row is None:
+                raise self._invalid(
+                    index,
+                    event,
+                    f"value references unknown execution {event.execution_id}",
+                )
+            if row[0] != str(event.trial_id):
+                raise self._conflict(
+                    index,
+                    event,
+                    f"value for trial {event.trial_id} names execution "
+                    f"{event.execution_id} owned by trial {row[0]}",
+                )
+            return str(event.execution_id)
         row = con.execute(
             "SELECT execution_id FROM executions WHERE trial_id = ? "
             "AND ended_ns IS NULL ORDER BY started_ns DESC LIMIT 1",
