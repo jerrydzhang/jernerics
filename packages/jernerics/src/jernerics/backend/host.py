@@ -6,8 +6,11 @@ from typing import Protocol
 
 class Host(Protocol):
     home: str
+    is_local: bool
 
     def run(self, command: Sequence[str], **kwargs) -> subprocess.CompletedProcess: ...
+
+    def shell(self, command: str, **kwargs) -> subprocess.CompletedProcess: ...
     def mkdir(self, remote_path: str) -> None: ...
     def file_exists(self, remote_path: str) -> bool: ...
     def getmtime(self, remote_path: str) -> float | None: ...
@@ -17,11 +20,16 @@ class Host(Protocol):
 
 
 class LocalHost:
+    is_local = True
+
     def __init__(self) -> None:
         self.home = str(Path.home())
 
     def run(self, command: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
         return subprocess.run(command, **kwargs)
+
+    def shell(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+        return subprocess.run(["sh", "-c", command], **kwargs)
 
     def mkdir(self, remote_path: str) -> None:
         Path(remote_path).mkdir(parents=True, exist_ok=True)
@@ -57,6 +65,8 @@ class StdoutHost:
     script is piped to bash on the login node via stdout.
     """
 
+    is_local = False
+
     def __init__(self, home: str = "") -> None:
         self.home = home
 
@@ -66,6 +76,14 @@ class StdoutHost:
             print(input_text)
         return subprocess.CompletedProcess(
             args=list(command), returncode=0, stdout="", stderr=""
+        )
+
+    def shell(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+        input_text = kwargs.get("input", "")
+        if input_text:
+            print(input_text)
+        return subprocess.CompletedProcess(
+            args=["sh", "-c", command], returncode=0, stdout="", stderr=""
         )
 
     def mkdir(self, remote_path: str) -> None:
@@ -92,10 +110,12 @@ class SSHHost(Host):
 
     Resolves the remote $HOME via an SSH call at construction rather than
     embedding ``$HOME``/``~`` in path strings and deferring expansion to call
-    sites. The deferral approach produced bugs when the wrong context's home was
-    substituted; eager resolution gives every caller a concrete ``home`` to
-    build absolute paths with. (LocalHost mirrors this with Path.home().)
+    sites. The deferral approach produced bugs when the wrong context's home
+    was substituted; eager resolution gives every caller a concrete ``home``
+    to build absolute paths with. (LocalHost mirrors this with Path.home().)
     """
+
+    is_local = False
 
     def __init__(self, host: str):
         self.host = host
@@ -116,6 +136,9 @@ class SSHHost(Host):
         return subprocess.run(
             ["ssh", "-o", "LogLevel=ERROR", self.host] + list(command), **kwargs
         )
+
+    def shell(self, command: str, **kwargs) -> subprocess.CompletedProcess:
+        return self.run([command], **kwargs)
 
     def mkdir(self, remote_path: str) -> None:
         self.run(["mkdir", "-p", remote_path], check=True)

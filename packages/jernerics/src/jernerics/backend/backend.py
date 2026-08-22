@@ -1,22 +1,23 @@
 import hashlib
-import os
 import shlex
+import subprocess
+import tarfile
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import tomllib
 
 from jernerics.backend.build_marker import needs_rebuild
-from jernerics.backend.host import SSHHost
 from jernerics.backend.job_meta import load_job_studies, save_job_meta
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
+from jernerics.backend.project_sync import _quote_path
 from jernerics.backend.submission import (
     SweepInfrastructure,
     submit_sweep,
-    write_env_file,
 )
-from jernerics.config import ARTIFACT_ENV_VARS
-from jernerics.tracking.batch_sync import ship_events_file
+from jernerics.paths import cache_dir
+from jernerics.tracking.batch_sync import replay_tracking, ship_events_file
 from jernerics.tracking.infra import resolve_tracking_ship
 
 
@@ -363,20 +364,9 @@ class Backend:
                 print(f"  {j.job_id}  {j.name}  {j.status}")
             raise RuntimeError("Active jobs prevent cleaning")
 
-        result = self.host.run(
-            (
-                [
-                    f"find {cache_host}/tracking"
-                    " -path '*/events/*.jsonl' 2>/dev/null | head -n 1"
-                ]
-                if isinstance(self.host, SSHHost)
-                else [
-                    "sh",
-                    "-c",
-                    f"find {cache_host}/tracking"
-                    " -path '*/events/*.jsonl' 2>/dev/null | head -n 1",
-                ]
-            ),
+        result = self.host.shell(
+            f"find {cache_host}/tracking"
+            " -path '*/events/*.jsonl' 2>/dev/null | head -n 1",
             check=False,
             capture_output=True,
             text=True,
@@ -394,12 +384,8 @@ class Backend:
             'if [ "$cs" -lt "$ms" ]; then echo "$m"; break; fi; '
             "done"
         )
-        result = self.host.run(
-            (
-                [artifact_check_cmd]
-                if isinstance(self.host, SSHHost)
-                else ["sh", "-c", artifact_check_cmd]
-            ),
+        result = self.host.shell(
+            artifact_check_cmd,
             check=False,
             capture_output=True,
             text=True,
@@ -457,44 +443,86 @@ class Backend:
         *,
         study: str | None = None,
     ) -> None:
-        if not self.tracking_server:
+        ship = resolve_tracking_ship(self.tracking_server or "")
+        if ship is None:
             raise RuntimeError("No tracking server configured")
-
-        cache_host = self.paths.resolve_cache()
-        bind_args = self.paths.bind_args(cache_host)
-        env = {k: v for k in ARTIFACT_ENV_VARS if (v := os.environ.get(k))}
-        env_file = write_env_file(self.host, cache_host, env) if env else None
-
-        inner_cmd = (
-            "python -m jernerics.tracking.replay_runner"
-            " --tracking-dir /cache/tracking"
-            f" --server-addr {self.tracking_server}"
-        )
-        if study:
-            inner_cmd += f" --study {shlex.quote(study)}"
-
-        wrapped = self.container.wrap(inner_cmd, bind_args, env_file=env_file)
-        cmd = f"cd {self.paths.remote_dir} && {wrapped}"
-
+        base_url, api_key = ship
         host_desc = getattr(self.host, "host", "local")
         print(f"Syncing tracking data from {host_desc}...")
-        # FIXME: brittle — assumes only SSHHost and LocalHost exist.
-        # SSHHost.run prepends "ssh host" to argv, which joins args with
-        # spaces on the remote. So ["sh", "-c", cmd] arrives as
-        # `sh -c cd /foo && bar` — sh only sees "cd". Pass compound
-        # commands as a single string for SSH, sh -c for local.
-        run_args = [cmd] if isinstance(self.host, SSHHost) else ["sh", "-c", cmd]
-        result = self.host.run(
-            run_args,
-            check=False,
-            capture_output=True,
-            text=True,
+
+        if self.host.is_local:
+            tracking_dir = Path(f"{self.paths.resolve_cache()}/tracking")
+        else:
+            tracking_dir = self._pull_tracking_cache()
+
+        print("Replaying events to the tracking server...")
+        result = replay_tracking(
+            tracking_dir=tracking_dir,
+            base_url=base_url,
+            api_key=api_key,
+            study=study,
         )
-        print(result.stdout)
-        if result.returncode != 0:
-            print(f"Sync failed: {result.stderr}")
-            raise RuntimeError(f"Sync failed: {result.stderr}")
+        if result.errors:
+            raise RuntimeError(
+                f"Tracking replay failed for {len(result.errors)} file(s): "
+                f"{result.errors[0]}"
+            )
         print("Sync complete.")
+
+    def _pull_tracking_cache(self) -> Path:
+        """Pull the remote tracking cache into the local cache directory."""
+        cache = self.paths.resolve_cache()
+        remote_tar = f"{cache}/tracking-pull.tar.gz"
+        local_cache = cache_dir()
+
+        tar_cmd = (
+            f"tar -C {shlex.quote(cache)} --exclude tracking/env"
+            f" -czf {shlex.quote(remote_tar)} tracking"
+        )
+        tarred = self.host.shell(
+            tar_cmd, timeout=600, check=False, capture_output=True, text=True
+        )
+        if tarred.returncode != 0:
+            raise RuntimeError(
+                f"Remote tar failed with exit code {tarred.returncode}: "
+                f"{tar_cmd}\n{tarred.stderr or tarred.stdout}"
+            )
+
+        remote_host = getattr(self.host, "host", None)
+        if remote_host is None:
+            print(f"Would run: scp {remote_tar} {local_cache}/tracking-pull.tar.gz")
+            return local_cache / "tracking"
+
+        with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
+            local_tar = tmp.name
+        try:
+            scp_cmd = [
+                "scp",
+                f"{remote_host}:{_quote_path(remote_tar)}",
+                local_tar,
+            ]
+            copied = subprocess.run(scp_cmd, check=False, timeout=600)
+            if copied.returncode != 0:
+                raise RuntimeError(
+                    f"scp failed with exit code {copied.returncode}: "
+                    f"{' '.join(scp_cmd)}. The remote tarball remains "
+                    f"at {remote_tar}"
+                )
+
+            self.host.shell(f"rm -f {shlex.quote(remote_tar)}", check=False)
+
+            local_cache.mkdir(parents=True, exist_ok=True)
+            try:
+                with tarfile.open(local_tar, "r:gz") as tar:
+                    tar.extractall(local_cache, filter="data")
+            except (OSError, tarfile.TarError) as e:
+                raise RuntimeError(
+                    f"Failed to extract {local_tar} into {local_cache}: {e}"
+                ) from e
+        finally:
+            Path(local_tar).unlink(missing_ok=True)
+
+        return local_cache / "tracking"
 
     def get_logs(
         self,

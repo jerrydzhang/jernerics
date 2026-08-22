@@ -1,4 +1,6 @@
 import json
+import shlex
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -6,10 +8,11 @@ import pytest
 from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.backend import Backend
 from jernerics.backend.container import NoContainer
-from jernerics.backend.host import LocalHost
+from jernerics.backend.host import LocalHost, StdoutHost
 from jernerics.backend.models import JobSubmission, SubmitResult, SweepSubmission
 from jernerics.backend.path_resolver import PathResolver
 from jernerics.backend.submission import SweepInfrastructure
+from jernerics.tracking.batch_sync import ReplayResult
 
 
 def _make_backend(host=None, container=None, adapter=None, syncer=None, **overrides):
@@ -619,6 +622,190 @@ class TestSync:
         backend = _make_backend(tracking_server=None)
         with pytest.raises(RuntimeError, match="tracking server"):
             backend.sync("proj")
+
+
+class TestSyncLocalReplay:
+    def test_replays_from_local_cache_without_transfer(self, tmp_path):
+        events = tmp_path / "proj" / "tracking" / "mystudy" / "events"
+        events.mkdir(parents=True)
+        (events / "0.jsonl").write_text("{}\n")
+        backend = _make_backend(
+            host=LocalHost(),
+            tracking_server="http://srv:8000",
+            cache_host=str(tmp_path),
+        )
+
+        with (
+            patch("jernerics.backend.backend.resolve_tracking_ship") as mock_resolve,
+            patch(
+                "jernerics.backend.backend.replay_tracking",
+                return_value=ReplayResult(),
+            ) as mock_replay,
+            patch("jernerics.backend.backend.subprocess.run") as mock_run,
+        ):
+            mock_resolve.return_value = ("http://srv:8000", "secret")
+            mock_run.side_effect = AssertionError("local sync must not spawn processes")
+            backend.sync("proj", study="mystudy")
+
+        mock_replay.assert_called_once_with(
+            tracking_dir=tmp_path / "proj" / "tracking",
+            base_url="http://srv:8000",
+            api_key="secret",
+            study="mystudy",
+        )
+
+    def test_raises_when_replay_reports_errors(self, tmp_path):
+        backend = _make_backend(
+            host=LocalHost(),
+            tracking_server="http://srv:8000",
+            cache_host=str(tmp_path),
+        )
+        failing = ReplayResult(errors=["mystudy/events/0.jsonl: boom"])
+
+        with (
+            patch("jernerics.backend.backend.resolve_tracking_ship") as mock_resolve,
+            patch(
+                "jernerics.backend.backend.replay_tracking",
+                return_value=failing,
+            ),
+        ):
+            mock_resolve.return_value = ("http://srv:8000", "secret")
+            with pytest.raises(RuntimeError, match="1 file"):
+                backend.sync("proj")
+
+
+class FakeRemoteHost:
+    """Stands in for SSHHost: records shell commands, never runs them."""
+
+    def __init__(self, returncode=0, stderr=""):
+        self.host = "hpc1"
+        self.home = "/home/user"
+        self.is_local = False
+        self.shell_calls = []
+        self._returncode = returncode
+        self._stderr = stderr
+
+    def shell(self, command, **kwargs):
+        self.shell_calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            args=[command],
+            returncode=self._returncode,
+            stdout="",
+            stderr=self._stderr,
+        )
+
+
+class TestSyncRemotePull:
+    def _make_remote_backend(self, tmp_path, host):
+        return _make_backend(
+            host=host,
+            tracking_server="http://srv:8000",
+            cache_host=str(tmp_path / "remote"),
+        )
+
+    @staticmethod
+    def _expected_tar_cmd(remote_cache, remote_tar):
+        return (
+            f"tar -C {shlex.quote(remote_cache)} --exclude tracking/env"
+            f" -czf {shlex.quote(remote_tar)} tracking"
+        )
+
+    def test_pulls_tarball_and_replays_locally(self, tmp_path):
+        host = FakeRemoteHost()
+        backend = self._make_remote_backend(tmp_path, host)
+        local_cache = tmp_path / "local-cache"
+        remote_cache = f"{tmp_path}/remote/proj"
+        remote_tar = f"{remote_cache}/tracking-pull.tar.gz"
+
+        with (
+            patch("jernerics.backend.backend.resolve_tracking_ship") as mock_resolve,
+            patch(
+                "jernerics.backend.backend.replay_tracking",
+                return_value=ReplayResult(),
+            ) as mock_replay,
+            patch("jernerics.backend.backend.cache_dir", return_value=local_cache),
+            patch("jernerics.backend.backend.subprocess.run") as mock_scp,
+            patch("jernerics.backend.backend.tarfile") as mock_tarfile,
+        ):
+            mock_resolve.return_value = ("http://srv:8000", "secret")
+            mock_scp.return_value = subprocess.CompletedProcess(args=[], returncode=0)
+            backend.sync("proj", study="mystudy")
+
+        tar_cmd, tar_kwargs = host.shell_calls[0]
+        assert tar_cmd == self._expected_tar_cmd(remote_cache, remote_tar)
+        assert tar_kwargs["timeout"] == 600
+        assert tar_kwargs["check"] is False
+
+        scp_argv = mock_scp.call_args[0][0]
+        assert scp_argv[0] == "scp"
+        assert scp_argv[1] == f"hpc1:{remote_tar}"
+        assert scp_argv[2].endswith(".tar.gz")
+        assert mock_scp.call_args.kwargs == {"check": False, "timeout": 600}
+
+        extract = mock_tarfile.open.return_value.__enter__.return_value.extractall
+        extract.assert_called_once_with(local_cache, filter="data")
+
+        rm_cmd, _ = host.shell_calls[-1]
+        assert rm_cmd == f"rm -f {shlex.quote(remote_tar)}"
+
+        mock_replay.assert_called_once_with(
+            tracking_dir=local_cache / "tracking",
+            base_url="http://srv:8000",
+            api_key="secret",
+            study="mystudy",
+        )
+
+    def test_tar_failure_reports_command_and_exit_state(self, tmp_path):
+        host = FakeRemoteHost(returncode=2, stderr="disk full")
+        backend = self._make_remote_backend(tmp_path, host)
+        remote_cache = f"{tmp_path}/remote/proj"
+        remote_tar = f"{remote_cache}/tracking-pull.tar.gz"
+        tar_cmd = self._expected_tar_cmd(remote_cache, remote_tar)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            backend.sync("proj")
+
+        message = str(excinfo.value)
+        assert tar_cmd in message
+        assert "exit code 2" in message
+        assert "disk full" in message
+
+    def test_scp_failure_names_command_and_remote_tarball(self, tmp_path):
+        host = FakeRemoteHost()
+        backend = self._make_remote_backend(tmp_path, host)
+        remote_tar = f"{tmp_path}/remote/proj/tracking-pull.tar.gz"
+
+        with patch("jernerics.backend.backend.subprocess.run") as mock_scp:
+            mock_scp.return_value = subprocess.CompletedProcess(args=[], returncode=1)
+            with pytest.raises(RuntimeError) as excinfo:
+                backend.sync("proj")
+
+        message = str(excinfo.value)
+        assert "scp failed with exit code 1" in message
+        assert f"scp hpc1:{remote_tar}" in message
+
+    def test_stdout_host_prints_would_be_scp_and_skips_transfer(self, tmp_path, capsys):
+        backend = _make_backend(
+            host=StdoutHost(),
+            tracking_server="http://srv:8000",
+            cache_host=str(tmp_path / "remote"),
+        )
+        local_cache = tmp_path / "local-cache"
+
+        with (
+            patch(
+                "jernerics.backend.backend.replay_tracking",
+                return_value=ReplayResult(),
+            ) as mock_replay,
+            patch("jernerics.backend.backend.cache_dir", return_value=local_cache),
+            patch("jernerics.backend.backend.subprocess.run") as mock_run,
+        ):
+            backend.sync("proj")
+
+        mock_run.assert_not_called()
+        mock_replay.assert_called_once()
+        assert mock_replay.call_args.kwargs["tracking_dir"] == local_cache / "tracking"
+        assert "Would run: scp" in capsys.readouterr().out
 
 
 class TestPrepareAndSubmitOverrides:
