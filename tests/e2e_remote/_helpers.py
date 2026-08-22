@@ -10,6 +10,8 @@ import os
 import shlex
 import subprocess
 import time
+from datetime import UTC, datetime
+from pathlib import Path
 
 # Fixed credential shared by the co-located server and the trial env. Matches
 # the key hard-coded in nix/tests/module.nix.
@@ -139,30 +141,47 @@ def wait_for_health(server, timeout=60):
 # ── sweep execution + sweep discovery ────────────────────────────────────────
 
 
-def sweeps_since(server, floor_ns):
-    """Sweep names whose deploy timestamp is at or after ``floor_ns``."""
+def studies(server):
     return {
         r[0]
         for r in query(
             server,
-            f"SELECT name FROM sweeps "
-            f"WHERE project='{PROJECT}' AND created_ns >= {floor_ns}",
+            f"SELECT name FROM sweeps WHERE project='{PROJECT}'",
         )
     }
 
 
-def run_sweep(server, backend_name, config_file, discover_timeout=900):
+def _sweep_submitted_at(name):
+    """UTC epoch seconds parsed from a sweep name's trailing timestamp.
+
+    Sweep names end in the deploy timestamp (``..._%Y%m%d-%H%M%S`` UTC)
+    minted by the submitting machine, so it identifies the submission
+    regardless of when its events replay onto the server.
+    """
+    try:
+        parsed = datetime.strptime(name.rsplit("_", 1)[-1], "%Y%m%d-%H%M%S").replace(
+            tzinfo=UTC
+        )
+    except ValueError:
+        return None
+    return parsed.timestamp()
+
+
+def run_sweep(server, backend_name, config_file, discover_timeout=1500):
     """Submit a sweep and return its sweep name.
 
     The CLI does not print the sweep name. Sweep events only reach the
     server via the remote post-hook's replay (deploy-time shipping is a
     no-op for remote backends), so the new row appears in ``sweeps`` when
-    the first post-hook replays. The row's ``created_ns`` is stamped by
-    this machine at deploy time, so scoping on it identifies exactly this
-    submission — a straggler sweep from an earlier run replaying late
-    cannot be mistaken for it.
+    the first post-hook replays — up to a partition-queue wait later. The
+    name's embedded deploy timestamp (this machine's clock) identifies
+    exactly this submission: a straggler sweep replaying late carries its
+    own older timestamp, and the row's ``created_ns`` cannot be trusted
+    (the replay races the epoch-stamped reconcile event that may create
+    the row first).
     """
-    floor_ns = int((time.time() - 120) * 1e9)
+    prefix = f"{PROJECT}_{Path(config_file).stem}_"
+    floor = time.time()
     env = {
         **os.environ,
         "JERNERICS_TRACKING_SERVER": server[1],
@@ -178,7 +197,13 @@ def run_sweep(server, backend_name, config_file, discover_timeout=900):
     )
 
     def new_sweep():
-        names = sweeps_since(server, floor_ns)
+        names = {
+            n
+            for n in studies(server)
+            if n.startswith(prefix)
+            and (submitted := _sweep_submitted_at(n)) is not None
+            and submitted >= floor
+        }
         return names.pop() if len(names) == 1 else None
 
     return wait_for(new_sweep, discover_timeout)
