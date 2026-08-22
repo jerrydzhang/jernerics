@@ -1,8 +1,9 @@
 import shlex
 import subprocess
+import sys
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pathspec
 
@@ -13,6 +14,8 @@ from jernerics.sync.exclusions import (
 )
 
 DEFAULT_SCP_TIMEOUT = 300
+MANIFEST_FILENAME = ".jernerics-sync-manifest"
+DELETE_BATCH_SIZE = 100
 
 
 def _quote_path(path: str) -> str:
@@ -20,6 +23,13 @@ def _quote_path(path: str) -> str:
     if path.startswith("~"):
         return "~" + shlex.quote(path[1:])
     return shlex.quote(path)
+
+
+def _is_safe_manifest_entry(entry: str) -> bool:
+    path = PurePosixPath(entry)
+    if path.is_absolute() or not path.parts:
+        return False
+    return ".." not in path.parts
 
 
 def _collect_files(project_path: Path, spec: pathspec.PathSpec) -> list[Path]:
@@ -51,11 +61,21 @@ class ProjectSync:
         if not files_to_sync:
             return True
 
+        current = {
+            file_path.relative_to(project_path).as_posix()
+            for file_path in files_to_sync
+        }
+        manifest_path = f"{self.remote_dir}/{MANIFEST_FILENAME}"
+        prior = self._read_prior_manifest(manifest_path)
+        stale = sorted(prior - current)
+
         if dry_run:
             print(f"Would sync {len(files_to_sync)} files")
+            print(f"Would delete {len(stale)} stale file(s)")
             return True
 
         self.host.mkdir(self.remote_dir)
+        self._delete_stale(stale)
 
         with tempfile.NamedTemporaryFile(suffix=".tar.gz", delete=False) as tmp:
             tmp_path = tmp.name
@@ -85,9 +105,36 @@ class ProjectSync:
                     f"Failed to extract tar archive: {result.stderr or result.stdout}"
                 )
 
+            self.host.write_file(manifest_path, "\n".join(sorted(current)) + "\n")
             return True
         finally:
             Path(tmp_path).unlink(missing_ok=True)
+
+    def _read_prior_manifest(self, manifest_path: str) -> set[str]:
+        content = self.host.read_file(manifest_path)
+        if not content:
+            return set()
+        return {line.strip() for line in content.splitlines() if line.strip()}
+
+    def _delete_stale(self, stale: list[str]) -> None:
+        deletable: list[str] = []
+        for entry in stale:
+            if _is_safe_manifest_entry(entry):
+                deletable.append(entry)
+            else:
+                print(f"skipped unsafe manifest entry: {entry}", file=sys.stderr)
+
+        quoted_dir = _quote_path(self.remote_dir)
+        for start in range(0, len(deletable), DELETE_BATCH_SIZE):
+            batch = deletable[start : start + DELETE_BATCH_SIZE]
+            quoted = " ".join(shlex.quote(entry) for entry in batch)
+            command = f"cd {quoted_dir} && rm -f -- {quoted}"
+            result = self.host.shell(command, check=False)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to delete stale files "
+                    f"(exit {result.returncode}): {command}"
+                )
 
     def container_exists(self) -> bool:
         return self.host.file_exists(f"{self.remote_dir}/container.sif")
