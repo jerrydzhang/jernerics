@@ -109,7 +109,7 @@ class TestRenderSweep:
         assert "CHECKER_JOB_ID=$(sbatch --parsable" in script
         assert "--dependency=afterany:$ARRAY_JOB_ID" in script
         assert "wrapped_checker_cmd" in script
-        assert "--kill-on-dep-invalid=yes" in script
+        assert "#SBATCH --kill-on-invalid-dep=yes" in script
 
     def test_max_parallel_none_uses_default(self):
         adapter = _make_adapter(max_concurrent_jobs=5)
