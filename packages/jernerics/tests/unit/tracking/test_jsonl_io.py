@@ -1,3 +1,5 @@
+import fcntl
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +9,7 @@ import pytest
 from jernerics.tracking.jsonl_io import (
     TrackingReader,
     TrackingWriter,
+    cursor_lock_path,
     cursor_path,
     read_cursor,
     scan_events,
@@ -157,12 +160,38 @@ class TestCursor:
         p = tmp_path / "events.jsonl"
         write_cursor(p, 10)
         write_cursor(p, 20)
-        assert sorted(f.name for f in tmp_path.iterdir()) == ["events.jsonl.cursor"]
+        assert sorted(f.name for f in tmp_path.iterdir()) == [
+            "events.jsonl.cursor",
+            "events.jsonl.cursor.lock",
+        ]
 
     def test_corrupt_cursor_reads_zero(self, tmp_path: Path) -> None:
         p = tmp_path / "events.jsonl"
         cursor_path(p).write_text("not-a-number")
         assert read_cursor(p) == 0
+
+    def test_stale_older_offset_does_not_regress(self, tmp_path: Path) -> None:
+        p = tmp_path / "events.jsonl"
+        p.write_bytes(b"x" * 600)
+        write_cursor(p, 500)
+
+        write_cursor(p, 200)
+
+        assert read_cursor(p) == 500
+
+    def test_smaller_offset_follows_recreated_file(self, tmp_path: Path) -> None:
+        p = tmp_path / "events.jsonl"
+        p.write_bytes(b"x" * 600)
+        write_cursor(p, 500)
+
+        p.write_bytes(b"x" * 100)  # recreated smaller than the cursor
+        write_cursor(p, 100)
+
+        assert read_cursor(p) == 100
+
+    def test_cursor_lock_path_is_sidecar_of_cursor(self, tmp_path: Path) -> None:
+        expected = tmp_path / "events.jsonl.cursor.lock"
+        assert cursor_lock_path(tmp_path / "events.jsonl") == expected
 
 
 class TestScanEvents:
@@ -269,3 +298,101 @@ class TestConcurrentWriters:
         events = read_all(p)
         assert len(events) == 400
         assert len({event.event_id for event in events}) == 400
+
+
+class TestConcurrentCursorCommits:
+    def test_parallel_commits_keep_maximum_and_leave_no_temp_files(
+        self, tmp_path: Path
+    ) -> None:
+        p = tmp_path / "events.jsonl"
+        p.write_bytes(b"x" * 200)
+        offsets = list(range(1, 121))
+        barrier = threading.Barrier(len(offsets))
+
+        def commit(offset: int) -> None:
+            barrier.wait()
+            write_cursor(p, offset)
+
+        threads = [
+            threading.Thread(target=commit, args=(offset,)) for offset in offsets
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert read_cursor(p) == max(offsets)
+        assert not list(tmp_path.glob("*.tmp"))
+
+
+class TestWriterLifetimeLock:
+    def test_exclusive_probe_blocks_while_writer_is_open(self, tmp_path: Path) -> None:
+        p = tmp_path / "events.jsonl"
+        writer = TrackingWriter(p)
+
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+        writer.close()
+
+        fd = os.open(p, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+
+
+class TestWriterReopenRace:
+    def test_writer_reopens_fresh_inode_when_replaced_between_open_and_lock(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        p = tmp_path / "events.jsonl"
+        p.touch()
+        stale_ino = p.stat().st_ino
+        real_flock = fcntl.flock
+        replace_once = [True]
+
+        def flock_replacing_once(fd, operation):
+            if replace_once[0]:
+                replace_once[0] = False
+                p.unlink()
+                p.touch()
+            return real_flock(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", flock_replacing_once)
+        writer = TrackingWriter(p)
+
+        fresh_ino = os.stat(p).st_ino
+        assert fresh_ino != stale_ino
+        assert os.fstat(writer.file.fileno()).st_ino == fresh_ino
+
+        event = _value_event()
+        writer.write_event(event)
+        writer.close()
+
+        assert read_all(p) == [event]
+
+    def test_writer_gives_up_after_retry_cap_when_inode_always_replaced(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        p = tmp_path / "events.jsonl"
+        p.touch()
+        real_flock = fcntl.flock
+        calls = []
+
+        def flock_always_replacing(fd, operation):
+            calls.append(operation)
+            p.unlink()
+            p.touch()
+            return real_flock(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", flock_always_replacing)
+
+        with pytest.raises(RuntimeError, match="replaced on every open attempt"):
+            TrackingWriter(p)
+
+        assert len(calls) == 5

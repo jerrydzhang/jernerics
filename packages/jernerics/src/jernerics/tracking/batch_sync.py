@@ -4,9 +4,13 @@ Each file ships from its durable byte cursor in ``IngestRequest`` batches;
 the cursor advances only after a 2xx acknowledgement. Overlap with the live
 shipper (or a repeated replay) is safe: the server treats re-sent events as
 duplicates. Files whose batches cannot be shipped report a per-file error and
-keep their cursor — no data loss.
+keep their cursor — no data loss. A shipped file is unlinked only when no
+live writer holds it and the cursor covers its current EOF; anything else
+stays for the next replay.
 """
 
+import fcntl
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,7 +26,13 @@ from jernerics_schema import (
 )
 from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
 
-from .jsonl_io import cursor_path, read_cursor, scan_events, write_cursor
+from .jsonl_io import (
+    cursor_lock_path,
+    cursor_path,
+    read_cursor,
+    scan_events,
+    write_cursor,
+)
 from .stream_client import (
     RETRY_BASE_INTERVAL,
     RETRY_MAX_WAIT,
@@ -165,6 +175,43 @@ def discover_jsonl_files(
     return sorted({path for pattern in patterns for path in tracking_dir.glob(pattern)})
 
 
+def _delete_shipped(path: Path) -> bool:
+    """Delete a shipped file and its cursor sidecars under an exclusive lock,
+    only when no live writer holds it (a ``TrackingWriter`` holds a shared
+    flock for its lifetime) and every byte of the current file is
+    acknowledged — appends that landed after this replay's scan stay for the
+    next replay. A missing file leaves only cursor cleanup. The unlink
+    happens while the exclusive lock is still held so a writer opening the
+    path cannot end up on an inode that is about to be deleted.
+    """
+    if not path.exists():
+        cursor_path(path).unlink(missing_ok=True)
+        cursor_lock_path(path).unlink(missing_ok=True)
+        return True
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return False
+    try:
+        try:
+            fully_acked = path.stat().st_size == read_cursor(path)
+        except OSError:
+            return False
+        if not fully_acked:
+            return False
+        path.unlink(missing_ok=True)
+        cursor_path(path).unlink(missing_ok=True)
+        cursor_lock_path(path).unlink(missing_ok=True)
+        return True
+    finally:
+        os.close(fd)
+
+
 def replay_tracking(
     tracking_dir: Path,
     base_url: str,
@@ -258,12 +305,16 @@ def replay_tracking(
     )
 
     if not aggregated.errors:
+        deleted = 0
+        skipped = 0
         for path in jsonl_files:
-            path.unlink(missing_ok=True)
-            cursor_path(path).unlink(missing_ok=True)
-        print(
-            f"Deleted {len(jsonl_files)} synced .jsonl file(s).",
-            file=sys.stderr,
-        )
+            if _delete_shipped(path):
+                deleted += 1
+            else:
+                skipped += 1
+        if deleted:
+            print(f"Deleted {deleted} synced .jsonl file(s).", file=sys.stderr)
+        if skipped:
+            print(f"Skipped {skipped} file(s) still in use.", file=sys.stderr)
 
     return aggregated

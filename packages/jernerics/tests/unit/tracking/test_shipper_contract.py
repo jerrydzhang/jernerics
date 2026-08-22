@@ -18,7 +18,6 @@ from jernerics.tracking.jsonl_io import (
     TrackingWriter,
     cursor_path,
     read_cursor,
-    write_cursor,
 )
 from jernerics.tracking.stream_client import StreamClient
 from jernerics_schema import (
@@ -162,7 +161,7 @@ class TestOverlapIsDuplicateSafe:
         assert read_cursor(path) == path.stat().st_size
 
         # a fresh replay re-sends the whole file from offset 0
-        write_cursor(path, 0)
+        cursor_path(path).unlink()
         result = replay_tracking(
             tracking_dir=tmp_path,
             base_url=BASE_URL,

@@ -15,6 +15,7 @@ from jernerics.tracking.batch_sync import (
 )
 from jernerics.tracking.jsonl_io import (
     TrackingWriter,
+    cursor_lock_path,
     cursor_path,
     read_cursor,
     scan_events,
@@ -418,3 +419,98 @@ class TestFileResultShape:
         assert result.error is None
         assert result.events_sent == 0
         assert result.events_total == 0
+
+
+class TestReplayUnderLiveWriter:
+    def test_appends_between_replays_all_reach_server(self, tmp_path, capfd) -> None:
+        path = tmp_path / "study" / "events" / "0.jsonl"
+        first, second = _value_event("e1"), _value_event("e2")
+        transport = FakeTransport()
+        writer = TrackingWriter(path)
+        writer.write_event(first)
+
+        result_one = replay_tracking(
+            tracking_dir=tmp_path,
+            base_url=BASE_URL,
+            study="study",
+            transport=transport,
+        )
+
+        assert result_one.errors == []
+        assert result_one.events_sent == 1
+        assert path.exists()
+        cursor_one = read_cursor(path)
+        assert cursor_one == path.stat().st_size
+
+        writer.write_event(second)
+
+        result_two = replay_tracking(
+            tracking_dir=tmp_path,
+            base_url=BASE_URL,
+            study="study",
+            transport=transport,
+        )
+
+        assert result_two.errors == []
+        assert result_two.events_sent == 1
+        assert path.exists()
+        cursor_two = read_cursor(path)
+        assert cursor_two == path.stat().st_size
+        assert cursor_two > cursor_one
+
+        writer.close()
+
+        result_three = replay_tracking(
+            tracking_dir=tmp_path,
+            base_url=BASE_URL,
+            study="study",
+            transport=transport,
+        )
+
+        assert result_three.errors == []
+        assert result_three.events_sent == 0
+        assert not path.exists()
+        assert not cursor_path(path).exists()
+        assert not cursor_lock_path(path).exists()
+
+        shipped = [event_id for body in transport.bodies for event_id in _ids(body)]
+        assert sorted(shipped) == sorted([str(first.event_id), str(second.event_id)])
+        assert "Skipped 1 file(s) still in use." in capfd.readouterr().err
+
+
+class TestReplayUnackedTail:
+    def test_unacked_tail_survives_until_replay_catches_up(self, tmp_path) -> None:
+        path = tmp_path / "study" / "events" / "0.jsonl"
+        shipped_event = _value_event("shipped")
+        _write_events(path, [shipped_event])
+        assert ship_events_file(path, BASE_URL, transport=FakeTransport())
+
+        tail_event = _value_event("tail")
+        line = tail_event.model_dump_json() + "\n"
+        with open(path, "a") as f:
+            f.write(line[: len(line) // 2])  # crashed writer: partial line
+        assert path.stat().st_size > read_cursor(path)
+
+        empty_transport = FakeTransport()
+        replay_tracking(
+            tracking_dir=tmp_path,
+            base_url=BASE_URL,
+            study="study",
+            transport=empty_transport,
+        )
+
+        assert empty_transport.requests == []
+        assert path.exists()
+
+        with open(path, "a") as f:
+            f.write(line[len(line) // 2 :])
+        final_transport = FakeTransport()
+        replay_tracking(
+            tracking_dir=tmp_path,
+            base_url=BASE_URL,
+            study="study",
+            transport=final_transport,
+        )
+
+        assert _ids(final_transport.bodies[0]) == [str(tail_event.event_id)]
+        assert not path.exists()
