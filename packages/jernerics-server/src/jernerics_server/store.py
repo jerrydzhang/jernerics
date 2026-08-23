@@ -51,6 +51,10 @@ class QueryResourceLimitError(StoreError):
     """A raw query exceeded its VM-step or wall-clock budget."""
 
 
+class QueryNotAuthorizedError(StoreError):
+    """The read-only query authorizer rejected a statement."""
+
+
 MAX_QUERY_VM_STEPS = 50_000_000
 """VM-step budget for one raw SQL execution."""
 
@@ -59,6 +63,41 @@ MAX_QUERY_SECONDS = 5.0
 
 _PROGRESS_PERIOD = 1_000_000
 """VM steps between raw-query resource checks."""
+
+_WRITE_ACTION_NAMES = (
+    "SQLITE_DELETE",
+    "SQLITE_INSERT",
+    "SQLITE_UPDATE",
+    "SQLITE_DROP_TABLE",
+    "SQLITE_DROP_INDEX",
+    "SQLITE_DROP_VIEW",
+    "SQLITE_DROP_TRIGGER",
+    "SQLITE_ALTER_TABLE",
+    "SQLITE_CREATE_TABLE",
+    "SQLITE_CREATE_INDEX",
+    "SQLITE_CREATE_VIEW",
+    "SQLITE_CREATE_TRIGGER",
+    "SQLITE_ATTACH",
+    "SQLITE_DETACH",
+    "SQLITE_REINDEX",
+    "SQLITE_ANALYZE",
+)
+
+_WRITE_ACTIONS = frozenset(
+    getattr(sqlite3, name) for name in _WRITE_ACTION_NAMES if hasattr(sqlite3, name)
+)
+
+
+def _read_only_authorizer(
+    action: int,
+    arg1: str | None,
+    arg2: str | None,
+    database: str | None,
+    trigger: str | None,
+) -> int:
+    if action in _WRITE_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
 
 
 def _enum_check(column: str, enum: type[Enum]) -> str:
@@ -379,6 +418,7 @@ class Store:
                 )
 
             con.set_progress_handler(_over_budget, _PROGRESS_PERIOD)
+            con.set_authorizer(_read_only_authorizer)
             cursor = con.execute(sql, params or [])
             columns = [desc[0] for desc in cursor.description]
             rows = cursor.fetchall()
@@ -389,6 +429,10 @@ class Store:
                     f"query exceeded resource limits ({MAX_QUERY_VM_STEPS} VM "
                     f"steps / {MAX_QUERY_SECONDS}s wall clock)"
                 ) from e
+            raise
+        except sqlite3.DatabaseError as e:
+            if "not authorized" in str(e):
+                raise QueryNotAuthorizedError(str(e)) from e
             raise
         finally:
             con.close()

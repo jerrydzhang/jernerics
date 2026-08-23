@@ -9,6 +9,7 @@ from jernerics_server import store as store_module
 from jernerics_server.store import (
     FutureSchemaError,
     LegacyStoreError,
+    QueryNotAuthorizedError,
     Store,
     StoreError,
     archive_v2,
@@ -133,6 +134,27 @@ class TestIndexes:
             _, rows = store.query("SELECT name FROM sqlite_master WHERE type = 'index'")
         explicit = {name for (name,) in rows if not name.startswith("sqlite_")}
         assert explicit == INDEXES
+
+
+class TestQueryAuthorizer:
+    def test_cte_delete_rejected_and_row_survives(self, db_path):
+        with Store(db_path) as store:
+            with pytest.raises(QueryNotAuthorizedError):
+                store.query("WITH c AS (SELECT 1) DELETE FROM trials")
+            assert store.query("SELECT trial_id FROM trials")[1] == [("t1",)]
+
+    def test_mode_ro_blocks_writes_when_authorizer_regressed(
+        self, db_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            store_module,
+            "_read_only_authorizer",
+            lambda *args: sqlite3.SQLITE_OK,
+        )
+        with Store(db_path) as store:
+            with pytest.raises(sqlite3.OperationalError, match="readonly"):
+                store.query("DELETE FROM trials")
+            assert store.query("SELECT trial_id FROM trials")[1] == [("t1",)]
 
 
 class TestConstraints:

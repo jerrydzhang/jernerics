@@ -29,7 +29,7 @@ from starlette.responses import FileResponse
 
 from .ingest import IngestService, IngestServiceError
 from .queries import QueryService, QueryServiceError
-from .store import QueryResourceLimitError, Store
+from .store import QueryNotAuthorizedError, QueryResourceLimitError, Store
 
 _READ_ONLY_KEYWORDS = {"SELECT", "WITH", "VALUES", "EXPLAIN", "SHOW", "DESCRIBE"}
 MAX_ROWS = 10_000
@@ -205,6 +205,11 @@ def create_app(
             columns, rows = store.query(req.sql, req.params)
         except QueryResourceLimitError as e:
             return _structured_error("query_resource_limit", str(e))
+        except QueryNotAuthorizedError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Only SELECT queries are allowed"},
+            )
         except Exception as e:
             return JSONResponse(
                 status_code=400,

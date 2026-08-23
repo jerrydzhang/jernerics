@@ -101,6 +101,32 @@ class TestQueryEndpoint:
         assert response.status_code == 200
         assert response.json()["rows"] == [[1]]
 
+    def test_valid_cte_select_returns_rows(self, client):
+        response = client.post(
+            "/query", json={"sql": "WITH c AS (SELECT 1 AS n) SELECT n FROM c"}
+        )
+        assert response.status_code == 200
+        assert response.json()["rows"] == [[1]]
+
+    def test_rejects_cte_delete(self, client):
+        response = client.post(
+            "/query", json={"sql": "WITH c AS (SELECT 1) DELETE FROM trials"}
+        )
+        assert response.status_code == 400
+        assert response.json() == {"error": "Only SELECT queries are allowed"}
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "WITH c AS (SELECT 1) INSERT INTO trials (trial_id) VALUES ('x')",
+            "WITH c AS (SELECT 1) UPDATE trials SET state = 'failed'",
+        ],
+    )
+    def test_rejects_cte_insert_and_update(self, client, sql):
+        response = client.post("/query", json={"sql": sql})
+        assert response.status_code == 400
+        assert response.json() == {"error": "Only SELECT queries are allowed"}
+
 
 class TestQueryAuth:
     def test_valid_bearer_passes(self, auth_client):
