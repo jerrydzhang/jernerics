@@ -30,6 +30,10 @@ class TrackerProtocol(Protocol):
         self, key: str, value: JsonValue, *, step: int | None = None
     ) -> None: ...
 
+    def log_metric(
+        self, key: str, value: JsonValue, *, step: int | None = None
+    ) -> None: ...
+
     def log_artifact(
         self,
         key: str,
@@ -56,6 +60,11 @@ class ConsoleTracker:
             print(f"[value] {key}={encoded}")
         else:
             print(f"[step {step}] {key}={encoded}")
+
+    def log_metric(
+        self, key: str, value: JsonValue, *, step: int | None = None
+    ) -> None:
+        self.log_value(key, value, step=step)
 
     def log_artifact(
         self,
@@ -93,6 +102,11 @@ class _JobTracker:
         else:
             msg = f"cannot track {type(value).__name__} observation for {key!r}"
             raise TypeError(msg)
+
+    def log_metric(
+        self, key: str, value: JsonValue, *, step: int | None = None
+    ) -> None:
+        self.log_value(key, value, step=step)
 
     def log_artifact(
         self,

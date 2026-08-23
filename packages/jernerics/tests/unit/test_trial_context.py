@@ -1,11 +1,14 @@
 import json
 import os
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 from jernerics.tracking.jsonl_io import TrackingReader
 from jernerics.trial_context import (
     ConsoleTracker,
+    TrackerProtocol,
+    _JobTracker,
     is_job,
     trial_config,
     trial_tracker,
@@ -106,6 +109,12 @@ class TestJobTracker:
         assert flag.value is True
         assert flag.observation is None
 
+    def test_log_metric_delegates_to_log_value(self):
+        tracker = MagicMock()
+        _JobTracker(tracker).log_metric("loss", 0.5, step=3)
+
+        tracker.log_value.assert_called_once_with("loss", 0.5, step=3)
+
     def test_events_carry_job_identity(self, job_tracker, monkeypatch):
         tracker, tmp_path = job_tracker
         tracker.log_param("model", "mlp")
@@ -200,6 +209,14 @@ class TestConsoleTracker:
 
         assert capsys.readouterr().out == "[step 2] loss=0.5\n"
 
+    def test_log_metric_prints_same_output_as_log_value(self, capsys):
+        ConsoleTracker().log_value("loss", 0.5, step=2)
+        expected = capsys.readouterr().out
+
+        ConsoleTracker().log_metric("loss", 0.5, step=2)
+
+        assert capsys.readouterr().out == expected
+
     def test_log_artifact_prints_artifact(self, capsys):
         ConsoleTracker().log_artifact("model", "/tmp/model.pt")
 
@@ -217,6 +234,9 @@ class TestConsoleTracker:
 
 
 class TestPublicSurface:
+    def test_protocol_exposes_log_metric(self):
+        assert hasattr(TrackerProtocol, "log_metric")
+
     @pytest.mark.parametrize("method", ["log_text", "log_json", "log_sweep_meta"])
     def test_console_lacks_backend_methods(self, method):
         assert not hasattr(ConsoleTracker(), method)
