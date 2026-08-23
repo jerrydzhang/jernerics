@@ -50,19 +50,40 @@ uv workspace monorepo at repo root:
 packages/
   jernerics/             # Client library (backend, CLI, tracking, runner)
   jernerics-server/      # HTTP tracking server (SQLite store, /query, /ingest, /artifact)
+  jernerics-schema/      # Shared schema package (events, records, selection tokens)
+tests/                   # Repo-root end-to-end suites
+  e2e/                   # Server journey tests (tracking, asktell)
+  e2e_remote/            # Real remote backend tests (marker: remote)
 ```
 
 Source layout inside `packages/jernerics/`:
 
 ```
 src/jernerics/
-  cli.py                 # Typer CLI — all commands
+  cli.py                 # Typer app assembly; commands live in commands/
   config.py              # BackendConfig, SweepConfig, config loading
   runner.py              # Trial runner invoked via python -m jernerics.runner
   paths.py               # cache_dir(), work(), is_hpc()
   post_hook.py           # Post-sweep hook (replay tracking, sync to server)
   retry.py               # Retry orchestration logic
   retry_checker.py       # Heartbeat staleness detection
+  trial_context.py       # Trial-facing tracking API (trial_tracker(), TrackerProtocol)
+  optuna_mirror.py       # Mirror optuna trial state into tracking snapshots
+  search.py              # Search-space protocol sweep configs program against
+  commands/              # CLI command implementations
+    tracking.py          # Tracking observability commands
+    execution.py         # Sweep execution and submit commands
+    interactive.py       # Interactive remote session commands
+    backend.py           # Backend management commands
+    jobs.py              # Job listing and status commands
+    project.py           # Project scaffolding and init
+    common.py            # Shared command helpers
+  sync/                  # Remote project sync
+    mutagen_sync.py      # Continuous bidirectional sync via optional mutagen CLI
+    resolve.py           # Conflict resolution and backups for sync
+    exclusions.py        # .jernericsignore pattern handling
+  observability/
+    render.py            # Rich renderers for tracking observability commands
   backend/               # Multi-backend execution
     adapter.py           # SchedulerAdapter protocol + SweepSubmissionParams
     backend.py           # Backend class (orchestrator: host + container + adapter)
@@ -76,6 +97,7 @@ src/jernerics/
     job_meta.py          # save_job_meta
     build_marker.py      # needs_rebuild, write_marker
     local_backend.py     # LocalBackend (blocking, in-process)
+    submission.py        # Submission events, env files, sweep infrastructure assembly
     slurm/               # Slurm scheduler adapter
       adapter.py         # SlurmAdapter (sbatch + Apptainer)
     pueue/               # Pueue scheduler adapter
@@ -83,12 +105,12 @@ src/jernerics/
   container/
     templates.py         # Container definition templates (.def and Dockerfile)
   tracking/              # JSONL tracker, HTTP ship client, replay, artifact upload/manifest
-                         # Also: infra, trial_environment, envelope (TypedDicts)
+                         # Also: infra, trial_environment, blob_uploader, artifact_manifest
 tests/
   unit/                  # Mirrors src/ structure
 ```
 
-Run commands inside the nix devShell. The `just` recipes wrap `uv run` internally, but direct `pytest` invocations also work since `VIRTUAL_ENV` is set by the shell hook. Never create a `.venv`.
+Run commands inside the nix devShell. The `just` recipes invoke `ruff`, `pytest`, and `ty` directly from the devShell `PATH` — there is no `uv run` anywhere. Direct `pytest` invocations work the same way. Never create a `.venv`.
 
 ## Definition of Done
 
@@ -163,7 +185,7 @@ When `just typecheck` (or `ty`) reports errors, fix the underlying type issues. 
 
 ## Packages
 
-The `jernerics-proto` package and gRPC/protobuf transport were removed. Tracking is now JSONL over HTTP (see `packages/jernerics/src/jernerics/tracking/envelope.py` for the envelope shape). The `just proto` recipe is gone.
+The `jernerics-proto` package and gRPC/protobuf transport were removed. Tracking is now JSONL over HTTP (`jernerics_schema.TrackingEvent` defines the event shape). The `just proto` recipe is gone.
 
 <!-- br-agent-instructions-v1 -->
 
