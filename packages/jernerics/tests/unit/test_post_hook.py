@@ -58,6 +58,7 @@ class TestRunPipeline:
 
     @patch("jernerics.post_hook.run_checker")
     def test_passes_args_to_run_checker(self, mock_run_checker):
+        mock_run_checker.return_value = False
         run_pipeline(
             ctx_path="/ctx.json",
             chain_depth=3,

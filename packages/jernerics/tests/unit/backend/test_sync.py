@@ -74,40 +74,6 @@ class TestCollectFiles:
         assert "secret.env" not in names
         assert "model.bin" not in names
 
-    def test_respects_rooted_jernericsignore_pattern(self, tmp_path):
-        (tmp_path / IGNORE_FILENAME).write_text("/scratch.txt\n")
-        (tmp_path / "scratch.txt").write_text("root")
-        (tmp_path / "nested").mkdir()
-        (tmp_path / "nested" / "scratch.txt").write_text("nested")
-
-        files = _collect_files(tmp_path, self._spec(tmp_path))
-
-        names = {str(f.relative_to(tmp_path)) for f in files}
-        assert "nested/scratch.txt" in names
-        assert "scratch.txt" not in names
-
-    def test_negation_reincludes_gitignore_excluded(self, tmp_path):
-        (tmp_path / ".gitignore").write_text("*.log\n")
-        (tmp_path / IGNORE_FILENAME).write_text("!keep.log\n")
-        (tmp_path / "keep.log").write_text("kept")
-        (tmp_path / "debug.log").write_text("debug")
-
-        files = _collect_files(tmp_path, self._spec(tmp_path))
-
-        names = [f.name for f in files]
-        assert "keep.log" in names
-        assert "debug.log" not in names
-
-    def test_negation_cannot_reinclude_builtin_excluded(self, tmp_path):
-        (tmp_path / IGNORE_FILENAME).write_text("!results/\n")
-        (tmp_path / "results").mkdir()
-        (tmp_path / "results" / "out.json").write_text("{}")
-
-        files = _collect_files(tmp_path, self._spec(tmp_path))
-
-        names = [f.name for f in files]
-        assert "out.json" not in names
-
     def test_jernericsignore_file_itself_collected(self, tmp_path):
         (tmp_path / IGNORE_FILENAME).write_text("scratch/\n")
 

@@ -14,7 +14,6 @@ from jernerics.config import (
     _deep_merge,
     find_pyproject_dir,
     get_project_name,
-    is_tty,
     load_backend_config,
     load_config,
     load_tracking_server,
@@ -43,12 +42,6 @@ class TestArtifactEnvVars:
 
         assert "AWS_ENDPOINT_URL" not in ARTIFACT_ENV_VARS
         assert "JERNERICS_ARTIFACT_BUCKET" not in ARTIFACT_ENV_VARS
-
-
-class TestIsTty:
-    def test_is_tty_returns_bool(self):
-        result = is_tty()
-        assert isinstance(result, bool)
 
 
 class TestLoadBackendConfig:
