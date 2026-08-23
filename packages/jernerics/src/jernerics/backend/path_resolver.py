@@ -4,6 +4,28 @@ _PROJECT_NAME_TEMPLATE = "{project_name}"
 _PROJECT_NAME_HYPHEN_TEMPLATE = "{project-name}"
 
 
+def has_project_template(path: str) -> bool:
+    return _PROJECT_NAME_TEMPLATE in path or _PROJECT_NAME_HYPHEN_TEMPLATE in path
+
+
+def substitute_project_name(path: str, project_name: str) -> str:
+    return path.replace(_PROJECT_NAME_TEMPLATE, project_name).replace(
+        _PROJECT_NAME_HYPHEN_TEMPLATE, project_name
+    )
+
+
+def strip_project_template(path: str) -> str:
+    if _PROJECT_NAME_TEMPLATE in path:
+        return path.replace(f"/{_PROJECT_NAME_TEMPLATE}", "").replace(
+            _PROJECT_NAME_TEMPLATE, ""
+        )
+    if _PROJECT_NAME_HYPHEN_TEMPLATE in path:
+        return path.replace(f"/{_PROJECT_NAME_HYPHEN_TEMPLATE}", "").replace(
+            _PROJECT_NAME_HYPHEN_TEMPLATE, ""
+        )
+    return path
+
+
 class PathResolver:
     def __init__(
         self,
@@ -60,10 +82,8 @@ class PathResolver:
     def resolve_cache(self, project_name: str = "") -> str:
         name = project_name or self._project_name
         cache = self.cache_dir or "/home/user/.cache/jernerics"
-        if _PROJECT_NAME_TEMPLATE in cache:
-            cache = cache.replace(_PROJECT_NAME_TEMPLATE, name)
-        elif _PROJECT_NAME_HYPHEN_TEMPLATE in cache:
-            cache = cache.replace(_PROJECT_NAME_HYPHEN_TEMPLATE, name)
+        if has_project_template(cache):
+            cache = substitute_project_name(cache, name)
         elif name:
             cache = f"{cache}/{name}"
         return cache
@@ -78,10 +98,8 @@ class PathResolver:
         if self._build_dir is None:
             return None
         build_dir = self._build_dir
-        if _PROJECT_NAME_TEMPLATE in build_dir:
-            build_dir = build_dir.replace(_PROJECT_NAME_TEMPLATE, project_name)
-        elif _PROJECT_NAME_HYPHEN_TEMPLATE in build_dir:
-            build_dir = build_dir.replace(_PROJECT_NAME_HYPHEN_TEMPLATE, project_name)
-        elif project_name:
-            build_dir = f"{build_dir}/{project_name}"
+        if has_project_template(build_dir):
+            return substitute_project_name(build_dir, project_name)
+        if project_name:
+            return f"{build_dir}/{project_name}"
         return build_dir

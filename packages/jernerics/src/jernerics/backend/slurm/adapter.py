@@ -5,6 +5,7 @@ import time
 
 from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.models import JobInfo, JobSubmission, SubmitResult
+from jernerics.backend.path_resolver import strip_project_template
 from jernerics.config import BackendConfig, SlurmConfig
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
@@ -212,10 +213,8 @@ class SlurmAdapter:
         )
         # Resolve cache_host the same way PathResolver does
         # (project_name will be set at sweep time via params, so use base path)
-        if cache_dir and "{project_name}" in cache_dir:
-            cache_host = cache_dir.replace("/{project_name}", "")
-        elif cache_dir:
-            cache_host = cache_dir
+        if cache_dir:
+            cache_host = strip_project_template(cache_dir)
         else:
             cache_host = f"{host.home}/.cache/jernerics"
 

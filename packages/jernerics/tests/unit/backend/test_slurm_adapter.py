@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from jernerics.backend.adapter import SchedulerAdapter
+from jernerics.backend.host import StdoutHost
 from jernerics.backend.slurm.adapter import SlurmAdapter
 from jernerics.config import BackendConfig, SharedConfig, SlurmConfig
 
@@ -295,16 +296,15 @@ class TestJobLifecycle:
 
 
 class TestFromConfig:
-    def test_constructs_from_config(self):
-        from jernerics.backend.host import StdoutHost
-
-        config = BackendConfig(
+    @staticmethod
+    def _config(cache_dir):
+        return BackendConfig(
             shared=SharedConfig(
                 name="hpc",
                 type="slurm",
                 host="user@hpc",
                 remote_dir="/scratch/user/proj",
-                cache_dir="/scratch/user/cache",
+                cache_dir=cache_dir,
                 container_type="apptainer",
                 heartbeat_interval_s=60,
             ),
@@ -316,11 +316,37 @@ class TestFromConfig:
                 max_concurrent_jobs=10,
             ),
         )
-        adapter = SlurmAdapter.from_config(config, host=StdoutHost())
+
+    def test_constructs_from_config(self):
+        adapter = SlurmAdapter.from_config(
+            self._config("/scratch/user/cache"), host=StdoutHost()
+        )
 
         assert adapter.partition == "priority"
         assert adapter.remote_dir == "/scratch/user/proj"
+        assert adapter.cache_host == "/scratch/user/cache"
         assert isinstance(adapter, SchedulerAdapter)
+
+    def test_cache_dir_with_template_stripped(self):
+        adapter = SlurmAdapter.from_config(
+            self._config("/scratch/user/cache/{project_name}"), host=StdoutHost()
+        )
+
+        assert adapter.cache_host == "/scratch/user/cache"
+
+    def test_cache_dir_with_hyphen_template_stripped(self):
+        adapter = SlurmAdapter.from_config(
+            self._config("/scratch/user/cache/{project-name}"), host=StdoutHost()
+        )
+
+        assert adapter.cache_host == "/scratch/user/cache"
+
+    def test_no_cache_dir_defaults_to_home(self):
+        adapter = SlurmAdapter.from_config(
+            self._config(None), host=StdoutHost(home="/home/user")
+        )
+
+        assert adapter.cache_host == "/home/user/.cache/jernerics"
 
 
 class TestGetLogs:

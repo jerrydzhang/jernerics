@@ -1,5 +1,10 @@
 from jernerics.backend.container import Apptainer, NoContainer
-from jernerics.backend.path_resolver import PathResolver
+from jernerics.backend.path_resolver import (
+    PathResolver,
+    has_project_template,
+    strip_project_template,
+    substitute_project_name,
+)
 
 
 def _resolver(**overrides):
@@ -122,3 +127,56 @@ class TestResolveBuildDir:
     def test_none_returns_none(self):
         r = _resolver(build_dir=None)
         assert r.resolve_build_dir("my-project") is None
+
+
+class TestHasProjectTemplate:
+    def test_underscore_spelling(self):
+        assert has_project_template("/cache/{project_name}")
+
+    def test_hyphen_spelling(self):
+        assert has_project_template("/cache/{project-name}")
+
+    def test_plain_path(self):
+        assert not has_project_template("/cache/jernerics")
+
+
+class TestSubstituteProjectName:
+    def test_underscore_spelling(self):
+        assert substitute_project_name("/cache/{project_name}", "proj") == "/cache/proj"
+
+    def test_hyphen_spelling(self):
+        assert substitute_project_name("/cache/{project-name}", "proj") == "/cache/proj"
+
+    def test_mixed_occurrences_both_replaced(self):
+        path = "/cache/{project_name}/optuna/{project-name}"
+        assert substitute_project_name(path, "proj") == "/cache/proj/optuna/proj"
+
+    def test_no_template_unchanged(self):
+        assert substitute_project_name("/cache/jernerics", "proj") == "/cache/jernerics"
+
+
+class TestStripProjectTemplate:
+    def test_underscore_spelling(self):
+        assert (
+            strip_project_template("/scratch/user/cache/{project_name}")
+            == "/scratch/user/cache"
+        )
+
+    def test_hyphen_spelling(self):
+        assert (
+            strip_project_template("/scratch/user/cache/{project-name}")
+            == "/scratch/user/cache"
+        )
+
+    def test_mid_path_template(self):
+        assert (
+            strip_project_template("/scratch/{project_name}/cache") == "/scratch/cache"
+        )
+
+    def test_mid_path_hyphen_template(self):
+        assert (
+            strip_project_template("/scratch/{project-name}/cache") == "/scratch/cache"
+        )
+
+    def test_no_template_passthrough(self):
+        assert strip_project_template("/scratch/user/cache") == "/scratch/user/cache"
