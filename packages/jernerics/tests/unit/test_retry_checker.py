@@ -449,6 +449,7 @@ class TestRetryCheckerUsesSubmitSweep:
             patch("jernerics.retry_checker.time") as mock_time,
             patch("jernerics.retry_checker.read_ledger", return_value={}),
             patch("jernerics.retry_checker.write_ledger"),
+            patch("jernerics.retry_checker.ship_events_file"),
             patch("jernerics.retry_checker.load_tracking_server") as mock_ts,
         ):
             mock_time.time.return_value = 1000.0

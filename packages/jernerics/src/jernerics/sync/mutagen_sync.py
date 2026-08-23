@@ -24,10 +24,10 @@ See the beads task ``jernerics-jernerics-interactive-uyy.2`` for the design.
 """
 
 import subprocess
-import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic, sleep
 
 from jernerics.sync.exclusions import mutagen_ignores, project_excludes
 
@@ -304,20 +304,20 @@ class MutagenSync:
         a conflicted session still syncs its healthy paths, and gating on zero
         conflicts here would push callers toward destructive fallbacks.
         """
-        deadline = time.monotonic() + timeout
+        deadline = monotonic() + timeout
         seen = False
-        while time.monotonic() < deadline:
+        while monotonic() < deadline:
             sessions = {s.name: s for s in self.list_sessions()}
             session = sessions.get(name)
             if session is None:
                 # The daemon may take a moment to register a freshly created
                 # session; keep polling until we've seen it at least once.
-                time.sleep(self.poll_interval)
+                sleep(self.poll_interval)
                 continue
             seen = True
             if is_idle(session):
                 return True
-            time.sleep(self.poll_interval)
+            sleep(self.poll_interval)
         if not seen:
             raise MutagenError(f"sync session {name!r} not found by mutagen")
         return False

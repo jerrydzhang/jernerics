@@ -11,9 +11,9 @@ overlapping with a later replay — duplicates.
 """
 
 import sys
-import time
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic, sleep
 from typing import Protocol
 
 import httpx
@@ -92,7 +92,7 @@ class StreamClient:
 
     def join(self) -> None:
         """Stop shipping: drain what is readable, bounded by flush_timeout."""
-        self._drain_deadline = time.monotonic() + self.flush_timeout
+        self._drain_deadline = monotonic() + self.flush_timeout
         self._stop.set()
         if self._thread.ident is not None:
             self._thread.join(timeout=self.flush_timeout)
@@ -123,7 +123,7 @@ class StreamClient:
                     continue
                 pending = events
             if not self._stop.is_set():
-                window_deadline = time.monotonic() + self.batch_window
+                window_deadline = monotonic() + self.batch_window
                 while len(pending) < self.batch_size:
                     # Always rescan before closing the window: a wait that
                     # runs to the deadline must not strand events written
@@ -133,7 +133,7 @@ class StreamClient:
                         self.path, offset, self.batch_size - len(pending)
                     )
                     pending.extend(events)
-                    remaining = window_deadline - time.monotonic()
+                    remaining = window_deadline - monotonic()
                     if remaining <= 0:
                         break
                     self._stop.wait(min(remaining, self.poll_interval))
@@ -174,7 +174,7 @@ class StreamClient:
                 detail = f"HTTP {response.status_code}"
             except httpx.HTTPError as exc:
                 detail = repr(exc)
-            now = time.monotonic()
+            now = monotonic()
             if first_failure is None:
                 first_failure = now
             if now - first_failure > self.max_retry_time:
@@ -192,7 +192,7 @@ class StreamClient:
                 file=sys.stderr,
             )
             if self._stop.is_set():
-                time.sleep(wait_time)
+                sleep(wait_time)
             else:
                 self._stop.wait(wait_time)
 
@@ -200,5 +200,5 @@ class StreamClient:
         return (
             self._stop.is_set()
             and self._drain_deadline is not None
-            and time.monotonic() > self._drain_deadline
+            and monotonic() > self._drain_deadline
         )

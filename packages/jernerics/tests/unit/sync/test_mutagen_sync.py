@@ -49,6 +49,19 @@ def _cp(returncode=0, stdout="", stderr=""):
     )
 
 
+class FakeClock:
+    """Deterministic clock for ``wait_idle`` deadlines; sleep advances time."""
+
+    def __init__(self, start: float = 0.0):
+        self.now = start
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds: float):
+        self.now += seconds
+
+
 class TestSessionName:
     def test_uses_prefix_and_project(self):
         assert session_name("myproj") == f"{SESSION_PREFIX}-myproj"
@@ -287,6 +300,7 @@ class TestStart:
 
     def test_convergence_timeout_raises(self):
         sync = MutagenSync(mutagen_path="/p/mutagen", poll_interval=0.01)
+        clock = FakeClock()
 
         def fake_run(cmd, **kwargs):
             if cmd[2] == "create":
@@ -295,6 +309,8 @@ class TestStart:
 
         with (
             patch("jernerics.sync.mutagen_sync.subprocess.run", side_effect=fake_run),
+            patch("jernerics.sync.mutagen_sync.monotonic", new=clock.monotonic),
+            patch("jernerics.sync.mutagen_sync.sleep", new=clock.sleep),
             pytest.raises(MutagenError, match="did not reach idle"),
         ):
             sync.start("/l", "h", "/r", name="n", convergence_timeout=1)
@@ -324,15 +340,23 @@ class TestWaitIdle:
 
     def test_times_out_when_not_idle(self):
         sync = MutagenSync(mutagen_path="/p/mutagen", poll_interval=0.01)
-        with patch.object(
-            MutagenSync, "list_sessions", return_value=[_session(status="Saving")]
+        clock = FakeClock()
+        with (
+            patch.object(
+                MutagenSync, "list_sessions", return_value=[_session(status="Saving")]
+            ),
+            patch("jernerics.sync.mutagen_sync.monotonic", new=clock.monotonic),
+            patch("jernerics.sync.mutagen_sync.sleep", new=clock.sleep),
         ):
             assert sync.wait_idle("jernerics-interactive-proj", timeout=1) is False
 
     def test_raises_when_session_never_appears(self):
         sync = MutagenSync(mutagen_path="/p/mutagen", poll_interval=0.01)
+        clock = FakeClock()
         with (
             patch.object(MutagenSync, "list_sessions", return_value=[]),
+            patch("jernerics.sync.mutagen_sync.monotonic", new=clock.monotonic),
+            patch("jernerics.sync.mutagen_sync.sleep", new=clock.sleep),
             pytest.raises(MutagenError, match="not found"),
         ):
             sync.wait_idle("ghost", timeout=1)

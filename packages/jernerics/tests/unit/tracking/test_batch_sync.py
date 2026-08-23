@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -174,12 +175,16 @@ class TestReplayFile:
     ) -> None:
         path = _write_events(tmp_path / "0.jsonl", [_value_event()])
         transport = FakeTransport([500, 502])
+        waits: list[float] = []
 
-        result = _replay_file(path, BASE_URL, transport=transport)
+        with patch("jernerics.tracking.batch_sync.sleep", side_effect=waits.append):
+            result = _replay_file(path, BASE_URL, transport=transport)
 
         assert result.error is None
         assert transport.bodies[0] == transport.bodies[1] == transport.bodies[2]
         assert read_cursor(path) == path.stat().st_size
+        # attempts back off exponentially: RETRY_BASE_INTERVAL * 2**retry_count
+        assert waits == [1.0, 2.0]
 
     def test_retry_budget_exhaustion_reports_error_and_keeps_cursor(
         self, tmp_path: Path
@@ -189,7 +194,8 @@ class TestReplayFile:
         # batch 1 succeeds; batch 2 exhausts its retry budget on HTTP 500
         transport = FakeTransport([200], always=500)
 
-        result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
+        with patch("jernerics.tracking.batch_sync.sleep"):
+            result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
 
         assert result.error is not None
         assert result.events_sent == 100
@@ -206,7 +212,8 @@ class TestReplayFile:
         path = _write_events(tmp_path / "0.jsonl", [_value_event()])
         transport = FakeTransport(always=httpx.ConnectError("refused"))
 
-        result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
+        with patch("jernerics.tracking.batch_sync.sleep"):
+            result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
 
         assert result.error is not None
         assert "refused" in result.error
@@ -313,7 +320,8 @@ class TestStructuredConflictHandling:
         body = json.dumps({"error": "conflict", "detail": "no index"}).encode()
         transport = FakeTransport(always=_FakeResponse(409, content=body))
 
-        result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
+        with patch("jernerics.tracking.batch_sync.sleep"):
+            result = _replay_file(path, BASE_URL, transport=transport, max_retries=2)
 
         assert result.error is not None
         assert "HTTP 409" in result.error
@@ -355,7 +363,8 @@ class TestStructuredConflictHandling:
             ]
         )
 
-        result = _replay_file(path, BASE_URL, transport=transport)
+        with patch("jernerics.tracking.batch_sync.sleep"):
+            result = _replay_file(path, BASE_URL, transport=transport)
 
         assert result.error is None
         assert result.conflicts == []
@@ -449,12 +458,13 @@ class TestReplayTracking:
             tmp_path / "study" / "events" / "0.jsonl", [_value_event()]
         )
 
-        result = replay_tracking(
-            tracking_dir=tmp_path,
-            base_url=BASE_URL,
-            max_retries=2,
-            transport=FakeTransport(always=httpx.ConnectError("refused")),
-        )
+        with patch("jernerics.tracking.batch_sync.sleep"):
+            result = replay_tracking(
+                tracking_dir=tmp_path,
+                base_url=BASE_URL,
+                max_retries=2,
+                transport=FakeTransport(always=httpx.ConnectError("refused")),
+            )
 
         assert result.files_processed == 1
         assert result.events_failed == 1

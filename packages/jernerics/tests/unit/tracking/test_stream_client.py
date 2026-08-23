@@ -1,10 +1,12 @@
 import json
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
@@ -94,6 +96,30 @@ def _wait_for(predicate, timeout: float = 5.0, what: str = "condition") -> None:
             return
         time.sleep(0.01)
     raise TimeoutError(f"timed out waiting for {what}")
+
+
+class FakeClock:
+    """Clock stand-in for the module-local monotonic/sleep seams.
+
+    ``monotonic`` keeps tracking the real clock so the window/poll
+    ``Event.wait`` loops still make progress; ``sleep`` — the stop-path
+    retry backoff — jumps a shared offset forward instead of blocking,
+    so drain deadlines and retry budgets expire after a few instant
+    posts. The lock keeps the offset consistent between the shipper
+    thread and the test thread.
+    """
+
+    def __init__(self) -> None:
+        self._offset = 0.0
+        self._lock = threading.Lock()
+
+    def monotonic(self) -> float:
+        with self._lock:
+            return time.monotonic() + self._offset
+
+    def sleep(self, seconds: float) -> None:
+        with self._lock:
+            self._offset += seconds
 
 
 class TestBatching:
@@ -250,10 +276,15 @@ class TestCrashRestart:
         # first instance: batch 1 (100 events) acks; the server then dies
         first_transport = FakeTransport([200], always=httpx.ConnectError("gone"))
         first = _make_client(path, first_transport, max_retry_time=0.3)
-        first.start()
-        _wait_for(lambda: len(first_transport.requests) >= 2, what="failed batch")
-        first.join()  # drain fails; thread exits via retry budget
-        first._thread.join(timeout=10.0)
+        clock = FakeClock()
+        with (
+            patch("jernerics.tracking.stream_client.monotonic", new=clock.monotonic),
+            patch("jernerics.tracking.stream_client.sleep", new=clock.sleep),
+        ):
+            first.start()
+            _wait_for(lambda: len(first_transport.requests) >= 2, what="failed batch")
+            first.join()  # drain fails; thread exits via retry budget
+            first._thread.join(timeout=10.0)
         assert not first._thread.is_alive()
 
         acked_ids = _ids(first_transport.bodies[0])
@@ -298,6 +329,7 @@ class TestShutdown:
         path = tmp_path / "events.jsonl"
         _write_events(path, [_value_event()])
         transport = FakeTransport(always=httpx.ConnectError("down"))
+        clock = FakeClock()
         client = _make_client(
             path,
             transport,
@@ -305,10 +337,14 @@ class TestShutdown:
             max_retry_time=60.0,
         )
 
-        client.start()
-        _wait_for(lambda: transport.requests, what="first attempt")
-        client.join()  # returns within flush timeout
-        client._thread.join(timeout=5.0)
+        with (
+            patch("jernerics.tracking.stream_client.monotonic", new=clock.monotonic),
+            patch("jernerics.tracking.stream_client.sleep", new=clock.sleep),
+        ):
+            client.start()
+            _wait_for(lambda: transport.requests, what="first attempt")
+            client.join()  # returns within flush timeout
+            client._thread.join(timeout=5.0)
 
         assert not client._thread.is_alive()
         assert read_cursor(path) == 0

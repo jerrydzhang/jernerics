@@ -12,10 +12,10 @@ stays for the next replay.
 import fcntl
 import os
 import sys
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import sleep
 
 import httpx
 from jernerics_schema import (
@@ -129,7 +129,7 @@ def _post_with_retries(
             raise RuntimeError(
                 f"ingest failed after {retry_count} attempts: {detail}"
             ) from None
-        time.sleep(min(RETRY_BASE_INTERVAL * 2**retry_count, RETRY_MAX_WAIT))
+        sleep(min(RETRY_BASE_INTERVAL * 2**retry_count, RETRY_MAX_WAIT))
 
 
 def _replay_file(
