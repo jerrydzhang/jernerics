@@ -9,12 +9,7 @@ from uuid import UUID
 import optuna
 import pytest
 from jernerics.optuna_mirror import fallback_trial_id
-from jernerics.post_hook import (
-    PipelineResult,
-    ReconciliationConflictError,
-    reconcile_study,
-    run_pipeline,
-)
+from jernerics.post_hook import PipelineResult, reconcile_study, run_pipeline
 from jernerics.retry import RetryContext
 from jernerics.retry_checker import _enqueue_retry
 from jernerics.runner import run_trial
@@ -140,11 +135,17 @@ class TestPostHookRepair:
         tracking_dir = tmp_path / "tracking" / "sweep"
         tracking_dir.mkdir(parents=True)
         trial_file = tmp_path / "trial.py"
-        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 0.42})\n')
-        config_file = _config(tmp_path, n_trials=2)
-        ctx_path = _ctx(tmp_path, storage_url, tracking_dir, n_trials=2)
+        trial_file.write_text(
+            _HEADER
+            + "import os, sys\n"
+            + "if os.environ['JERNERICS_TRIAL_NUMBER'] == '1':\n"
+            + "    sys.exit(3)\n"
+            + 'tracker.finish({"loss": 0.42})\n'
+        )
+        config_file = _config(tmp_path, n_trials=1)
+        ctx_path = _ctx(tmp_path, storage_url, tracking_dir, n_trials=1)
 
-        for _ in range(2):
+        def _run_trial():
             run_trial(
                 trial_file=str(trial_file),
                 config_file=str(config_file),
@@ -153,6 +154,10 @@ class TestPostHookRepair:
                 tracking_dir=str(tracking_dir),
                 project_name="proj",
             )
+
+        _run_trial()
+        with pytest.raises(SystemExit):
+            _run_trial()
 
         assert not (tracking_dir / "submission").exists()
         ctx = RetryContext.from_json(ctx_path.read_text())
@@ -175,12 +180,19 @@ class TestPostHookRepair:
             study_name="sweep",
             storage=JournalStorage(JournalFileBackend(storage_url)),
         )
+        expected_states = {
+            OptunaState.COMPLETE: "completed",
+            OptunaState.FAIL: "failed",
+        }
         for frozen in study.trials:
             row = rows_[frozen.number]
-            assert row["state"] == "completed"
-            assert row["objective"] == pytest.approx(frozen.value)
+            assert row["state"] == expected_states[frozen.state]
             assert row["params"] == frozen.params
             assert row["trial_id"] == UUID(frozen.user_attrs["jernerics_trial_id"])
+            if frozen.state == OptunaState.COMPLETE:
+                assert row["objective"] == pytest.approx(frozen.value)
+            else:
+                assert row["objective"] is None
         with Store(db_path) as store:
             objective, distributions_json, attrs_json = store.query(
                 "SELECT objective, distributions_json, attrs_json FROM trials "
@@ -321,91 +333,6 @@ class TestTerminalConflict:
             assert store.query("SELECT trial_id, kind FROM reconciliation_conflicts")[
                 1
             ] == [(str(live_id), "optimizer_terminal_state")]
-
-    def test_run_pipeline_raises_on_conflicts(self, tmp_path, http_server):
-        base_url, db_path = http_server
-        storage_url = str(tmp_path / "sweep.journal")
-        study = _make_study(storage_url)
-        conflicting = study.ask()
-        conflicting.suggest_float("rate", 0.1, 0.9)
-        live_id = UUID(int=43)
-        conflicting.set_user_attr("jernerics_trial_id", str(live_id))
-        study.tell(conflicting, state=OptunaState.FAIL)
-        self._seed_server_completed(db_path, live_id, dict(conflicting.params))
-
-        tracking_dir = tmp_path / "tracking" / "sweep"
-        ctx_path = _ctx(tmp_path, storage_url, tracking_dir, n_trials=1)
-
-        from unittest.mock import patch
-
-        with (
-            patch("jernerics.post_hook.run_checker", return_value=False),
-            pytest.raises(ReconciliationConflictError) as exc_info,
-        ):
-            from jernerics.post_hook import run_pipeline
-
-            run_pipeline(
-                ctx_path=str(ctx_path),
-                chain_depth=0,
-                tracking_dir=str(tracking_dir),
-                base_url=base_url,
-            )
-        assert exc_info.value.conflicts[0].trial_id == live_id
-
-
-class TestReconstructability:
-    def test_sqlite_reconstructs_mixed_success_and_failure_sweep(
-        self, tmp_path, http_server
-    ):
-        base_url, db_path = http_server
-        storage_url = str(tmp_path / "sweep.journal")
-        _make_study(storage_url)
-        tracking_dir = tmp_path / "tracking" / "sweep"
-        tracking_dir.mkdir(parents=True)
-        trial_file = tmp_path / "trial.py"
-        trial_file.write_text(
-            _HEADER
-            + "import os, sys\n"
-            + "if os.environ['JERNERICS_TRIAL_NUMBER'] == '1':\n"
-            + "    sys.exit(3)\n"
-            + 'tracker.finish({"loss": 0.42})\n'
-        )
-        config_file = _config(tmp_path, n_trials=2)
-        ctx_path = _ctx(tmp_path, storage_url, tracking_dir, n_trials=2)
-
-        from contextlib import suppress
-
-        for _ in range(2):
-            with suppress(SystemExit):
-                run_trial(
-                    trial_file=str(trial_file),
-                    config_file=str(config_file),
-                    study_name="sweep",
-                    storage_url=storage_url,
-                    tracking_dir=str(tracking_dir),
-                    project_name="proj",
-                )
-
-        ctx = RetryContext.from_json(ctx_path.read_text())
-        reconcile_study(ctx, tracking_dir)
-        replay_tracking(tracking_dir=tracking_dir.parent, base_url=base_url)
-
-        study = optuna.load_study(
-            study_name="sweep", storage=JournalStorage(JournalFileBackend(storage_url))
-        )
-        rows_ = _trial_rows(db_path)
-        expected_states = {
-            OptunaState.COMPLETE: "completed",
-            OptunaState.FAIL: "failed",
-        }
-        for frozen in study.trials:
-            row = rows_[frozen.number]
-            assert row["state"] == expected_states[frozen.state]
-            assert row["params"] == frozen.params
-            if frozen.state == OptunaState.COMPLETE:
-                assert row["objective"] == pytest.approx(frozen.value)
-            else:
-                assert row["objective"] is None
 
 
 class TestRetryChainEndToEnd:

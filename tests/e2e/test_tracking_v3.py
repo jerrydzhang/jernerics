@@ -1,6 +1,6 @@
 """Deterministic end-to-end proof of the complete Tracking v3 system.
 
-One scenario, built once per class by the ``scenario`` fixture, exercises
+One scenario, built once per module by the ``scenario`` fixture, exercises
 every locked user surface in order: deploy-path submission events, two
 runner trials (a failing one and its successful retry, with real retry
 planning and lineage), live streaming plus post-hook replay and
@@ -165,11 +165,19 @@ def _trial_id(scenario, number: int) -> UUID:
     )
 
 
-@pytest.fixture(scope="class")
-def scenario(tmp_path_factory):
+@pytest.fixture(scope="module")
+def scenario(tmp_path_factory, request):
     """Build the whole world once and drive it through the real pipeline."""
     tmp_path = tmp_path_factory.mktemp("tracking-v3")
-    base_url, db_path, artifacts_root = _start_server(tmp_path)
+    base_url, db_path, artifacts_root, server, thread, store = _start_server(tmp_path)
+
+    def _teardown_server():
+        server.should_exit = True
+        thread.join(timeout=5)
+        store.close()
+        assert not thread.is_alive()
+
+    request.addfinalizer(_teardown_server)
 
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -308,11 +316,12 @@ def scenario(tmp_path_factory):
         submission_events=submission_events,
         live_events=live_events,
         live_rows_after_first_trial=live_rows_after_first_trial,
-        counts_after_pipeline=_row_counts(db_path),
     )
 
 
-def _start_server(tmp_path: Path) -> tuple[str, Path, Path]:
+def _start_server(
+    tmp_path: Path,
+) -> tuple[str, Path, Path, uvicorn.Server, threading.Thread, Store]:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -328,7 +337,7 @@ def _start_server(tmp_path: Path) -> tuple[str, Path, Path]:
         if server.started:
             break
         time.sleep(0.05)
-    return f"http://127.0.0.1:{port}", db_path, artifacts_root
+    return f"http://127.0.0.1:{port}", db_path, artifacts_root, server, thread, store
 
 
 class TestSubmissionEvents:
@@ -636,6 +645,7 @@ class TestDashboardServiceFacts:
 
 class TestIdempotence:
     def test_full_pipeline_rerun_changes_nothing(self, scenario):
+        counts_before = _row_counts(scenario.db_path)
         result = run_pipeline(
             ctx_path=str(scenario.ctx_path),
             chain_depth=0,
@@ -648,4 +658,4 @@ class TestIdempotence:
             base_url=scenario.base_url,
             study=SWEEP,
         )
-        assert _row_counts(scenario.db_path) == scenario.counts_after_pipeline
+        assert _row_counts(scenario.db_path) == counts_before
