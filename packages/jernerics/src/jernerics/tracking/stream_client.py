@@ -116,6 +116,11 @@ class StreamClient:
         while True:
             if not pending:
                 events, offset = scan_events(self.path, offset, self.batch_size)
+                if not events and self._stop.is_set():
+                    # A write can land between the scan above and the stop
+                    # check below; anything written before join() set stop
+                    # must still ship, so take one more look before giving up.
+                    events, offset = scan_events(self.path, offset, self.batch_size)
                 if not events:
                     if self._stop.is_set():
                         return

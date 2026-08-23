@@ -10,7 +10,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import httpx
-from jernerics.tracking.jsonl_io import read_cursor, write_cursor
+from jernerics.tracking.jsonl_io import read_cursor, scan_events, write_cursor
 from jernerics.tracking.stream_client import StreamClient
 from jernerics_schema import (
     PROTOCOL_VERSION,
@@ -353,6 +353,42 @@ class TestShutdown:
     def test_join_without_start_is_noop(self, tmp_path: Path) -> None:
         client = _make_client(tmp_path / "events.jsonl", FakeTransport())
         client.join()
+
+    def test_event_written_between_empty_scan_and_stop_still_ships(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        transport = FakeTransport()
+        client = _make_client(path, transport)
+        event = _value_event("late")
+        scanned = threading.Event()
+        armed = [True]
+
+        def gated_scan_events(path_, start_offset, max_events=None):
+            if not armed[0]:
+                return scan_events(path_, start_offset, max_events)
+            armed[0] = False
+            # First scan runs on the empty file; hold its stale result until
+            # join() sets stop so the write below lands between the scan and
+            # the loop's stop check.
+            stale = scan_events(path_, start_offset, max_events)
+            scanned.set()
+            client._stop.wait(timeout=5.0)
+            return stale
+
+        monkeypatch.setattr(
+            "jernerics.tracking.stream_client.scan_events", gated_scan_events
+        )
+        client.start()
+        assert scanned.wait(timeout=5.0), "shipper never performed its first scan"
+
+        _write_events(path, [event])
+        client.join()
+
+        assert len(transport.requests) == 1
+        assert _ids(transport.bodies[0]) == [str(event.event_id)]
+        assert not client._thread.is_alive()
+        assert read_cursor(path) == path.stat().st_size
 
 
 class TestLiveTail:
