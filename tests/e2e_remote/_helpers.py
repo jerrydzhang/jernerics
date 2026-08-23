@@ -44,25 +44,20 @@ def ssh(host, cmd, **kwargs):
 
 
 def _build_state(backend_name):
-    """Opaque remote-side image fingerprint and build-marker mtime.
+    """Build-marker mtime on the remote.
 
-    The build job rewrites the marker when it finishes, so a changed state
-    means "build completed" even when a fully cached docker build produces a
-    byte-identical image.
+    The marker is rewritten only after the build job's command exits
+    successfully (backend.py writes it under `set -e`), so a changed
+    mtime means the build completed. The image fingerprint is
+    deliberately excluded: sif/docker image timestamps move while the
+    build is still running, which used to masquerade as completion.
     """
     if backend_name == "hpc":
         host, cache = HPC, HPC_CACHE
-        image = f"stat -c %Y ~/projects/jernerics-examples/{PROJECT}/container.sif"
     else:
         host, cache = SCIMLAB, SCIMLAB_CACHE
-        image = f"docker image inspect {PROJECT} --format '{{{{.Created}}}}'"
     marker = f"stat -c %Y {cache}/{PROJECT}/.build_marker"
-    res = ssh(
-        host,
-        f"{image} 2>/dev/null; echo -n marker:; {marker} 2>/dev/null",
-        capture_output=True,
-        text=True,
-    )
+    res = ssh(host, f"{marker} 2>/dev/null", capture_output=True, text=True)
     return res.stdout.strip()
 
 
