@@ -2,7 +2,6 @@
 
 import re
 import stat
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -133,8 +132,7 @@ class TestSession:
     def test_expired_cookie_redirects_to_login(self, tmp_path):
         client = _build(tmp_path)
         signer = _ctx(client).signer
-        token = signer.sign(ttl_s=1)
-        time.sleep(1.1)
+        token = signer.sign(ttl_s=-60)
         response = client.get(
             "/dashboard/", follow_redirects=False, cookies={COOKIE_NAME: token}
         )

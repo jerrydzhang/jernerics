@@ -596,7 +596,7 @@ class TestKeysetPagination:
         assert response.status_code == 200
         return response.json()
 
-    def test_token_advances_through_concurrent_ingest(self, scenario):
+    def test_ingest_completing_between_pages_appears_in_later_pages(self, scenario):
         first = self._page(scenario)
         assert [r["step"] for r in first["records"]] == list(range(10))
         thread = threading.Thread(
@@ -765,7 +765,7 @@ class TestQueryHardening:
         assert "error" in body.json()
 
     def test_long_running_query_aborted_by_guard(self, scenario, monkeypatch):
-        monkeypatch.setattr(store_module, "MAX_QUERY_SECONDS", 1.0)
+        monkeypatch.setattr(store_module, "MAX_QUERY_SECONDS", 0.0)
         sql = (
             "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt) "
             "SELECT count(*) FROM cnt"

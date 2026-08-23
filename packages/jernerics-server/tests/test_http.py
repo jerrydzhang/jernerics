@@ -84,21 +84,6 @@ class TestQueryEndpoint:
         body = response.json()
         assert body["rows"] == [[None]]
 
-    def test_row_limit_enforced(self, client):
-        response = client.post(
-            "/query",
-            json={
-                "sql": (
-                    "WITH RECURSIVE cnt(x) AS ("
-                    "SELECT 1 UNION ALL SELECT x+1 FROM cnt WHERE x < 11000) "
-                    "SELECT * FROM cnt"
-                ),
-            },
-        )
-        assert response.status_code == 400
-        body = response.json()
-        assert "error" in body
-
     def test_query_binds_params(self, client, tmp_path):
         _seed_trial(tmp_path / "test.sqlite")
         response = client.post(

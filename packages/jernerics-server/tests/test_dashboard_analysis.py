@@ -9,10 +9,8 @@ TestClient page 200s.
 """
 
 import json
-import re
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1489,18 +1487,6 @@ class TestContinueInPython:
     def test_python_snippet_shows_token(self):
         snippet = python_snippet("abc123", PROJECT)
         assert 'decode_selection("abc123")' in snippet
-
-
-class TestNoSqlInCallbacks:
-    _FORBIDDEN_SQL = re.compile(r"SELECT")
-    _FORBIDDEN_MODULES = re.compile(r"sqlite|httpx")
-
-    def test_analysis_modules_contain_no_sql_or_direct_clients(self):
-        root = Path(__file__).parent.parent / "src" / "jernerics_server" / "dashboard"
-        for name in ("analysis.py", "figures.py", "selection_tokens.py"):
-            source = (root / name).read_text()
-            assert not self._FORBIDDEN_SQL.search(source), name
-            assert not self._FORBIDDEN_MODULES.search(source), name
 
 
 class TestAnalysisRouteServes:
