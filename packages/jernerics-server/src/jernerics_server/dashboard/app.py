@@ -6,9 +6,12 @@ callbacks read exclusively through the shared QueryService (wrapped by
 DashboardService) — there is no second SQL layer.
 """
 
+from typing import cast
+
 import dash
+from a2wsgi.wsgi import WSGIMiddleware
 from fastapi import FastAPI
-from starlette.middleware.wsgi import WSGIMiddleware
+from starlette.types import ASGIApp
 
 from jernerics_server.queries import QueryService
 from jernerics_server.store import Store
@@ -58,6 +61,9 @@ def mount_dashboard(app: FastAPI, ctx: DashboardContext) -> DashboardContext:
     register_auth_routes(app, ctx)
     if ctx.api_key is not None:
         app.add_middleware(DashboardAuthMiddleware, ctx=ctx)
-    app.mount(ctx.routes_base, WSGIMiddleware(build_dash_app(ctx).server))
+    # a2wsgi types the ASGI scope as a bare MutableMapping; the app is ASGI.
+    app.mount(
+        ctx.routes_base, cast(ASGIApp, WSGIMiddleware(build_dash_app(ctx).server))
+    )
     app.state.dashboard = ctx
     return ctx

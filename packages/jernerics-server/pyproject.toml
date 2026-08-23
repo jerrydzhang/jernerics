@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "dash>=4.2",
     "dash-ag-grid>=31.2",
+    "a2wsgi>=1.0",
     "fastapi>=0.136.1",
     "jernerics-schema",
     "uvicorn[standard]>=0.46.0",

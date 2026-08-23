@@ -121,11 +121,8 @@ class TestSession:
         assert response.headers["location"] == _login_url()
 
     def test_tampered_cookie_redirects_to_login(self, client):
-        response = client.get(
-            "/dashboard/",
-            follow_redirects=False,
-            cookies={COOKIE_NAME: "eyJzdWIiOiJkYXNoYm9hcmQifQ.forged"},
-        )
+        client.cookies.set(COOKIE_NAME, "eyJzdWIiOiJkYXNoYm9hcmQifQ.forged")
+        response = client.get("/dashboard/", follow_redirects=False)
         assert response.status_code == 303
         assert response.headers["location"] == _login_url()
 
@@ -133,9 +130,8 @@ class TestSession:
         client = _build(tmp_path)
         signer = _ctx(client).signer
         token = signer.sign(ttl_s=-60)
-        response = client.get(
-            "/dashboard/", follow_redirects=False, cookies={COOKIE_NAME: token}
-        )
+        client.cookies.set(COOKIE_NAME, token)
+        response = client.get("/dashboard/", follow_redirects=False)
         assert response.status_code == 303
         assert response.headers["location"] == _login_url()
 
@@ -150,11 +146,8 @@ class TestLogout:
     def test_dashboard_after_logout_requires_login(self, authed):
         token = authed.cookies.get(COOKIE_NAME)
         authed.post("/dashboard/logout", follow_redirects=False)
-        response = authed.get(
-            "/dashboard/",
-            follow_redirects=False,
-            cookies={COOKIE_NAME: token or ""},
-        )
+        authed.cookies.set(COOKIE_NAME, token or "")
+        response = authed.get("/dashboard/", follow_redirects=False)
         assert response.status_code == 303
         assert response.headers["location"] == _login_url()
 
