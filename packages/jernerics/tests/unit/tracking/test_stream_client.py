@@ -24,6 +24,7 @@ BASE_URL = "http://localhost:8000"
 @dataclass
 class _FakeResponse:
     status_code: int
+    content: bytes = b""
 
 
 class FakeTransport:
@@ -42,6 +43,8 @@ class FakeTransport:
             response = self.always if self.always is not None else 200
         if isinstance(response, Exception):
             raise response
+        if isinstance(response, _FakeResponse):
+            return response
         return _FakeResponse(response)
 
     @property
@@ -248,6 +251,28 @@ class TestRetry:
         assert _ids(transport.bodies[1]) == first_ids
         assert _ids(transport.bodies[2]) == first_ids
         assert read_cursor(path) == path.stat().st_size
+
+    def test_first_failure_logs_error_body_once(self, tmp_path, capfd) -> None:
+        path = tmp_path / "events.jsonl"
+        _write_events(path, [_value_event()])
+        body = b'{"error":"conflict","detail":"FOREIGN KEY constraint failed"}'
+        transport = FakeTransport(
+            [
+                _FakeResponse(409, content=body),
+                _FakeResponse(409, content=body),
+                200,
+            ]
+        )
+        client = _make_client(path, transport)
+        client.start()
+        _wait_for(lambda: len(transport.requests) == 3, what="retries")
+        client.join()
+
+        err = capfd.readouterr().err
+        first = next(line for line in err.splitlines() if "retry 1 " in line)
+        second = next(line for line in err.splitlines() if "retry 2 " in line)
+        assert "FOREIGN KEY constraint failed" in first
+        assert "FOREIGN KEY constraint failed" not in second
 
     def test_gives_up_after_max_retry_time_leaving_cursor(
         self, tmp_path, capfd

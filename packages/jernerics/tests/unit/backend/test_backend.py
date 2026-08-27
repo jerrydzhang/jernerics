@@ -186,6 +186,14 @@ class TestPrepareAndSubmit:
         )
         spec = _make_spec()
 
+        shipped = {}
+
+        def _capture(path, base_url, api_key=None, **kwargs):
+            shipped["content"] = Path(path).read_text()
+            return True
+
+        mock_ship.side_effect = _capture
+
         backend.prepare_and_submit(
             spec,
             project_dir=tmp_path / "proj",
@@ -196,16 +204,54 @@ class TestPrepareAndSubmit:
 
         adapter.submit_sweep.assert_called_once()
         mock_ship.assert_called_once()
-        path, base_url = mock_ship.call_args[0][:2]
-        assert path == (
+        assert mock_ship.call_args[0][1] == "http://localhost:8000"
+        written = (
             tmp_path
             / "cache"
             / "proj"
             / "tracking"
             / "mystudy"
+            / "submission"
             / f"{spec.submission_id}.jsonl"
         )
-        assert base_url == "http://localhost:8000"
+        assert written.is_file()
+        assert shipped["content"] == written.read_text()
+        assert "sweep_snapshot" in shipped["content"]
+
+    @patch("jernerics.backend.backend.resolve_tracking_ship")
+    @patch("jernerics.backend.backend.ship_events_file")
+    def test_unreadable_submission_events_notes_and_continues(
+        self, mock_ship, mock_resolve, tmp_path, capfd
+    ):
+        mock_resolve.return_value = ("http://localhost:8000", None)
+        host = MagicMock()
+        host.home = "/home/user"
+        host.read_file.return_value = None
+        host.run.return_value = MagicMock(returncode=0, stdout="")
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = SubmitResult(
+            submissions=[JobSubmission(job_id="123", n_trials=5)]
+        )
+        backend = _make_backend(
+            host=host,
+            adapter=adapter,
+            tracking_server="http://localhost:8000",
+            remote_dir=str(tmp_path / "proj"),
+            cache_host=str(tmp_path / "cache"),
+        )
+        spec = _make_spec()
+
+        result = backend.prepare_and_submit(
+            spec,
+            project_dir=tmp_path / "proj",
+            project_name="proj",
+            direction="minimize",
+            backend_name="hpc",
+        )
+
+        assert result.submissions[0].job_id == "123"
+        mock_ship.assert_not_called()
+        assert "not readable" in capfd.readouterr().err
 
     @patch("jernerics.backend.backend.resolve_tracking_ship")
     @patch("jernerics.backend.backend.ship_events_file")

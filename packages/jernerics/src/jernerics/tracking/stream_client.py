@@ -24,6 +24,7 @@ from .jsonl_io import read_cursor, scan_events, write_cursor
 
 RETRY_BASE_INTERVAL = 0.5
 RETRY_MAX_WAIT = 10.0
+MAX_ERROR_BODY_CHARS = 400
 
 
 class TransportResponse(Protocol):
@@ -177,6 +178,14 @@ class StreamClient:
                 if 200 <= response.status_code < 300:
                     return True
                 detail = f"HTTP {response.status_code}"
+                if retry_count == 0:
+                    error_body = (
+                        response.content[:MAX_ERROR_BODY_CHARS]
+                        .decode("utf-8", "replace")
+                        .strip()
+                    )
+                    if error_body:
+                        detail = f"{detail}: {error_body}"
             except httpx.HTTPError as exc:
                 detail = repr(exc)
             now = monotonic()

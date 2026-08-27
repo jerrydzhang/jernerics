@@ -1,6 +1,7 @@
 import hashlib
 import shlex
 import subprocess
+import sys
 import tarfile
 import tempfile
 from pathlib import Path
@@ -56,6 +57,41 @@ def _check_path_dependencies(project_dir: Path) -> None:
     lines.append('  git = "https://github.com/<user>/<repo>.git"')
     lines.append(f'  subdirectory = "packages/{first_name}"')
     raise RuntimeError("\n".join(lines))
+
+
+def _ship_submission_events(
+    host,
+    remote_path: str,
+    base_url: str,
+    api_key: str | None,
+) -> None:
+    """Land the sweep's submission events on the server from the deploy side.
+
+    The file is written on the host filesystem (remote backends: the
+    cluster), so read it back over the host transport and ship a local
+    copy — live trial streams need the sweep row on the server from
+    their first batch. Best-effort: the post-hook replay remains the
+    delivery guarantee.
+    """
+    try:
+        content = host.read_file(remote_path)
+        if content is None:
+            print(
+                f"jernerics: submission events not readable at {remote_path}; "
+                "the post-hook replay will deliver them.",
+                file=sys.stderr,
+            )
+            return
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local = Path(tmp_dir) / "submission.jsonl"
+            local.write_text(content)
+            ship_events_file(local, base_url, api_key)
+    except Exception as exc:
+        print(
+            f"jernerics: immediate ship of submission events failed: {exc!r}; "
+            "the post-hook replay will deliver them.",
+            file=sys.stderr,
+        )
 
 
 class Backend:
@@ -191,18 +227,15 @@ class Backend:
         )
 
         # Land the sweep/submission/job events immediately so live trial
-        # streams validate from their first batch. Best-effort: remote
-        # backends write the file on the host (silent no-op here) and the
-        # post-hook replay remains the delivery guarantee.
+        # streams validate from their first batch.
         if spec.project_name and result is not None and self.tracking_server:
             ship = resolve_tracking_ship(self.tracking_server)
             if ship:
                 base_url, api_key = ship
-                ship_events_file(
-                    Path(cache_host)
-                    / "tracking"
-                    / spec.study_name
-                    / f"{spec.submission_id}.jsonl",
+                _ship_submission_events(
+                    self.host,
+                    f"{cache_host}/tracking/{spec.study_name}"
+                    f"/submission/{spec.submission_id}.jsonl",
                     base_url,
                     api_key,
                 )
