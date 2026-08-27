@@ -86,6 +86,7 @@ class SlurmConfig:
     mem: str = "16G"
     cpus: int = 4
     max_concurrent_jobs: int = 10
+    exclude: str | None = None
 
     def defaults_dict(self) -> dict[str, str | None]:
         return {
@@ -244,12 +245,12 @@ def load_backend_config(
             mem=slurm.get("mem", "16G"),
             cpus=slurm.get("cpus", 4),
             max_concurrent_jobs=slurm.get("max_concurrent_jobs", 10),
+            exclude=slurm.get("exclude"),
         )
     elif backend_type == "pueue":
         backend_specific = PueueConfig(
             parallel=bc.get("parallel", 1),
         )
-
     container_config: ApptainerConfig | DockerConfig | None = None
     if shared.container_type == "apptainer":
         apptainer = bc.get("apptainer", {})

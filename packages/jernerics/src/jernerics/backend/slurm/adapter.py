@@ -244,6 +244,7 @@ class SlurmAdapter:
         mem: str = "16G",
         cpus: int = 4,
         max_concurrent_jobs: int = 10,
+        exclude: str | None = None,
         cache_host: str = "",
     ):
         self.host = host
@@ -253,6 +254,7 @@ class SlurmAdapter:
         self.mem = mem
         self.cpus = cpus
         self.max_concurrent_jobs = max_concurrent_jobs
+        self.exclude = exclude
         self.cache_host = cache_host
 
     @classmethod
@@ -286,6 +288,7 @@ class SlurmAdapter:
             mem=slurm.mem,
             cpus=slurm.cpus,
             max_concurrent_jobs=slurm.max_concurrent_jobs,
+            exclude=slurm.exclude,
             cache_host=cache_host,
         )
 
@@ -397,6 +400,13 @@ class SlurmAdapter:
             f"#SBATCH --mem={mem}\n"
             f"#SBATCH --cpus-per-task={cpus}\n"
         )
+        if self.exclude:
+            parts = [p.strip() for p in self.exclude.split(",") if p.strip()]
+            if parts:
+                nodes = ",".join(
+                    _validate_slurm_value(p, "exclude") for p in parts
+                )
+                sbatch_script += f"#SBATCH --exclude={nodes}\n"
         if log_dir is not None:
             expanded = _expand_path(log_dir)
             sbatch_script += (

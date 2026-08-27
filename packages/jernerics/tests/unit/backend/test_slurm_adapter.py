@@ -321,6 +321,26 @@ class TestSubmitJob:
 
         assert adapter.submit_job("echo hello") == "99999;hpc"
 
+    def test_exclude_emits_sbatch_directive(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="99999")
+        adapter = _make_adapter(host=host, exclude="cn649,cn123")
+
+        adapter.submit_job("echo hello", name="build")
+
+        script = host.run.call_args.kwargs["input"]
+        assert "#SBATCH --exclude=cn649,cn123\n" in script
+
+    def test_no_exclude_directive_by_default(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="99999")
+        adapter = _make_adapter(host=host)
+
+        adapter.submit_job("echo hello", name="build")
+
+        script = host.run.call_args.kwargs["input"]
+        assert "--exclude" not in script
+
 
 class TestJobLifecycle:
     def test_list_jobs(self):
