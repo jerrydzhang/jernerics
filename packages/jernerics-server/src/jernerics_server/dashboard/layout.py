@@ -4,8 +4,10 @@ The shell owns all client-side state: ``dcc.Location`` carries the URL,
 ``project-store`` the active project, ``selection-store`` the unified
 selection tray (sweeps picked on any grid, retry families, and the
 expansion toggle — the typed ``Selection`` is built per query call in
-the service), ``view-store`` the analysis view state the ``view=``
-parameter round-trips, ``analysis-message-store`` the analysis
+``view-store`` the analysis view state the ``view=``
+parameter round-trips, ``workspace-store`` the per-project workspace
+review state (view, quick filter, column filters, sort),
+``analysis-message-store`` the analysis
 URL-hydration message, and ``poll`` is the conditional refresh interval
 pages enable or disable through the router callback.
 
@@ -30,6 +32,7 @@ from .service import (
     SweepDetail,
     SweepSummary,
     TrialDetail,
+    view_counts,
 )
 
 POLL_INTERVAL_MS = 5000
@@ -94,6 +97,7 @@ def shell() -> html.Div:
             ),
             dcc.Store(id="analysis-message-store"),
             dcc.Store(id="view-store", data=default_view_state()),
+            dcc.Store(id="workspace-store", storage_type="session"),
             dcc.Interval(id="poll", interval=POLL_INTERVAL_MS, disabled=True),
         ],
         className="shell",
@@ -149,6 +153,21 @@ def project_page(catalog: list[ProjectSummary], now_ns: int) -> html.Div:
                         Badge(f"active {summary.active}", kind="active"),
                         Badge(f"stale {summary.stale}", kind="stale"),
                         Badge(f"failed {summary.failed}", kind="failed"),
+                        *(
+                            [
+                                Badge(
+                                    f"archived {summary.archived_sweeps}",
+                                    kind="archived",
+                                )
+                            ]
+                            if summary.archived_sweeps
+                            else []
+                        ),
+                        *(
+                            [Badge(f"invalid {summary.invalid_sweeps}", kind="invalid")]
+                            if summary.invalid_sweeps
+                            else []
+                        ),
                     ],
                     className="project-counts",
                 ),
@@ -186,6 +205,15 @@ def project_page(catalog: list[ProjectSummary], now_ns: int) -> html.Div:
     )
 
 
+def sweep_curation(summary: SweepSummary) -> str:
+    """Distinct curation marker for grid cells; invalid outranks archived."""
+    if summary.invalid:
+        return "invalid"
+    if summary.archived:
+        return "archived"
+    return ""
+
+
 def sweep_grid_row(summary: SweepSummary, now_ns: int) -> dict[str, object]:
     """One AG Grid row dict for the workspace sweep grid."""
     return {
@@ -207,7 +235,21 @@ def sweep_grid_row(summary: SweepSummary, now_ns: int) -> dict[str, object]:
             else components.relative_time(summary.latest_submitted_ns, now_ns)
         ),
         "health": summary.health,
+        "curation": sweep_curation(summary),
+        "archived": summary.archived,
+        "invalid": summary.invalid,
     }
+
+
+def sweep_grid_columns(sort: list | None) -> list[dict]:
+    """Workspace column defs with a stored sort applied as each column's
+    initial sort (AG Grid's documented restore point for colId/sort)."""
+    by_field = {entry["colId"]: entry for entry in sort or []}
+    columns = []
+    for column in _SWEEP_GRID_COLUMNS:
+        entry = by_field.get(column["field"])
+        columns.append({**column, "sort": entry["sort"]} if entry else dict(column))
+    return columns
 
 
 _SWEEP_GRID_COLUMNS = [
@@ -217,6 +259,7 @@ _SWEEP_GRID_COLUMNS = [
         "cellRenderer": "markdown",
     },
     {"headerName": "State", "field": "state"},
+    {"headerName": "Curation", "field": "curation"},
     {"headerName": "Submitted jobs", "field": "submitted_jobs"},
     {"headerName": "Expected trials", "field": "expected_trials"},
     {"headerName": "Started", "field": "started"},
@@ -229,13 +272,95 @@ _SWEEP_GRID_COLUMNS = [
 ]
 
 
+def view_options(counts: dict[str, int]) -> list[dict[str, str]]:
+    """RadioItems options for the workspace view controls, with counts."""
+    return [
+        {"label": f" Current · {counts['current']}", "value": "current"},
+        {"label": f" Archived · {counts['archived']}", "value": "archived"},
+        {"label": f" All · {counts['all']}", "value": "all"},
+    ]
+
+
+def curation_transitions(archived: bool, invalid: bool) -> dict[str, bool]:
+    """Which curation actions are valid transitions for one sweep."""
+    return {
+        "archive": not archived,
+        "invalid": not invalid,
+        "restore_validity": invalid,
+        "restore": archived and not invalid,
+    }
+
+
+def selection_transitions(rows: list[dict] | None) -> dict[str, bool]:
+    """Valid transitions for a grid selection: an action is offered when
+    at least one selected row admits it."""
+    per_row = [
+        curation_transitions(bool(row.get("archived")), bool(row.get("invalid")))
+        for row in rows or []
+    ]
+    return {
+        action: any(transition[action] for transition in per_row)
+        for action in curation_transitions(False, False)
+    }
+
+
+def curation_note(visible: list[SweepSummary]) -> str:
+    """The active-work note when incomplete sweeps carry curation."""
+    if any(
+        summary.incomplete and (summary.archived or summary.invalid)
+        for summary in visible
+    ):
+        return (
+            "Curation does not cancel or hide active work — incomplete "
+            "sweeps stay visible in Current while they run."
+        )
+    return ""
+
+
+def action_message(ok: bool, text: str) -> html.Div:
+    """Visible success/failure report for a curation action."""
+    return html.Div(text, className=f"action-message {'ok' if ok else 'err'}")
+
+
+def workspace_actions() -> html.Div:
+    """Selected-row action bar; buttons enable per the selection."""
+    return html.Div(
+        [
+            html.A("Analyze", id="ws-analyze", className="action analyze-link"),
+            html.Button("Archive", id="ws-archive", disabled=True, className="action"),
+            html.Button(
+                "Mark invalid", id="ws-invalid", disabled=True, className="action"
+            ),
+            html.Button(
+                "Restore validity",
+                id="ws-restore-validity",
+                disabled=True,
+                className="action",
+            ),
+            html.Button("Restore", id="ws-restore", disabled=True, className="action"),
+            dcc.Input(
+                id="ws-reason",
+                type="text",
+                placeholder="Reason (required for Mark invalid)",
+                className="reason-input",
+            ),
+        ],
+        className="action-bar",
+    )
+
+
 def workspace_page(
     project: str,
     summaries: list[SweepSummary],
     selected_sweeps: list[str],
     now_ns: int,
+    *,
+    visible: list[SweepSummary] | None = None,
+    counts: dict[str, int] | None = None,
+    state: dict | None = None,
 ) -> html.Div:
-    """Project workspace: the sweep grid that feeds the selection tray."""
+    """Project workspace: view controls, quick search, the sweep grid
+    that feeds the selection tray, and the curation action bar."""
     if not summaries:
         return html.Div(
             [
@@ -244,11 +369,38 @@ def workspace_page(
             ],
             className="page",
         )
-    rows = [sweep_grid_row(summary, now_ns) for summary in summaries]
+    state = state or {}
+    view = state.get("view") or "current"
+    quick = state.get("quick") or ""
+    shown = summaries if visible is None else visible
+    row_counts = view_counts(summaries) if counts is None else counts
+    rows = [sweep_grid_row(summary, now_ns) for summary in shown]
     selected = [row for row in rows if row["sweep_id"] in set(selected_sweeps)]
     return html.Div(
         [
             html.H2(f"Project {project}"),
+            html.Div(
+                [
+                    dcc.RadioItems(
+                        id="workspace-view",
+                        options=view_options(row_counts),
+                        value=view,
+                        inline=True,
+                        className="workspace-views",
+                    ),
+                    dcc.Input(
+                        id="workspace-quick",
+                        value=quick,
+                        type="search",
+                        placeholder="Search sweeps…",
+                        className="quick-filter",
+                    ),
+                ],
+                className="workspace-controls",
+            ),
+            html.Div(
+                curation_note(shown), id="workspace-curation-note", className="hint"
+            ),
             html.P(
                 "Optimizer and objective direction are owned by the "
                 "optimizer journal, not the v3 store — they show as "
@@ -258,7 +410,7 @@ def workspace_page(
             AgGrid(
                 id="sweep-grid",
                 rowData=rows,
-                columnDefs=_SWEEP_GRID_COLUMNS,
+                columnDefs=sweep_grid_columns(state.get("sort")),
                 defaultColDef={
                     "sortable": True,
                     "filter": True,
@@ -266,11 +418,14 @@ def workspace_page(
                     "minWidth": 100,
                 },
                 dashGridOptions=components.grid_options(
-                    rowSelection={"mode": "multiRow"}
+                    rowSelection={"mode": "multiRow"}, quickFilterText=quick
                 ),
+                filterModel=state.get("filters"),
                 selectedRows=selected,
                 className="ag-theme-alpine grid",
             ),
+            workspace_actions(),
+            html.Div(id="workspace-message"),
             html.P(
                 "Select sweeps to load them into the shared selection tray.",
                 className="hint",
@@ -425,6 +580,83 @@ def lineage_chain(root: str | None, lineage: list[dict]) -> list[object]:
     ]
 
 
+def curation_banners(overview: SweepSummary, now_ns: int) -> list[html.Div]:
+    """Archived/invalid banners naming the state; invalid carries the
+    reason and its timestamp."""
+    banners = []
+    if overview.archived:
+        banners.append(
+            html.Div(
+                [
+                    Badge("archived", kind="archived"),
+                    " This sweep is archived — curation changes review "
+                    "visibility only; tracked facts and running work are "
+                    "untouched.",
+                ],
+                className="curation-banner",
+            )
+        )
+    if overview.invalid:
+        banners.append(
+            html.Div(
+                [
+                    Badge("invalid", kind="invalid"),
+                    " Marked scientifically invalid at "
+                    f"{components.absolute_time(overview.invalid_ns)} — "
+                    f"reason: {overview.invalid_reason}. The data stays "
+                    "queryable but must not be treated as valid science.",
+                ],
+                className="curation-banner curation-banner-invalid",
+            )
+        )
+    return banners
+
+
+def curation_actions(overview: SweepSummary, prefix: str) -> html.Div:
+    """Archive/invalid/restore buttons offering only valid transitions."""
+    offered = curation_transitions(overview.archived, overview.invalid)
+    return html.Div(
+        [
+            html.Button(
+                "Archive",
+                id=f"{prefix}-archive",
+                disabled=not offered["archive"],
+                className="action",
+            ),
+            html.Button(
+                "Mark invalid",
+                id=f"{prefix}-invalid",
+                disabled=not offered["invalid"],
+                className="action",
+            ),
+            html.Button(
+                "Restore validity",
+                id=f"{prefix}-restore-validity",
+                disabled=not offered["restore_validity"],
+                className="action",
+            ),
+            html.Button(
+                "Restore",
+                id=f"{prefix}-restore",
+                disabled=not offered["restore"],
+                className="action",
+            ),
+        ],
+        className="action-bar",
+    )
+
+
+def detail_curation(overview: SweepSummary, now_ns: int) -> html.Div:
+    """Sweep-detail banners plus the action row (refreshed after a
+    mutation so button availability follows the new state)."""
+    return html.Div(
+        [
+            *curation_banners(overview, now_ns),
+            curation_actions(overview, "detail"),
+        ]
+    )
+
+
 def sweep_page(detail: SweepDetail, now_ns: int) -> html.Div:
     """Sweep page: project breadcrumb, submission/job correlation,
     monitoring, every execution, in-flight progress, and the trial-family
@@ -449,6 +681,22 @@ def sweep_page(detail: SweepDetail, now_ns: int) -> html.Div:
                         className="analyze-link",
                     ),
                 ]
+            ),
+            html.Div(
+                [
+                    html.Div(
+                        detail_curation(overview, now_ns),
+                        id="detail-curation",
+                    ),
+                    dcc.Input(
+                        id="detail-reason",
+                        type="text",
+                        placeholder="Reason (required for Mark invalid)",
+                        className="reason-input",
+                    ),
+                    html.Div(id="detail-message"),
+                ],
+                className="curation-section",
             ),
             html.Section(
                 [

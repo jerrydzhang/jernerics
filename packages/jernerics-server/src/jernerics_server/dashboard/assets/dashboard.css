@@ -520,3 +520,109 @@ a.project-row:hover {
 .artifact-video {
   max-width: 100%;
 }
+
+/* Curation workspace, banners, and scope warnings (jernerics-cdf.2) */
+
+.badge-archived {
+  border-color: #b8bcd4;
+  background: #eceff4;
+}
+
+.badge-invalid {
+  border-color: #b00020;
+  background: #b00020;
+  color: #fff;
+}
+
+.workspace-controls {
+  display: flex;
+  gap: 1.2rem;
+  align-items: center;
+  margin: 0.4rem 0 0.2rem;
+  flex-wrap: wrap;
+}
+
+.workspace-controls .workspace-views {
+  display: inline-flex;
+  gap: 0.2rem;
+}
+
+.workspace-controls .quick-filter {
+  margin-bottom: 0;
+}
+
+.action-bar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.6rem 0;
+  flex-wrap: wrap;
+}
+
+.action-bar .action {
+  border: 1px solid #c9d1d9;
+  background: #f6f8fa;
+  border-radius: 6px;
+  padding: 0.35rem 0.8rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+}
+
+.action-bar .action:hover:not(:disabled) {
+  background: #e8ecef;
+}
+
+.action-bar .action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.reason-input {
+  border: 1px solid #c9d1d9;
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  min-width: 18rem;
+  font-size: 0.9rem;
+}
+
+.action-message {
+  margin: 0.3rem 0;
+  font-size: 0.9rem;
+}
+
+.action-message.ok {
+  color: #1a7f37;
+}
+
+.action-message.err {
+  color: #b00020;
+}
+
+.curation-banner {
+  border: 1px solid #d4a72c;
+  background: #fff8e1;
+  border-radius: 6px;
+  padding: 0.5rem 0.8rem;
+  margin: 0.3rem 0;
+  font-size: 0.9rem;
+}
+
+.curation-banner-invalid {
+  border-color: #b00020;
+  background: #fdecea;
+}
+
+.curation-section {
+  margin: 0.4rem 0 0.8rem;
+}
+
+.scope-warning {
+  color: #b00020;
+  font-size: 0.9rem;
+}
+
+.include-toggle {
+  margin: 0.6rem 0 0.2rem;
+}

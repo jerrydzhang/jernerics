@@ -12,13 +12,21 @@ import time
 from uuid import UUID
 
 import dash
-from dash import Input, Output, State, no_update
+from dash import Input, Output, State, html, no_update
 from dash.exceptions import PreventUpdate
 
 from . import analysis, artifacts, layout
 from .components import Error, grid_options
 from .routes import parse_route
-from .service import DashboardService, TrialDetail
+from .service import (
+    WORKSPACE_VIEWS,
+    CurationRejectedError,
+    CurationUnavailableError,
+    DashboardService,
+    TrialDetail,
+    view_counts,
+    workspace_visible,
+)
 
 _INCOMPLETE_TRIAL_STATES = ("waiting", "running")
 
@@ -29,7 +37,8 @@ def page_content(
     *,
     selected_sweeps: list[str] | None = None,
     now_ns: int | None = None,
-) -> tuple[object, bool]:
+    workspace: dict | None = None,
+) -> tuple[html.Div, bool]:
     """(page, poll enabled) for a URL, with live data.
 
     ``poll enabled`` is True only while the page's selected work is
@@ -40,13 +49,20 @@ def page_content(
     if spec.kind == "project":
         return layout.project_page(service.project_catalog(), now), False
     if spec.kind == "workspace":
-        summaries = service.sweep_overview(spec.object_id or "")
-        polls = any(summary.incomplete for summary in summaries)
+        project = spec.object_id or ""
+        summaries = service.sweep_overview(project)
+        state = workspace_state(workspace, project)
         return (
             layout.workspace_page(
-                spec.object_id or "", summaries, selected_sweeps or [], now
+                project,
+                summaries,
+                selected_sweeps or [],
+                now,
+                visible=workspace_visible(summaries, state["view"]),
+                counts=view_counts(summaries),
+                state=state,
             ),
-            polls,
+            any(summary.incomplete for summary in summaries),
         )
     if spec.kind == "sweep":
         detail = service.sweep_detail(spec.object_id or "")
@@ -124,6 +140,92 @@ def lineage_panel(rows: list[dict] | None, data: dict | None) -> list[object]:
     return layout.lineage_chain(root, lineage)
 
 
+def workspace_state(store: dict | None, project: str | None) -> dict:
+    """Per-project workspace controls state from the session store."""
+    saved = (store or {}).get(project or "") or {}
+    view = saved.get("view")
+    return {
+        "view": view if view in WORKSPACE_VIEWS else "current",
+        "quick": str(saved.get("quick") or ""),
+        "filters": saved.get("filters") or None,
+        "sort": saved.get("sort") or None,
+    }
+
+
+def sort_from_columns(columns: list | None) -> list | None:
+    """Sort entries (colId/sort) extracted from AG Grid column state."""
+    entries = [
+        {"colId": column["colId"], "sort": column["sort"]}
+        for column in columns or []
+        if isinstance(column, dict) and column.get("sort")
+    ]
+    return entries or None
+
+
+def remember_workspace(
+    current: dict | None, project: str | None, **fields: object
+) -> dict | None:
+    """Session store after one workspace control edit; ``None`` when the
+    per-project state is unchanged (only edited fields are
+    authoritative, so a mounting control's echo cannot wipe the rest)."""
+    state = workspace_state(current, project)
+    updated = {**state, **fields}
+    if updated == state:
+        return None
+    return {**(current or {}), project or "": updated}
+
+
+_CURATION_VERBS = {
+    "archive": "Archived",
+    "invalid": "Marked invalid",
+    "restore_validity": "Restored validity of",
+    "restore": "Restored",
+}
+
+
+def run_curation(
+    service: DashboardService, action: str, sweep_id: str, reason: str
+) -> str:
+    """One service mutation per action name; returns the sweep's label."""
+    if action == "archive":
+        return service.archive_sweep(sweep_id)
+    if action == "invalid":
+        return service.mark_sweep_invalid(sweep_id, reason)
+    if action == "restore_validity":
+        return service.restore_sweep_validity(sweep_id)
+    return service.restore_sweep(sweep_id)
+
+
+def apply_curation(
+    service: DashboardService, action: str, sweep_ids: list[str], reason: str = ""
+) -> tuple[bool, str]:
+    """Run one curation action over ids deterministically; (all ok,
+    report) with per-sweep failures named, never a false all-succeeded."""
+    if action == "invalid" and not reason.strip():
+        return (
+            False,
+            "Mark invalid requires a reason (1..500 characters after trimming).",
+        )
+    labels: list[str] = []
+    failures: list[str] = []
+    for sweep_id in sorted(set(sweep_ids)):
+        try:
+            labels.append(run_curation(service, action, sweep_id, reason))
+        except (CurationUnavailableError, CurationRejectedError) as error:
+            failures.append(f"{service.sweep_label(sweep_id)}: {error}")
+    verb = _CURATION_VERBS[action]
+    report = f"{verb} {', '.join(labels)}." if labels else ""
+    if failures:
+        prefix = f"{report} " if report else ""
+        report = f"{prefix}Failed — {'; '.join(failures)}."
+    return not failures, report
+
+
+def triggered_action(triggered: set[str], mapping: dict[str, str]) -> str | None:
+    """The action name for the one triggered control, if any."""
+    return next((action for prop, action in mapping.items() if prop in triggered), None)
+
+
 def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("page-container", "children"),
@@ -131,12 +233,19 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input("url", "pathname"),
         Input("poll", "n_intervals"),
         State("selection-store", "data"),
+        State("workspace-store", "data"),
     )
-    def _render_page(pathname: str | None, _tick: int | None, selection: dict | None):
+    def _render_page(
+        pathname: str | None,
+        _tick: int | None,
+        selection: dict | None,
+        workspace: dict | None,
+    ):
         page, polls = page_content(
             pathname,
             service,
             selected_sweeps=(selection or {}).get("sweeps") or [],
+            workspace=workspace,
         )
         return page, not polls
 
@@ -232,6 +341,204 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _show_lineage(rows: list[dict] | None, data: dict | None):
         return lineage_panel(rows, data)
+
+    # -- Workspace curation (jernerics-cdf.2) ----------------------------
+
+    @app.callback(
+        Output("workspace-store", "data"),
+        Input("workspace-view", "value"),
+        Input("workspace-quick", "value"),
+        Input("sweep-grid", "filterModel"),
+        Input("sweep-grid", "columnState"),
+        State("project-store", "data"),
+        State("workspace-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _remember_workspace(
+        view: str | None,
+        quick: str | None,
+        filters: dict | None,
+        columns: list | None,
+        project: str | None,
+        current: dict | None,
+    ):
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        fields: dict[str, object] = {}
+        if "workspace-view.value" in triggered:
+            fields["view"] = view if view in WORKSPACE_VIEWS else "current"
+        if "workspace-quick.value" in triggered:
+            fields["quick"] = quick or ""
+        if "sweep-grid.filterModel" in triggered:
+            fields["filters"] = filters or None
+        if "sweep-grid.columnState" in triggered:
+            fields["sort"] = sort_from_columns(columns)
+        updated = remember_workspace(current, project, **fields)
+        if updated is None:
+            raise PreventUpdate
+        return updated
+
+    @app.callback(
+        Output("sweep-grid", "rowData"),
+        Output("workspace-curation-note", "children"),
+        Input("workspace-view", "value"),
+        State("project-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _switch_workspace_view(view: str | None, project: str | None):
+        if view not in WORKSPACE_VIEWS or not project:
+            raise PreventUpdate
+        visible = workspace_visible(service.sweep_overview(project), view)
+        now = time.time_ns()
+        return (
+            [layout.sweep_grid_row(summary, now) for summary in visible],
+            layout.curation_note(visible),
+        )
+
+    @app.callback(
+        Output("sweep-grid", "dashGridOptions"),
+        Input("workspace-quick", "value"),
+        State("workspace-store", "data"),
+        State("project-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _filter_sweep_rows(
+        text: str | None,
+        _workspace: dict | None,
+        _project: str | None,
+    ):
+        return grid_options(
+            rowSelection={"mode": "multiRow"}, quickFilterText=text or ""
+        )
+
+    @app.callback(
+        Output("ws-analyze", "href"),
+        Input("selection-store", "data"),
+        State("project-store", "data"),
+    )
+    def _sync_workspace_analyze(tray: dict | None, project: str | None):
+        return analysis.analysis_href(service, project, tray)
+
+    @app.callback(
+        Output("ws-archive", "disabled"),
+        Output("ws-invalid", "disabled"),
+        Output("ws-restore-validity", "disabled"),
+        Output("ws-restore", "disabled"),
+        Input("sweep-grid", "selectedRows"),
+        prevent_initial_call=True,
+    )
+    def _offer_workspace_transitions(rows: list[dict] | None):
+        offered = layout.selection_transitions(rows)
+        return (
+            not offered["archive"],
+            not offered["invalid"],
+            not offered["restore_validity"],
+            not offered["restore"],
+        )
+
+    WORKSPACE_ACTIONS = {
+        "ws-archive.n_clicks": "archive",
+        "ws-invalid.n_clicks": "invalid",
+        "ws-restore-validity.n_clicks": "restore_validity",
+        "ws-restore.n_clicks": "restore",
+    }
+
+    @app.callback(
+        Output("workspace-message", "children"),
+        Output("sweep-grid", "rowData", allow_duplicate=True),
+        Output("sweep-grid", "selectedRows"),
+        Output("workspace-view", "options"),
+        Output("workspace-curation-note", "children", allow_duplicate=True),
+        Input("ws-archive", "n_clicks"),
+        Input("ws-invalid", "n_clicks"),
+        Input("ws-restore-validity", "n_clicks"),
+        Input("ws-restore", "n_clicks"),
+        State("sweep-grid", "selectedRows"),
+        State("ws-reason", "value"),
+        State("project-store", "data"),
+        State("workspace-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _curate_from_workspace(
+        _archive: int,
+        _invalid: int,
+        _validity: int,
+        _restore: int,
+        rows: list[dict] | None,
+        reason: str | None,
+        project: str | None,
+        workspace: dict | None,
+    ):
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        action = triggered_action(triggered, WORKSPACE_ACTIONS)
+        if action is None:
+            raise PreventUpdate
+        sweep_ids = [str(row["sweep_id"]) for row in rows or []]
+        if not sweep_ids:
+            return (
+                layout.action_message(
+                    False, "Select sweeps first — actions apply to selected rows."
+                ),
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+            )
+        ok, report = apply_curation(service, action, sweep_ids, reason or "")
+        summaries = service.sweep_overview(project or "")
+        view = workspace_state(workspace, project)["view"]
+        visible = workspace_visible(summaries, view)
+        now = time.time_ns()
+        # Replacing rowData drops the grid's selection silently; writing
+        # [] makes the drop an event, so tray and action-bar callbacks
+        # re-fire against the post-action state.
+        return (
+            layout.action_message(ok, report),
+            [layout.sweep_grid_row(summary, now) for summary in visible],
+            [],
+            layout.view_options(view_counts(summaries)),
+            layout.curation_note(visible),
+        )
+
+    DETAIL_ACTIONS = {
+        "detail-archive.n_clicks": "archive",
+        "detail-invalid.n_clicks": "invalid",
+        "detail-restore-validity.n_clicks": "restore_validity",
+        "detail-restore.n_clicks": "restore",
+    }
+
+    @app.callback(
+        Output("detail-message", "children"),
+        Output("detail-curation", "children"),
+        Input("detail-archive", "n_clicks"),
+        Input("detail-invalid", "n_clicks"),
+        Input("detail-restore-validity", "n_clicks"),
+        Input("detail-restore", "n_clicks"),
+        State("url", "pathname"),
+        State("detail-reason", "value"),
+        prevent_initial_call=True,
+    )
+    def _curate_from_detail(
+        _archive: int,
+        _invalid: int,
+        _validity: int,
+        _restore: int,
+        pathname: str | None,
+        reason: str | None,
+    ):
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        action = triggered_action(triggered, DETAIL_ACTIONS)
+        spec = parse_route(pathname)
+        if action is None or spec.kind != "sweep":
+            raise PreventUpdate
+        sweep_id = spec.object_id or ""
+        ok, report = apply_curation(service, action, [sweep_id], reason or "")
+        detail = service.sweep_detail(sweep_id)
+        banner = (
+            layout.detail_curation(detail.overview, time.time_ns())
+            if detail is not None
+            else no_update
+        )
+        return layout.action_message(ok, report), banner
 
     # -- Analysis page (jernerics-h5d.13) ---------------------------------
 
@@ -338,6 +645,25 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return analysis.expand_values(tray)
 
     @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input("analysis-include", "value"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_include(values: list[str] | None, current: dict | None):
+        doc = analysis.view_from_include(current, values)
+        if doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output("analysis-include", "value"),
+        Input("view-store", "data"),
+    )
+    def _sync_include_controls(doc: dict | None):
+        return analysis.include_values(doc)
+
+    @app.callback(
         Output("analysis-error", "children"),
         Input("analysis-message-store", "data"),
     )
@@ -349,12 +675,18 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("analysis-sweep-grid", "selectedRows"),
         Input("project-store", "data"),
         Input("selection-store", "data"),
+        Input("view-store", "data"),
     )
-    def _load_analysis_sweeps(project: str | None, tray: dict | None):
+    def _load_analysis_sweeps(
+        project: str | None, tray: dict | None, view_doc: dict | None
+    ):
         if not project:
             return [], analysis.mounted_selection([], initial=is_initial())
         rows, selected = analysis.sweep_picker_rows(
-            service.sweep_overview(project), tray
+            service.sweep_overview(project),
+            tray,
+            include_archived=bool((view_doc or {}).get("include_archived")),
+            include_invalid=bool((view_doc or {}).get("include_invalid")),
         )
         return rows, analysis.mounted_selection(selected, initial=is_initial())
 

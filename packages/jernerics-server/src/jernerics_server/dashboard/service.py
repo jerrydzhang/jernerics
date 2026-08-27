@@ -1,7 +1,9 @@
-"""Thin read-only composition over QueryService for Dash callbacks.
+"""Composition over QueryService (reads) and Store (curation writes)
+for Dash callbacks.
 
-DashboardService contains no SQL: every method delegates to the same
-QueryService the HTTP API uses, so the dashboard can never drift from
+DashboardService contains no SQL: every read delegates to the same
+QueryService the HTTP API uses, and every curation mutation delegates
+to the explicit Store methods, so the dashboard can never drift from
 the one SQL layer. Selections arrive from client state as plain strings
 and are rebuilt into typed ``Selection`` objects here, per query call.
 
@@ -26,10 +28,39 @@ from jernerics_schema import (
 )
 
 from jernerics_server.queries import QueryService
+from jernerics_server.store import (
+    InvalidCurationReasonError,
+    Store,
+    StoreError,
+    SweepNotFoundError,
+    SweepStillInvalidError,
+)
 
 ANALYSIS_REDUCTIONS = ("none", "mean", "min", "max")
 """Explicit execution-reduction choices for the series overlay; "none"
 shows every (trial, execution) series as logged."""
+
+WORKSPACE_VIEWS = ("current", "archived", "all")
+"""Workspace review views over a project's sweeps."""
+
+
+class CurationUnavailableError(Exception):
+    """A curation mutation was requested without an injected Store."""
+
+
+class CurationRejectedError(Exception):
+    """The Store refused a curation mutation; the message is the
+    user-visible reason."""
+
+
+def _curation_error(error: StoreError) -> str:
+    if isinstance(error, SweepNotFoundError):
+        return "no sweep matches this id"
+    if isinstance(error, SweepStillInvalidError):
+        return "remains invalid — restore validity before unarchiving"
+    if isinstance(error, InvalidCurationReasonError):
+        return "reason must be 1..500 characters after trimming"
+    return str(error)
 
 
 @dataclass(frozen=True)
@@ -222,11 +253,38 @@ def _parse_id(value: str) -> uuid.UUID | None:
         return None
 
 
+def workspace_visible(
+    summaries: Sequence[SweepSummary], view: str
+) -> list[SweepSummary]:
+    """The sweeps one workspace view shows.
+
+    ``current`` keeps every incomplete sweep (curation never hides
+    active work) plus terminal unarchived/valid ones; ``archived``
+    shows terminal archived sweeps, invalid sweeps included; ``all``
+    shows everything. Unknown views fall back to ``current``.
+    """
+    if view == "all":
+        return list(summaries)
+    if view == "archived":
+        return [s for s in summaries if s.archived and not s.incomplete]
+    return [s for s in summaries if s.current]
+
+
+def view_counts(summaries: Sequence[SweepSummary]) -> dict[str, int]:
+    """Row counts the workspace view controls carry."""
+    return {
+        "current": sum(1 for s in summaries if s.current),
+        "archived": sum(1 for s in summaries if s.archived and not s.incomplete),
+        "all": len(summaries),
+    }
+
+
 @dataclass(frozen=True)
 class DashboardService:
     """The only data doorway callbacks are allowed to use."""
 
     queries: QueryService
+    store: Store | None = None
 
     def projects(self) -> list[str]:
         return self.queries.projects()
@@ -290,6 +348,53 @@ class DashboardService:
             )
             for row in self.queries.sweep_overview(selection)
         ]
+
+    def _curation_store(self) -> Store:
+        if self.store is None:
+            raise CurationUnavailableError(
+                "curation is unavailable: this dashboard has no write store"
+            )
+        return self.store
+
+    def sweep_label(self, sweep_id: str) -> str:
+        """Display label (sweep name, else the short id) for reports."""
+        parsed = _parse_id(sweep_id)
+        context = self.queries.sweep_context(parsed) if parsed else None
+        if context:
+            return str(context["name"])
+        return sweep_id.replace("-", "")[:8]
+
+    def archive_sweep(self, sweep_id: str) -> str:
+        """Archive a sweep; returns its label for the action report."""
+        try:
+            self._curation_store().archive_sweep(sweep_id)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+        return self.sweep_label(sweep_id)
+
+    def restore_sweep(self, sweep_id: str) -> str:
+        """Restore an archived sweep; returns its label on success."""
+        try:
+            self._curation_store().restore_sweep(sweep_id)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+        return self.sweep_label(sweep_id)
+
+    def mark_sweep_invalid(self, sweep_id: str, reason: str) -> str:
+        """Mark a sweep scientifically invalid; returns its label."""
+        try:
+            self._curation_store().mark_sweep_invalid(sweep_id, reason)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+        return self.sweep_label(sweep_id)
+
+    def restore_sweep_validity(self, sweep_id: str) -> str:
+        """Clear the invalid facts; returns the sweep's label."""
+        try:
+            self._curation_store().restore_sweep_validity(sweep_id)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+        return self.sweep_label(sweep_id)
 
     def sweep_detail(self, sweep_id: str) -> SweepDetail | None:
         """Sweep page data; ``None`` when the id matches no sweep."""

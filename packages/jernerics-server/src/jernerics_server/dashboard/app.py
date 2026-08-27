@@ -51,7 +51,7 @@ def build_dashboard_context(
     return DashboardContext(
         api_key=api_key,
         queries=queries,
-        service=DashboardService(queries),
+        service=DashboardService(queries, store),
         signer=SessionSigner(load_or_create_secret(store.path.parent)),
     )
 

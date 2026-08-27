@@ -33,16 +33,36 @@ from jernerics_schema import (
     TrialState,
     ValueEvent,
 )
-from jernerics_server.dashboard.analysis import decode_view_state
+from jernerics_server.dashboard.analysis import (
+    decode_view_state,
+    sweep_picker_rows,
+)
 from jernerics_server.dashboard.callbacks import (
+    apply_curation,
     lineage_panel,
     page_content,
+    remember_workspace,
+    sort_from_columns,
     tray_from_grid,
+    workspace_state,
 )
 from jernerics_server.dashboard.components import grid_options, short_id
-from jernerics_server.dashboard.layout import family_grid_row, sweep_grid_row
+from jernerics_server.dashboard.layout import (
+    curation_note,
+    curation_transitions,
+    family_grid_row,
+    selection_transitions,
+    sweep_grid_row,
+    view_options,
+)
 from jernerics_server.dashboard.selection_tokens import decode_selection_token
-from jernerics_server.dashboard.service import DashboardService
+from jernerics_server.dashboard.service import (
+    CurationRejectedError,
+    CurationUnavailableError,
+    DashboardService,
+    view_counts,
+    workspace_visible,
+)
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
 from jernerics_server.queries import QueryService
@@ -474,6 +494,38 @@ def authed(tmp_path) -> TestClient:
     )
     assert response.status_code == 303
     return client
+
+
+@pytest.fixture
+def mutable(tmp_path) -> tuple[Store, DashboardService]:
+    store = Store(tmp_path / "mutable.sqlite")
+    result = IngestService(store).apply(
+        IngestRequest(protocol_version=PROTOCOL_VERSION, events=_seed_events())
+    )
+    assert not result.conflicts
+    return store, DashboardService(QueryService(store), store)
+
+
+@pytest.fixture
+def mutable_client(tmp_path) -> tuple[Store, TestClient]:
+    store = Store(tmp_path / "mounted.sqlite")
+    IngestService(store).apply(
+        IngestRequest(protocol_version=PROTOCOL_VERSION, events=_seed_events())
+    )
+    client = TestClient(
+        create_app(
+            store,
+            api_key=API_KEY,
+            artifacts_root=tmp_path / "artifacts",
+            dashboard=True,
+        ),
+        base_url="https://testserver",
+    )
+    response = client.post(
+        "/dashboard/login", data={"api_key": API_KEY}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    return store, client
 
 
 def _walk(component: Component):
@@ -986,3 +1038,529 @@ class TestRoutesServe:
             response = authed.get(url)
             assert response.status_code == 200, url
             assert "react-entry-point" in response.text
+
+
+class TestServiceCurationMutations:
+    def test_archive_and_restore_report_labels_and_change_reads(self, mutable):
+        _store, service = mutable
+        assert service.archive_sweep(str(SWEEP_B)) == "beta"
+        beta = {row.name: row for row in service.sweep_overview("ops")}["beta"]
+        assert beta.archived and not beta.invalid
+        assert service.archive_sweep(str(SWEEP_B)) == "beta"  # retry is a no-op
+        assert service.restore_sweep(str(SWEEP_B)) == "beta"
+        beta = {row.name: row for row in service.sweep_overview("ops")}["beta"]
+        assert beta.current is True
+
+    def test_mark_invalid_persists_reason_and_archives(self, mutable):
+        _store, service = mutable
+        assert service.mark_sweep_invalid(str(SWEEP_B), "  contaminated dataset ") == (
+            "beta"
+        )
+        beta = {row.name: row for row in service.sweep_overview("ops")}["beta"]
+        assert beta.invalid is True
+        assert beta.invalid_reason == "contaminated dataset"
+        assert beta.archived is True  # invalid implies an archived fact
+        assert beta.archived_ns is not None and beta.invalid_ns is not None
+
+    def test_blank_or_overlong_reason_is_rejected_by_the_store(self, mutable):
+        _store, service = mutable
+        for reason in ("   ", "", "x" * 501):
+            with pytest.raises(
+                CurationRejectedError, match=r"1\.\.500 characters after trimming"
+            ):
+                service.mark_sweep_invalid(str(SWEEP_B), reason)
+
+    def test_restore_validity_leaves_the_archived_fact(self, mutable):
+        _store, service = mutable
+        service.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        assert service.restore_sweep_validity(str(SWEEP_B)) == "beta"
+        beta = {row.name: row for row in service.sweep_overview("ops")}["beta"]
+        assert beta.invalid is False and beta.invalid_reason is None
+        assert beta.archived is True and beta.current is False
+
+    def test_restore_while_invalid_names_the_transition(self, mutable):
+        _store, service = mutable
+        service.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        with pytest.raises(CurationRejectedError, match="restore validity"):
+            service.restore_sweep(str(SWEEP_B))
+
+    def test_unknown_sweep_id_is_rejected_visibly(self, mutable):
+        _store, service = mutable
+        with pytest.raises(CurationRejectedError, match="no sweep matches"):
+            service.archive_sweep(str(uuid.uuid4()))
+
+    def test_mutations_without_a_store_raise_a_clear_error(self, service):
+        with pytest.raises(CurationUnavailableError, match="no write store"):
+            service.archive_sweep(str(SWEEP_B))
+
+
+class TestWorkspaceViews:
+    def test_view_counts_and_visibility_match_current_semantics(self, curated):
+        store, service = curated
+        store.archive_sweep(str(CUR_SWEEP_NEW))
+        store.mark_sweep_invalid(str(CUR_SWEEP_DONE), "wrong dataset")
+        summaries = service.sweep_overview("curate") + service.sweep_overview("done")
+        assert view_counts(summaries) == {"current": 1, "archived": 2, "all": 3}
+        names = {
+            view: {s.name for s in workspace_visible(summaries, view)}
+            for view in ("current", "archived", "all")
+        }
+        assert names["current"] == {"older"}
+        assert names["archived"] == {"newer", "only"}
+        assert names["all"] == {"older", "newer", "only"}
+        assert workspace_visible(summaries, "nonsense") == workspace_visible(
+            summaries, "current"
+        )
+
+    def test_incomplete_curated_sweep_stays_in_current_with_note(
+        self, store_and_service
+    ):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_A))
+        store.mark_sweep_invalid(str(SWEEP_A), "still running")
+        summaries = service.sweep_overview("ops")
+        assert [s.name for s in workspace_visible(summaries, "current")] == [
+            "alpha",
+            "beta",
+        ]
+        assert [s.name for s in workspace_visible(summaries, "archived")] == []
+        visible = workspace_visible(summaries, "current")
+        assert "does not cancel or hide active work" in str(curation_note(visible))
+
+    def test_workspace_page_renders_controls_counts_and_action_bar(
+        self, store_and_service
+    ):
+        _store, service = store_and_service
+        summaries = service.sweep_overview("ops")
+        page = page_content("/dashboard/project/ops", service)[0]
+        rendered = str(page)
+        assert "Current · 2" in rendered
+        assert "Archived · 0" in rendered
+        assert "All · 2" in rendered
+        assert "id='workspace-view'" in rendered
+        assert "id='workspace-quick'" in rendered
+        for button in ("ws-archive", "ws-invalid", "ws-restore-validity", "ws-restore"):
+            assert f"id='{button}'" in rendered
+        assert "id='ws-reason'" in rendered
+        assert "id='workspace-message'" in rendered
+        assert "id='workspace-curation-note'" in rendered
+
+    def test_workspace_state_reapplies_quick_filter_sort_and_columns(
+        self, store_and_service
+    ):
+        _store, service = store_and_service
+        state = {
+            "view": "all",
+            "quick": "alpha",
+            "filters": {
+                "state": {"filterType": "text", "type": "equals", "filter": "running"}
+            },
+            "sort": [{"colId": "started", "sort": "desc"}],
+        }
+        page, _polls = page_content(
+            "/dashboard/project/ops", service, workspace={"ops": state}
+        )
+        grid = _grid(page, "sweep-grid")
+        assert grid.filterModel == state["filters"]
+        columns = {column["field"]: column for column in grid.columnDefs}
+        assert columns["started"]["sort"] == "desc"
+        assert "sort" not in columns["name"]
+        assert grid.dashGridOptions["quickFilterText"] == "alpha"
+        views = next(
+            node
+            for node in _walk(page)
+            if getattr(node, "id", None) == "workspace-view"
+        )
+        assert views.value == "all"
+
+    def test_archived_view_renders_only_terminal_archived_rows(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        page, _polls = page_content(
+            "/dashboard/project/ops",
+            service,
+            workspace={"ops": {"view": "archived", "quick": ""}},
+        )
+        grid = _grid(page, "sweep-grid")
+        assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
+        assert "Current · 1" in str(page)
+
+
+class TestWorkspaceActions:
+    def test_grid_rows_carry_distinct_curation_markers(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        store.mark_sweep_invalid(str(SWEEP_A), "misconfigured")
+        rows = {
+            row["sweep_id"]: row
+            for row in (sweep_grid_row(s, 0) for s in service.sweep_overview("ops"))
+        }
+        assert rows[str(SWEEP_A)]["curation"] == "invalid"
+        assert rows[str(SWEEP_A)]["invalid"] is True
+        assert rows[str(SWEEP_B)]["curation"] == "archived"
+        assert rows[str(SWEEP_B)]["archived"] is True
+
+    def test_curation_transitions_matrix(self):
+        assert curation_transitions(False, False) == {
+            "archive": True,
+            "invalid": True,
+            "restore_validity": False,
+            "restore": False,
+        }
+        assert curation_transitions(True, False) == {
+            "archive": False,
+            "invalid": True,
+            "restore_validity": False,
+            "restore": True,
+        }
+        assert curation_transitions(True, True) == {
+            "archive": False,
+            "invalid": False,
+            "restore_validity": True,
+            "restore": False,
+        }
+
+    def test_mixed_selection_exposes_only_valid_transitions(self):
+        assert selection_transitions([]) == {
+            "archive": False,
+            "invalid": False,
+            "restore_validity": False,
+            "restore": False,
+        }
+        offered = selection_transitions(
+            [
+                {"sweep_id": "a", "archived": False, "invalid": False},
+                {"sweep_id": "b", "archived": True, "invalid": True},
+            ]
+        )
+        assert offered == {
+            "archive": True,
+            "invalid": True,
+            "restore_validity": True,
+            "restore": False,
+        }
+
+    def test_view_options_carry_counts(self):
+        assert view_options({"current": 3, "archived": 1, "all": 4}) == [
+            {"label": " Current · 3", "value": "current"},
+            {"label": " Archived · 1", "value": "archived"},
+            {"label": " All · 4", "value": "all"},
+        ]
+
+
+class TestWorkspacePersistence:
+    def test_sort_extraction_from_column_state(self):
+        assert sort_from_columns(
+            [
+                {"colId": "name", "sort": None, "width": 120},
+                {"colId": "started", "sort": "desc", "width": 90},
+                "junk",
+            ]
+        ) == [{"colId": "started", "sort": "desc"}]
+        assert sort_from_columns([]) is None
+        assert sort_from_columns(None) is None
+
+    def test_defaults_and_saved_state_per_project(self):
+        assert workspace_state(None, "ops") == {
+            "view": "current",
+            "quick": "",
+            "filters": None,
+            "sort": None,
+        }
+        saved = {"ops": {"view": "archived", "quick": "x"}}
+        assert workspace_state(saved, "ops")["view"] == "archived"
+        assert workspace_state(saved, "beta")["view"] == "current"
+        assert workspace_state({"ops": {"view": "weird"}}, "ops")["view"] == "current"
+
+    def test_remember_merges_only_the_edited_field(self):
+        current = {
+            "ops": {
+                "view": "all",
+                "quick": "x",
+                "filters": None,
+                "sort": [{"colId": "name", "sort": "asc"}],
+            }
+        }
+        updated = remember_workspace(current, "ops", quick="")
+        assert updated is not None
+        assert updated["ops"] == {
+            "view": "all",
+            "quick": "",
+            "filters": None,
+            "sort": [{"colId": "name", "sort": "asc"}],
+        }
+        assert remember_workspace(updated, "ops", quick="") is None
+        other = remember_workspace(updated, "beta", view="archived")
+        assert other is not None
+        assert other["ops"] == updated["ops"]
+        assert other["beta"]["view"] == "archived"
+
+
+class TestApplyCuration:
+    def test_blank_reason_is_rejected_before_dispatch(self, mutable):
+        store, service = mutable
+        ok, report = apply_curation(service, "invalid", [str(SWEEP_B)], "   ")
+        assert ok is False
+        assert "requires a reason" in report
+        assert store._curation_row(str(SWEEP_B))[1] is None
+
+    def test_partial_failure_never_claims_all_succeeded(self, mutable):
+        _store, service = mutable
+        ghost = str(uuid.uuid4())
+        ok, report = apply_curation(service, "archive", [str(SWEEP_B), ghost])
+        assert ok is False
+        assert "Archived beta" in report
+        assert "Failed" in report and ghost.replace("-", "")[:8] in report
+
+
+class TestSweepDetailCuration:
+    def test_archived_banner_and_disabled_transitions(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        page, _polls = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
+        rendered = str(page)
+        assert "This sweep is archived" in rendered
+        assert "id='detail-curation'" in rendered
+        assert "id='detail-reason'" in rendered
+        assert "id='detail-message'" in rendered
+        assert "badge-archived" in rendered
+
+    def test_invalid_banner_names_reason_and_timestamp(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        page, _polls = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
+        rendered = str(page)
+        assert "Marked scientifically invalid" in rendered
+        assert "contaminated dataset" in rendered
+        assert "UTC" in rendered
+        assert "badge-invalid" in rendered
+
+    def test_detail_buttons_follow_valid_transitions(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        page, _polls = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
+        buttons = {
+            node.id: node
+            for node in _walk(page)
+            if getattr(node, "id", "").startswith("detail-")
+        }
+        assert buttons["detail-archive"].disabled is True
+        assert buttons["detail-invalid"].disabled is True
+        assert buttons["detail-restore-validity"].disabled is False
+        assert buttons["detail-restore"].disabled is True
+
+    def test_curated_sweep_still_resolves_and_links_analysis(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "kept for audit")
+        page, _polls = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
+        link = next(
+            node
+            for node in _walk(page)
+            if getattr(node, "className", None) == "analyze-link"
+        )
+        selection = decode_selection_token(link.href.split("sel=")[1].split("&")[0])
+        assert selection.sweeps == (SWEEP_B,)
+
+
+class TestProjectPageCuration:
+    def test_rows_show_separate_archived_and_invalid_counts(self, curated):
+        store, service = curated
+        store.archive_sweep(str(CUR_SWEEP_NEW))
+        store.mark_sweep_invalid(str(CUR_SWEEP_DONE), "wrong dataset")
+        page, _polls = page_content("/dashboard/", service)
+        rendered = str(page)
+        assert "Span(children='archived 1', className='badge badge-archived')" in (
+            rendered
+        )
+        assert "Span(children='invalid 1', className='badge badge-invalid')" in (
+            rendered
+        )
+
+    def test_failed_terminal_curated_work_keeps_current_health(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        page, _polls = page_content("/dashboard/", service)
+        rendered = str(page)
+        assert "failed 1" in rendered  # alpha's failed execution stays Current
+
+
+class TestAnalysisCuratedDiscovery:
+    def test_terminal_archived_hidden_until_included(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        summaries = service.sweep_overview("ops")
+        rows, _selected = sweep_picker_rows(summaries, {"sweeps": []})
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
+        rows, _selected = sweep_picker_rows(
+            summaries, {"sweeps": []}, include_archived=True
+        )
+        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
+        rows, _selected = sweep_picker_rows(
+            summaries, {"sweeps": []}, include_invalid=True
+        )
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
+
+    def test_terminal_invalid_needs_its_own_include(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        summaries = service.sweep_overview("ops")
+        rows, _selected = sweep_picker_rows(summaries, {"sweeps": []})
+        rows, _selected = sweep_picker_rows(
+            summaries, {"sweeps": []}, include_archived=True
+        )
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
+        rows, _selected = sweep_picker_rows(
+            summaries, {"sweeps": []}, include_invalid=True
+        )
+        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
+
+    def test_picked_curated_sweep_is_never_dropped(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "kept for audit")
+        summaries = service.sweep_overview("ops")
+        rows, selected = sweep_picker_rows(summaries, {"sweeps": [str(SWEEP_B)]})
+        assert [row["sweep_id"] for row in selected] == [str(SWEEP_B)]
+        beta = next(row for row in rows if row["sweep_id"] == str(SWEEP_B))
+        assert beta["curation"] == "invalid"
+
+
+class TestMountedCurationJourney:
+    """The registered curation callbacks, driven through Dash's dispatch
+    endpoint exactly as the browser would."""
+
+    @staticmethod
+    def _callback_key(callback_map, wanted: set[str]) -> str:
+        def outputs_of(key):
+            stripped = key.removeprefix("..").removesuffix("..")
+            return {part.split("@")[0] for part in stripped.split("...") if part}
+
+        return next(key for key in callback_map if outputs_of(key) == wanted)
+
+    def _dispatch(self, client, callback_map, wanted, inputs, state=(), changed=None):
+        key = self._callback_key(callback_map, wanted)
+        specs = [
+            part.split("@")[0]
+            for part in key.removeprefix("..").removesuffix("..").split("...")
+            if part
+        ]
+        outputs = [
+            {"id": spec.split(".")[0], "property": spec.split(".")[1]} for spec in specs
+        ]
+        response = client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": key,
+                "outputs": outputs[0] if len(outputs) == 1 else outputs,
+                "inputs": inputs,
+                "state": list(state),
+                "changedPropIds": changed
+                or [f"{i['id']}.{i['property']}" for i in inputs],
+            },
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["response"]
+
+    def _callback_map(self, client):
+        from jernerics_server.dashboard.app import build_dash_app
+
+        app = client.app
+        ctx = app.state.dashboard
+        return build_dash_app(ctx).callback_map
+
+    _WORKSPACE_OUTPUTS = {
+        "workspace-message.children",
+        "sweep-grid.rowData",
+        "sweep-grid.selectedRows",
+        "workspace-view.options",
+        "workspace-curation-note.children",
+    }
+
+    def test_workspace_archive_refreshes_grid_and_counts(self, mutable_client):
+        store, client = mutable_client
+        callback_map = self._callback_map(client)
+        row = {"sweep_id": str(SWEEP_B), "archived": False, "invalid": False}
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._WORKSPACE_OUTPUTS,
+            [
+                {"id": "ws-archive", "property": "n_clicks", "value": 1},
+                {"id": "ws-invalid", "property": "n_clicks", "value": 0},
+                {"id": "ws-restore-validity", "property": "n_clicks", "value": 0},
+                {"id": "ws-restore", "property": "n_clicks", "value": 0},
+            ],
+            state=[
+                {"id": "sweep-grid", "property": "selectedRows", "value": [row]},
+                {"id": "ws-reason", "property": "value", "value": ""},
+                {"id": "project-store", "property": "data", "value": "ops"},
+                {"id": "workspace-store", "property": "data", "value": None},
+            ],
+            changed=["ws-archive.n_clicks"],
+        )
+        assert response["workspace-message"]["children"]["props"][
+            "children"
+        ].startswith("Archived beta")
+        row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
+        assert row_ids == [str(SWEEP_A)]  # beta left the Current view
+        labels = [option["label"] for option in response["workspace-view"]["options"]]
+        assert labels == [" Current · 1", " Archived · 1", " All · 2"]
+        assert store._curation_row(str(SWEEP_B))[0] is not None
+
+    def test_workspace_mark_invalid_requires_reason(self, mutable_client):
+        store, client = mutable_client
+        callback_map = self._callback_map(client)
+        row = {"sweep_id": str(SWEEP_B), "archived": False, "invalid": False}
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._WORKSPACE_OUTPUTS,
+            [
+                {"id": "ws-archive", "property": "n_clicks", "value": 0},
+                {"id": "ws-invalid", "property": "n_clicks", "value": 1},
+                {"id": "ws-restore-validity", "property": "n_clicks", "value": 0},
+                {"id": "ws-restore", "property": "n_clicks", "value": 0},
+            ],
+            state=[
+                {"id": "sweep-grid", "property": "selectedRows", "value": [row]},
+                {"id": "ws-reason", "property": "value", "value": "   "},
+                {"id": "project-store", "property": "data", "value": "ops"},
+                {"id": "workspace-store", "property": "data", "value": None},
+            ],
+            changed=["ws-invalid.n_clicks"],
+        )
+        message = response["workspace-message"]["children"]["props"]["children"]
+        assert "requires a reason" in message
+        assert store._curation_row(str(SWEEP_B))[1] is None  # nothing dispatched
+
+    _DETAIL_OUTPUTS = {"detail-message.children", "detail-curation.children"}
+
+    def test_detail_mark_invalid_persists_reason_and_banner(self, mutable_client):
+        store, client = mutable_client
+        callback_map = self._callback_map(client)
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._DETAIL_OUTPUTS,
+            [
+                {"id": "detail-archive", "property": "n_clicks", "value": 0},
+                {"id": "detail-invalid", "property": "n_clicks", "value": 1},
+                {"id": "detail-restore-validity", "property": "n_clicks", "value": 0},
+                {"id": "detail-restore", "property": "n_clicks", "value": 0},
+            ],
+            state=[
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"/dashboard/sweep/{SWEEP_B}",
+                },
+                {"id": "detail-reason", "property": "value", "value": "bad shards"},
+            ],
+            changed=["detail-invalid.n_clicks"],
+        )
+        assert response["detail-message"]["children"]["props"]["children"] == (
+            "Marked invalid beta."
+        )
+        rendered = str(response["detail-curation"]["children"])
+        assert "bad shards" in rendered
+        row = store._curation_row(str(SWEEP_B))
+        assert row[1] is not None and row[2] == "bad shards"

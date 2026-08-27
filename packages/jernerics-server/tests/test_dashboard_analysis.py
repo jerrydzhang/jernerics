@@ -47,6 +47,7 @@ from jernerics_server.dashboard.analysis import (
     expand_values,
     hydrate_tray,
     hydrate_view,
+    include_values,
     mounted_selection,
     optuna_tab_content,
     points_tab,
@@ -62,6 +63,7 @@ from jernerics_server.dashboard.analysis import (
     tray_from_edit,
     tray_summary,
     view_from_controls,
+    view_from_include,
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
@@ -1471,7 +1473,7 @@ class TestViewSync:
         """The control-sync write fires the edit callback with every
         input; a dropdown whose options have not loaded reports None and
         must not wipe the hydrated key."""
-        doc = dict(default_view_state(), active="series")
+        doc: dict[str, Any] = dict(default_view_state(), active="series")
         doc["series"] = {
             **doc["series"],
             "keys": ["loss"],
@@ -1500,7 +1502,7 @@ class TestViewSync:
         }
         assert edited_fields({"url.search"}) == set()
 
-    _LOADED = {
+    _LOADED: dict[str, set[str] | None] = {
         "key": {"loss", "accuracy", "summary"},
         "color": {"host", "shard"},
         "facet": {"host", "shard"},
@@ -1523,12 +1525,12 @@ class TestViewSync:
         doc = default_view_state()
         doc["series"] = {**doc["series"], "keys": ["loss"], "color": "shard"}
         doc["optuna"] = {**doc["optuna"], "contour_x": "lr"}
-        unloaded = {name: None for name in self._LOADED}
+        unloaded: dict[str, set[str] | None] = {name: None for name in self._LOADED}
         _active, key, _reduction, color, _facet, cx, _cy = control_values(doc, unloaded)
         assert key is no_update
         assert color is no_update
         assert cx is no_update
-        partial = {**self._LOADED, "key": set()}
+        partial: dict[str, set[str] | None] = {**self._LOADED, "key": set()}
         _active, key, _reduction, _color, _facet, cx, _cy = control_values(doc, partial)
         assert key is no_update
         assert cx == "lr"
@@ -1553,8 +1555,8 @@ class TestScopeBar:
         assert "1 execution(s)" in rendered
         assert "retry families expanded" in rendered
 
-    def test_projectless_bar_tells_the_user_to_pick(self):
-        rendered = str(scope_bar(None, None, None))
+    def test_projectless_bar_tells_the_user_to_pick(self, service):
+        rendered = str(scope_bar(service, None, None))
         assert "Pick a project" in rendered
 
     def test_scope_bar_sits_above_tabs_and_selection_tab_is_gone(self):
@@ -1860,7 +1862,7 @@ class TestColdStartMountedJourney:
     def test_deep_link_settles_view_state_alongside_the_tray(
         self, authed, callback_map
     ):
-        doc = dict(default_view_state(), active="series")
+        doc: dict[str, Any] = dict(default_view_state(), active="series")
         doc["series"] = {**doc["series"], "keys": ["loss"], "reduction": "mean"}
         sel = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = f"?sel={sel}&view={encode_view_state(doc)}"
@@ -1958,3 +1960,165 @@ class TestAnalysisRouteServes:
         response = authed.get(f"/dashboard/analysis?sel={token}")
         assert response.status_code == 200
         assert "react-entry-point" in response.text
+
+
+@pytest.fixture
+def curated_service(tmp_path) -> tuple[Store, DashboardService]:
+    store = _seeded_store(tmp_path)
+    store.archive_sweep(str(SWEEP_B))
+    store.mark_sweep_invalid(str(SWEEP_C), "sensor drifted after epoch 1")
+    return store, DashboardService(QueryService(store))
+
+
+class TestIncludeControls:
+    """jernerics-cdf.2: the v1 view document gains discovery-only
+    ``include_archived``/``include_invalid`` booleans; the typed
+    Selection and ``sel=`` token stay untouched."""
+
+    def test_defaults_are_off_and_missing_fields_take_them(self):
+        assert default_view_state()["include_archived"] is False
+        assert default_view_state()["include_invalid"] is False
+        assert decode_view_state(json.dumps({"v": VIEW_VERSION})) == (
+            default_view_state()
+        )
+
+    def test_round_trip_carries_both_flags(self):
+        doc = default_view_state()
+        doc["include_archived"] = True
+        doc["include_invalid"] = True
+        encoded = encode_view_state(doc)
+        assert decode_view_state(unquote(encoded)) == doc
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            json.dumps({"v": VIEW_VERSION, "include_archived": "yes"}),
+            json.dumps({"v": VIEW_VERSION, "include_archived": 1}),
+            json.dumps({"v": VIEW_VERSION, "include_invalid": []}),
+        ],
+    )
+    def test_non_boolean_flags_fail_with_descriptive_errors(self, payload):
+        with pytest.raises(ViewStateError, match="include_"):
+            decode_view_state(payload)
+
+    def test_checklist_values_and_edits_touch_only_the_flags(self):
+        doc: dict[str, Any] = dict(default_view_state(), active="series")
+        doc["series"] = {**doc["series"], "keys": ["loss"]}
+        edited = view_from_include(doc, ["invalid"])
+        assert edited["include_invalid"] is True
+        assert edited["include_archived"] is False
+        assert edited["series"] == doc["series"]
+        assert edited["active"] == "series"
+        assert include_values(edited) == ["invalid"]
+        assert include_values(view_from_include(edited, ["archived", "invalid"])) == [
+            "archived",
+            "invalid",
+        ]
+        assert include_values(None) == []
+
+    def test_default_flags_stay_out_of_the_url(self, service):
+        target = search_from_state(service, PROJECT, _tray(), default_view_state(), "")
+        assert target is None or "view=" not in target
+
+    def test_include_flags_are_minted_into_the_view_parameter(self, service):
+        doc = dict(default_view_state(), include_archived=True)
+        target = search_from_state(service, PROJECT, _tray(), doc, "")
+        assert target is not None and "&view=" in target
+        raw = target.split("&view=")[1]
+        assert decode_view_state(unquote(raw))["include_archived"] is True
+
+
+class TestCuratedDiscovery:
+    def test_terminal_curated_sweeps_hidden_from_discovery(self, curated_service):
+        _store, service = curated_service
+        summaries = service.sweep_overview(PROJECT)
+        rows, _selected = sweep_picker_rows(summaries, dict(EMPTY_TRAY))
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
+
+    def test_include_controls_reveal_their_own_category(self, curated_service):
+        _store, service = curated_service
+        summaries = service.sweep_overview(PROJECT)
+        rows, _selected = sweep_picker_rows(
+            summaries, dict(EMPTY_TRAY), include_archived=True
+        )
+        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
+        rows, _selected = sweep_picker_rows(
+            summaries, dict(EMPTY_TRAY), include_invalid=True
+        )
+        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_C)}
+        rows, _selected = sweep_picker_rows(
+            summaries, dict(EMPTY_TRAY), include_archived=True, include_invalid=True
+        )
+        assert {row["sweep_id"] for row in rows} == {
+            str(SWEEP_A),
+            str(SWEEP_B),
+            str(SWEEP_C),
+        }
+
+    def test_revealed_rows_carry_distinct_curation_markers(self, curated_service):
+        _store, service = curated_service
+        rows, _selected = sweep_picker_rows(
+            service.sweep_overview(PROJECT),
+            dict(EMPTY_TRAY),
+            include_archived=True,
+            include_invalid=True,
+        )
+        markers = {row["sweep_id"]: row["curation"] for row in rows}
+        assert markers[str(SWEEP_B)] == "archived"
+        assert markers[str(SWEEP_C)] == "invalid"
+        assert markers[str(SWEEP_A)] == ""
+
+    def test_hydrated_curated_token_survives_with_include_off(self, curated_service):
+        _store, service = curated_service
+        selection = Selection(project=PROJECT, sweeps=(SWEEP_C,))
+        search = f"?sel={encode_selection_token(selection)}"
+        tray, error = hydrate_tray(
+            service, PROJECT, "/dashboard/analysis", search, None
+        )
+        assert error is None and tray is not None
+        rows, selected = sweep_picker_rows(service.sweep_overview(PROJECT), tray)
+        assert [row["sweep_id"] for row in selected] == [str(SWEEP_C)]
+        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_C)}
+
+
+class TestCuratedScopeBar:
+    def test_archived_pick_badges_without_warning(self, curated_service):
+        _store, service = curated_service
+        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_B)]))
+        rendered = str(bar)
+        assert "Scope: beta" in rendered
+        assert "beta archived" in rendered
+        assert "badge-archived" in rendered
+        assert "scientifically invalid" not in rendered
+
+    def test_invalid_pick_badges_reason_and_warns(self, curated_service):
+        _store, service = curated_service
+        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_C)]))
+        rendered = str(bar)
+        assert "gamma invalid" in rendered
+        assert "badge-invalid" in rendered
+        assert "sensor drifted after epoch 1" in rendered
+        assert "marked scientifically invalid" in rendered
+
+    def test_mixed_scope_keeps_names_and_both_badges(self, curated_service):
+        _store, service = curated_service
+        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_C)]))
+        rendered = str(bar)
+        assert "Scope: alpha, gamma" in rendered
+        assert "2 sweep(s)" in rendered
+        assert "gamma archived" in rendered and "gamma invalid" in rendered
+
+    def test_series_entry_arrives_with_warning_for_invalid_sweep(self, curated_service):
+        _store, service = curated_service
+        href = series_entry_href(PROJECT, str(SWEEP_C))
+        selection = decode_selection_token(href.split("sel=")[1].split("&")[0])
+        tray, error = hydrate_tray(
+            service,
+            PROJECT,
+            "/dashboard/analysis",
+            f"?sel={encode_selection_token(selection)}&view={href.split('&view=')[1]}",
+            None,
+        )
+        assert error is None and tray is not None
+        rendered = str(scope_bar(service, PROJECT, tray))
+        assert "marked scientifically invalid" in rendered

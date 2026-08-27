@@ -22,7 +22,7 @@ from dash_ag_grid import AgGrid
 from jernerics_schema import Selection
 
 from . import components, figures
-from .components import MISSING, Empty, short_id
+from .components import MISSING, Badge, Empty, short_id
 from .routes import ROUTES_BASE, parse_route
 from .selection_tokens import (
     SelectionTokenError,
@@ -79,6 +79,8 @@ def default_view_state() -> dict[str, Any]:
         },
         "highlighted_families": [],
         "auto_refresh": False,
+        "include_archived": False,
+        "include_invalid": False,
         "optuna": {"contour_x": None, "contour_y": None},
     }
 
@@ -179,6 +181,12 @@ def decode_view_state(raw: str) -> dict[str, Any]:
     auto_refresh = payload.get("auto_refresh", False)
     _require(isinstance(auto_refresh, bool), "auto_refresh must be a boolean")
     doc["auto_refresh"] = auto_refresh
+    include_archived = payload.get("include_archived", False)
+    _require(isinstance(include_archived, bool), "include_archived must be a boolean")
+    doc["include_archived"] = include_archived
+    include_invalid = payload.get("include_invalid", False)
+    _require(isinstance(include_invalid, bool), "include_invalid must be a boolean")
+    doc["include_invalid"] = include_invalid
     optuna = payload.get("optuna", {})
     _require(isinstance(optuna, dict), "optuna must be an object")
     doc["optuna"]["contour_x"] = _optional_key(
@@ -349,6 +357,28 @@ def analysis_page() -> html.Div:
                         "URL token.",
                         className="hint",
                     ),
+                    dcc.Checklist(
+                        id="analysis-include",
+                        options=[
+                            {
+                                "label": " include archived sweeps",
+                                "value": "archived",
+                            },
+                            {
+                                "label": " include invalid sweeps",
+                                "value": "invalid",
+                            },
+                        ],
+                        value=[],
+                        className="include-toggle",
+                    ),
+                    html.P(
+                        "Terminal archived and invalid sweeps stay out of "
+                        "discovery until included; sweeps already in the "
+                        "scope are never removed, and their badges and "
+                        "warnings stay visible above.",
+                        className="hint",
+                    ),
                     AgGrid(
                         id="analysis-sweep-grid",
                         rowData=[],
@@ -424,27 +454,44 @@ def scope_bar(
     service: DashboardService, project: str | None, tray: dict[str, Any] | None
 ) -> html.Div:
     """The persistent scope line above every analysis view: selected
-    sweep names plus the tray's counts."""
+    sweep names, curation badges, and the tray's counts. Curated sweeps
+    stay in scope with their state named — never silently removed."""
     tray = tray or EMPTY_TRAY
     if not project:
         return html.Div(
             Empty("Pick a project in the header to analyze its sweeps."),
             className="scope-bar",
         )
-    names = {
-        summary.sweep_id: summary.name for summary in service.sweep_overview(project)
+    summaries = {
+        summary.sweep_id: summary for summary in service.sweep_overview(project)
     }
+    picked_ids = list(tray.get("sweeps") or [])
     picked = [
-        names.get(sweep_id, short_id(sweep_id)) for sweep_id in tray.get("sweeps") or []
+        (summaries[sweep_id].name if sweep_id in summaries else short_id(sweep_id))
+        for sweep_id in picked_ids
     ]
     label = ", ".join(picked) if picked else "nothing selected"
-    return html.Div(
-        [
-            html.Span(f"Scope: {label}", className="scope-sweeps"),
-            html.Span(tray_summary(tray), className="scope-counts"),
-        ],
-        className="scope-bar",
-    )
+    children: list[Any] = [
+        html.Span(f"Scope: {label}", className="scope-sweeps"),
+        html.Span(tray_summary(tray), className="scope-counts"),
+    ]
+    for sweep_id, name in zip(picked_ids, picked, strict=True):
+        summary = summaries.get(sweep_id)
+        if summary is None:
+            continue
+        if summary.archived:
+            children.append(Badge(f"{name} archived", kind="archived"))
+        if summary.invalid:
+            children.append(Badge(f"{name} invalid", kind="invalid"))
+            children.append(
+                html.Span(
+                    f"{name} is marked scientifically invalid — reason: "
+                    f"{summary.invalid_reason}. Continue only with that "
+                    "in mind, or remove it from the scope.",
+                    className="scope-warning",
+                )
+            )
+    return html.Div(children, className="scope-bar")
 
 
 def _series_tab() -> html.Div:
@@ -514,6 +561,7 @@ _SWEEP_PICKER_COLUMNS: list[dict[str, Any]] = [
     },
     {"headerName": "Id", "field": "sweep_id"},
     {"headerName": "State", "field": "state"},
+    {"headerName": "Curation", "field": "curation"},
     {"headerName": "Health", "field": "health"},
     {"headerName": "Backend", "field": "backend"},
 ]
@@ -533,22 +581,53 @@ def _objective(objective: float | None) -> str:
 
 
 def sweep_picker_rows(
-    summaries: list[Any], tray: dict[str, Any] | None
+    summaries: list[Any],
+    tray: dict[str, Any] | None,
+    *,
+    include_archived: bool = False,
+    include_invalid: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Sweep-picker grid rows, selected rows matching the tray's sweeps."""
-    rows = [
-        {
-            "sweep_id": summary.sweep_id,
-            "name": summary.name,
-            "state": summary.state,
-            "health": summary.health,
-            "backend": summary.backend or MISSING,
-        }
-        for summary in summaries
-    ]
+    """Sweep-picker grid rows, selected rows matching the tray's sweeps.
+
+    Terminal archived/invalid sweeps stay out of discovery until the
+    include controls reveal them; sweeps already picked (through a
+    ``sel=`` token, the workspace grid, or Analyze series) are never
+    dropped, and incomplete sweeps always stay discoverable — curation
+    never hides active work.
+    """
     picked = set((tray or {}).get("sweeps") or [])
+    rows = []
+    for summary in summaries:
+        hidden_curation = (summary.invalid and not include_invalid) or (
+            summary.archived and not summary.invalid and not include_archived
+        )
+        if (
+            hidden_curation
+            and not summary.incomplete
+            and summary.sweep_id not in picked
+        ):
+            continue
+        rows.append(
+            {
+                "sweep_id": summary.sweep_id,
+                "name": summary.name,
+                "state": summary.state,
+                "health": summary.health,
+                "backend": summary.backend or MISSING,
+                "curation": _picker_curation(summary),
+            }
+        )
     selected = [row for row in rows if row["sweep_id"] in picked]
     return rows, selected
+
+
+def _picker_curation(summary: Any) -> str:
+    """Distinct curation marker for picker cells; invalid outranks archived."""
+    if summary.invalid:
+        return "invalid"
+    if summary.archived:
+        return "archived"
+    return ""
 
 
 def family_picker_rows(
@@ -715,6 +794,30 @@ def cold_start(
 def expand_values(tray: dict[str, Any] | None) -> list[str]:
     """Expansion-toggle checklist values matching the tray's flag."""
     return ["expand"] if (tray or {}).get("expand") else []
+
+
+def include_values(doc: dict[str, Any] | None) -> list[str]:
+    """Include-control checklist values matching the view state."""
+    doc = doc or default_view_state()
+    values = []
+    if doc.get("include_archived"):
+        values.append("archived")
+    if doc.get("include_invalid"):
+        values.append("invalid")
+    return values
+
+
+def view_from_include(
+    current: dict[str, Any] | None, values: list[str] | None
+) -> dict[str, Any]:
+    """View state after an include-control edit; only the two include
+    flags change."""
+    picked = set(values or [])
+    return {
+        **(current or default_view_state()),
+        "include_archived": "archived" in picked,
+        "include_invalid": "invalid" in picked,
+    }
 
 
 def synced_search(
