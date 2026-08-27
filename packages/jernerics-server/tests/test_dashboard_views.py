@@ -69,6 +69,15 @@ E5 = uuid.UUID("dd150000-0000-4000-8000-000000000000")
 E6 = uuid.UUID("dd160000-0000-4000-8000-000000000000")
 E7 = uuid.UUID("dd170000-0000-4000-8000-000000000000")
 E8 = uuid.UUID("dd180000-0000-4000-8000-000000000000")
+CUR_SWEEP_OLD = uuid.UUID("aa310000-0000-4000-8000-000000000000")
+CUR_SWEEP_NEW = uuid.UUID("aa320000-0000-4000-8000-000000000000")
+CUR_SWEEP_DONE = uuid.UUID("aa330000-0000-4000-8000-000000000000")
+CUR_T1 = uuid.UUID("cc310000-0000-4000-8000-000000000000")
+CUR_T2 = uuid.UUID("cc320000-0000-4000-8000-000000000000")
+CUR_T3 = uuid.UUID("cc330000-0000-4000-8000-000000000000")
+CUR_E1 = uuid.UUID("dd310000-0000-4000-8000-000000000000")
+CUR_E2 = uuid.UUID("dd320000-0000-4000-8000-000000000000")
+CUR_E3 = uuid.UUID("dd330000-0000-4000-8000-000000000000")
 
 
 def _seed_events() -> list:
@@ -355,14 +364,91 @@ def _seed_events() -> list:
     ]
 
 
+def _curation_seed_events() -> list:
+    """Project curate: terminal sweeps older/newer; project done: one
+    terminal sweep. Flat, terminal-only facts for curation reads."""
+    now = datetime.now(UTC)
+
+    def at(seconds_ago: float) -> datetime:
+        return now - timedelta(seconds=seconds_ago)
+
+    def event(cls, seconds_ago: float, **kwargs):
+        return cls(event_id=uuid.uuid4(), recorded_at=at(seconds_ago), **kwargs)
+
+    def terminal_sweep(
+        sweep_id: uuid.UUID,
+        project: str,
+        name: str,
+        trial_id: uuid.UUID,
+        execution_id: uuid.UUID,
+        seconds_ago: float,
+    ) -> list:
+        return [
+            event(
+                SweepSnapshotEvent,
+                seconds_ago,
+                project=project,
+                sweep_id=sweep_id,
+                name=name,
+                state="completed",
+            ),
+            event(
+                TrialSnapshotEvent,
+                seconds_ago - 10,
+                trial_id=trial_id,
+                sweep_id=sweep_id,
+                number=0,
+                state=TrialState.COMPLETED,
+                retry_root_trial_id=trial_id,
+            ),
+            event(
+                ExecutionStartEvent,
+                seconds_ago - 20,
+                execution_id=execution_id,
+                trial_id=trial_id,
+                hostname="node09",
+                started_at=at(seconds_ago - 20),
+            ),
+            event(
+                ExecutionEndEvent,
+                seconds_ago - 30,
+                execution_id=execution_id,
+                ended_at=at(seconds_ago - 30),
+                outcome="success",
+                exit_code=0,
+            ),
+        ]
+
+    return [
+        *terminal_sweep(CUR_SWEEP_OLD, "curate", "older", CUR_T1, CUR_E1, 300),
+        *terminal_sweep(CUR_SWEEP_NEW, "curate", "newer", CUR_T2, CUR_E2, 100),
+        *terminal_sweep(CUR_SWEEP_DONE, "done", "only", CUR_T3, CUR_E3, 50),
+    ]
+
+
 @pytest.fixture
-def service(tmp_path) -> DashboardService:
+def store_and_service(tmp_path) -> tuple[Store, DashboardService]:
     store = Store(tmp_path / "views.sqlite")
     result = IngestService(store).apply(
         IngestRequest(protocol_version=PROTOCOL_VERSION, events=_seed_events())
     )
     assert not result.conflicts
-    return DashboardService(QueryService(store))
+    return store, DashboardService(QueryService(store))
+
+
+@pytest.fixture
+def service(store_and_service) -> DashboardService:
+    return store_and_service[1]
+
+
+@pytest.fixture
+def curated(tmp_path) -> tuple[Store, DashboardService]:
+    store = Store(tmp_path / "curation.sqlite")
+    result = IngestService(store).apply(
+        IngestRequest(protocol_version=PROTOCOL_VERSION, events=_curation_seed_events())
+    )
+    assert not result.conflicts
+    return store, DashboardService(QueryService(store))
 
 
 @pytest.fixture
@@ -726,6 +812,134 @@ class TestPolling:
         assert page_content(f"/dashboard/trial/{F2}", service)[1] is False
         assert page_content(f"/dashboard/execution/{E4}", service)[1] is True
         assert page_content(f"/dashboard/execution/{E8}", service)[1] is False
+
+
+class TestCurrentSemantics:
+    def test_uncurated_sweeps_are_current(self, store_and_service):
+        _, service = store_and_service
+        summaries = {row.name: row for row in service.sweep_overview("ops")}
+        assert summaries["alpha"].current is True
+        assert summaries["beta"].current is True
+
+    def test_terminal_archived_sweep_is_not_current(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        summaries = {row.name: row for row in service.sweep_overview("ops")}
+        assert summaries["beta"].archived is True
+        assert summaries["beta"].current is False
+        assert summaries["alpha"].current is True
+
+    def test_incomplete_sweep_stays_current_despite_curation(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_A))
+        store.mark_sweep_invalid(str(SWEEP_A), "misconfigured but still running")
+        summaries = {row.name: row for row in service.sweep_overview("ops")}
+        alpha = summaries["alpha"]
+        assert alpha.archived is True and alpha.invalid is True
+        assert alpha.incomplete is True
+        assert alpha.current is True
+
+    def test_invalid_terminal_sweep_needs_both_restores(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        summaries = {row.name: row for row in service.sweep_overview("ops")}
+        assert summaries["beta"].current is False
+        store.restore_sweep_validity(str(SWEEP_B))
+        summaries = {row.name: row for row in service.sweep_overview("ops")}
+        assert summaries["beta"].invalid is False
+        assert summaries["beta"].archived is True
+        assert summaries["beta"].current is False
+        store.restore_sweep(str(SWEEP_B))
+        summaries = {row.name: row for row in service.sweep_overview("ops")}
+        assert summaries["beta"].current is True
+
+
+class TestProjectCatalogCuration:
+    def _row(self, service, project):
+        return {row.project: row for row in service.project_catalog()}[project]
+
+    def test_terminal_archived_sweep_leaves_current_reads(self, curated):
+        store, service = curated
+        before = self._row(service, "curate")
+        assert before.recent_sweep == "newer"
+        assert before.succeeded == 2
+        assert (before.archived_sweeps, before.invalid_sweeps) == (0, 0)
+        store.archive_sweep(str(CUR_SWEEP_NEW))
+        after = self._row(service, "curate")
+        assert after.succeeded == 1
+        assert after.recent_sweep == "older"
+        assert after.last_activity_ns < before.last_activity_ns
+        assert (after.archived_sweeps, after.invalid_sweeps) == (1, 0)
+
+    def test_restored_sweep_returns_to_current_reads(self, curated):
+        store, service = curated
+        store.archive_sweep(str(CUR_SWEEP_NEW))
+        store.restore_sweep(str(CUR_SWEEP_NEW))
+        row = self._row(service, "curate")
+        assert row.recent_sweep == "newer"
+        assert row.succeeded == 2
+        assert (row.archived_sweeps, row.invalid_sweeps) == (0, 0)
+
+    def test_invalid_terminal_sweep_hidden_and_counted(self, curated):
+        store, service = curated
+        store.mark_sweep_invalid(str(CUR_SWEEP_NEW), "contaminated inputs")
+        row = self._row(service, "curate")
+        assert row.succeeded == 1
+        assert row.recent_sweep == "older"
+        assert row.last_activity_ns < self._row(service, "done").last_activity_ns
+        assert (row.archived_sweeps, row.invalid_sweeps) == (1, 1)
+
+    def test_fully_archived_project_stays_listed(self, curated):
+        store, service = curated
+        store.archive_sweep(str(CUR_SWEEP_DONE))
+        rows = {row.project: row for row in service.project_catalog()}
+        assert set(rows) == {"curate", "done"}
+        done = rows["done"]
+        assert (done.archived_sweeps, done.invalid_sweeps) == (1, 0)
+        assert done.recent_sweep is None
+        assert done.last_activity_ns is None
+        assert (done.active, done.quiet, done.stale, done.succeeded) == (0, 0, 0, 0)
+
+    def test_catalog_excludes_terminal_archived_sweep_from_ops_counts(
+        self, store_and_service
+    ):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        row = self._row(service, "ops")
+        assert row.succeeded == 1
+        assert (row.active, row.stale, row.failed) == (1, 1, 1)
+        assert row.recent_sweep == "alpha"
+        assert (row.archived_sweeps, row.invalid_sweeps) == (1, 0)
+
+
+class TestOverviewCuration:
+    def test_overview_returns_all_sweeps_with_curation_facts(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        summaries = {row.name: row for row in service.sweep_overview("ops")}
+        assert set(summaries) == {"alpha", "beta"}
+        beta = summaries["beta"]
+        assert beta.archived is True
+        assert beta.invalid is True
+        assert beta.invalid_reason == "contaminated dataset"
+        assert beta.archived_ns is not None and beta.invalid_ns is not None
+        alpha = summaries["alpha"]
+        assert alpha.archived_ns is None
+        assert alpha.invalid_ns is None
+        assert alpha.invalid_reason is None
+
+    def test_explicit_sweep_read_returns_curated_sweep(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        store.mark_sweep_invalid(str(SWEEP_A), "kept for audit")
+        beta = service.sweep_detail(str(SWEEP_B))
+        assert beta is not None
+        assert beta.overview.archived is True
+        assert beta.overview.current is False
+        alpha = service.sweep_detail(str(SWEEP_A))
+        assert alpha is not None
+        assert alpha.overview.invalid_reason == "kept for audit"
+        assert alpha.overview.current is True
 
 
 class TestNoSqlInCallbacks:

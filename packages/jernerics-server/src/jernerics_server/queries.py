@@ -149,6 +149,32 @@ _ZERO_COUNTS: dict[str, int] = {
 }
 
 
+_CURRENT_SWEEPS_CTES = (
+    "live AS ("
+    "SELECT t.sweep_id AS sweep_id, SUM(t.state = 'waiting') AS waiting, "
+    "SUM(t.state = 'running') AS running FROM trials t GROUP BY t.sweep_id), "
+    "ended AS ("
+    "SELECT t.sweep_id AS sweep_id, COUNT(*) AS started, "
+    "SUM(e.ended_ns IS NOT NULL) AS terminal FROM executions e "
+    "JOIN trials t ON e.trial_id = t.trial_id GROUP BY t.sweep_id), "
+    "sweep_curated AS ("
+    "SELECT s.sweep_id AS sweep_id, s.project AS project, s.name AS name, "
+    "s.updated_ns AS updated_ns, c.archived_ns IS NOT NULL AS archived, "
+    "c.invalid_ns IS NOT NULL AS invalid, "
+    "COALESCE(live.waiting, 0) > 0 OR COALESCE(live.running, 0) > 0 "
+    "OR COALESCE(ended.started, 0) > COALESCE(ended.terminal, 0) AS incomplete "
+    "FROM sweeps s LEFT JOIN sweep_curation c ON c.sweep_id = s.sweep_id "
+    "LEFT JOIN live ON live.sweep_id = s.sweep_id "
+    "LEFT JOIN ended ON ended.sweep_id = s.sweep_id), "
+    "current_sweeps AS ("
+    "SELECT * FROM sweep_curated WHERE incomplete OR NOT (archived OR invalid))"
+)
+"""CTE chain ending in ``current_sweeps``: every sweep with its curation
+facts and the completeness notion :meth:`QueryService.sweep_overview`
+computes; a sweep is current while incomplete, or terminal and neither
+archived nor invalid."""
+
+
 class QueryService:
     """Every domain read over the v3 store, shared by HTTP and callbacks."""
 
@@ -805,23 +831,26 @@ class QueryService:
         return sql, [now_ns, quiet_ns, now_ns, stale_ns]
 
     def project_catalog(self) -> list[dict[str, Any]]:
-        """Per-project operational rollup: execution health counts, the most
-        recently updated sweep, and last activity across all records.
+        """Per-project operational rollup over current sweeps: execution
+        health counts, the most recently updated sweep, and last activity;
+        archived and invalid sweep counts keep hidden history discoverable.
 
-        Three batched queries (no per-project loops); monitoring labels are
+        Batched queries (no per-project loops); monitoring labels are
         derived in SQL with the same thresholds as :func:`_monitoring`.
+        Projects stay listed even when every sweep is archived.
         """
         case_sql, case_params = self._monitoring_case()
         _, count_rows = self._store.query(
+            f"WITH {_CURRENT_SWEEPS_CTES} "
             "SELECT ex.project, "
             "SUM(ex.label = 'active'), SUM(ex.label = 'quiet'), "
             "SUM(ex.label = 'stale'), SUM(ex.label = 'unknown'), "
             "SUM(ex.label = 'ended' AND ex.outcome = 'success'), "
             "SUM(ex.label = 'ended' AND ex.outcome = 'failure') "
-            "FROM (SELECT s.project AS project, e.outcome AS outcome, "
+            "FROM (SELECT cur.project AS project, e.outcome AS outcome, "
             f"{case_sql} AS label "
             "FROM executions e JOIN trials t ON e.trial_id = t.trial_id "
-            "JOIN sweeps s ON t.sweep_id = s.sweep_id) ex "
+            "JOIN current_sweeps cur ON cur.sweep_id = t.sweep_id) ex "
             "GROUP BY ex.project",
             case_params,
         )
@@ -836,33 +865,45 @@ class QueryService:
             for row in count_rows
         }
         _, activity_rows = self._store.query(
+            f"WITH {_CURRENT_SWEEPS_CTES} "
             "SELECT project, MAX(updated_ns) FROM ("
-            "SELECT project, updated_ns FROM sweeps "
-            "UNION ALL SELECT s.project, t.updated_ns FROM trials t "
-            "JOIN sweeps s ON t.sweep_id = s.sweep_id "
-            "UNION ALL SELECT s.project, e.updated_ns FROM executions e "
+            "SELECT project, updated_ns FROM current_sweeps "
+            "UNION ALL SELECT cur.project, t.updated_ns FROM trials t "
+            "JOIN current_sweeps cur ON cur.sweep_id = t.sweep_id "
+            "UNION ALL SELECT cur.project, e.updated_ns FROM executions e "
             "JOIN trials t ON e.trial_id = t.trial_id "
-            "JOIN sweeps s ON t.sweep_id = s.sweep_id) "
+            "JOIN current_sweeps cur ON cur.sweep_id = t.sweep_id) "
             "GROUP BY project"
         )
         activity = {row[0]: row[1] for row in activity_rows}
         _, sweep_rows = self._store.query(
-            "SELECT s.project, s.name FROM sweeps s "
-            "JOIN (SELECT project, MAX(updated_ns) AS mx FROM sweeps "
-            "GROUP BY project) m ON m.project = s.project "
-            "AND s.updated_ns = m.mx ORDER BY s.project, s.name"
+            f"WITH {_CURRENT_SWEEPS_CTES} "
+            "SELECT cur.project, cur.name FROM current_sweeps cur "
+            "JOIN (SELECT project, MAX(updated_ns) AS mx FROM current_sweeps "
+            "GROUP BY project) m ON m.project = cur.project "
+            "AND cur.updated_ns = m.mx ORDER BY cur.project, cur.name"
         )
         recent: dict[str, str] = {}
         for row in sweep_rows:
             recent.setdefault(row[0], row[1])
+        _, curation_rows = self._store.query(
+            f"WITH {_CURRENT_SWEEPS_CTES} "
+            "SELECT project, SUM(archived), SUM(invalid) FROM sweep_curated "
+            "GROUP BY project"
+        )
+        curation = {
+            row[0]: {"archived_sweeps": row[1] or 0, "invalid_sweeps": row[2] or 0}
+            for row in curation_rows
+        }
         return [
             {
                 "project": project,
                 **(_ZERO_COUNTS | counts.get(project, {})),
                 "recent_sweep": recent.get(project),
                 "last_activity_ns": activity.get(project),
+                **curation[project],
             }
-            for project in sorted(activity)
+            for project in sorted(curation)
         ]
 
     def sweep_overview(self, selection: Selection) -> list[dict[str, Any]]:
@@ -880,7 +921,9 @@ class QueryService:
         _, rows = self._store.query(
             "WITH sel AS ("
             "SELECT s.sweep_id AS sweep_id, s.name AS name, s.state AS state, "
-            "s.updated_ns AS updated_ns FROM sweeps s "
+            "s.updated_ns AS updated_ns, c.archived_ns AS archived_ns, "
+            "c.invalid_ns AS invalid_ns, c.invalid_reason AS invalid_reason "
+            "FROM sweeps s LEFT JOIN sweep_curation c ON c.sweep_id = s.sweep_id "
             f"WHERE {scope}), "
             "latest_sub AS ("
             "SELECT sweep_id, submitted_ns, backend, expected_trials FROM ("
@@ -921,7 +964,8 @@ class QueryService:
             "COALESCE(m.n_active, 0), COALESCE(m.n_quiet, 0), "
             "COALESCE(m.n_stale, 0), COALESCE(m.n_unknown, 0), "
             "COALESCE(m.n_succeeded, 0), COALESCE(m.n_failed, 0), "
-            "COALESCE(ts.waiting, 0), COALESCE(ts.running, 0) "
+            "COALESCE(ts.waiting, 0), COALESCE(ts.running, 0), "
+            "sel.archived_ns, sel.invalid_ns, sel.invalid_reason "
             "FROM sel LEFT JOIN latest_sub ls ON ls.sweep_id = sel.sweep_id "
             "LEFT JOIN jobs j ON j.sweep_id = sel.sweep_id "
             "LEFT JOIN mon m ON m.sweep_id = sel.sweep_id "
@@ -950,6 +994,9 @@ class QueryService:
                         "failed",
                         "waiting_trials",
                         "running_trials",
+                        "archived_ns",
+                        "invalid_ns",
+                        "invalid_reason",
                     ),
                     row,
                     strict=True,

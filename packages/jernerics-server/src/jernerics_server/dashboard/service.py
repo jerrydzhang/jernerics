@@ -45,6 +45,8 @@ class ProjectSummary:
     failed: int
     recent_sweep: str | None
     last_activity_ns: int | None
+    archived_sweeps: int
+    invalid_sweeps: int
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,17 @@ class SweepSummary:
     latest_submitted_ns: int | None
     waiting_trials: int
     running_trials: int
+    archived_ns: int | None
+    invalid_ns: int | None
+    invalid_reason: str | None
+
+    @property
+    def archived(self) -> bool:
+        return self.archived_ns is not None
+
+    @property
+    def invalid(self) -> bool:
+        return self.invalid_ns is not None
 
     @property
     def health(self) -> str:
@@ -84,6 +97,12 @@ class SweepSummary:
         return bool(
             self.waiting_trials or self.running_trials or self.started > self.terminal
         )
+
+    @property
+    def current(self) -> bool:
+        """True while incomplete regardless of curation, or terminal and
+        neither archived nor invalid."""
+        return self.incomplete or not (self.archived or self.invalid)
 
 
 @dataclass(frozen=True)
@@ -233,6 +252,8 @@ class DashboardService:
                 failed=row["failed"],
                 recent_sweep=row["recent_sweep"],
                 last_activity_ns=row["last_activity_ns"],
+                archived_sweeps=row["archived_sweeps"],
+                invalid_sweeps=row["invalid_sweeps"],
             )
             for row in self.queries.project_catalog()
         ]
@@ -263,6 +284,9 @@ class DashboardService:
                 latest_submitted_ns=row["latest_submitted_ns"],
                 waiting_trials=row["waiting_trials"],
                 running_trials=row["running_trials"],
+                archived_ns=row["archived_ns"],
+                invalid_ns=row["invalid_ns"],
+                invalid_reason=row["invalid_reason"],
             )
             for row in self.queries.sweep_overview(selection)
         ]

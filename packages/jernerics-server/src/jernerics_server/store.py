@@ -28,7 +28,7 @@ from jernerics_schema import (
     TrialState,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _V2_TABLES = ("sweep_meta", "trial_end", "params")
 
@@ -49,6 +49,18 @@ class FutureSchemaError(StoreError):
 
 class QueryResourceLimitError(StoreError):
     """A raw query exceeded its VM-step or wall-clock budget."""
+
+
+class SweepNotFoundError(StoreError):
+    """A curation mutation named a sweep id no sweep row carries."""
+
+
+class SweepStillInvalidError(StoreError):
+    """Unarchiving was requested while the sweep remains invalid."""
+
+
+class InvalidCurationReasonError(StoreError):
+    """The invalid-marking reason is blank or longer than 500 characters."""
 
 
 class QueryNotAuthorizedError(StoreError):
@@ -283,11 +295,38 @@ def _migrate_to_v6(con: sqlite3.Connection) -> None:
         con.execute(statement)
 
 
+def _migrate_to_v7(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE sweep_curation (
+            sweep_id TEXT PRIMARY KEY REFERENCES sweeps(sweep_id),
+            archived_ns INTEGER,
+            invalid_ns INTEGER,
+            invalid_reason TEXT CHECK(
+                invalid_reason IS NULL
+                OR (length(trim(invalid_reason)) > 0
+                    AND length(trim(invalid_reason)) <= 500)
+            ),
+            updated_ns INTEGER NOT NULL,
+            CHECK(
+                (invalid_ns IS NULL AND invalid_reason IS NULL)
+                OR (
+                    invalid_ns IS NOT NULL
+                    AND invalid_reason IS NOT NULL
+                    AND archived_ns IS NOT NULL
+                )
+            )
+        ) STRICT
+        """
+    )
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_to_v3,
     4: _migrate_to_v4,
     5: _migrate_to_v5,
     6: _migrate_to_v6,
+    7: _migrate_to_v7,
 }
 
 
@@ -474,6 +513,115 @@ class Store:
                     "AND received_ns IS NULL",
                     [received_ns, artifact_id],
                 )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def _curation_row(self, sweep_id: str) -> tuple | None:
+        return self._con.execute(
+            "SELECT c.archived_ns, c.invalid_ns, c.invalid_reason "
+            "FROM sweeps s LEFT JOIN sweep_curation c ON c.sweep_id = s.sweep_id "
+            "WHERE s.sweep_id = ?",
+            [sweep_id],
+        ).fetchone()
+
+    def archive_sweep(self, sweep_id: str) -> None:
+        """Mark ``sweep_id`` archived; retrying while archived is a no-op."""
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._curation_row(sweep_id)
+                if row is None:
+                    raise SweepNotFoundError(f"no sweep with id {sweep_id}")
+                if row[0] is None:
+                    self._con.execute(
+                        "INSERT INTO sweep_curation "
+                        "(sweep_id, archived_ns, updated_ns) VALUES (?, ?, ?) "
+                        "ON CONFLICT(sweep_id) DO UPDATE SET "
+                        "archived_ns = excluded.archived_ns, "
+                        "updated_ns = excluded.updated_ns",
+                        [sweep_id, now_ns, now_ns],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def restore_sweep(self, sweep_id: str) -> None:
+        """Clear archived; rejected while the sweep remains invalid."""
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._curation_row(sweep_id)
+                if row is None:
+                    raise SweepNotFoundError(f"no sweep with id {sweep_id}")
+                if row[1] is not None:
+                    raise SweepStillInvalidError(
+                        f"sweep {sweep_id} remains invalid; "
+                        "restore validity before unarchiving"
+                    )
+                if row[0] is not None:
+                    self._con.execute(
+                        "UPDATE sweep_curation SET archived_ns = NULL, "
+                        "updated_ns = ? WHERE sweep_id = ?",
+                        [now_ns, sweep_id],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def mark_sweep_invalid(self, sweep_id: str, reason: str) -> None:
+        """Mark ``sweep_id`` scientifically invalid with a trimmed reason of
+        1..500 characters; archives the sweep when no archived fact exists."""
+        trimmed = reason.strip()
+        if not trimmed or len(trimmed) > 500:
+            raise InvalidCurationReasonError(
+                f"invalid reason must be 1..500 characters after trimming, "
+                f"got {len(trimmed)}"
+            )
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._curation_row(sweep_id)
+                if row is None:
+                    raise SweepNotFoundError(f"no sweep with id {sweep_id}")
+                if row[1] is None or row[2] != trimmed:
+                    self._con.execute(
+                        "INSERT INTO sweep_curation "
+                        "(sweep_id, archived_ns, invalid_ns, invalid_reason, "
+                        "updated_ns) VALUES (?, COALESCE(?, ?), ?, ?, ?) "
+                        "ON CONFLICT(sweep_id) DO UPDATE SET "
+                        "archived_ns = excluded.archived_ns, "
+                        "invalid_ns = excluded.invalid_ns, "
+                        "invalid_reason = excluded.invalid_reason, "
+                        "updated_ns = excluded.updated_ns",
+                        [sweep_id, row[0], now_ns, now_ns, trimmed, now_ns],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def restore_sweep_validity(self, sweep_id: str) -> None:
+        """Clear the invalid facts; the archived fact is left unchanged."""
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._curation_row(sweep_id)
+                if row is None:
+                    raise SweepNotFoundError(f"no sweep with id {sweep_id}")
+                if row[1] is not None:
+                    self._con.execute(
+                        "UPDATE sweep_curation SET invalid_ns = NULL, "
+                        "invalid_reason = NULL, updated_ns = ? WHERE sweep_id = ?",
+                        [now_ns, sweep_id],
+                    )
                 self._con.execute("COMMIT")
             except BaseException:
                 self._con.execute("ROLLBACK")

@@ -8,10 +8,13 @@ import pytest
 from jernerics_server import store as store_module
 from jernerics_server.store import (
     FutureSchemaError,
+    InvalidCurationReasonError,
     LegacyStoreError,
     QueryNotAuthorizedError,
     Store,
     StoreError,
+    SweepNotFoundError,
+    SweepStillInvalidError,
     archive_v2,
 )
 
@@ -27,6 +30,7 @@ TABLES = {
     "artifacts",
     "artifact_blobs",
     "reconciliation_conflicts",
+    "sweep_curation",
 }
 
 INDEXES = {
@@ -111,7 +115,7 @@ class TestInit:
     def test_fresh_store_creates_current_schema(self, tmp_path):
         path = tmp_path / "store.sqlite"
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(6,)]
+            assert store.query("PRAGMA user_version")[1] == [(7,)]
             con = sqlite3.connect(path)
             assert _table_names(con) - {"sqlite_sequence"} == TABLES
             con.close()
@@ -123,7 +127,7 @@ class TestInit:
 
     def test_reopen_existing_store_is_noop_and_keeps_data(self, db_path):
         with Store(db_path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(6,)]
+            assert store.query("PRAGMA user_version")[1] == [(7,)]
             assert store.query("SELECT trial_id FROM trials")[1] == [("t1",)]
             assert store.query("SELECT COUNT(*) FROM tracked_values")[1] == [(1,)]
 
@@ -418,9 +422,9 @@ class TestFutureSchema:
     def test_user_version_beyond_supported_refused(self, tmp_path):
         path = tmp_path / "store.sqlite"
         con = sqlite3.connect(path)
-        con.execute("PRAGMA user_version=7")
+        con.execute("PRAGMA user_version=8")
         con.close()
-        with pytest.raises(FutureSchemaError, match="version 7"):
+        with pytest.raises(FutureSchemaError, match="version 8"):
             Store(path)
 
 
@@ -450,7 +454,7 @@ class TestMigrationV3ToV4:
         self._make_v3_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(6,)]
+            assert store.query("PRAGMA user_version")[1] == [(7,)]
             submission_cols = {
                 row[1] for row in store.query("PRAGMA table_info(submissions)")[1]
             }
@@ -523,7 +527,7 @@ class TestMigrationV4ToV5:
         self._make_v4_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(6,)]
+            assert store.query("PRAGMA user_version")[1] == [(7,)]
             trial_cols = {row[1] for row in store.query("PRAGMA table_info(trials)")[1]}
             assert {"objective", "distributions_json", "attrs_json"} <= trial_cols
             store.verify()
@@ -582,7 +586,7 @@ class TestMigrationV5ToV6:
         self._make_v5_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(6,)]
+            assert store.query("PRAGMA user_version")[1] == [(7,)]
             artifact_cols = {
                 row[1] for row in store.query("PRAGMA table_info(artifacts)")[1]
             }
@@ -597,6 +601,227 @@ class TestMigrationV5ToV6:
             assert store.query(
                 "SELECT artifact_id, key, context_json, source FROM artifacts"
             )[1] == [("a1", "model", None, "user")]
+
+
+class TestMigrationV6ToV7:
+    def _make_v6_file(self, path: Path) -> None:
+        con = sqlite3.connect(path)
+        for version in (3, 4, 5, 6):
+            store_module._MIGRATIONS[version](con)
+        con.execute("PRAGMA user_version=6")
+        con.execute("PRAGMA foreign_keys=ON")
+        con.executescript(
+            """
+            INSERT INTO sweeps (sweep_id, project, name, state, created_ns, updated_ns)
+            VALUES ('sw', 'p', 'n', 'completed', 1, 2);
+            INSERT INTO trials (trial_id, sweep_id, number, state,
+            retry_root_trial_id, retry_index, created_ns, updated_ns)
+            VALUES ('t1', 'sw', 0, 'completed', 't1', 0, 1, 2);
+            INSERT INTO executions (execution_id, trial_id, hostname, started_ns,
+            ended_ns, outcome, exit_code, created_ns, updated_ns)
+            VALUES ('e1', 't1', 'node7', 10, 20, 'success', 0, 10, 20);
+            INSERT INTO tracked_values (execution_id, key, step, value_type,
+            scalar_val, text_val, context, recorded_ns)
+            VALUES ('e1', 'loss', 0, 'scalar', 0.5, NULL, '{}', 16);
+            """
+        )
+        con.commit()
+        con.close()
+
+    def test_v6_file_upgrades_in_place(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v6_file(path)
+
+        with Store(path) as store:
+            assert store.query("PRAGMA user_version")[1] == [(7,)]
+            assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(0,)]
+            store.verify()
+
+    def test_v6_tracking_data_survives_upgrade(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v6_file(path)
+
+        with Store(path) as store:
+            assert store.query("SELECT trial_id, state FROM trials")[1] == [
+                ("t1", "completed")
+            ]
+            assert store.query("SELECT key, scalar_val FROM tracked_values")[1] == [
+                ("loss", 0.5)
+            ]
+
+    def test_curation_writable_after_upgrade(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v6_file(path)
+
+        with Store(path) as store:
+            store.mark_sweep_invalid("sw", "contaminated inputs")
+            assert store.query(
+                "SELECT archived_ns IS NOT NULL, invalid_reason "
+                "FROM sweep_curation WHERE sweep_id = 'sw'"
+            )[1] == [(1, "contaminated inputs")]
+
+
+class TestSweepCuration:
+    def _curation(self, store: Store, sweep_id: str = "sw") -> tuple:
+        row = store.query(
+            "SELECT archived_ns, invalid_ns, invalid_reason FROM sweep_curation "
+            "WHERE sweep_id = ?",
+            [sweep_id],
+        )[1]
+        assert len(row) <= 1
+        return row[0] if row else (None, None, None)
+
+    def _tracking_rows(self, store: Store) -> dict:
+        return {
+            table: store.query(f"SELECT * FROM {table}")[1]
+            for table in TABLES - {"sweep_curation"}
+        }
+
+    def test_archive_and_restore_round_trip_persists_across_reopen(self, db_path):
+        with Store(db_path) as store:
+            store.archive_sweep("sw")
+            assert self._curation(store)[0] is not None
+        with Store(db_path) as store:
+            assert self._curation(store)[0] is not None
+            store.restore_sweep("sw")
+            assert self._curation(store) == (None, None, None)
+        with Store(db_path) as store:
+            assert self._curation(store) == (None, None, None)
+
+    def test_archive_is_retry_safe_without_duplicate_rows(self, db_path):
+        with Store(db_path) as store:
+            store.archive_sweep("sw")
+            first = self._curation(store)[0]
+            store.archive_sweep("sw")
+            assert self._curation(store)[0] == first
+            assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(1,)]
+
+    def test_restore_unarchived_sweep_is_noop(self, db_path):
+        with Store(db_path) as store:
+            store.restore_sweep("sw")
+            assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(0,)]
+
+    def test_mark_invalid_sets_archived_and_reason_is_trimmed(self, db_path):
+        with Store(db_path) as store:
+            store.mark_sweep_invalid("sw", "  wrong optimizer state  ")
+            archived_ns, invalid_ns, reason = self._curation(store)
+            assert archived_ns is not None and invalid_ns is not None
+            assert reason == "wrong optimizer state"
+
+    def test_mark_invalid_retry_and_reason_update_keep_one_row(self, db_path):
+        with Store(db_path) as store:
+            store.mark_sweep_invalid("sw", "bad seed")
+            store.mark_sweep_invalid("sw", "bad seed")
+            store.mark_sweep_invalid("sw", "bad data")
+            assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(1,)]
+            assert self._curation(store)[2] == "bad data"
+
+    def test_restore_validity_keeps_archived_fact(self, db_path):
+        with Store(db_path) as store:
+            store.mark_sweep_invalid("sw", "ruined by disk corruption")
+            store.restore_sweep_validity("sw")
+            archived_ns, invalid_ns, reason = self._curation(store)
+            assert archived_ns is not None
+            assert invalid_ns is None and reason is None
+
+    def test_restore_validity_on_valid_sweep_is_noop(self, db_path):
+        with Store(db_path) as store:
+            store.restore_sweep_validity("sw")
+            assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(0,)]
+
+    def test_restore_rejected_while_sweep_remains_invalid(self, db_path):
+        with Store(db_path) as store:
+            store.mark_sweep_invalid("sw", "irreproducible")
+            with pytest.raises(SweepStillInvalidError, match="remains invalid"):
+                store.restore_sweep("sw")
+            assert self._curation(store)[0] is not None
+
+    def test_validity_then_restore_returns_to_uncurated_state(self, db_path):
+        with Store(db_path) as store:
+            store.mark_sweep_invalid("sw", "irreproducible")
+            store.restore_sweep_validity("sw")
+            store.restore_sweep("sw")
+            assert self._curation(store) == (None, None, None)
+
+    @pytest.mark.parametrize(
+        "reason",
+        ["", "   ", "\t\n"],
+    )
+    def test_blank_reasons_rejected(self, db_path, reason):
+        with Store(db_path) as store:
+            with pytest.raises(InvalidCurationReasonError, match=r"1\.\.500"):
+                store.mark_sweep_invalid("sw", reason)
+            assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(0,)]
+
+    def test_over_500_character_reason_rejected(self, db_path):
+        with Store(db_path) as store:
+            with pytest.raises(InvalidCurationReasonError, match=r"1\.\.500"):
+                store.mark_sweep_invalid("sw", "x" * 501)
+            assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(0,)]
+
+    def test_500_character_padded_reason_trims_within_bound(self, db_path):
+        with Store(db_path) as store:
+            store.mark_sweep_invalid("sw", " " + "x" * 500 + " ")
+            assert self._curation(store)[2] == "x" * 500
+
+    @pytest.mark.parametrize(
+        "mutation",
+        ["archive_sweep", "restore_sweep", "restore_sweep_validity"],
+    )
+    def test_unknown_sweep_id_rejected(self, db_path, mutation):
+        with (
+            Store(db_path) as store,
+            pytest.raises(SweepNotFoundError, match="ghost"),
+        ):
+            getattr(store, mutation)("ghost")
+
+    def test_unknown_sweep_id_rejected_for_mark_invalid(self, db_path):
+        with (
+            Store(db_path) as store,
+            pytest.raises(SweepNotFoundError, match="ghost"),
+        ):
+            store.mark_sweep_invalid("ghost", "never tracked")
+
+    def test_curation_never_rewrites_tracking_rows(self, db_path):
+        with Store(db_path) as store:
+            before = self._tracking_rows(store)
+            store.archive_sweep("sw")
+            store.mark_sweep_invalid("sw", "duplicate project config")
+            store.restore_sweep_validity("sw")
+            store.restore_sweep("sw")
+            assert self._tracking_rows(store) == before
+
+    def test_invalid_without_archived_rejected_by_schema(self, db_path):
+        with pytest.raises(sqlite3.IntegrityError):
+            _write(
+                db_path,
+                "INSERT INTO sweep_curation (sweep_id, invalid_ns, invalid_reason,"
+                " updated_ns) VALUES ('sw', 1, 'x', 1)",
+            )
+
+    def test_invalid_ns_without_reason_rejected_by_schema(self, db_path):
+        with pytest.raises(sqlite3.IntegrityError):
+            _write(
+                db_path,
+                "INSERT INTO sweep_curation (sweep_id, archived_ns, invalid_ns,"
+                " updated_ns) VALUES ('sw', 1, 1, 1)",
+            )
+
+    def test_blank_reason_rejected_by_schema(self, db_path):
+        with pytest.raises(sqlite3.IntegrityError):
+            _write(
+                db_path,
+                "INSERT INTO sweep_curation (sweep_id, archived_ns, invalid_ns,"
+                " invalid_reason, updated_ns) VALUES ('sw', 1, 1, '  ', 1)",
+            )
+
+    def test_curation_for_unknown_sweep_rejected_by_foreign_key(self, db_path):
+        with pytest.raises(sqlite3.IntegrityError, match="FOREIGN KEY"):
+            _write(
+                db_path,
+                "INSERT INTO sweep_curation (sweep_id, archived_ns, updated_ns)"
+                " VALUES ('ghost', 1, 1)",
+            )
 
 
 class TestMigrationAtomicity:
@@ -625,7 +850,7 @@ class TestMigrationAtomicity:
         monkeypatch.undo()
         with Store(path) as store:
             store.verify()
-            assert store.query("PRAGMA user_version")[1] == [(6,)]
+            assert store.query("PRAGMA user_version")[1] == [(7,)]
 
 
 def _make_v2_db(path: Path) -> None:
