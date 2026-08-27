@@ -39,6 +39,7 @@ class RetryContext:
     trial_relpath: str
     config_relpath: str
     cli_overrides: dict[str, str] = field(default_factory=dict)
+    param_overrides: dict[str, Any] = field(default_factory=dict)
     storage_path: str = ""
     tracking_dir: str = ""
     project_dir: str = "/work"

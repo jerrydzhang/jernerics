@@ -1,6 +1,7 @@
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 
 @dataclass
@@ -17,6 +18,7 @@ class SweepSubmission:
     server_addr: str | None = None
     max_parallel: int | None = None
     backend_overrides: dict[str, str] = field(default_factory=dict)
+    param_overrides: dict[str, Any] = field(default_factory=dict)
     grid: dict[str, list] | None = None
     git_hash: str | None = None
     submission_id: str = field(default_factory=lambda: uuid.uuid4().hex)

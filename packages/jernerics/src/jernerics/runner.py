@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import subprocess
@@ -49,6 +50,7 @@ def run_trial(
     project_name: str | None = None,
     server_addr: str | None = None,
     heartbeat_interval_s: float = 60.0,
+    param_overrides: dict[str, Any] | None = None,
 ) -> None:
     """Run one trial through the explicit ask/tell optimizer lifecycle.
 
@@ -90,7 +92,21 @@ def run_trial(
                 "'search_space' in the config file."
             )
 
-        config = {**sweep.base, **params, "config_index": trial.number}
+        overrides = param_overrides or {}
+        if overrides and set(overrides) & set(params):
+            overlap = sorted(set(overrides) & set(params))
+            raise ValueError(
+                f"Config keys defined in both --set-param and search_space: "
+                f"{overlap}. Please remove the overlapping keys from either "
+                "--set-param or 'search_space' in the config file."
+            )
+
+        config = {
+            **sweep.base,
+            **params,
+            **overrides,
+            "config_index": trial.number,
+        }
 
         config_path = _write_trial_config(config, tracking_dir, trial.number)
         events_path = Path(tracking_dir or "") / "events" / f"{trial.number}.jsonl"
@@ -324,8 +340,14 @@ if __name__ == "__main__":
     parser.add_argument("--project-name", default=None)
     parser.add_argument("--server-addr", default=None)
     parser.add_argument("--heartbeat-interval", type=float, default=60.0)
+    parser.add_argument("--param-overrides", default=None)
     args = parser.parse_args()
 
+    cli_param_overrides = None
+    if args.param_overrides:
+        cli_param_overrides = json.loads(
+            base64.b64decode(args.param_overrides).decode()
+        )
     run_trial(
         trial_file=args.trial_file,
         config_file=args.config_file,
@@ -335,4 +357,5 @@ if __name__ == "__main__":
         project_name=args.project_name,
         server_addr=args.server_addr,
         heartbeat_interval_s=args.heartbeat_interval,
+        param_overrides=cli_param_overrides,
     )

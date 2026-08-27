@@ -1,4 +1,4 @@
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from jernerics.config import SweepConfig
@@ -541,3 +541,212 @@ class TestRunLocalSweep:
             os.unlink(trial_path)
 
         assert mock_run_trial.call_count == 5
+
+
+class TestRunRemoteCommand:
+    @patch("jernerics.commands.execution._get_backend")
+    @patch("jernerics.commands.execution.load_config")
+    @patch("jernerics.commands.execution.find_pyproject_dir")
+    def test_slurm_submit_error_exits_four(
+        self, mock_find, mock_load, mock_get_backend, tmp_path, capsys
+    ):
+        from jernerics.backend.slurm.adapter import SlurmSubmitError
+        from jernerics.commands.execution import run_remote
+        from jernerics.config import ExitCode
+
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text("pass")
+
+        mock_find.return_value = tmp_path
+        mock_load.return_value = SweepConfig(
+            base={},
+            search_space=None,
+            n_trials=1,
+            sampler=None,
+            direction="minimize",
+            backend_overrides={},
+            objective=None,
+        )
+        backend = MagicMock()
+        backend.prepare_and_submit.side_effect = SlurmSubmitError(
+            "checker submission failed; array job 10001 already queued"
+        )
+        mock_get_backend.return_value = (backend, "proj", tmp_path)
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_remote(
+                str(tmp_path / "trial.py"),
+                str(tmp_path / "config.py"),
+                backend_name="hpc",
+            )
+
+        assert exc_info.value.code == ExitCode.SLURM_ERROR
+        assert "array job 10001 already queued" in capsys.readouterr().out
+
+    @patch("jernerics.commands.execution.load_config")
+    @patch("jernerics.commands.execution.find_pyproject_dir")
+    def test_set_unknown_key_exits_config_error(
+        self, mock_find, mock_load, tmp_path, capsys
+    ):
+        from jernerics.commands.execution import run_remote
+        from jernerics.config import ExitCode
+
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text("pass")
+        mock_find.return_value = tmp_path
+        mock_load.return_value = SweepConfig(
+            base={},
+            search_space=None,
+            n_trials=1,
+            sampler=None,
+            direction="minimize",
+            backend_overrides={},
+            objective=None,
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_remote(
+                str(tmp_path / "trial.py"),
+                str(tmp_path / "config.py"),
+                backend_name="hpc",
+                set_opt=["bogus=1"],
+            )
+
+        assert exc_info.value.code == ExitCode.CONFIG_ERROR
+        out = capsys.readouterr().out
+        assert "bogus" in out
+        assert "partition" in out
+        assert "cpus-per-task" in out
+
+    @patch("jernerics.commands.execution.load_config")
+    @patch("jernerics.commands.execution.find_pyproject_dir")
+    def test_set_param_missing_equals_exits_config_error(
+        self, mock_find, mock_load, tmp_path, capsys
+    ):
+        from jernerics.commands.execution import run_remote
+        from jernerics.config import ExitCode
+
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text("pass")
+        mock_find.return_value = tmp_path
+        mock_load.return_value = SweepConfig(
+            base={},
+            search_space=None,
+            n_trials=1,
+            sampler=None,
+            direction="minimize",
+            backend_overrides={},
+            objective=None,
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_remote(
+                str(tmp_path / "trial.py"),
+                str(tmp_path / "config.py"),
+                backend_name="hpc",
+                set_param_opt=["target"],
+            )
+
+        assert exc_info.value.code == ExitCode.CONFIG_ERROR
+        assert "--set-param" in capsys.readouterr().out
+
+    @patch("jernerics.commands.execution.load_config")
+    @patch("jernerics.commands.execution.find_pyproject_dir")
+    def test_set_param_empty_key_exits_config_error(
+        self, mock_find, mock_load, tmp_path, capsys
+    ):
+        from jernerics.commands.execution import run_remote
+        from jernerics.config import ExitCode
+
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text("pass")
+        mock_find.return_value = tmp_path
+        mock_load.return_value = SweepConfig(
+            base={},
+            search_space=None,
+            n_trials=1,
+            sampler=None,
+            direction="minimize",
+            backend_overrides={},
+            objective=None,
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_remote(
+                str(tmp_path / "trial.py"),
+                str(tmp_path / "config.py"),
+                backend_name="hpc",
+                set_param_opt=["=3200"],
+            )
+
+        assert exc_info.value.code == ExitCode.CONFIG_ERROR
+
+    @patch("jernerics.commands.execution._get_backend")
+    @patch("jernerics.commands.execution.load_config")
+    @patch("jernerics.commands.execution.find_pyproject_dir")
+    def test_set_param_coerces_values_into_spec(
+        self, mock_find, mock_load, mock_get_backend, tmp_path
+    ):
+        from jernerics.commands.execution import run_remote
+
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text("pass")
+        mock_find.return_value = tmp_path
+        mock_load.return_value = SweepConfig(
+            base={},
+            search_space=None,
+            n_trials=1,
+            sampler=None,
+            direction="minimize",
+            backend_overrides={},
+            objective=None,
+        )
+        backend = MagicMock()
+        backend.prepare_and_submit.return_value = None
+        mock_get_backend.return_value = (backend, "proj", tmp_path)
+
+        run_remote(
+            str(tmp_path / "trial.py"),
+            str(tmp_path / "config.py"),
+            backend_name="hpc",
+            set_param_opt=["target=3200", "name=foo", "flag=true"],
+        )
+
+        spec = backend.prepare_and_submit.call_args[0][0]
+        assert spec.param_overrides == {"target": 3200, "name": "foo", "flag": True}
+        assert isinstance(spec.param_overrides["target"], int)
+
+    @patch("jernerics.commands.execution._get_backend")
+    @patch("jernerics.commands.execution.load_config")
+    @patch("jernerics.commands.execution.find_pyproject_dir")
+    def test_set_valid_sbatch_key_passes_cli_overrides(
+        self, mock_find, mock_load, mock_get_backend, tmp_path
+    ):
+        from jernerics.commands.execution import run_remote
+
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text("pass")
+        mock_find.return_value = tmp_path
+        mock_load.return_value = SweepConfig(
+            base={},
+            search_space=None,
+            n_trials=1,
+            sampler=None,
+            direction="minimize",
+            backend_overrides={},
+            objective=None,
+        )
+        backend = MagicMock()
+        backend.prepare_and_submit.return_value = None
+        mock_get_backend.return_value = (backend, "proj", tmp_path)
+
+        run_remote(
+            str(tmp_path / "trial.py"),
+            str(tmp_path / "config.py"),
+            backend_name="hpc",
+            set_opt=["partition=debug"],
+        )
+
+        assert backend.prepare_and_submit.call_args[1]["cli_overrides"] == {
+            "partition": "debug"
+        }

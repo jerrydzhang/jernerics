@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 from jernerics.backend.adapter import SchedulerAdapter
 from jernerics.backend.host import StdoutHost
-from jernerics.backend.slurm.adapter import SlurmAdapter
+from jernerics.backend.slurm.adapter import SlurmAdapter, SlurmSubmitError
 from jernerics.config import BackendConfig, SharedConfig, SlurmConfig
 
 
@@ -135,6 +135,19 @@ class TestRenderSweep:
         assert "#SBATCH --output=/cache/logs/%A_%a.out" in script
         assert "#SBATCH --error=/cache/logs/%A_%a.err" in script
 
+    def test_chain_script_guards_submission_failures(self):
+        adapter = _make_adapter()
+        params = _make_params(post_hook_command="wrapped_checker_cmd")
+        script = adapter.render_sweep(params)
+
+        assert '|| { echo "array job submission failed" >&2; exit 1; }' in script
+        assert '[ -n "$ARRAY_JOB_ID" ]' in script
+        assert (
+            "checker submission failed; array job $ARRAY_JOB_ID already queued"
+            in script
+        )
+        assert '[ -n "$CHECKER_JOB_ID" ]' in script
+
     def test_custom_output_error_patterns(self):
         adapter = _make_adapter()
         params = _make_params(
@@ -161,6 +174,47 @@ class TestRenderSweep:
 
         assert "mkdir -p /cache/optuna" in script
         assert "mkdir -p /cache/tracking/exp1" in script
+
+
+class TestRenderOverrideAllowlist:
+    def test_unknown_override_key_raises_value_error(self):
+        adapter = _make_adapter()
+        params = _make_params(overrides={"target": "3200"})
+
+        with pytest.raises(ValueError) as exc_info:
+            adapter.render_sweep(params)
+
+        message = str(exc_info.value)
+        assert "target" in message
+        assert "partition" in message
+        assert "cpus-per-task" in message
+
+    def test_multiple_unknown_keys_all_named(self):
+        adapter = _make_adapter()
+        params = _make_params(overrides={"target": "3200", "foo": "bar"})
+
+        with pytest.raises(ValueError) as exc_info:
+            adapter.render_sweep(params)
+
+        message = str(exc_info.value)
+        assert "foo, target" in message
+
+    def test_every_allowlisted_key_renders_as_directive(self):
+        from jernerics.backend.slurm.adapter import SBATCH_OVERRIDE_KEYS
+
+        adapter = _make_adapter()
+        for key in sorted(SBATCH_OVERRIDE_KEYS):
+            params = _make_params(overrides={key: "debug"})
+            script = adapter.render_sweep(params)
+            assert f"#SBATCH --{key}=debug" in script
+
+    def test_partition_override_still_renders(self):
+        adapter = _make_adapter()
+        params = _make_params(overrides={"partition": "debug"})
+
+        script = adapter.render_sweep(params)
+
+        assert "#SBATCH --partition=debug" in script
 
 
 class TestSubmitSweep:
@@ -198,6 +252,41 @@ class TestSubmitSweep:
         with pytest.raises(RuntimeError, match="Failed to submit"):
             adapter.submit_sweep(_make_params())
 
+    def test_chain_empty_stdout_raises_slurm_submit_error(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(
+            returncode=0, stdout="", stderr="sbatch: error: invalid partition"
+        )
+        adapter = _make_adapter(host=host)
+        params = _make_params(post_hook_command="checker_cmd")
+
+        with pytest.raises(SlurmSubmitError, match="invalid partition"):
+            adapter.submit_sweep(params)
+
+    def test_chain_checker_failure_names_queued_array_job(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="checker submission failed; array job 10001 already queued",
+        )
+        adapter = _make_adapter(host=host)
+        params = _make_params(post_hook_command="checker_cmd")
+
+        with pytest.raises(SlurmSubmitError, match="array job 10001"):
+            adapter.submit_sweep(params)
+
+    def test_chain_keeps_parsable_cluster_suffix(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="10001;hpc 10002;hpc")
+        adapter = _make_adapter(host=host)
+        params = _make_params(post_hook_command="checker_cmd")
+
+        result = adapter.submit_sweep(params)
+
+        assert result.submissions[0].job_id == "10001;hpc"
+        assert result.submissions[1].job_id == "10002;hpc"
+
 
 class TestSubmitJob:
     def test_submits_single_job(self):
@@ -208,6 +297,29 @@ class TestSubmitJob:
         job_id = adapter.submit_job("echo hello", name="build")
 
         assert job_id == "99999"
+
+    def test_raises_slurm_submit_error_on_failure(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=1, stderr="sbatch: error: qos")
+        adapter = _make_adapter(host=host)
+
+        with pytest.raises(SlurmSubmitError, match="Failed to submit build job"):
+            adapter.submit_job("echo hello")
+
+    def test_raises_slurm_submit_error_on_non_numeric_id(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="pending approval")
+        adapter = _make_adapter(host=host)
+
+        with pytest.raises(SlurmSubmitError, match="pending approval"):
+            adapter.submit_job("echo hello")
+
+    def test_keeps_parsable_cluster_suffix(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="99999;hpc")
+        adapter = _make_adapter(host=host)
+
+        assert adapter.submit_job("echo hello") == "99999;hpc"
 
 
 class TestJobLifecycle:

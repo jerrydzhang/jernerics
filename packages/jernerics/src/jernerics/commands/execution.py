@@ -1,13 +1,19 @@
+import json
 import re
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
 from jernerics.backend.local_backend import LocalBackend
 from jernerics.backend.models import SweepSubmission
+from jernerics.backend.slurm.adapter import (
+    SBATCH_OVERRIDE_KEYS,
+    SlurmSubmitError,
+    unknown_sbatch_override_message,
+)
 from jernerics.commands.common import _get_backend
 from jernerics.config import (
     ExitCode,
@@ -33,6 +39,13 @@ def _validate_relpath(path: str, desc: str) -> str:
             f"Error: {desc} path '{path}' must not contain '..' (path traversal)."
         )
     return path
+
+
+def _coerce_param_value(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw
 
 
 def _capture_git_hash(cwd: Path | None) -> str | None:
@@ -124,7 +137,11 @@ def run_remote(
     ],
     set_opt: Annotated[
         list[str] | None,
-        typer.Option("--set", "-S", help="Set backend option (key=value)"),
+        typer.Option("--set", "-S", help="Set sbatch override (key=value)"),
+    ] = None,
+    set_param_opt: Annotated[
+        list[str] | None,
+        typer.Option("--set-param", help="Set trial-config param (key=value)"),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -161,6 +178,23 @@ def run_remote(
             print(f"Error: Empty key in --set option: {opt}")
             raise SystemExit(ExitCode.CONFIG_ERROR)
         cli_overrides[key] = value
+    unknown = set(cli_overrides) - SBATCH_OVERRIDE_KEYS
+    if unknown:
+        print(f"Error: {unknown_sbatch_override_message(unknown)}")
+        raise SystemExit(ExitCode.CONFIG_ERROR)
+
+    param_overrides = {}
+    for opt in set_param_opt or []:
+        if "=" not in opt:
+            print(
+                f"Error: Invalid --set-param option: {opt}. Expected format: key=value"
+            )
+            raise SystemExit(ExitCode.CONFIG_ERROR)
+        key, raw = opt.split("=", 1)
+        if not key:
+            print(f"Error: Empty key in --set-param option: {opt}")
+            raise SystemExit(ExitCode.CONFIG_ERROR)
+        param_overrides[key] = _coerce_param_value(raw)
 
     backend, project_name, project_dir = _get_backend(backend_name)
 
@@ -188,6 +222,7 @@ def run_remote(
         server_addr=backend.tracking_server,
         grid=sweep.grid,
         git_hash=git_hash,
+        param_overrides=param_overrides,
     )
 
     try:
@@ -202,6 +237,9 @@ def run_remote(
             cli_overrides=cli_overrides,
             local_cache_dir=cache_dir(),
         )
+    except SlurmSubmitError as e:
+        print(f"Error: {e}")
+        raise SystemExit(ExitCode.SLURM_ERROR) from None
     except (RuntimeError, ValueError) as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.GENERAL_ERROR) from None

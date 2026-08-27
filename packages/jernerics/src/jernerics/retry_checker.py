@@ -182,6 +182,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         config_relpath=ctx.config_relpath,
         project_name=ctx.project_name,
         git_hash=ctx.git_hash or None,
+        param_overrides=ctx.param_overrides,
     )
 
     submit_sweep(

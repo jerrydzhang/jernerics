@@ -1,5 +1,6 @@
 import base64
 import json
+from typing import Any
 
 
 def build_setup_command(
@@ -61,6 +62,7 @@ def build_trial_command(
     project_name: str | None = None,
     tracking_server: str | None = None,
     heartbeat_interval_s: float = -1.0,
+    param_overrides: dict[str, Any] | None = None,
     multiline: bool = False,
 ) -> str:
     args = [
@@ -82,6 +84,9 @@ def build_trial_command(
         args.extend(["--server-addr", tracking_server])
     if heartbeat_interval_s > 0:
         args.extend(["--heartbeat-interval", str(heartbeat_interval_s)])
+    if param_overrides:
+        po_b64 = base64.b64encode(json.dumps(param_overrides).encode()).decode()
+        args.extend(["--param-overrides", po_b64])
     if multiline:
         return " \\\n        ".join(args)
     return " ".join(args)
@@ -148,6 +153,7 @@ def build_sweep_commands(
         tracking_dir=tracking_dir,
         tracking_server=tracking_server,
         heartbeat_interval_s=heartbeat_interval_s,
+        param_overrides=spec.param_overrides,
         work_prefix=paths.work_prefix,
         multiline=multiline,
     )

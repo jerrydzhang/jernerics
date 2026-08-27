@@ -280,6 +280,81 @@ class TestSubmitSweep:
         adapter.render_sweep.assert_called_once()
         adapter.submit_sweep.assert_not_called()
 
+    def test_dry_run_unknown_override_fails_loudly(self):
+        from jernerics.backend.slurm.adapter import SlurmAdapter
+        from jernerics.backend.submission import submit_sweep
+
+        adapter = SlurmAdapter(
+            MagicMock(),
+            remote_dir="/scratch/proj",
+            partition="priority",
+            time="1:00:00",
+            mem="16G",
+            cpus=4,
+            max_concurrent_jobs=10,
+            cache_host="/cache",
+        )
+        infra = self._make_infra(adapter)
+        spec = SweepSubmission(
+            trial_path=Path("trial.py"),
+            config_path=Path("config.py"),
+            study_name="mystudy",
+            storage_url="/cache/optuna/mystudy.journal",
+            n_trials=5,
+        )
+        host = MagicMock()
+        host.home = "/home/user"
+
+        with pytest.raises(ValueError) as exc_info:
+            submit_sweep(
+                spec,
+                infra,
+                host=host,
+                project_dir="/work",
+                project_name="proj",
+                backend_name="hpc",
+                direction="minimize",
+                experiment_overrides={"target": "3200"},
+                dry_run=True,
+            )
+
+        assert "target" in str(exc_info.value)
+
+    def test_writes_param_overrides_to_retry_context(self):
+        from jernerics.backend.submission import submit_sweep
+
+        adapter = MagicMock()
+        adapter.submit_sweep.return_value = None
+        infra = self._make_infra(adapter)
+        spec = SweepSubmission(
+            trial_path=Path("trial.py"),
+            config_path=Path("config.py"),
+            study_name="mystudy",
+            storage_url="/cache/optuna/mystudy.journal",
+            n_trials=5,
+            param_overrides={"target": 3200},
+        )
+        host = MagicMock()
+        host.home = "/home/user"
+
+        submit_sweep(
+            spec,
+            infra,
+            host=host,
+            project_dir="/work",
+            project_name="proj",
+            backend_name="hpc",
+            direction="minimize",
+        )
+
+        import json
+
+        write_calls = [
+            c for c in host.write_file.call_args_list if "_ctx.json" in str(c)
+        ]
+        ctx = json.loads(write_calls[0][0][1])
+        assert ctx["param_overrides"] == {"target": 3200}
+
 
 class TestSubmissionEventEmission:
     def _make_infra(self, adapter, cache_dir):

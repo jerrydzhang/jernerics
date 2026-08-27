@@ -66,6 +66,7 @@ def _setup_common_mocks(
     *,
     cli_overrides=None,
     backend_overrides=None,
+    param_overrides=None,
 ):
     """Shared test setup for retry checker tests."""
     study = MagicMock()
@@ -87,6 +88,7 @@ def _setup_common_mocks(
         trial_relpath="trial.py",
         config_relpath="config.py",
         cli_overrides=cli_overrides or {},
+        param_overrides=param_overrides or {},
         storage_path=storage_path,
         tracking_dir=str(tracking_dir),
         project_dir=str(tmp_path),
@@ -421,6 +423,48 @@ class TestRetryCheckerUsesSubmitSweep:
 
         call_kwargs = mock_submit.call_args
         assert call_kwargs[1]["chain_depth"] == 3
+
+    @patch("jernerics.retry_checker.submit_sweep")
+    @patch("jernerics.retry_checker.assemble_infrastructure")
+    @patch("jernerics.retry_checker.load_config")
+    @patch("jernerics.retry_checker.load_backend_config")
+    def test_restores_param_overrides_on_retry_spec(
+        self,
+        mock_load_backend,
+        mock_load_config,
+        mock_assemble,
+        mock_submit,
+        tmp_path,
+    ):
+        from jernerics.retry_checker import run_checker
+
+        ctx_path, study = _setup_common_mocks(
+            mock_load_backend,
+            mock_load_config,
+            mock_assemble,
+            mock_submit,
+            tmp_path,
+            param_overrides={"target": 3200},
+        )
+
+        with (
+            patch("jernerics.retry_checker.optuna") as mock_optuna,
+            patch("jernerics.retry_checker.time") as mock_time,
+            patch("jernerics.retry_checker.read_ledger", return_value={}),
+            patch("jernerics.retry_checker.write_ledger"),
+            patch("jernerics.retry_checker.load_tracking_server", return_value=None),
+        ):
+            mock_time.time.return_value = 1000.0
+            mock_time.sleep = MagicMock()
+            mock_optuna.load_study.return_value = study
+            mock_optuna.trial.TrialState = TrialState
+            mock_optuna.storages.journal.JournalFileBackend.return_value = MagicMock()
+            mock_optuna.storages.journal.JournalStorage.return_value = MagicMock()
+
+            run_checker(ctx_path=ctx_path, chain_depth=0)
+
+        retry_spec = mock_submit.call_args[0][0]
+        assert retry_spec.param_overrides == {"target": 3200}
 
     @patch("jernerics.retry_checker.submit_sweep")
     @patch("jernerics.retry_checker.assemble_infrastructure")

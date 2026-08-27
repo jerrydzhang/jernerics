@@ -1,5 +1,5 @@
-"""Tests for build_sweep_commands pure function."""
-
+import base64
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -149,7 +149,46 @@ class TestBuildSweepCommandsBasics:
             direction="minimize",
         )
         assert "--git-hash" not in trial
-        assert "--git-hash" not in trial
+
+    def test_param_overrides_appended_as_decodable_b64(self):
+        spec = _make_spec()
+        spec.param_overrides = {"target": 3200}
+        paths = _make_paths()
+        _, trial, _ = build_sweep_commands(
+            spec=spec,
+            container=NoContainer(),
+            paths=paths,
+            direction="minimize",
+        )
+
+        assert "--param-overrides" in trial
+        b64 = trial.split("--param-overrides ")[1].split()[0]
+        assert json.loads(base64.b64decode(b64)) == {"target": 3200}
+
+    def test_no_param_overrides_flag_when_empty(self):
+        spec = _make_spec()
+        paths = _make_paths()
+        _, trial, _ = build_sweep_commands(
+            spec=spec,
+            container=NoContainer(),
+            paths=paths,
+            direction="minimize",
+        )
+
+        assert "--param-overrides" not in trial
+
+    def test_param_overrides_survive_container_wrap(self):
+        spec = _make_spec()
+        spec.param_overrides = {"target": 3200}
+        paths = _make_paths(container=Apptainer())
+        _, trial, _ = build_sweep_commands(
+            spec=spec,
+            container=Apptainer(),
+            paths=paths,
+            direction="minimize",
+        )
+
+        assert "--param-overrides" in trial
 
 
 class TestBuildSweepCommandsAlwaysPostHook:

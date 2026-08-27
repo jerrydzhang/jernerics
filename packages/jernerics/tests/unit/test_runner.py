@@ -123,6 +123,76 @@ class TestRunTrialSubprocess:
         )
         assert study.trials[0].value == pytest.approx(0.0)
 
+    def test_param_overrides_reach_trial_config(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 1.0})\n')
+        config_file = _config_file(tmp_path)
+        storage_url = _make_study(tmp_path)
+        tracking_dir = tmp_path / "tracking" / "s"
+        tracking_dir.mkdir(parents=True)
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+            param_overrides={"target": 3200},
+        )
+
+        resolved = json.loads((tmp_path / "configs" / "trial_0.json").read_text())
+        assert resolved["target"] == 3200
+        assert isinstance(resolved["target"], int)
+        assert resolved["lr"] == pytest.approx(0.01)
+
+    def test_param_overrides_override_base_keys(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + 'tracker.finish({"loss": 1.0})\n')
+        config_file = _config_file(tmp_path)
+        storage_url = _make_study(tmp_path)
+        tracking_dir = tmp_path / "tracking" / "s"
+        tracking_dir.mkdir(parents=True)
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+            param_overrides={"lr": 0.5},
+        )
+
+        resolved = json.loads((tmp_path / "configs" / "trial_0.json").read_text())
+        assert resolved["lr"] == pytest.approx(0.5)
+
+    def test_param_overrides_conflicting_with_search_space_raises(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text("pass\n")
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "n_trials = 1\n"
+            "def search_space(trial):\n"
+            "    return {'lr': trial.suggest_float('lr', 0.001, 0.1)}\n"
+            "backend_overrides = {}\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = tmp_path / "tracking" / "s"
+        tracking_dir.mkdir(parents=True)
+
+        with pytest.raises(ValueError, match="lr"):
+            run_trial(
+                trial_file=str(trial_file),
+                config_file=str(config_file),
+                study_name="s",
+                storage_url=storage_url,
+                tracking_dir=str(tracking_dir),
+                project_name="proj",
+                param_overrides={"lr": 0.1},
+            )
+
 
 class TestWriteTrialConfig:
     def test_writes_resolved_config_under_cache_configs(self, tmp_path):

@@ -243,6 +243,7 @@ def submit_sweep(
         trial_relpath=spec.trial_relpath,
         config_relpath=spec.config_relpath,
         cli_overrides=cli_overrides or {},
+        param_overrides=spec.param_overrides,
         storage_path=spec.storage_url,
         tracking_dir=infra.paths.tracking_dir(spec.study_name),
         project_dir=infra.paths.work_prefix,

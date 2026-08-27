@@ -10,6 +10,35 @@ from jernerics.backend.path_resolver import strip_project_template
 from jernerics.config import BackendConfig, SlurmConfig
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
+_SLURM_JOB_ID_PATTERN = re.compile(r"^(\d+)(;\S+)?$")
+
+SBATCH_OVERRIDE_KEYS = frozenset(
+    {
+        "partition",
+        "time",
+        "mem",
+        "account",
+        "cpus-per-task",
+        "gpus",
+        "gres",
+        "constraint",
+        "exclude",
+        "nodes",
+        "ntasks",
+        "output",
+        "error",
+    }
+)
+
+
+def unknown_sbatch_override_message(unknown: set[str]) -> str:
+    keys = ", ".join(sorted(unknown))
+    valid = ", ".join(sorted(SBATCH_OVERRIDE_KEYS))
+    return f"Unknown sbatch override key(s): {keys}. Valid keys: {valid}"
+
+
+class SlurmSubmitError(RuntimeError):
+    pass
 
 
 def _validate_slurm_value(value: str, name: str) -> str:
@@ -19,6 +48,12 @@ def _validate_slurm_value(value: str, name: str) -> str:
             "Only alphanumeric, underscore, hyphen, period, colon, and slash allowed."
         )
     return value
+
+
+def _validate_job_id(job_id: str, *, stderr: str) -> str:
+    if not _SLURM_JOB_ID_PATTERN.match(job_id):
+        raise SlurmSubmitError(f"sbatch returned invalid job id {job_id!r}: {stderr}")
+    return job_id
 
 
 def _expand_path(p: str) -> str:
@@ -180,13 +215,19 @@ def _compose_chain(array_script: str, checker_script: str) -> str:
         "ARRAY_JOB_ID=$(sbatch --parsable <<'EOF'\n"
         f"{array_script}\n"
         "EOF\n"
-        ")\n"
+        ') || { echo "array job submission failed" >&2; exit 1; }\n'
+        '[ -n "$ARRAY_JOB_ID" ] || '
+        '{ echo "array job submission failed (empty job id)" >&2; exit 1; }\n'
         "\n"
         "CHECKER_JOB_ID=$(sbatch --parsable"
         " --dependency=afterany:$ARRAY_JOB_ID <<'EOF'\n"
         f"{checker_script}\n"
         "EOF\n"
-        ")\n"
+        ') || { echo "checker submission failed; '
+        'array job $ARRAY_JOB_ID already queued" >&2; exit 1; }\n'
+        '[ -n "$CHECKER_JOB_ID" ] || '
+        '{ echo "checker submission failed (empty job id); '
+        'array job $ARRAY_JOB_ID already queued" >&2; exit 1; }\n'
         "\n"
         'echo "$ARRAY_JOB_ID $CHECKER_JOB_ID"'
     )
@@ -256,6 +297,9 @@ class SlurmAdapter:
 
     def _render_overrides(self, params: SweepSubmissionParams) -> dict[str, str]:
         slurm_opts = {**params.overrides}
+        unknown = set(slurm_opts) - SBATCH_OVERRIDE_KEYS
+        if unknown:
+            raise ValueError(unknown_sbatch_override_message(unknown))
         # Pop output/error so we can expand ~ in them
         output_pattern = slurm_opts.pop("output", None)
         error_pattern = slurm_opts.pop("error", None)
@@ -308,7 +352,7 @@ class SlurmAdapter:
                 text=True,
             )
             if result.returncode != 0:
-                raise RuntimeError(f"Failed to submit job: {result.stderr.strip()}")
+                raise SlurmSubmitError(f"Failed to submit job: {result.stderr.strip()}")
             return SubmitResult(
                 submissions=[
                     JobSubmission(
@@ -325,13 +369,15 @@ class SlurmAdapter:
             text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to submit job chain: {result.stderr.strip()}")
+            raise SlurmSubmitError(
+                f"Failed to submit job chain: {result.stderr.strip()}"
+            )
 
         parts = result.stdout.strip().split(" ", 1)
-        job_id = parts[0]
-        checker_id = parts[1] if len(parts) > 1 else None
+        job_id = _validate_job_id(parts[0], stderr=result.stderr.strip())
         subs = [JobSubmission(job_id=job_id, n_trials=params.n_trials)]
-        if checker_id is not None:
+        if len(parts) > 1:
+            checker_id = _validate_job_id(parts[1], stderr=result.stderr.strip())
             subs.append(JobSubmission(job_id=checker_id, n_trials=0, role="checker"))
         return SubmitResult(submissions=subs)
 
@@ -363,7 +409,9 @@ class SlurmAdapter:
             "BUILD_JOB_ID=$(sbatch --parsable <<'JERNERICS_EOF'",
             sbatch_script,
             "JERNERICS_EOF",
-            ")",
+            ') || { echo "build job submission failed" >&2; exit 1; }',
+            '[ -n "$BUILD_JOB_ID" ] || '
+            '{ echo "build job submission failed (empty job id)" >&2; exit 1; }',
             "echo $BUILD_JOB_ID",
         ]
         submission_script = "\n".join(lines)
@@ -376,8 +424,10 @@ class SlurmAdapter:
             text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to submit build job: {result.stderr.strip()}")
-        return result.stdout.strip()
+            raise SlurmSubmitError(
+                f"Failed to submit build job: {result.stderr.strip()}"
+            )
+        return _validate_job_id(result.stdout.strip(), stderr=result.stderr.strip())
 
     def list_jobs(self, include_completed: bool = False) -> list[JobInfo]:
         fmt = "%i|%j|%T"

@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -907,3 +908,37 @@ class TestRetryContextServerAddr:
         )
         restored = RetryContext.from_json(ctx.to_json())
         assert restored.server_addr == ""
+
+
+class TestRetryContextParamOverrides:
+    def test_param_overrides_survive_serialization_roundtrip(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+            param_overrides={"target": 3200},
+        )
+        restored = RetryContext.from_json(ctx.to_json())
+        assert restored.param_overrides == {"target": 3200}
+
+    def test_param_overrides_default_empty(self):
+        ctx = RetryContext(
+            study_name="test-study",
+            backend_name="hpc",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+        )
+        assert ctx.param_overrides == {}
+
+    def test_ctx_json_without_key_defaults_empty(self):
+        text = json.dumps(
+            {
+                "study_name": "test-study",
+                "backend_name": "hpc",
+                "trial_relpath": "trial.py",
+                "config_relpath": "config.py",
+            }
+        )
+        restored = RetryContext.from_json(text)
+        assert restored.param_overrides == {}
