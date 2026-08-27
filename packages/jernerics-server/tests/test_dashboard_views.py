@@ -720,7 +720,7 @@ class TestSweepPage:
         assert "/dashboard/project/ops" in rendered
 
     def test_analyze_series_deep_link_needs_no_workspace_pick(self, service):
-        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
+        page: Any = page_content(f"/dashboard/sweep/{SWEEP_A}", service)[0]
         link = next(
             node
             for node in _walk(page)

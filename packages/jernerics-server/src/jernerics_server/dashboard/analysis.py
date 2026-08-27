@@ -13,6 +13,7 @@ flows through DashboardService.
 """
 
 import json
+import math
 import uuid
 from typing import Any
 from urllib.parse import parse_qs, quote
@@ -55,11 +56,18 @@ VIEW_VERSION = 1
 """Wire version of the dashboard-only ``view=`` URL document."""
 
 _ANALYSIS_VIEWS = ("catalog", "series", "points", "optuna", "python")
-_SERIES_MODES = ("overlay",)
+_SERIES_MODES = ("stacked", "overlay")
+_AXIS_SCALES = ("linear", "log")
+_AXIS_RANGES = ("auto", "custom")
 
 
 class ViewStateError(Exception):
     """The ``view=`` URL parameter is malformed or unsupported."""
+
+
+def default_axis_state() -> dict[str, Any]:
+    """A per-key y-axis at its default: linear scale, auto range."""
+    return {"scale": "linear", "range": "auto", "min": None, "max": None}
 
 
 def default_view_state() -> dict[str, Any]:
@@ -69,13 +77,14 @@ def default_view_state() -> dict[str, Any]:
         "active": "catalog",
         "series": {
             "keys": [],
-            "mode": "overlay",
+            "mode": "stacked",
             "reduction": "none",
             "trial_display": None,
             "context_filters": {},
             "color": None,
             "facet": None,
             "axes": {},
+            "overlay_axis": default_axis_state(),
         },
         "highlighted_families": [],
         "auto_refresh": False,
@@ -109,6 +118,40 @@ def _string_list(value: Any, field: str) -> list[str]:
             f"{field} entries must be non-empty strings",
         )
     return list(value)
+
+
+def _finite_number(value: Any, field: str) -> float | None:
+    """A finite numeric field; ``None`` when absent, anything else is an
+    error."""
+    if value is None:
+        return None
+    _require(
+        isinstance(value, int | float) and not isinstance(value, bool),
+        f"{field} must be a finite number",
+    )
+    _require(math.isfinite(value), f"{field} must be a finite number")
+    return float(value)
+
+
+def decode_axis_state(value: Any, field: str) -> dict[str, Any]:
+    """A validated per-key axis object; unknown fields are dropped and
+    ``auto`` ranges ignore stored bounds."""
+    _require(isinstance(value, dict), f"{field} must be an object")
+    scale = value.get("scale", "linear")
+    _require(scale in _AXIS_SCALES, f"{field}.scale must be linear or log")
+    range_mode = value.get("range", "auto")
+    _require(range_mode in _AXIS_RANGES, f"{field}.range must be auto or custom")
+    axis = {"scale": scale, "range": range_mode, "min": None, "max": None}
+    if range_mode == "custom":
+        low = _finite_number(value.get("min"), f"{field}.min")
+        high = _finite_number(value.get("max"), f"{field}.max")
+        if low is None or high is None:
+            raise ViewStateError(f"{field} custom range requires finite min and max")
+        _require(low < high, f"{field} custom range requires min < max")
+        if scale == "log":
+            _require(low > 0, f"{field} log custom range requires min > 0")
+        axis["min"], axis["max"] = low, high
+    return axis
 
 
 def decode_view_state(raw: str) -> dict[str, Any]:
@@ -170,11 +213,10 @@ def decode_view_state(raw: str) -> dict[str, Any]:
             isinstance(name, str) and name != "",
             "series.axes keys must be non-empty strings",
         )
-        _require(
-            isinstance(axis, str) and axis != "",
-            "series.axes values must be non-empty strings",
-        )
-        doc["series"]["axes"][name] = axis
+        doc["series"]["axes"][name] = decode_axis_state(axis, f"series.axes[{name!r}]")
+    doc["series"]["overlay_axis"] = decode_axis_state(
+        series.get("overlay_axis", default_axis_state()), "series.overlay_axis"
+    )
     doc["highlighted_families"] = _string_list(
         payload.get("highlighted_families", []), "highlighted_families"
     )
@@ -251,18 +293,29 @@ def _gated_value(desired: str | None, loaded: set[str] | None) -> Any:
     return desired if loaded is not None and desired in loaded else no_update
 
 
+def _gated_keys(keys: list[str], loaded: set[str] | None) -> Any:
+    """A multi-select value to write, or ``no_update`` when writing it
+    would race the options: a dropdown drops values its options do not
+    carry and fires the loss back as an edit."""
+    if loaded is None:
+        return no_update if keys else []
+    if keys and not set(keys) <= loaded:
+        return no_update
+    return list(keys)
+
+
 def control_values(
     doc: dict[str, Any] | None,
     loaded: dict[str, set[str] | None],
 ) -> tuple[Any, ...]:
-    """(active, key, reduction, color, facet, contour_x, contour_y) the
-    analysis controls take from the view state; dropdown values arrive
-    only once their options carry them."""
+    """(active, keys, mode, reduction, color, facet, contour_x,
+    contour_y) the analysis controls take from the view state; dropdown
+    values arrive only once their options carry them."""
     doc = doc or default_view_state()
-    keys = doc["series"]["keys"]
     return (
         doc["active"],
-        _gated_value(keys[0] if keys else None, loaded.get("key")),
+        _gated_keys(doc["series"]["keys"], loaded.get("keys")),
+        doc["series"]["mode"],
         doc["series"]["reduction"],
         _gated_value(doc["series"]["color"], loaded.get("color")),
         _gated_value(doc["series"]["facet"], loaded.get("facet")),
@@ -275,7 +328,8 @@ def view_from_controls(
     current: dict[str, Any] | None,
     *,
     active: str | None,
-    key: str | None,
+    keys: list[str] | None,
+    mode: str | None,
     reduction: str | None,
     color: str | None,
     facet: str | None,
@@ -288,13 +342,17 @@ def view_from_controls(
     authoritative; the rest survive from ``current`` — a control-sync
     write fires the edit callback with every input, and a control whose
     options have not loaded reports None, which must not read as a
-    clear. Fields without controls at all (mode, trial display, context
-    filters, per-key axes, highlighted families, auto-refresh) always
-    survive."""
+    clear. Fields without controls at all (trial display, context
+    filters, per-key axes, the overlay axis, highlighted families,
+    auto-refresh) always survive."""
     doc = current or default_view_state()
     series = dict(doc["series"])
-    if "key" in edited:
-        series["keys"] = [key] if key else []
+    if "keys" in edited:
+        series["keys"] = list(
+            dict.fromkeys(key for key in keys or [] if isinstance(key, str) and key)
+        )
+    if "mode" in edited and mode in _SERIES_MODES:
+        series["mode"] = mode
     if "reduction" in edited:
         series["reduction"] = reduction if reduction in ANALYSIS_REDUCTIONS else "none"
     if "color" in edited:
@@ -320,7 +378,8 @@ def view_from_controls(
 
 _CONTROL_IDS = {
     "analysis-tabs": "active",
-    "analysis-key": "key",
+    "analysis-key": "keys",
+    "analysis-mode": "mode",
     "analysis-reduction": "reduction",
     "analysis-color": "color",
     "analysis-facet": "facet",
@@ -424,7 +483,7 @@ def analysis_page() -> html.Div:
                         children=html.Div(id="analysis-catalog"),
                     ),
                     dcc.Tab(
-                        label="Series overlay",
+                        label="Series panels",
                         value="series",
                         children=_series_tab(),
                     ),
@@ -451,13 +510,15 @@ def analysis_page() -> html.Div:
 
 
 def scope_bar(
-    service: DashboardService, project: str | None, tray: dict[str, Any] | None
+    service: DashboardService | None,
+    project: str | None,
+    tray: dict[str, Any] | None,
 ) -> html.Div:
     """The persistent scope line above every analysis view: selected
     sweep names, curation badges, and the tray's counts. Curated sweeps
     stay in scope with their state named — never silently removed."""
     tray = tray or EMPTY_TRAY
-    if not project:
+    if not project or service is None:
         return html.Div(
             Empty("Pick a project in the header to analyze its sweeps."),
             className="scope-bar",
@@ -499,7 +560,21 @@ def _series_tab() -> html.Div:
         [
             html.Div(
                 [
-                    dcc.Dropdown(id="analysis-key", placeholder="Value key…"),
+                    dcc.Dropdown(
+                        id="analysis-key",
+                        placeholder="Value keys… (order = panel order)",
+                        multi=True,
+                        searchable=True,
+                    ),
+                    dcc.RadioItems(
+                        id="analysis-mode",
+                        options=[
+                            {"label": " Stacked panels", "value": "stacked"},
+                            {"label": " Shared-axis overlay", "value": "overlay"},
+                        ],
+                        value="stacked",
+                        inline=True,
+                    ),
                     dcc.Dropdown(id="analysis-color", placeholder="Color by context…"),
                     dcc.Dropdown(
                         id="analysis-facet",
@@ -518,12 +593,16 @@ def _series_tab() -> html.Div:
                 className="analysis-controls",
             ),
             html.P(
-                "Group executions: “none” shows every (trial, execution) "
-                "series as logged; mean/min/max fold executions within each "
-                "trial, per step — never an implicit latest value.",
+                "Stacked (default): one linked-x panel per key with its own "
+                "y axis. Overlay (explicit): every key on ONE shared, "
+                "unnormalized y axis. Group executions: “none” shows every "
+                "(trial, execution) series as logged; mean/min/max fold "
+                "executions within each trial, per step — never an implicit "
+                "latest value.",
                 className="hint",
             ),
-            dcc.Graph(id="analysis-series-figure"),
+            html.Div(id="analysis-series-panels"),
+            dcc.Store(id="analysis-series-data"),
         ]
     )
 
@@ -958,14 +1037,19 @@ def catalog_tab(
                 [
                     html.H3("Value keys"),
                     components.DataTable(
-                        ("Key", "Kind", "Points", "Steps", "Trials"),
+                        ("Key", "Kind", "Points", "Steps", "Trials", "Families"),
                         [
                             (
                                 entry["key"],
                                 entry["kind"],
                                 entry["points"],
-                                "yes" if entry["steps"] else "no",
+                                (
+                                    f"{entry['extent'][0]}-{entry['extent'][1]}"
+                                    if entry["steps"]
+                                    else "no"
+                                ),
                                 entry["trials"],
+                                entry["families"],
                             )
                             for entry in values
                         ],
@@ -1024,56 +1108,206 @@ def catalog_tab(
                 ],
                 className="section",
             ),
-        ]
+        ],
     )
 
 
-def _long_form(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One row per point, with series identity and flat context values."""
-    rows: list[dict[str, Any]] = []
-    for group in groups:
-        trial = short_id(group["trial"])
-        execution = short_id(group["execution"]) if group["execution"] else ""
-        series = f"{trial}/{execution}" if execution else trial
-        for step, value in group["points"]:
-            rows.append(
-                {
-                    "step": step,
-                    "value": value,
-                    "series": series,
-                    "trial": trial,
-                    "execution": execution,
-                    **(group["context"] or {}),
-                }
+def _coverage_label(entry: dict[str, Any]) -> str:
+    low, high = entry["extent"]
+    extent = f"steps {low}-{high}" if entry["steps"] else "no steps beyond 0"
+    return (
+        f"{entry['key']} · {entry['kind']} · {entry['points']} pts · "
+        f"{entry['trials']} trial(s) · {entry['families']} family/families · "
+        f"{extent}"
+    )
+
+
+def _series_payload(per_key: list[dict[str, Any]], keys: list[str]) -> dict[str, Any]:
+    """The analysis-series-data store payload: every fetched observation
+    behind the panels, for axis edits that must not re-query."""
+    per_key_data = {key: {"series": []} for key in keys}
+    per_key_data.update(
+        {entry["key"]: {"series": entry["series"]} for entry in per_key}
+    )
+    return {"keys": keys, "per_key": per_key_data}
+
+
+def _axis_controls(axis: dict[str, Any], pattern: Any, *, overlay: bool = False):
+    """One compact control block: scale, range mode, custom bounds, and
+    Reset — pattern ids keyed by metric for stacked panels, static ids
+    for the one shared overlay axis."""
+    ids = (
+        {
+            "scale": "analysis-overlay-scale",
+            "range": "analysis-overlay-range",
+            "min": "analysis-overlay-min",
+            "max": "analysis-overlay-max",
+            "reset": "analysis-overlay-reset",
+        }
+        if overlay
+        else {
+            "scale": {"axis-scale": pattern},
+            "range": {"axis-range": pattern},
+            "min": {"axis-min": pattern},
+            "max": {"axis-max": pattern},
+            "reset": {"axis-reset": pattern},
+        }
+    )
+    return [
+        dcc.Dropdown(
+            id=ids["scale"],
+            options=[
+                {"label": "Linear", "value": "linear"},
+                {"label": "Log", "value": "log"},
+            ],
+            value=axis["scale"],
+            clearable=False,
+        ),
+        dcc.RadioItems(
+            id=ids["range"],
+            options=[
+                {"label": "Auto", "value": "auto"},
+                {"label": " Custom", "value": "custom"},
+            ],
+            value=axis["range"],
+            inline=True,
+        ),
+        dcc.Input(
+            id=ids["min"],
+            type="number",
+            value=axis["min"],
+            placeholder="min",
+            debounce=True,
+        ),
+        dcc.Input(
+            id=ids["max"],
+            type="number",
+            value=axis["max"],
+            placeholder="max",
+            debounce=True,
+        ),
+        html.Button("Reset", id=ids["reset"], n_clicks=0),
+    ]
+
+
+def _note_span(notes: list[str], note_id: Any) -> html.Span:
+    return html.Span(
+        " · ".join(notes) if notes else "",
+        className="panel-note",
+        id=note_id,
+    )
+
+
+def _panel_headers(
+    per_key: list[dict[str, Any]],
+    axes: dict[str, dict[str, Any]],
+) -> list[html.Div]:
+    """Per-key header rows in picker order: title, reorder buttons, the
+    compact axis controls, and the coverage/clipping notes."""
+    headers = []
+    for index, entry in enumerate(per_key, start=1):
+        key = entry["key"]
+        axis = axes.get(key) or default_axis_state()
+        resolved = figures.resolve_axis(axis, entry["series"])
+        notes = figures.axis_notes(resolved)
+        if not entry["series"]:
+            notes = ["no observations under this scope", *notes]
+        headers.append(
+            html.Div(
+                [
+                    html.Span(f"{index}. {key}", className="panel-title"),
+                    html.Button(
+                        "↑", id={"panel-move-up": key}, n_clicks=0, title="Move up"
+                    ),
+                    html.Button(
+                        "↓", id={"panel-move-down": key}, n_clicks=0, title="Move down"
+                    ),
+                    *_axis_controls(axis, key),
+                    _note_span(notes, {"axis-note": key}),
+                ],
+                className="panel-header",
             )
-    return rows
+        )
+    return headers
+
+
+def panel_notes(view_doc: dict[str, Any] | None, data: dict[str, Any] | None) -> list:
+    """Note text for every rendered stacked panel, in picker order —
+    the ALL-pattern note output realigns every panel without waiting
+    for a re-render."""
+    doc = view_doc or default_view_state()
+    if doc["series"]["mode"] != "stacked":
+        return []
+    notes = []
+    for key in doc["series"]["keys"]:
+        series = (data or {}).get("per_key", {}).get(key, {}).get("series", [])
+        resolved = figures.resolve_axis(doc["series"]["axes"].get(key), series)
+        parts = figures.axis_notes(resolved)
+        if not series:
+            parts = ["no observations under this scope", *parts]
+        notes.append(" · ".join(parts))
+    return notes
+
+
+def _overlay_panel(
+    per_key: list[dict[str, Any]],
+    overlay_axis: dict[str, Any],
+    *,
+    color: str | None,
+    facet: str | None,
+) -> list[Any]:
+    """The explicit shared-axis overlay: one control block, one figure,
+    no per-key axes disturbed."""
+    pooled = [series for entry in per_key for series in entry["series"]]
+    resolved = figures.resolve_axis(overlay_axis, pooled)
+    figure = dcc.Graph(
+        figure=figures.overlay_figure(per_key, overlay_axis, color=color, facet=facet)
+    )
+    return [
+        html.Div(
+            [
+                html.Span("Shared y axis (unnormalized)", className="panel-title"),
+                *_axis_controls(overlay_axis, None, overlay=True),
+                _note_span(figures.axis_notes(resolved), "analysis-overlay-note"),
+            ],
+            className="panel-header",
+        ),
+        figure,
+    ]
 
 
 def series_outputs(
-    service: DashboardService,
+    service: DashboardService | None,
     project: str | None,
     tray: dict[str, Any] | None,
-    key: str | None,
-    color: str | None,
-    facet: str | None,
-    reduction: str | None,
-) -> tuple[Any, list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
-    """(figure, key options, color options, facet options) for the series
-    overlay; color/facet options come from the context catalog."""
-    if not project:
+    view_doc: dict[str, Any] | None,
+) -> tuple[
+    list[Any], dict, list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]
+]:
+    """(panels, data payload, key options, color options, facet options)
+    for the series tab — the callback's output order: every panel comes
+    from ONE multi-key values read; per-key axis state rides the view
+    doc."""
+    doc = view_doc or default_view_state()
+    series_doc = doc["series"]
+    keys = list(series_doc["keys"])
+    if not project or service is None:
         return (
-            figures.overlay_figure([], key=""),
+            [Empty("Pick a project in the header to analyze its sweeps.")],
+            _series_payload([], keys),
             [],
             [],
             [],
         )
-    keys = service.analysis_value_keys(project, tray)
+    coverage = service.analysis_value_keys(project, tray)
+    offered = {
+        entry["key"]: _coverage_label(entry)
+        for entry in coverage
+        if entry["kind"] == "scalar" and entry["steps"]
+    }
     key_options = [
-        {
-            "label": f"{entry['key']} · {entry['kind']} · {entry['points']} pts",
-            "value": entry["key"],
-        }
-        for entry in keys
+        {"label": offered.get(key, f"{key} · absent under this scope"), "value": key}
+        for key in sorted({*offered, *keys})
     ]
     dim_options = [
         {
@@ -1082,18 +1316,146 @@ def series_outputs(
         }
         for entry in service.analysis_context_dims(project, tray)
     ]
-    if not key or key not in {entry["key"] for entry in keys}:
-        return (
-            figures.overlay_figure([], key=key),
-            key_options,
-            dim_options,
-            dim_options,
-        )
-    groups = service.analysis_series(project, tray, key, reduction or "none")
-    figure = figures.overlay_figure(
-        _long_form(groups), key=key, color=color, facet=facet
+    per_key = service.analysis_series(
+        project, tray, keys, series_doc["reduction"] or "none"
     )
-    return figure, key_options, dim_options, dim_options
+    payload = _series_payload(per_key, keys)
+    if not keys:
+        panels = [
+            Empty(
+                "No value keys selected — pick one or more scalar step keys; "
+                "the picker order is the panel order."
+            )
+        ]
+    elif series_doc["mode"] == "overlay":
+        panels = _overlay_panel(
+            per_key,
+            series_doc["overlay_axis"],
+            color=series_doc["color"],
+            facet=series_doc["facet"],
+        )
+    else:
+        panels = [
+            *_panel_headers(per_key, series_doc["axes"]),
+            dcc.Graph(
+                figure=figures.stacked_figure(
+                    per_key,
+                    series_doc["axes"],
+                    color=series_doc["color"],
+                    facet=series_doc["facet"],
+                )
+            ),
+        ]
+    return panels, payload, key_options, dim_options, dim_options
+
+
+def axis_state_edit(
+    current: dict[str, Any] | None,
+    *,
+    metric: str | None,
+    control: str,
+    scale: Any,
+    range_mode: Any,
+    low: Any,
+    high: Any,
+    data: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """(edited view doc, note) after one axis-control edit — ``metric``
+    names a per-key stacked axis, ``None`` the shared overlay axis. A
+    ``None`` doc means the edit was refused: the last valid axis stays
+    and the note says why (invalid bounds, or log against non-positive
+    observations — those points are never dropped)."""
+    doc = current or default_view_state()
+    series = dict(doc["series"])
+    if metric is None:
+        axis = dict(series["overlay_axis"])
+        observations = [
+            entry
+            for key in series["keys"]
+            for entry in (data or {}).get("per_key", {}).get(key, {}).get("series", [])
+        ]
+    else:
+        axis = dict(series["axes"].get(metric) or default_axis_state())
+        observations = (data or {}).get("per_key", {}).get(metric, {}).get("series", [])
+    field = control if control in {"scale", "range", "min", "max", "reset"} else None
+    if field == "reset":
+        axis = default_axis_state()
+    elif field == "scale":
+        axis["scale"] = scale if scale in _AXIS_SCALES else "linear"
+    elif field == "range":
+        axis["range"] = range_mode if range_mode in _AXIS_RANGES else "auto"
+        axis["min"] = _number_or_none(low) if axis["range"] == "custom" else None
+        axis["max"] = _number_or_none(high) if axis["range"] == "custom" else None
+    elif field in ("min", "max"):
+        axis["min"] = _number_or_none(low)
+        axis["max"] = _number_or_none(high)
+        if axis["min"] is not None and axis["max"] is not None:
+            axis["range"] = "custom"
+    else:
+        return None, None
+    if axis["range"] == "custom":
+        if axis["min"] is None or axis["max"] is None:
+            return None, "custom range needs finite min and max"
+        if axis["min"] >= axis["max"]:
+            return None, "custom range needs min < max"
+        if axis["scale"] == "log" and axis["min"] <= 0:
+            return None, "log custom range needs min > 0"
+    elif axis["min"] is not None or axis["max"] is not None:
+        if field in ("min", "max"):
+            return None, "type both finite bounds to apply a custom range"
+        axis["min"] = axis["max"] = None
+    if axis["scale"] == "log":
+        non_positive = figures.non_positive_count(observations)
+        if non_positive:
+            return (
+                None,
+                f"log not applied: {non_positive} non-positive observation(s) "
+                "— keeping the last valid linear axis",
+            )
+    resolved = figures.resolve_axis(axis, observations)
+    if metric is None:
+        series["overlay_axis"] = axis
+    else:
+        axes = dict(series["axes"])
+        if axis == default_axis_state():
+            axes.pop(metric, None)
+        else:
+            axes[metric] = axis
+        series["axes"] = axes
+    edited = {**doc, "series": series}
+    if edited == doc:
+        return None, None
+    return edited, " · ".join(figures.axis_notes(resolved))
+
+
+def _number_or_none(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def moved_keys(
+    current: dict[str, Any] | None, metric: str, direction: str
+) -> dict[str, Any] | None:
+    """View doc after moving one selected key up/down in picker order;
+    ``None`` when the move changes nothing."""
+    if direction not in ("up", "down"):
+        return None
+    doc = current or default_view_state()
+    keys = list(doc["series"]["keys"])
+    if metric not in keys:
+        return None
+    index = keys.index(metric)
+    target = index - 1 if direction == "up" else index + 1
+    if not 0 <= target < len(keys):
+        return None
+    keys[index], keys[target] = keys[target], keys[index]
+    series = dict(doc["series"], keys=keys)
+    return {**doc, "series": series}
 
 
 def _format_payload(payload: Any) -> str:

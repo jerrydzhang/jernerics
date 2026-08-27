@@ -331,6 +331,41 @@ a.project-row:hover {
   margin: 0.8rem 0;
 }
 
+
+/* Series panels (jernerics-cdf.4) */
+
+.panel-header {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 0.6rem 0 0.2rem;
+}
+
+.panel-header .panel-title {
+  font-weight: 600;
+}
+
+.panel-header .dash-dropdown {
+  min-width: 6rem;
+  flex: none;
+}
+
+.panel-header .dash-radiogroup,
+.panel-header button,
+.panel-header input {
+  flex: none;
+}
+
+.panel-header input {
+  width: 6rem;
+}
+
+.panel-note {
+  font-size: 0.9rem;
+  color: #8a6d3b;
+}
+
 .scope-bar {
   display: flex;
   gap: 1rem;

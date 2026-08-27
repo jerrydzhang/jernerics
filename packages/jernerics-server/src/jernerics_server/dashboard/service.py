@@ -734,20 +734,22 @@ class DashboardService:
     def analysis_value_keys(
         self, project: str | None, tray: dict[str, Any] | None
     ) -> list[dict[str, Any]]:
-        """Value keys under the selection: kind, volume, and whether the
-        key logs more than step 0 (series vs single point)."""
+        """Value keys under the selection: kind, volume, trial and
+        retry-family coverage, and the step extent."""
         if not project:
             return []
         selection = self.analysis_selection(project, tray)
         return [
             {
-                "key": record.key,
-                "kind": record.kind,
-                "points": record.n_points,
-                "trials": record.n_trials,
-                "steps": (record.latest_step or 0) > 0,
+                "key": row["key"],
+                "kind": row["kind"],
+                "points": row["points"],
+                "trials": row["trials"],
+                "families": row["families"],
+                "steps": (row["max_step"] or 0) > 0,
+                "extent": (row["min_step"], row["max_step"]),
             }
-            for record in self.queries.value_catalog(selection)
+            for row in self.queries.value_key_coverage(selection)
         ]
 
     def analysis_context_dims(
@@ -832,37 +834,39 @@ class DashboardService:
         self,
         project: str | None,
         tray: dict[str, Any] | None,
-        key: str | None,
+        keys: Sequence[str] | None,
         reduction: str = "none",
     ) -> list[dict[str, Any]]:
-        """Numeric series for one value key under the selection.
+        """Ordered numeric series for the given value keys from ONE
+        paginated values read; a key with no observations maps to an
+        empty series list and missing stays missing.
 
         ``reduction="none"`` returns one series per (trial, execution)
         pair — every logged point, never a silently chosen latest value.
         ``mean``/``min``/``max`` fold executions within each trial, per
-        step, as an explicit user-chosen reduction.
+        step, independently per key, as an explicit user-chosen
+        reduction.
         """
-        if not project or not key:
-            return []
         if reduction not in ANALYSIS_REDUCTIONS:
             raise ValueError(f"unknown reduction {reduction!r}")
+        wanted = list(dict.fromkeys(key for key in keys or [] if key))
+        if not project or not wanted:
+            return [{"key": key, "series": []} for key in wanted]
         selection = self.analysis_selection(project, tray)
-        numeric: list[tuple[ValueRecord, float]] = []
-        for record in self._follow_values(selection, (key,)):
-            if isinstance(record.value, int | float) and not isinstance(
+        grouped: dict[tuple[str, str, str | None], list[tuple[ValueRecord, float]]] = {}
+        for record in self._follow_values(selection, tuple(wanted)):
+            if not isinstance(record.value, int | float) or isinstance(
                 record.value, bool
             ):
-                numeric.append((record, float(record.value)))
-        grouped: dict[tuple[str, str | None], list[tuple[ValueRecord, float]]] = {}
-        for record, number in numeric:
+                continue
             identity = (
-                (str(record.trial_id), str(record.execution_id))
-                if reduction == "none"
-                else (str(record.trial_id), None)
+                record.key,
+                str(record.trial_id),
+                str(record.execution_id) if reduction == "none" else None,
             )
-            grouped.setdefault(identity, []).append((record, number))
-        series: list[dict[str, Any]] = []
-        for (trial, execution), group in sorted(grouped.items()):
+            grouped.setdefault(identity, []).append((record, float(record.value)))
+        per_key: dict[str, list[dict[str, Any]]] = {key: [] for key in wanted}
+        for (key, trial, execution), group in sorted(grouped.items()):
             by_step: dict[int, list[float]] = {}
             context: dict[str, Any] = {}
             for record, number in group:
@@ -880,7 +884,7 @@ class DashboardService:
                 points = [(step, max(v)) for step, v in sorted(by_step.items())]
             else:
                 points = [(step, values[0]) for step, values in sorted(by_step.items())]
-            series.append(
+            per_key[key].append(
                 {
                     "trial": trial,
                     "execution": execution,
@@ -888,7 +892,7 @@ class DashboardService:
                     "context": context,
                 }
             )
-        return series
+        return [{"key": key, "series": per_key[key]} for key in wanted]
 
     def analysis_points(
         self, project: str | None, tray: dict[str, Any] | None

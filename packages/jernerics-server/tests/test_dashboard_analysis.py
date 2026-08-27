@@ -37,10 +37,12 @@ from jernerics_server.dashboard.analysis import (
     ViewStateError,
     analysis_href,
     analysis_page,
+    axis_state_edit,
     catalog_tab,
     cold_start,
     control_values,
     decode_view_state,
+    default_axis_state,
     default_view_state,
     edited_fields,
     encode_view_state,
@@ -49,6 +51,7 @@ from jernerics_server.dashboard.analysis import (
     hydrate_view,
     include_values,
     mounted_selection,
+    moved_keys,
     optuna_tab_content,
     points_tab,
     python_snippet,
@@ -67,7 +70,20 @@ from jernerics_server.dashboard.analysis import (
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
-from jernerics_server.dashboard.callbacks import page_content, tray_from_grid
+from jernerics_server.dashboard.callbacks import (
+    overlay_axis_control,
+    page_content,
+    pattern_trigger,
+    tray_from_grid,
+)
+from jernerics_server.dashboard.figures import (
+    axis_notes,
+    clipped_count,
+    non_positive_count,
+    overlay_figure,
+    resolve_axis,
+    stacked_figure,
+)
 from jernerics_server.dashboard.layout import shell
 from jernerics_server.dashboard.selection_tokens import (
     SelectionTokenError,
@@ -390,6 +406,8 @@ def _seed_events() -> list:
         ),
         event(ValueEvent, 875, trial_id=TB, key="loss", step=0, value=0.7),
         event(ValueEvent, 870, trial_id=TB, key="loss", step=1, value=0.6),
+        event(ValueEvent, 868, trial_id=TB, key="delta", step=0, value=-0.5),
+        event(ValueEvent, 867, trial_id=TB, key="delta", step=1, value=0.25),
         event(ValueEvent, 865, trial_id=TB, key="accuracy", step=0, value=0.81),
         event(ValueEvent, 860, trial_id=TB, key="accuracy", step=1, value=0.91),
         event(
@@ -829,56 +847,166 @@ class TestDataCatalog:
             assert needle in rendered
 
 
-class TestSeriesOverlay:
-    def test_one_trace_per_trial_execution_pair(self, service):
-        figure, *_rest = series_outputs(
-            service, PROJECT, _tray(), "loss", None, None, "none"
+def _series_doc(**overrides: Any) -> dict:
+    doc = default_view_state()
+    doc["active"] = "series"
+    doc["series"].update(overrides)
+    return doc
+
+
+def _all_sweeps() -> dict:
+    return _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)])
+
+
+def _panel_graphs(panels: list) -> list:
+    return [node for node in panels if isinstance(node, dcc.Graph)]
+
+
+def _panel_headers(panels: list) -> list:
+    return [node for node in panels if getattr(node, "className", "") == "panel-header"]
+
+
+class TestSeriesPanels:
+    """jernerics-cdf.4: three heterogeneous scalar keys render three
+    ordered aligned panels from ONE values read, with independent y
+    axes, stable trial colors, and missing coverage visible."""
+
+    def test_three_keys_three_ordered_panels_from_one_read(self, service, monkeypatch):
+        doc = _series_doc(keys=["loss", "accuracy", "score"])
+        reads: list[tuple[str, ...] | None] = []
+        original = service.queries.values
+
+        def spy(selection, **kwargs):
+            reads.append(kwargs.get("keys"))
+            return original(selection, **kwargs)
+
+        monkeypatch.setattr(service.queries, "values", spy)
+        panels, payload, _key_options, _color, _facet = series_outputs(
+            service, PROJECT, _all_sweeps(), doc
         )
-        names = {trace.name for trace in figure.data}
-        assert names == {
+        assert reads == [("loss", "accuracy", "score")]
+        assert payload["keys"] == ["loss", "accuracy", "score"]
+        graph = _panel_graphs(panels)[0]
+        titles = [
+            annotation.text
+            for annotation in graph.figure.layout.annotations
+            if annotation.text
+        ]
+        assert titles[:3] == ["loss", "accuracy", "score"]
+        assert graph.figure.layout.xaxis.matches == "x3"
+        assert graph.figure.layout.xaxis2.matches == "x3"
+        per_panel_traces = [[], [], []]
+        for trace in graph.figure.data:
+            axis = trace.yaxis or "y"
+            per_panel_traces[int(axis.removeprefix("y") or 1) - 1].append(trace)
+        assert {trace.name for trace in per_panel_traces[0]} == {
             "cc310000/dd310000",
             "cc310200/dd310100",
             "cc310200/dd310200",
             "cc310300/dd310300",
+            "cc320000/dd320000",
         }
-        points = {trace.name: len(trace.x) for trace in figure.data}
-        assert points["cc310200/dd310100"] == 3
-        assert points["cc310200/dd310200"] == 4
+        assert [trace.name for trace in per_panel_traces[1]] == ["cc320000/dd320000"]
+        assert [trace.name for trace in per_panel_traces[2]] == ["cc330000/dd330000"]
+
+    def test_trial_color_is_stable_across_panels(self, service):
+        doc = _series_doc(keys=["loss", "accuracy"])
+        panels, *_ = series_outputs(service, PROJECT, _all_sweeps(), doc)
+        graph = _panel_graphs(panels)[0]
+        by_axis = {}
+        for trace in graph.figure.data:
+            by_axis.setdefault(trace.yaxis or "y", {})[trace.name] = trace
+        loss_tb = by_axis["y"]["cc320000/dd320000"]
+        accuracy_tb = by_axis["y2"]["cc320000/dd320000"]
+        assert loss_tb.line.color == accuracy_tb.line.color
+        identities = {
+            trace.name: trace.line.color
+            for trace in graph.figure.data
+            if trace.yaxis in (None, "y")
+        }
+        by_trial = {}
+        for name, color in identities.items():
+            by_trial.setdefault(name.split("/")[0], set()).add(color)
+        assert set(by_trial) == {"cc310000", "cc310200", "cc310300", "cc320000"}
+        assert all(len(colors) == 1 for colors in by_trial.values())
+        assert len({color for colors in by_trial.values() for color in colors}) == 4
 
     def test_no_reduction_returns_every_point(self, service):
-        figure, *_rest = series_outputs(
-            service, PROJECT, _tray(), "loss", None, None, "none"
-        )
-        assert sum(len(trace.x) for trace in figure.data) == 10
+        doc = _series_doc(keys=["loss"])
+        panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        assert sum(len(trace.x) for trace in graph.figure.data) == 10
 
     def test_mean_reduction_folds_executions_per_trial(self, service):
-        figure, *_rest = series_outputs(
-            service, PROJECT, _tray(), "loss", None, None, "mean"
-        )
-        names = {trace.name for trace in figure.data}
+        doc = _series_doc(keys=["loss"], reduction="mean")
+        panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        names = {trace.name for trace in graph.figure.data}
         assert names == {"cc310000", "cc310200", "cc310300"}
-        merged = next(t for t in figure.data if t.name == "cc310200")
+        merged = next(t for t in graph.figure.data if t.name == "cc310200")
         assert list(merged.x) == [0, 1, 2, 3]
         assert merged.y[0] == pytest.approx((0.5 + 0.6) / 2)
         assert merged.y[3] == pytest.approx(0.35)
 
-    def test_context_dimensions_offer_color_and_facet(self, service):
-        all_sweeps = _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)])
-        _figure, key_options, color_options, facet_options = series_outputs(
-            service, PROJECT, all_sweeps, "loss", None, None, "none"
+    def test_reductions_apply_independently_per_key(self, service):
+        doc = _series_doc(keys=["loss", "delta"], reduction="mean")
+        panels, *_ = series_outputs(service, PROJECT, _all_sweeps(), doc)
+        graph = _panel_graphs(panels)[0]
+        by_axis = {}
+        for trace in graph.figure.data:
+            by_axis.setdefault(trace.yaxis or "y", []).append(trace)
+        assert [t.name for t in by_axis["y2"]] == ["cc320000"]
+        assert list(by_axis["y2"][0].y) == pytest.approx([-0.5, 0.25])
+
+    def test_picker_options_show_kind_coverage_and_extent(self, service):
+        doc = _series_doc(keys=[])
+        _panels, _payload, key_options, color_options, facet_options = series_outputs(
+            service, PROJECT, _all_sweeps(), doc
         )
-        assert {"loss", "accuracy", "summary", "score"} <= {
-            option["value"] for option in key_options
-        }
+        labels = {option["value"]: option["label"] for option in key_options}
+        assert labels["loss"] == (
+            "loss · scalar · 12 pts · 4 trial(s) · 3 family/families · steps 0-3"
+        )
+        assert "steps 0-1" in labels["accuracy"]
+        assert "delta" in labels
+        assert "score" not in labels
         assert {option["value"] for option in color_options} == {"host", "shard"}
         assert facet_options == color_options
 
-    def test_context_color_keys_traces_by_dimension(self, service):
-        figure, *_rest = series_outputs(
-            service, PROJECT, _tray(), "loss", "shard", None, "none"
+    def test_non_scalar_keys_stay_unselected_and_absent_keys_are_kept(
+        self,
+        service,
+    ):
+        doc = _series_doc(keys=["summary", "ghost"])
+        panels, _payload, key_options, *_unused = series_outputs(
+            service, PROJECT, _all_sweeps(), doc
         )
-        assert len(figure.data) == 4
-        by_name = {trace.name: trace for trace in figure.data}
+        labels = {option["value"]: option["label"] for option in key_options}
+        assert labels["ghost"] == "ghost · absent under this scope"
+        headers = _panel_headers(panels)
+        rendered = str(headers)
+        assert "summary" in rendered and "ghost" in rendered
+        assert "no observations under this scope" in rendered
+
+    def test_missing_key_keeps_its_panel_with_coverage_note(self, service):
+        doc = _series_doc(keys=["loss", "score"])
+        panels, payload, _k, _c, _f = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        titles = [
+            annotation.text
+            for annotation in graph.figure.layout.annotations
+            if annotation.text
+        ]
+        assert titles[:2] == ["loss", "score"]
+        assert payload["per_key"]["score"]["series"] == []
+        assert "no observations under this scope" in str(_panel_headers(panels))
+
+    def test_context_color_keys_traces_by_dimension(self, service):
+        doc = _series_doc(keys=["loss"], color="shard")
+        panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        assert len(graph.figure.data) == 4
+        by_name = {trace.name: trace for trace in graph.figure.data}
         shard_zero = [
             by_name["cc310000/dd310000"],
             by_name["cc310200/dd310100"],
@@ -886,7 +1014,29 @@ class TestSeriesOverlay:
         ]
         assert len({trace.line.color for trace in shard_zero}) == 1
         assert by_name["cc310200/dd310200"].line.color != shard_zero[0].line.color
-        assert len({trace.line.color for trace in figure.data}) == 2
+        assert len({trace.line.color for trace in graph.figure.data}) == 2
+
+    def test_execution_dash_distinguishes_executions_of_one_trial(self, service):
+        doc = _series_doc(keys=["loss"])
+        panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        by_name = {trace.name: trace for trace in graph.figure.data}
+        first = by_name["cc310200/dd310100"].line.dash
+        second = by_name["cc310200/dd310200"].line.dash
+        assert first != second
+        assert by_name["cc310000/dd310000"].line.dash == "solid"
+
+    def test_projectless_renders_empty_state_and_empty_payload(self):
+        panels, payload, key_options, _color, _facet = series_outputs(
+            None, None, None, _series_doc(keys=["loss"])
+        )
+        assert "Pick a project" in str(panels)
+        assert key_options == []
+        assert payload == {"keys": ["loss"], "per_key": {"loss": {"series": []}}}
+
+    def test_no_keys_renders_guidance(self, service):
+        panels, *_rest = series_outputs(service, PROJECT, _all_sweeps(), _series_doc())
+        assert "No value keys selected" in str(panels)
 
 
 class TestPointsTable:
@@ -1274,12 +1424,32 @@ class TestViewStateCodec:
         doc["active"] = "series"
         doc["series"] = {
             **doc["series"],
-            "keys": ["loss", "accuracy"],
+            "keys": ["loss", "accuracy", "delta"],
+            "mode": "overlay",
             "reduction": "mean",
             "trial_display": "short",
             "context_filters": {"host": ["node00", "node01"]},
             "color": "shard",
-            "axes": {"loss": "y1", "accuracy": "y2"},
+            "axes": {
+                "loss": {
+                    "scale": "log",
+                    "range": "custom",
+                    "min": 1.0,
+                    "max": 100.0,
+                },
+                "accuracy": {
+                    "scale": "linear",
+                    "range": "auto",
+                    "min": None,
+                    "max": None,
+                },
+            },
+            "overlay_axis": {
+                "scale": "linear",
+                "range": "custom",
+                "min": -1.0,
+                "max": 2.0,
+            },
         }
         doc["highlighted_families"] = [str(RA0)]
         doc["auto_refresh"] = True
@@ -1288,6 +1458,54 @@ class TestViewStateCodec:
         assert all(char not in '{}":,&' for char in encoded)
         assert decode_view_state(unquote(encoded)) == doc
         assert encode_view_state(decode_view_state(unquote(encoded))) == encoded
+
+    def test_default_mode_is_stacked_and_axes_default_to_linear_auto(self):
+        assert default_view_state()["series"]["mode"] == "stacked"
+        assert default_view_state()["series"]["axes"] == {}
+        assert default_view_state()["series"]["overlay_axis"] == (default_axis_state())
+        assert default_axis_state() == {
+            "scale": "linear",
+            "range": "auto",
+            "min": None,
+            "max": None,
+        }
+
+    def test_absent_axis_entry_means_linear_auto(self):
+        doc = decode_view_state(
+            json.dumps({"v": VIEW_VERSION, "series": {"keys": ["loss"]}})
+        )
+        assert doc["series"]["axes"] == {}
+
+    def test_auto_range_ignores_stored_bounds_and_unknown_axis_fields(self):
+        decoded = decode_view_state(
+            json.dumps(
+                {
+                    "v": VIEW_VERSION,
+                    "series": {
+                        "axes": {
+                            "loss": {
+                                "range": "auto",
+                                "min": 3,
+                                "max": 9,
+                                "dash": "dot",
+                            }
+                        },
+                        "overlay_axis": {"scale": "log", "bogus": 1},
+                    },
+                }
+            )
+        )
+        assert decoded["series"]["axes"]["loss"] == default_axis_state()
+        assert decoded["series"]["overlay_axis"] == {
+            "scale": "log",
+            "range": "auto",
+            "min": None,
+            "max": None,
+        }
+
+    def test_old_string_axes_form_is_rejected_without_alias(self):
+        with pytest.raises(ViewStateError, match="must be an object"):
+            decode_view_state(json.dumps({"v": 1, "series": {"axes": {"loss": "y1"}}}))
 
     def test_unknown_fields_are_dropped_and_not_re_emitted(self):
         doc = default_view_state()
@@ -1327,6 +1545,66 @@ class TestViewStateCodec:
             json.dumps({"v": VIEW_VERSION, "series": {"context_filters": []}}),
             json.dumps(
                 {"v": VIEW_VERSION, "series": {"context_filters": {"host": "n0"}}}
+            ),
+            json.dumps({"v": VIEW_VERSION, "series": {"axes": {"loss": "y1"}}}),
+            json.dumps(
+                {
+                    "v": VIEW_VERSION,
+                    "series": {"axes": {"loss": {"range": "custom", "min": 1}}},
+                }
+            ),
+            json.dumps(
+                {
+                    "v": VIEW_VERSION,
+                    "series": {"axes": {"loss": {"range": "custom", "min": 5}}},
+                }
+            ),
+            json.dumps(
+                {
+                    "v": VIEW_VERSION,
+                    "series": {
+                        "axes": {"loss": {"range": "custom", "min": 2, "max": 1}}
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "v": VIEW_VERSION,
+                    "series": {
+                        "axes": {
+                            "loss": {
+                                "scale": "log",
+                                "range": "custom",
+                                "min": 0,
+                                "max": 5,
+                            }
+                        }
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "v": VIEW_VERSION,
+                    "series": {
+                        "axes": {"loss": {"range": "custom", "min": "a", "max": 5}}
+                    },
+                }
+            ),
+            json.dumps(
+                {"v": VIEW_VERSION, "series": {"axes": {"loss": {"scale": "ln"}}}}
+            ),
+            json.dumps(
+                {
+                    "v": VIEW_VERSION,
+                    "series": {
+                        "overlay_axis": {
+                            "scale": "log",
+                            "range": "custom",
+                            "min": -1,
+                            "max": 5,
+                        }
+                    },
+                }
             ),
             json.dumps({"v": VIEW_VERSION, "series": {"axes": {"loss": 1}}}),
             json.dumps({"v": VIEW_VERSION, "highlighted_families": [7]}),
@@ -1434,7 +1712,8 @@ class TestViewSync:
 
     _ALL_FIELDS = {
         "active",
-        "key",
+        "keys",
+        "mode",
         "reduction",
         "color",
         "facet",
@@ -1447,14 +1726,16 @@ class TestViewSync:
         doc["series"] = {
             **doc["series"],
             "keys": ["loss", "accuracy"],
-            "axes": {"loss": "y1"},
+            "axes": {"loss": {"scale": "log", "range": "auto"}},
+            "overlay_axis": {"scale": "linear", "range": "custom", "min": 0, "max": 1},
             "context_filters": {"host": ["node00"]},
         }
         doc["auto_refresh"] = True
         edited = view_from_controls(
             doc,
             active="series",
-            key="accuracy",
+            keys=["accuracy", "score"],
+            mode="overlay",
             reduction="max",
             color="shard",
             facet=None,
@@ -1463,16 +1744,74 @@ class TestViewSync:
             edited=self._ALL_FIELDS,
         )
         assert edited["active"] == "series"
-        assert edited["series"]["keys"] == ["accuracy"]
+        assert edited["series"]["keys"] == ["accuracy", "score"]
+        assert edited["series"]["mode"] == "overlay"
         assert edited["series"]["reduction"] == "max"
-        assert edited["series"]["axes"] == {"loss": "y1"}
+        assert edited["series"]["axes"] == {"loss": {"scale": "log", "range": "auto"}}
+        assert edited is not None
+        assert edited["series"]["overlay_axis"] == {
+            "scale": "linear",
+            "range": "custom",
+            "min": 0,
+            "max": 1,
+        }
         assert edited["series"]["context_filters"] == {"host": ["node00"]}
         assert edited["auto_refresh"] is True
+
+    def test_keys_edit_dedupes_and_drops_empties(self):
+        junk_keys: list[Any] = ["loss", "", "accuracy", "loss", None]
+        edited = view_from_controls(
+            default_view_state(),
+            active=None,
+            keys=junk_keys,
+            mode=None,
+            reduction=None,
+            color=None,
+            facet=None,
+            contour_x=None,
+            contour_y=None,
+            edited={"keys"},
+        )
+        assert edited["series"]["keys"] == ["loss", "accuracy"]
+
+    def test_mode_switch_keeps_dormant_per_key_axes(self):
+        doc = _series_doc(
+            keys=["loss", "accuracy"],
+            axes={"loss": {"scale": "log", "range": "auto"}},
+        )
+        overlaid = view_from_controls(
+            doc,
+            active="series",
+            keys=["loss", "accuracy"],
+            mode="overlay",
+            reduction=None,
+            color=None,
+            facet=None,
+            contour_x=None,
+            contour_y=None,
+            edited={"mode"},
+        )
+        assert overlaid["series"]["mode"] == "overlay"
+        assert overlaid["series"]["axes"] == doc["series"]["axes"]
+        restored = view_from_controls(
+            overlaid,
+            active="series",
+            keys=["loss", "accuracy"],
+            mode="stacked",
+            reduction=None,
+            color=None,
+            facet=None,
+            contour_x=None,
+            contour_y=None,
+            edited={"mode"},
+        )
+        assert restored["series"]["axes"] == doc["series"]["axes"]
+        assert restored["series"]["mode"] == "stacked"
 
     def test_untriggered_controls_never_read_as_clears(self):
         """The control-sync write fires the edit callback with every
         input; a dropdown whose options have not loaded reports None and
-        must not wipe the hydrated key."""
+        must not wipe the hydrated keys."""
         doc: dict[str, Any] = dict(default_view_state(), active="series")
         doc["series"] = {
             **doc["series"],
@@ -1483,7 +1822,8 @@ class TestViewSync:
         tab_echo = view_from_controls(
             doc,
             active="series",
-            key=None,
+            keys=None,
+            mode=None,
             reduction="mean",
             color=None,
             facet=None,
@@ -1500,23 +1840,31 @@ class TestViewSync:
             "active",
             "contour_x",
         }
+        assert edited_fields({"analysis-mode.value"}) == {"mode"}
         assert edited_fields({"url.search"}) == set()
 
     _LOADED: dict[str, set[str] | None] = {
-        "key": {"loss", "accuracy", "summary"},
+        "keys": {"loss", "accuracy", "summary"},
         "color": {"host", "shard"},
         "facet": {"host", "shard"},
         "contour_x": {"lr", "seed"},
         "contour_y": {"lr", "seed"},
     }
 
-    def test_control_values_read_the_first_series_key(self):
+    def test_control_values_read_the_ordered_series_keys(self):
         doc = default_view_state()
-        doc["series"]["keys"] = ["loss", "accuracy"]
-        active, key, reduction, color, facet, cx, cy = control_values(doc, self._LOADED)
-        assert (active, key, reduction) == ("catalog", "loss", "none")
+        doc["series"]["keys"] = ["accuracy", "loss"]
+        active, keys, mode, reduction, color, facet, cx, cy = control_values(
+            doc, self._LOADED
+        )
+        assert (active, keys, mode, reduction) == (
+            "catalog",
+            ["accuracy", "loss"],
+            "stacked",
+            "none",
+        )
         assert (color, facet, cx, cy) == (None, None, None, None)
-        assert control_values(None, self._LOADED)[1] is None
+        assert control_values(None, self._LOADED)[1] == []
 
     def test_values_wait_for_their_options(self):
         """A value written before its options exist is dropped by the
@@ -1526,13 +1874,13 @@ class TestViewSync:
         doc["series"] = {**doc["series"], "keys": ["loss"], "color": "shard"}
         doc["optuna"] = {**doc["optuna"], "contour_x": "lr"}
         unloaded: dict[str, set[str] | None] = {name: None for name in self._LOADED}
-        _active, key, _reduction, color, _facet, cx, _cy = control_values(doc, unloaded)
-        assert key is no_update
+        _a, keys, _m, _r, color, _f, cx, _cy = control_values(doc, unloaded)
+        assert keys is no_update
         assert color is no_update
         assert cx is no_update
-        partial: dict[str, set[str] | None] = {**self._LOADED, "key": set()}
-        _active, key, _reduction, _color, _facet, cx, _cy = control_values(doc, partial)
-        assert key is no_update
+        partial = {**self._LOADED, "keys": set()}
+        _a, keys, _m, _r, _c, _f, cx, _cy = control_values(doc, partial)
+        assert keys is no_update
         assert cx == "lr"
 
 
@@ -2121,4 +2469,514 @@ class TestCuratedScopeBar:
         )
         assert error is None and tray is not None
         rendered = str(scope_bar(service, PROJECT, tray))
-        assert "marked scientifically invalid" in rendered
+
+
+def _fake_context(*prop_ids: str):
+    return type(
+        "Context",
+        (),
+        {"triggered": [{"prop_id": prop_id, "value": None} for prop_id in prop_ids]},
+    )()
+
+
+class TestPatternTriggers:
+    def test_pattern_trigger_resolves_metric_and_control(self):
+        metric, control = pattern_trigger(
+            _fake_context('{"axis-scale": "train.loss"}.value')
+        )
+        assert (metric, control) == ("train.loss", "axis-scale")
+        assert pattern_trigger(_fake_context())[0] is None
+        assert pattern_trigger(_fake_context("view-store.data"))[0] is None
+
+    def test_move_buttons_resolve_their_direction(self):
+        metric, control = pattern_trigger(
+            _fake_context('{"panel-move-up": "loss"}.n_clicks')
+        )
+        assert (metric, control) == ("loss", "panel-move-up")
+
+    def test_overlay_axis_control_names_the_fired_field(self):
+        assert (
+            overlay_axis_control(
+                [{"prop_id": "analysis-overlay-range.value"}, {"prop_id": "url.search"}]
+            )
+            == "range"
+        )
+        assert overlay_axis_control([]) is None
+        assert overlay_axis_control([{"prop_id": "url.search"}]) is None
+
+
+class TestAxisResolution:
+    """Pure figure-layer axis rules: log refusal with counts, custom
+    bounds clipping, notes."""
+
+    def test_counts(self):
+        series = [
+            {"trial": str(RA0), "execution": str(EXA0), "points": [(0, 1.0), (1, 0.0)]},
+            {"trial": str(RA0), "execution": None, "points": [(0, -2.0)]},
+        ]
+        assert non_positive_count(series) == 2
+        assert clipped_count(series, -1.0, 0.5) == 2
+
+    def test_log_refused_while_any_observation_is_non_positive(self):
+        series = [
+            {"trial": str(TB), "execution": str(EXB), "points": [(0, -0.5), (1, 0.25)]}
+        ]
+        resolved = resolve_axis({"scale": "log", "range": "auto"}, series)
+        assert resolved["scale"] == "linear"
+        assert resolved["log_requested"] is True
+        assert resolved["non_positive"] == 1
+        assert "log unavailable: 1 non-positive observation(s)" in axis_notes(resolved)
+
+    def test_log_applied_when_all_positive(self):
+        series = [{"trial": str(TB), "execution": str(EXB), "points": [(0, 0.5)]}]
+        resolved = resolve_axis({"scale": "log", "range": "auto"}, series)
+        assert resolved["scale"] == "log"
+        assert axis_notes(resolved) == []
+
+    def test_custom_range_reports_clipping(self):
+        series = [
+            {"trial": str(TB), "execution": str(EXB), "points": [(0, -0.5), (1, 0.25)]}
+        ]
+        resolved = resolve_axis(
+            {"scale": "linear", "range": "custom", "min": -1, "max": 0}, series
+        )
+        assert resolved["range"] == (-1.0, 0.0)
+        assert resolved["clipped"] == 1
+        assert axis_notes(resolved) == [
+            "log unavailable: 1 non-positive observation(s)",
+            "1 observation(s) outside [-1, 0]",
+        ]
+
+
+class TestStackedFigureRules:
+    def _per_key(self):
+        shared_trial = str(RA2)
+        return [
+            {
+                "key": "loss",
+                "series": [
+                    {
+                        "trial": shared_trial,
+                        "execution": str(EXA1),
+                        "points": [(0, 0.5), (1, 0.4)],
+                        "context": {"shard": 0},
+                    },
+                ],
+            },
+            {
+                "key": "accuracy",
+                "series": [
+                    {
+                        "trial": shared_trial,
+                        "execution": str(EXA1),
+                        "points": [(0, 0.8), (1, 0.9)],
+                        "context": {"shard": 0},
+                    },
+                ],
+            },
+        ]
+
+    def test_panels_share_x_and_keep_independent_y_axes(self):
+        figure = stacked_figure(
+            self._per_key(),
+            {"accuracy": {"scale": "linear", "range": "custom", "min": 0, "max": 1}},
+        )
+        assert figure.layout.xaxis.matches == "x2"
+        assert figure.layout.xaxis2.matches is None
+        assert figure.layout.yaxis.range is None
+        assert list(figure.layout.yaxis2.range) == [0.0, 1.0]
+
+    def test_log_custom_bounds_render_in_log10(self):
+        figure = stacked_figure(
+            self._per_key(),
+            {"loss": {"scale": "log", "range": "custom", "min": 1, "max": 100}},
+        )
+        assert figure.layout.yaxis.type == "log"
+        assert list(figure.layout.yaxis.range) == [0.0, 2.0]
+
+    def test_trial_color_stable_across_panels(self):
+        figure = stacked_figure(self._per_key(), {})
+        first, second = figure.data
+        assert first.name == second.name == "cc310200/dd310100"
+        assert first.line.color == second.line.color
+
+    def test_facet_splits_rows_within_a_key(self):
+        per_key = [
+            {
+                "key": "loss",
+                "series": [
+                    {
+                        "trial": str(RA2),
+                        "execution": str(EXA1),
+                        "points": [(0, 0.5)],
+                        "context": {"shard": 0},
+                    },
+                    {
+                        "trial": str(RA2),
+                        "execution": str(EXA2),
+                        "points": [(0, 0.6)],
+                        "context": {"shard": 1},
+                    },
+                ],
+            }
+        ]
+        figure = stacked_figure(per_key, {}, facet="shard")
+        titles = [a.text for a in figure.layout.annotations if a.text]
+        assert titles == ["loss · shard = 0", "loss · shard = 1"]
+        assert figure.data[0].yaxis == "y"
+        assert figure.data[1].yaxis == "y2"
+
+
+class TestOverlayFigureRules:
+    def _per_key(self):
+        return [
+            {
+                "key": "loss",
+                "series": [
+                    {
+                        "trial": str(RA2),
+                        "execution": str(EXA1),
+                        "points": [(0, 0.5), (1, 0.4)],
+                        "context": {},
+                    }
+                ],
+            },
+            {
+                "key": "accuracy",
+                "series": [
+                    {
+                        "trial": str(TB),
+                        "execution": str(EXB),
+                        "points": [(0, 0.81)],
+                        "context": {},
+                    }
+                ],
+            },
+        ]
+
+    def test_one_shared_y_axis_and_unnormalized_values(self):
+        figure = overlay_figure(self._per_key(), None)
+        yaxis_props = [key for key in figure.layout if key.startswith("yaxis")]
+        assert yaxis_props == ["yaxis"]
+        values = {trace.name: list(trace.y) for trace in figure.data}
+        assert values["loss · cc310200/dd310100"] == [0.5, 0.4]
+        assert values["accuracy · cc320000/dd320000"] == [0.81]
+        assert figure.layout.yaxis.type == "linear"
+
+    def test_pooled_log_refusal_and_shared_custom_range(self):
+        per_key = [
+            *self._per_key(),
+            {
+                "key": "delta",
+                "series": [
+                    {
+                        "trial": str(TB),
+                        "execution": str(EXB),
+                        "points": [(0, -0.5), (1, 0.25)],
+                        "context": {},
+                    }
+                ],
+            },
+        ]
+        figure = overlay_figure(per_key, {"scale": "log", "range": "auto"})
+        assert figure.layout.yaxis.type == "linear"
+        figure = overlay_figure(
+            per_key, {"scale": "linear", "range": "custom", "min": -1, "max": 1}
+        )
+        assert list(figure.layout.yaxis.range) == [-1.0, 1.0]
+
+
+class TestAxisStateEdits:
+    """jernerics-cdf.4 per-panel axis control edits: validation, log
+    refusal with counts, reset, and the pooled overlay axis."""
+
+    def test_custom_range_requires_both_bounds(self, service):
+        doc = _series_doc(keys=["loss"])
+        _panels, payload, _k, _c, _f = series_outputs(service, PROJECT, _tray(), doc)
+        edited, note = axis_state_edit(
+            doc,
+            metric="loss",
+            control="range",
+            scale="linear",
+            range_mode="custom",
+            low=None,
+            high=None,
+            data=payload,
+        )
+        assert edited is None and note is not None
+        assert "finite min and max" in note
+
+    def test_custom_min_must_be_less_than_max(self, service):
+        doc = _series_doc(keys=["loss"])
+        _panels, payload, _k, _c, _f = series_outputs(service, PROJECT, _tray(), doc)
+        edited, note = axis_state_edit(
+            doc,
+            metric="loss",
+            control="max",
+            scale="linear",
+            range_mode="custom",
+            low=0.5,
+            high=0.4,
+            data=payload,
+        )
+        assert edited is None and note is not None
+        assert "min < max" in note
+
+    def test_log_custom_bounds_must_be_positive(self):
+        doc = _series_doc(
+            keys=["loss"], axes={"loss": {"scale": "log", "range": "auto"}}
+        )
+        edited, note = axis_state_edit(
+            doc,
+            metric="loss",
+            control="min",
+            scale="log",
+            range_mode="custom",
+            low=-1,
+            high=5,
+            data=None,
+        )
+        assert edited is None and note is not None
+        assert "min > 0" in note
+
+    def test_log_refused_with_non_positive_count(self, service):
+        doc = _series_doc(keys=["delta"])
+        _panels, payload, _k, _c, _f = series_outputs(
+            service, PROJECT, _all_sweeps(), doc
+        )
+        edited, note = axis_state_edit(
+            doc,
+            metric="delta",
+            control="scale",
+            scale="log",
+            range_mode="auto",
+            low=None,
+            high=None,
+            data=payload,
+        )
+        assert edited is None and note is not None
+        assert "log not applied: 1 non-positive observation(s)" in note
+
+    def test_log_accepted_for_all_positive_key(self, service):
+        doc = _series_doc(keys=["loss"])
+        _panels, payload, _k, _c, _f = series_outputs(service, PROJECT, _tray(), doc)
+        edited, note = axis_state_edit(
+            doc,
+            metric="loss",
+            control="scale",
+            scale="log",
+            range_mode="auto",
+            low=None,
+            high=None,
+            data=payload,
+        )
+        assert edited is not None
+        assert edited["series"]["axes"]["loss"] == {
+            "scale": "log",
+            "range": "auto",
+            "min": None,
+            "max": None,
+        }
+        assert note == ""
+
+    def test_valid_custom_range_lands_and_reports_clipping(self, service):
+        doc = _series_doc(keys=["loss"])
+        _panels, payload, _k, _c, _f = series_outputs(service, PROJECT, _tray(), doc)
+        edited, note = axis_state_edit(
+            doc,
+            metric="loss",
+            control="max",
+            scale="linear",
+            range_mode="custom",
+            low=0.4,
+            high=0.5,
+            data=payload,
+        )
+        assert edited is not None
+        assert edited["series"]["axes"]["loss"] == {
+            "scale": "linear",
+            "range": "custom",
+            "min": 0.4,
+            "max": 0.5,
+        }
+        assert note is not None and "5 observation(s) outside [0.4, 0.5]" in note
+
+    def test_auto_clears_stored_bounds_and_reset_returns_default(self, service):
+        doc = _series_doc(
+            keys=["loss"],
+            axes={
+                "loss": {
+                    "scale": "log",
+                    "range": "custom",
+                    "min": 1.0,
+                    "max": 10.0,
+                }
+            },
+        )
+        edited, _note = axis_state_edit(
+            doc,
+            metric="loss",
+            control="range",
+            scale="log",
+            range_mode="auto",
+            low=1,
+            high=10,
+            data=None,
+        )
+        assert edited is not None
+        assert edited["series"]["axes"]["loss"] == {
+            "scale": "log",
+            "range": "auto",
+            "min": None,
+            "max": None,
+        }
+        reset, note = axis_state_edit(
+            edited,
+            metric="loss",
+            control="reset",
+            scale="log",
+            range_mode="auto",
+            low=None,
+            high=None,
+            data=None,
+        )
+        assert reset is not None
+        # a fully-default axis is canonically absent, not stored
+        assert reset["series"]["axes"] == {}
+        assert note == ""
+
+    def test_unchanged_edit_is_not_a_write(self):
+        doc = _series_doc(keys=["loss"])
+        edited, note = axis_state_edit(
+            doc,
+            metric="loss",
+            control="scale",
+            scale="linear",
+            range_mode="auto",
+            low=None,
+            high=None,
+            data=None,
+        )
+        assert edited is None and note is None
+
+    def test_overlay_axis_pools_every_selected_key(self, service):
+        doc = _series_doc(keys=["loss", "delta"], mode="overlay")
+        _panels, payload, _k, _c, _f = series_outputs(
+            service, PROJECT, _all_sweeps(), doc
+        )
+        edited, note = axis_state_edit(
+            doc,
+            metric=None,
+            control="scale",
+            scale="log",
+            range_mode="auto",
+            low=None,
+            high=None,
+            data=payload,
+        )
+        assert edited is None and note is not None
+        assert "log not applied: 1 non-positive observation(s)" in note
+        edited, _note = axis_state_edit(
+            doc,
+            metric=None,
+            control="range",
+            scale="linear",
+            range_mode="custom",
+            low=-1,
+            high=2,
+            data=payload,
+        )
+        assert edited is not None
+        assert edited["series"]["overlay_axis"] == {
+            "scale": "linear",
+            "range": "custom",
+            "min": -1.0,
+            "max": 2.0,
+        }
+        assert edited["series"]["axes"] == {}
+
+    def test_payload_survives_store_serialization(self, service):
+        doc = _series_doc(keys=["delta"])
+        _panels, payload, _k, _c, _f = series_outputs(
+            service, PROJECT, _all_sweeps(), doc
+        )
+        round_tripped = json.loads(json.dumps(payload))
+        _edited, note = axis_state_edit(
+            doc,
+            metric="delta",
+            control="scale",
+            scale="log",
+            range_mode="auto",
+            low=None,
+            high=None,
+            data=round_tripped,
+        )
+        assert note is not None and "1 non-positive" in note
+
+
+class TestKeyOrdering:
+    def test_move_up_down_and_boundaries(self):
+        doc = _series_doc(keys=["loss", "accuracy", "score"])
+        moved = moved_keys(doc, "accuracy", "up")
+        assert moved is not None
+        assert moved["series"]["keys"] == ["accuracy", "loss", "score"]
+        moved = moved_keys(doc, "accuracy", "down")
+        assert moved is not None
+        assert moved["series"]["keys"] == ["loss", "score", "accuracy"]
+        assert moved_keys(doc, "loss", "up") is None
+        assert moved_keys(doc, "score", "down") is None
+        assert moved_keys(doc, "ghost", "up") is None
+        assert moved_keys(doc, "loss", "sideways") is None
+
+    def test_url_round_trip_reproduces_keys_order_mode_and_axes(self, service):
+        doc = _series_doc(
+            keys=["delta", "loss", "accuracy"],
+            mode="overlay",
+            axes={
+                "loss": {
+                    "scale": "log",
+                    "range": "custom",
+                    "min": 1.0,
+                    "max": 100.0,
+                },
+                "accuracy": {
+                    "scale": "linear",
+                    "range": "auto",
+                    "min": None,
+                    "max": None,
+                },
+            },
+            overlay_axis={
+                "scale": "linear",
+                "range": "custom",
+                "min": -1.0,
+                "max": 2.0,
+            },
+        )
+        search = f"?view={encode_view_state(doc)}"
+        hydrated, error = hydrate_view("/dashboard/analysis", search, None)
+        assert error is None and hydrated == doc
+        target = search_from_state(service, PROJECT, _tray(), doc, "")
+        assert target is not None and "view=" in target
+        assert decode_view_state(unquote(target.split("view=")[1])) == doc
+
+    def test_reorder_and_mode_switch_preserve_dormant_axes(self, service):
+        doc = _series_doc(
+            keys=["loss", "accuracy"],
+            axes={
+                "loss": {
+                    "scale": "log",
+                    "range": "custom",
+                    "min": 1.0,
+                    "max": 100.0,
+                }
+            },
+        )
+        reordered = moved_keys(doc, "accuracy", "up")
+        assert reordered is not None
+        assert reordered["series"]["keys"] == ["accuracy", "loss"]
+        assert reordered["series"]["axes"] == doc["series"]["axes"]
+        search = f"?view={encode_view_state(reordered)}"
+        hydrated, error = hydrate_view("/dashboard/analysis", search, None)
+        assert error is None and hydrated is not None
+        assert hydrated["series"]["keys"] == ["accuracy", "loss"]

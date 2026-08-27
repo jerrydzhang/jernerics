@@ -8,7 +8,9 @@ work remains — complete pages disable the interval, so terminal pages
 never poll.
 """
 
+import json
 import time
+from typing import Any
 from uuid import UUID
 
 import dash
@@ -29,6 +31,46 @@ from .service import (
 )
 
 _INCOMPLETE_TRIAL_STATES = ("waiting", "running")
+
+
+def pattern_trigger(context: Any) -> tuple[str | None, str]:
+    """(metric, control) of the pattern component that fired a MATCH
+    callback; ``(None, "")`` when nothing did. Pattern prop ids carry
+    the resolved id as a JSON object before the final ``.prop``."""
+    triggered = context.triggered
+    if not triggered:
+        return None, ""
+    id_json = triggered[0]["prop_id"].rsplit(".", 1)[0]
+    try:
+        resolved = json.loads(id_json)
+    except ValueError:
+        return None, ""
+    if not isinstance(resolved, dict) or len(resolved) != 1:
+        return None, ""
+    control, metric = next(iter(resolved.items()))
+    return str(metric), str(control)
+
+
+def overlay_axis_control(triggered: Any) -> str | None:
+    """The ``analysis-overlay-*`` control field that fired, if any."""
+    for item in triggered or []:
+        prop_id = str(item.get("prop_id", ""))
+        if prop_id.startswith("analysis-overlay-"):
+            return prop_id.rsplit(".", 1)[0].removeprefix("analysis-overlay-")
+    return None
+
+
+def pattern_input_value(
+    inputs_list: Any, entry: int, pattern_key: str, metric: str
+) -> Any:
+    """The current value of one ALL-pattern input, located by its
+    resolved component id (ALL inputs arrive as lists)."""
+    items = inputs_list[entry] if isinstance(inputs_list, list) else []
+    for item in items or []:
+        component_id = item.get("id") if isinstance(item, dict) else None
+        if isinstance(component_id, dict) and component_id.get(pattern_key) == metric:
+            return item.get("value")
+    return None
 
 
 def page_content(
@@ -717,6 +759,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("view-store", "data", allow_duplicate=True),
         Input("analysis-tabs", "value"),
         Input("analysis-key", "value"),
+        Input("analysis-mode", "value"),
         Input("analysis-reduction", "value"),
         Input("analysis-color", "value"),
         Input("analysis-facet", "value"),
@@ -727,7 +770,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _edit_view_state(
         active: str | None,
-        key: str | None,
+        keys: list | None,
+        mode: str | None,
         reduction: str | None,
         color: str | None,
         facet: str | None,
@@ -738,7 +782,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         doc = analysis.view_from_controls(
             current,
             active=active,
-            key=key,
+            keys=keys,
+            mode=mode,
             reduction=reduction,
             color=color,
             facet=facet,
@@ -755,6 +800,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("analysis-tabs", "value"),
         Output("analysis-key", "value"),
+        Output("analysis-mode", "value"),
         Output("analysis-reduction", "value"),
         Output("analysis-color", "value"),
         Output("analysis-facet", "value"),
@@ -781,7 +827,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return analysis.control_values(
             doc,
             {
-                "key": analysis.loaded_option_values(key_options),
+                "keys": analysis.loaded_option_values(key_options),
                 "color": analysis.loaded_option_values(color_options),
                 "facet": analysis.loaded_option_values(facet_options),
                 "contour_x": analysis.loaded_option_values(contour_x_options),
@@ -798,28 +844,128 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return analysis.catalog_tab(service, project, tray)
 
     @app.callback(
-        Output("analysis-series-figure", "figure"),
+        Output("analysis-series-panels", "children"),
+        Output("analysis-series-data", "data"),
         Output("analysis-key", "options"),
         Output("analysis-color", "options"),
         Output("analysis-facet", "options"),
         Input("selection-store", "data"),
-        Input("analysis-key", "value"),
-        Input("analysis-color", "value"),
-        Input("analysis-facet", "value"),
-        Input("analysis-reduction", "value"),
+        Input("view-store", "data"),
         State("project-store", "data"),
     )
     def _render_analysis_series(
-        tray: dict | None,
-        key: str | None,
-        color: str | None,
-        facet: str | None,
-        reduction: str | None,
-        project: str | None,
+        tray: dict | None, view_doc: dict | None, project: str | None
     ):
-        return analysis.series_outputs(
-            service, project, tray, key, color, facet, reduction
+        # One render per tray/view state: every panel, the picker
+        # options, and the data store behind the axis callbacks come
+        # from a single multi-key values read.
+        return analysis.series_outputs(service, project, tray, view_doc)
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Output({"axis-note": dash.ALL}, "children"),
+        Input({"axis-scale": dash.ALL}, "value"),
+        Input({"axis-range": dash.ALL}, "value"),
+        Input({"axis-min": dash.ALL}, "value"),
+        Input({"axis-max": dash.ALL}, "value"),
+        Input({"axis-reset": dash.ALL}, "n_clicks"),
+        State("view-store", "data"),
+        State("analysis-series-data", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_axis_state(
+        _scales: list,
+        _ranges: list,
+        _lows: list,
+        _highs: list,
+        _resets: list,
+        current: dict | None,
+        data: dict | None,
+    ):
+        # ALL (not MATCH): dash 4 dropdowns mount child elements whose
+        # ids extend the pattern id, which breaks single-value MATCH
+        # resolution; values are read from inputs_list by resolved id.
+        inputs = dash.callback_context.inputs_list
+        metric, control = pattern_trigger(dash.callback_context)
+        field = control.removeprefix("axis-") if control else ""
+        if not metric or field not in {"scale", "range", "min", "max", "reset"}:
+            raise PreventUpdate
+        doc, note = analysis.axis_state_edit(
+            current,
+            metric=metric,
+            control=field,
+            scale=pattern_input_value(inputs, 0, "axis-scale", metric),
+            range_mode=pattern_input_value(inputs, 1, "axis-range", metric),
+            low=pattern_input_value(inputs, 2, "axis-min", metric),
+            high=pattern_input_value(inputs, 3, "axis-max", metric),
+            data=data,
         )
+        # A refused edit (invalid bounds, log against non-positive data)
+        # keeps the last valid axis; the note still explains why. Notes
+        # ride the ALL output in picker order, so every panel stays in
+        # sync without a re-render.
+        notes = analysis.panel_notes(current, data)
+        if (current or analysis.default_view_state())["series"]["mode"] == "stacked":
+            keys = (current or analysis.default_view_state())["series"]["keys"]
+            if metric in keys:
+                notes[keys.index(metric)] = note or notes[keys.index(metric)]
+        if doc is None and note is None:
+            raise PreventUpdate
+        return no_update if doc is None else doc, notes
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Output("analysis-overlay-note", "children"),
+        Input("analysis-overlay-scale", "value"),
+        Input("analysis-overlay-range", "value"),
+        Input("analysis-overlay-min", "value"),
+        Input("analysis-overlay-max", "value"),
+        Input("analysis-overlay-reset", "n_clicks"),
+        State("view-store", "data"),
+        State("analysis-series-data", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_overlay_axis(
+        scale: str | None,
+        range_mode: str | None,
+        low: Any,
+        high: Any,
+        _reset: int | None,
+        current: dict | None,
+        data: dict | None,
+    ):
+        control = overlay_axis_control(dash.callback_context.triggered)
+        if control is None:
+            raise PreventUpdate
+        doc, note = analysis.axis_state_edit(
+            current,
+            metric=None,
+            control=control,
+            scale=scale,
+            range_mode=range_mode,
+            low=low,
+            high=high,
+            data=data,
+        )
+        if doc is None and note is None:
+            raise PreventUpdate
+        return no_update if doc is None else doc, note
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input({"panel-move-up": dash.ALL}, "n_clicks"),
+        Input({"panel-move-down": dash.ALL}, "n_clicks"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _move_series_key(_ups: list, _downs: list, current: dict | None):
+        metric, control = pattern_trigger(dash.callback_context)
+        if metric is None or control not in ("panel-move-up", "panel-move-down"):
+            raise PreventUpdate
+        doc = analysis.moved_keys(current, metric, control.removeprefix("panel-move-"))
+        if doc is None:
+            raise PreventUpdate
+        return doc
 
     @app.callback(
         Output("analysis-points", "children"),

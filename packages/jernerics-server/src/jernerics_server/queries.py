@@ -538,6 +538,36 @@ class QueryService:
             for row in rows
         ]
 
+    def value_key_coverage(self, selection: Selection) -> list[dict[str, Any]]:
+        """Per (key, kind) coverage: point count, distinct trials and
+        retry families, and the step extent — the analysis picker's
+        facts, with no semantics guessed from key names."""
+        where, params = self._trial_scope(selection)
+        _, rows = self._store.query(
+            "SELECT v.key, v.value_type, COUNT(*), "
+            "COUNT(DISTINCT e.trial_id), COUNT(DISTINCT t.retry_root_trial_id), "
+            "MIN(v.step), MAX(v.step) "
+            "FROM tracked_values v "
+            "JOIN executions e ON v.execution_id = e.execution_id "
+            "JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sweeps s ON t.sweep_id = s.sweep_id "
+            f"WHERE {where} GROUP BY v.key, v.value_type "
+            "ORDER BY v.key, v.value_type",
+            params,
+        )
+        return [
+            {
+                "key": row[0],
+                "kind": row[1],
+                "points": row[2],
+                "trials": row[3],
+                "families": row[4],
+                "min_step": row[5],
+                "max_step": row[6],
+            }
+            for row in rows
+        ]
+
     def values(
         self,
         selection: Selection,
