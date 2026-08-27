@@ -536,7 +536,11 @@ class Backend:
             job_id,
             follow=follow,
             stderr=stderr,
-            meta={"local_cache_dir": local_cache_dir, "host": self.host},
+            meta={
+                "local_cache_dir": local_cache_dir,
+                "host": self.host,
+                "cache_host": self.paths.resolve_cache(),
+            },
         )
 
     # Delegated to adapter

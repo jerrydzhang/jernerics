@@ -601,7 +601,16 @@ class TestDelegatedMethods:
         backend = _make_backend(adapter=adapter)
 
         backend.get_logs("123", local_cache_dir=Path("/cache"))
-        adapter.get_logs.assert_called_once()
+        adapter.get_logs.assert_called_once_with(
+            "123",
+            follow=False,
+            stderr=False,
+            meta={
+                "local_cache_dir": Path("/cache"),
+                "host": backend.host,
+                "cache_host": "/scratch/cache/proj",
+            },
+        )
 
     def test_cleanup(self):
         adapter = MagicMock()

@@ -2,6 +2,7 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 
 from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.models import JobInfo, JobSubmission, SubmitResult
@@ -56,6 +57,24 @@ def expand_slurm_pattern(
         result = result.replace("%N", "*")
 
     return result
+
+
+def _find_job_meta(meta: dict | None, job_id: str) -> Path | None:
+    """Locate saved job meta for a job id, falling back to its array base id.
+
+    Array elements arrive as "<base>_<index>" but submit saves one meta file
+    per array job under the base id.
+    """
+    local_cache_dir = (meta or {}).get("local_cache_dir")
+    if local_cache_dir is None:
+        return None
+    candidates = [local_cache_dir / "jobs" / f"{job_id}.json"]
+    if "_" in job_id:
+        candidates.append(local_cache_dir / "jobs" / f"{job_id.split('_')[0]}.json")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _resolve_output_dir(output_path: str) -> str:
@@ -511,20 +530,13 @@ class SlurmAdapter:
 
         from jernerics.config import ExitCode
 
-        if meta is not None and meta.get("local_cache_dir") is not None:
-            local_cache_dir = meta["local_cache_dir"]
-            meta_file = local_cache_dir / "jobs" / f"{job_id}.json"
-            if meta_file.exists():
-                meta_data = json.loads(meta_file.read_text())
-                output_pattern = meta_data.get("output_pattern", "logs/slurm_%j.out")
-                error_pattern = meta_data.get("error_pattern", "logs/slurm_%j.err")
-                meta_remote_dir = meta_data.get("remote_dir", self.remote_dir)
-                n_trials = meta_data.get("n_trials", 1)
-            else:
-                output_pattern = None
-                error_pattern = None
-                meta_remote_dir = self.remote_dir
-                n_trials = 1
+        meta_file = _find_job_meta(meta, job_id)
+        if meta_file is not None:
+            meta_data = json.loads(meta_file.read_text())
+            output_pattern = meta_data.get("output_pattern", "logs/slurm_%j.out")
+            error_pattern = meta_data.get("error_pattern", "logs/slurm_%j.err")
+            meta_remote_dir = meta_data.get("remote_dir", self.remote_dir)
+            n_trials = meta_data.get("n_trials", 1)
         else:
             output_pattern = None
             error_pattern = None
@@ -532,8 +544,9 @@ class SlurmAdapter:
             n_trials = 1
 
         if output_pattern is None or error_pattern is None:
-            output_pattern = f"{self.cache_host}/logs/%A_%a.out"
-            error_pattern = f"{self.cache_host}/logs/%A_%a.err"
+            cache_host = (meta or {}).get("cache_host") or self.cache_host
+            output_pattern = f"{cache_host}/logs/%A_%a.out"
+            error_pattern = f"{cache_host}/logs/%A_%a.err"
 
         log_pattern = error_pattern if stderr else output_pattern
 

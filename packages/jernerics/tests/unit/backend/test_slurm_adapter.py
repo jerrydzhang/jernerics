@@ -369,6 +369,52 @@ class TestGetLogs:
 
         adapter.get_logs("123", meta={"local_cache_dir": tmp_path, "host": host})
 
+    def test_get_logs_array_element_uses_base_job_meta(self, tmp_path):
+        import json
+
+        meta_dir = tmp_path / "jobs"
+        meta_dir.mkdir()
+        (meta_dir / "100.json").write_text(
+            json.dumps(
+                {
+                    "output_pattern": "/cache/logs/%A_%a.out",
+                    "error_pattern": "/cache/logs/%A_%a.err",
+                    "remote_dir": "/scratch/proj",
+                    "n_trials": 5,
+                }
+            )
+        )
+
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="log output")
+        adapter = _make_adapter(host=host)
+
+        adapter.get_logs("100_3", meta={"local_cache_dir": tmp_path, "host": host})
+
+        host.run.assert_called_with(
+            ["cat /cache/logs/100_3.out"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_get_logs_without_meta_uses_cache_host_from_meta(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="log data")
+        adapter = _make_adapter(host=host)
+
+        adapter.get_logs(
+            "42",
+            meta={"local_cache_dir": None, "cache_host": "/cache/proj"},
+        )
+
+        host.run.assert_called_with(
+            ["cat /cache/proj/logs/42_1.out"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
     def test_get_logs_resolves_slurm_patterns(self):
         host = MagicMock()
         host.run.return_value = MagicMock(returncode=0, stdout="log data")
