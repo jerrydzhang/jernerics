@@ -40,6 +40,7 @@ from jernerics_schema import (
     Selection,
     sweep_id_for,
 )
+from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
@@ -536,14 +537,23 @@ class TestLiveReplayOverlap:
         recorded as optimizer_terminal_state conflicts and never
         overwrite the terminal facts."""
         counts_before = _row_counts(scenario.db_path)
+        duplicates = 0
+        conflicts = []
         with Store(scenario.db_path) as store:
-            result = IngestService(store).apply(
-                IngestRequest(
-                    protocol_version=PROTOCOL_VERSION, events=scenario.live_events
+            service = IngestService(store)
+            for start in range(0, len(scenario.live_events), MAX_EVENTS_PER_REQUEST):
+                result = service.apply(
+                    IngestRequest(
+                        protocol_version=PROTOCOL_VERSION,
+                        events=scenario.live_events[
+                            start : start + MAX_EVENTS_PER_REQUEST
+                        ],
+                    )
                 )
-            )
-        assert result.duplicates == len(scenario.live_events) - 2
-        assert sorted(conflict.detail for conflict in result.conflicts) == [
+                duplicates += result.duplicates
+                conflicts.extend(result.conflicts)
+        assert duplicates == len(scenario.live_events) - 2
+        assert sorted(conflict.detail for conflict in conflicts) == [
             '{"existing":"completed","incoming":"running"}',
             '{"existing":"failed","incoming":"running"}',
         ]
