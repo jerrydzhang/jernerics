@@ -11,6 +11,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 from dash.development.base_component import Component
@@ -32,6 +33,7 @@ from jernerics_schema import (
     TrialState,
     ValueEvent,
 )
+from jernerics_server.dashboard.analysis import decode_view_state
 from jernerics_server.dashboard.callbacks import (
     lineage_panel,
     page_content,
@@ -39,6 +41,7 @@ from jernerics_server.dashboard.callbacks import (
 )
 from jernerics_server.dashboard.components import grid_options, short_id
 from jernerics_server.dashboard.layout import family_grid_row, sweep_grid_row
+from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
@@ -663,6 +666,21 @@ class TestSweepPage:
         rendered = str(page)
         assert "project ops" in rendered
         assert "/dashboard/project/ops" in rendered
+
+    def test_analyze_series_deep_link_needs_no_workspace_pick(self, service):
+        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
+        link = next(
+            node
+            for node in _walk(page)
+            if getattr(node, "className", None) == "analyze-link"
+        )
+        assert link.children == "Analyze series"
+        sel, view = link.href.split("?", 1)[1].split("&view=")
+        selection = decode_selection_token(sel.removeprefix("sel="))
+        assert selection.project == "ops"
+        assert selection.sweeps == (SWEEP_A,)
+        assert selection.trials is None
+        assert decode_view_state(unquote(view))["active"] == "series"
 
 
 class TestTrialFamilies:

@@ -4,14 +4,18 @@ One project's sweeps, trials, and retry families feed a shared selection
 tray; the effective selection round-trips through the URL query string
 (``?sel=<token>``) with the same token format the jernerics client
 uses, so dashboards and Python sessions hand selections to each other.
-Tabs: selection tray, data catalog, series overlay, points tables,
-study-style Optuna views (plain plotly — no optuna dependency), and the
-continue-in-Python handoff. All data flows through DashboardService.
+A persistent scope bar plus an Edit-scope disclosure sit above every
+view, and the active view and its controls ride a second, dashboard-
+only ``?view=<json>`` parameter (jernerics-cdf.3). Tabs: data catalog,
+series overlay, points tables, study-style Optuna views (plain plotly —
+no optuna dependency), and the continue-in-Python handoff. All data
+flows through DashboardService.
 """
 
 import json
+import uuid
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 from dash import dcc, html, no_update
 from dash_ag_grid import AgGrid
@@ -19,7 +23,7 @@ from jernerics_schema import Selection
 
 from . import components, figures
 from .components import MISSING, Empty, short_id
-from .routes import parse_route
+from .routes import ROUTES_BASE, parse_route
 from .selection_tokens import (
     SelectionTokenError,
     decode_selection_token,
@@ -47,23 +51,343 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "minWidth": 100,
 }
 
+VIEW_VERSION = 1
+"""Wire version of the dashboard-only ``view=`` URL document."""
+
+_ANALYSIS_VIEWS = ("catalog", "series", "points", "optuna", "python")
+_SERIES_MODES = ("overlay",)
+
+
+class ViewStateError(Exception):
+    """The ``view=`` URL parameter is malformed or unsupported."""
+
+
+def default_view_state() -> dict[str, Any]:
+    """The v1 view document with every control at its default."""
+    return {
+        "v": VIEW_VERSION,
+        "active": "catalog",
+        "series": {
+            "keys": [],
+            "mode": "overlay",
+            "reduction": "none",
+            "trial_display": None,
+            "context_filters": {},
+            "color": None,
+            "facet": None,
+            "axes": {},
+        },
+        "highlighted_families": [],
+        "auto_refresh": False,
+        "optuna": {"contour_x": None, "contour_y": None},
+    }
+
+
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ViewStateError(message)
+
+
+def _optional_key(value: Any, field: str) -> str | None:
+    """A string-or-null field; empty or non-string values are errors."""
+    if value is None:
+        return None
+    _require(
+        isinstance(value, str) and value != "",
+        f"{field} must be a non-empty string or null",
+    )
+    return value
+
+
+def _string_list(value: Any, field: str) -> list[str]:
+    _require(isinstance(value, list), f"{field} must be a list")
+    for item in value:
+        _require(
+            isinstance(item, str) and item != "",
+            f"{field} entries must be non-empty strings",
+        )
+    return list(value)
+
+
+def decode_view_state(raw: str) -> dict[str, Any]:
+    """The canonical v1 view document from a ``view=`` value; unknown
+    fields are dropped, missing fields take defaults, wrong types or
+    enum values raise :class:`ViewStateError`."""
+    try:
+        payload = json.loads(raw)
+    except ValueError as error:
+        raise ViewStateError(f"view state is malformed: {error}") from error
+    _require(isinstance(payload, dict), "view state must be a JSON object")
+    version = payload.get("v")
+    _require(
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version == VIEW_VERSION,
+        f"unsupported view state: expected version {VIEW_VERSION}",
+    )
+    doc = default_view_state()
+    active = payload.get("active", doc["active"])
+    _require(
+        isinstance(active, str) and active in _ANALYSIS_VIEWS,
+        f"unsupported analysis view {active!r}",
+    )
+    doc["active"] = active
+    series = payload.get("series", {})
+    _require(isinstance(series, dict), "series must be an object")
+    doc["series"]["keys"] = list(
+        dict.fromkeys(_string_list(series.get("keys", []), "series.keys"))
+    )
+    mode = series.get("mode", doc["series"]["mode"])
+    _require(mode in _SERIES_MODES, f"unsupported series mode {mode!r}")
+    doc["series"]["mode"] = mode
+    reduction = series.get("reduction", doc["series"]["reduction"])
+    _require(
+        reduction in ANALYSIS_REDUCTIONS,
+        f"unsupported execution reduction {reduction!r}",
+    )
+    doc["series"]["reduction"] = reduction
+    doc["series"]["trial_display"] = _optional_key(
+        series.get("trial_display"), "series.trial_display"
+    )
+    filters = series.get("context_filters", {})
+    _require(isinstance(filters, dict), "series.context_filters must be an object")
+    for name, values in filters.items():
+        _require(
+            isinstance(name, str) and name != "",
+            "series.context_filters keys must be non-empty strings",
+        )
+        doc["series"]["context_filters"][name] = _string_list(
+            values, f"series.context_filters[{name!r}]"
+        )
+    doc["series"]["color"] = _optional_key(series.get("color"), "series.color")
+    doc["series"]["facet"] = _optional_key(series.get("facet"), "series.facet")
+    axes = series.get("axes", {})
+    _require(isinstance(axes, dict), "series.axes must be an object")
+    for name, axis in axes.items():
+        _require(
+            isinstance(name, str) and name != "",
+            "series.axes keys must be non-empty strings",
+        )
+        _require(
+            isinstance(axis, str) and axis != "",
+            "series.axes values must be non-empty strings",
+        )
+        doc["series"]["axes"][name] = axis
+    doc["highlighted_families"] = _string_list(
+        payload.get("highlighted_families", []), "highlighted_families"
+    )
+    auto_refresh = payload.get("auto_refresh", False)
+    _require(isinstance(auto_refresh, bool), "auto_refresh must be a boolean")
+    doc["auto_refresh"] = auto_refresh
+    optuna = payload.get("optuna", {})
+    _require(isinstance(optuna, dict), "optuna must be an object")
+    doc["optuna"]["contour_x"] = _optional_key(
+        optuna.get("contour_x"), "optuna.contour_x"
+    )
+    doc["optuna"]["contour_y"] = _optional_key(
+        optuna.get("contour_y"), "optuna.contour_y"
+    )
+    return doc
+
+
+def encode_view_state(doc: dict[str, Any]) -> str:
+    """Percent-encoded compact JSON for the ``view=`` URL parameter."""
+    return quote(json.dumps(doc, separators=(",", ":"), sort_keys=True), safe="")
+
+
+def _view_param(search: str | None) -> str | None:
+    values = parse_qs((search or "").lstrip("?")).get("view")
+    return values[0] if values else None
+
+
+def hydrate_view(
+    pathname: str | None,
+    search: str | None,
+    current: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """(doc, error) for a URL carrying ``?view=``. ``None`` means leave
+    the view store alone (off the analysis route, or already showing
+    this state). No parameter means defaults; a malformed or unsupported
+    document yields defaults plus a visible error."""
+    if parse_route(pathname).kind != "analysis":
+        return None, None
+    raw = _view_param(search)
+    defaults = default_view_state()
+    if raw is None:
+        return (None if current == defaults else defaults), None
+    try:
+        doc = decode_view_state(raw)
+    except ViewStateError as error:
+        return defaults, str(error)
+    return (None if current == doc else doc), None
+
+
+def loaded_option_values(options: Any) -> set[str] | None:
+    """Value set of dropdown options as Dash reports them; ``None`` when
+    the options are not loaded yet (not a list)."""
+    if not isinstance(options, list):
+        return None
+    return {
+        option["value"]
+        for option in options
+        if isinstance(option, dict) and "value" in option
+    }
+
+
+def _gated_value(desired: str | None, loaded: set[str] | None) -> Any:
+    """A dropdown value to write, or ``no_update`` when writing it would
+    race the options: a dropdown drops a value its options do not carry
+    and fires the loss back as an edit."""
+    if desired is None:
+        return None
+    return desired if loaded is not None and desired in loaded else no_update
+
+
+def control_values(
+    doc: dict[str, Any] | None,
+    loaded: dict[str, set[str] | None],
+) -> tuple[Any, ...]:
+    """(active, key, reduction, color, facet, contour_x, contour_y) the
+    analysis controls take from the view state; dropdown values arrive
+    only once their options carry them."""
+    doc = doc or default_view_state()
+    keys = doc["series"]["keys"]
+    return (
+        doc["active"],
+        _gated_value(keys[0] if keys else None, loaded.get("key")),
+        doc["series"]["reduction"],
+        _gated_value(doc["series"]["color"], loaded.get("color")),
+        _gated_value(doc["series"]["facet"], loaded.get("facet")),
+        _gated_value(doc["optuna"]["contour_x"], loaded.get("contour_x")),
+        _gated_value(doc["optuna"]["contour_y"], loaded.get("contour_y")),
+    )
+
+
+def view_from_controls(
+    current: dict[str, Any] | None,
+    *,
+    active: str | None,
+    key: str | None,
+    reduction: str | None,
+    color: str | None,
+    facet: str | None,
+    contour_x: str | None,
+    contour_y: str | None,
+    edited: set[str],
+) -> dict[str, Any]:
+    """View state after a control edit. Only the fields named in
+    ``edited`` (the controls the event actually carried) are
+    authoritative; the rest survive from ``current`` — a control-sync
+    write fires the edit callback with every input, and a control whose
+    options have not loaded reports None, which must not read as a
+    clear. Fields without controls at all (mode, trial display, context
+    filters, per-key axes, highlighted families, auto-refresh) always
+    survive."""
+    doc = current or default_view_state()
+    series = dict(doc["series"])
+    if "key" in edited:
+        series["keys"] = [key] if key else []
+    if "reduction" in edited:
+        series["reduction"] = reduction if reduction in ANALYSIS_REDUCTIONS else "none"
+    if "color" in edited:
+        series["color"] = color
+    if "facet" in edited:
+        series["facet"] = facet
+    optuna = dict(doc["optuna"])
+    if "contour_x" in edited:
+        optuna["contour_x"] = contour_x
+    if "contour_y" in edited:
+        optuna["contour_y"] = contour_y
+    return {
+        **doc,
+        "active": (
+            active
+            if "active" in edited and active in _ANALYSIS_VIEWS
+            else doc["active"]
+        ),
+        "series": series,
+        "optuna": optuna,
+    }
+
+
+_CONTROL_IDS = {
+    "analysis-tabs": "active",
+    "analysis-key": "key",
+    "analysis-reduction": "reduction",
+    "analysis-color": "color",
+    "analysis-facet": "facet",
+    "analysis-contour-x": "contour_x",
+    "analysis-contour-y": "contour_y",
+}
+
+
+def edited_fields(triggered: Any) -> set[str]:
+    """View-doc fields named by the triggered callback inputs."""
+    return {
+        field
+        for field in (
+            _CONTROL_IDS.get(str(prop).split(".", 1)[0]) for prop in triggered
+        )
+        if field
+    }
+
 
 def analysis_page() -> html.Div:
-    """The tabbed analysis surface; interactive state lives in the shell's
-    unified selection store and the URL token."""
+    """The analysis surface; interactive state lives in the shell's
+    unified selection store, the view store, and the URL."""
     return html.Div(
         [
             html.H2("Analysis"),
             html.Div(id="analysis-error"),
+            html.Div(id="analysis-scope-bar", className="scope-bar"),
+            html.Details(
+                [
+                    html.Summary("Edit scope"),
+                    html.P(
+                        "Pick sweeps and retry families from the project; the "
+                        "scope drives every view and is shared through the "
+                        "URL token.",
+                        className="hint",
+                    ),
+                    AgGrid(
+                        id="analysis-sweep-grid",
+                        rowData=[],
+                        columnDefs=_SWEEP_PICKER_COLUMNS,
+                        defaultColDef=_GRID_DEFAULTS,
+                        dashGridOptions=components.grid_options(
+                            rowSelection={"mode": "multiRow"}
+                        ),
+                        className="ag-theme-alpine grid",
+                    ),
+                    AgGrid(
+                        id="analysis-family-grid",
+                        rowData=[],
+                        columnDefs=_FAMILY_PICKER_COLUMNS,
+                        defaultColDef=_GRID_DEFAULTS,
+                        dashGridOptions=components.grid_options(
+                            rowSelection={"mode": "multiRow"}
+                        ),
+                        className="ag-theme-alpine grid",
+                    ),
+                    dcc.Checklist(
+                        id="analysis-expand",
+                        options=[
+                            {
+                                "label": " include retry families — expand "
+                                "picked roots to every generation",
+                                "value": "expand",
+                            }
+                        ],
+                        value=[],
+                        className="expand-toggle",
+                    ),
+                ],
+                className="scope-editor",
+            ),
             dcc.Tabs(
                 id="analysis-tabs",
-                value="selection",
+                value="catalog",
                 children=[
-                    dcc.Tab(
-                        label="Selection",
-                        value="selection",
-                        children=_selection_tab(),
-                    ),
                     dcc.Tab(
                         label="Data catalog",
                         value="catalog",
@@ -96,51 +420,30 @@ def analysis_page() -> html.Div:
     )
 
 
-def _selection_tab() -> html.Div:
+def scope_bar(
+    service: DashboardService, project: str | None, tray: dict[str, Any] | None
+) -> html.Div:
+    """The persistent scope line above every analysis view: selected
+    sweep names plus the tray's counts."""
+    tray = tray or EMPTY_TRAY
+    if not project:
+        return html.Div(
+            Empty("Pick a project in the header to analyze its sweeps."),
+            className="scope-bar",
+        )
+    names = {
+        summary.sweep_id: summary.name for summary in service.sweep_overview(project)
+    }
+    picked = [
+        names.get(sweep_id, short_id(sweep_id)) for sweep_id in tray.get("sweeps") or []
+    ]
+    label = ", ".join(picked) if picked else "nothing selected"
     return html.Div(
         [
-            html.P(
-                "Pick sweeps and retry families from the project; the tray "
-                "drives every tab and is shared through the URL token.",
-                className="hint",
-            ),
-            html.H3("Sweeps"),
-            AgGrid(
-                id="analysis-sweep-grid",
-                rowData=[],
-                columnDefs=_SWEEP_PICKER_COLUMNS,
-                defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions=components.grid_options(
-                    rowSelection={"mode": "multiRow"}
-                ),
-                className="ag-theme-alpine grid",
-            ),
-            html.H3("Trial families"),
-            AgGrid(
-                id="analysis-family-grid",
-                rowData=[],
-                columnDefs=_FAMILY_PICKER_COLUMNS,
-                defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions=components.grid_options(
-                    rowSelection={"mode": "multiRow"}
-                ),
-                className="ag-theme-alpine grid",
-            ),
-            dcc.Checklist(
-                id="analysis-expand",
-                options=[
-                    {
-                        "label": " include retry families — expand picked "
-                        "roots to every generation",
-                        "value": "expand",
-                    }
-                ],
-                value=[],
-                className="expand-toggle",
-            ),
-            html.Div(id="analysis-tray-summary", className="hint"),
+            html.Span(f"Scope: {label}", className="scope-sweeps"),
+            html.Span(tray_summary(tray), className="scope-counts"),
         ],
-        className="analysis-pickers",
+        className="scope-bar",
     )
 
 
@@ -421,20 +724,50 @@ def synced_search(
     current_search: str | None,
     project: str | None,
     *,
+    view_doc: dict[str, Any] | None = None,
     url_navigated: bool,
 ) -> str | None:
-    """The URL search after a navigation or a tray edit; ``None`` leaves
-    it alone. Navigations may only drop the analysis token — minting on
-    navigation would let a stale session tray clobber a freshly opened
-    deep link before hydration lands. Tray edits mint the token, and
-    only on the analysis page whose grids are the sole editors."""
+    """The URL search after a navigation or a tray/view edit; ``None``
+    leaves it alone. Navigations may only drop the analysis parameters —
+    minting on navigation would let a stale session tray clobber a
+    freshly opened deep link before hydration lands. Tray and view
+    edits mint, and only on the analysis page."""
     if url_navigated:
         if current_search and parse_route(pathname).kind != "analysis":
             return ""
         return None
     if parse_route(pathname).kind != "analysis":
         return None
-    return search_from_tray(service, project, tray, current_search)
+    return search_from_state(service, project, tray, view_doc, current_search)
+
+
+def selection_query(
+    service: DashboardService, project: str | None, tray: dict[str, Any] | None
+) -> str:
+    """The ``sel=`` query fragment; empty when the tray has nothing to
+    hand off or no project is active."""
+    if not project:
+        return ""
+    picks = tray or EMPTY_TRAY
+    if not any(
+        picks.get(name) for name in ("sweeps", "trials", "families", "executions")
+    ):
+        return ""
+    token = encode_selection_token(service.analysis_selection(project, picks))
+    return f"sel={token}"
+
+
+def view_query(view_doc: dict[str, Any] | None) -> str:
+    """The ``view=`` query fragment; empty when the state is absent or
+    default (a default state does not belong in the URL)."""
+    if not view_doc or view_doc == default_view_state():
+        return ""
+    return f"view={encode_view_state(view_doc)}"
+
+
+def _query_search(fragments: list[str]) -> str:
+    joined = "&".join(fragment for fragment in fragments if fragment)
+    return f"?{joined}" if joined else ""
 
 
 def search_from_tray(
@@ -447,15 +780,57 @@ def search_from_tray(
     unchanged. An empty tray clears the token (nothing to hand off)."""
     if not project:
         return None
-    picks = tray or EMPTY_TRAY
-    if not any(
-        picks.get(name) for name in ("sweeps", "trials", "families", "executions")
-    ):
-        target = ""
-    else:
-        token = encode_selection_token(service.analysis_selection(project, picks))
-        target = f"?sel={token}"
+    target = _query_search([selection_query(service, project, tray)])
     return None if target == (current_search or "") else target
+
+
+def search_from_state(
+    service: DashboardService,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    view_doc: dict[str, Any] | None,
+    current_search: str | None,
+) -> str | None:
+    """URL search carrying both parameters; ``None`` when unchanged. A
+    current ``view=`` that does not decode is left in place (the visible
+    error stays until a real edit rewrites it)."""
+    target = _query_search(
+        [
+            fragment
+            for fragment in (
+                selection_query(service, project, tray),
+                view_query(view_doc),
+            )
+            if fragment
+        ]
+    )
+    if target == (current_search or ""):
+        return None
+    if "view=" not in target and _view_param(current_search) is not None:
+        try:
+            decode_view_state(_view_param(current_search) or "")
+        except ViewStateError:
+            return None
+    return target
+
+
+def analysis_href(
+    service: DashboardService, project: str | None, tray: dict[str, Any] | None
+) -> str:
+    """Analysis URL carrying the tray's current scope (header tray)."""
+    fragment = selection_query(service, project, tray)
+    return f"{ROUTES_BASE}/analysis{_query_search([fragment])}"
+
+
+def series_entry_href(project: str, sweep_id: str) -> str:
+    """Analysis URL scoped to one sweep with the Series view active
+    (sweep detail's Analyze series action)."""
+    selection = Selection(project=project, sweeps=(uuid.UUID(sweep_id),))
+    doc = dict(default_view_state(), active="series")
+    return (
+        f"{ROUTES_BASE}/analysis?sel={encode_selection_token(selection)}"
+        f"&view={encode_view_state(doc)}"
+    )
 
 
 def _pick_project_first() -> html.Div:

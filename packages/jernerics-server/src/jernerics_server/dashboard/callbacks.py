@@ -212,10 +212,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("selection-tray", "children"),
+        Output("selection-tray", "href"),
         Input("selection-store", "data"),
+        Input("project-store", "data"),
     )
-    def _update_tray(data: dict | None):
-        return analysis.tray_summary(data)
+    def _update_tray(tray: dict | None, project: str | None):
+        # The tray stays a live summary, but it is also the one-click
+        # door into Analysis carrying the current scope.
+        return (
+            analysis.tray_summary(tray),
+            analysis.analysis_href(service, project, tray),
+        )
 
     @app.callback(
         Output("family-lineage-panel", "children"),
@@ -231,27 +238,39 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("selection-store", "data"),
         Output("analysis-message-store", "data"),
+        Output("view-store", "data"),
         Input("url", "pathname"),
         Input("url", "search"),
         Input("project-store", "data"),
         State("selection-store", "data"),
+        State("view-store", "data"),
     )
     def _hydrate_analysis_tray(
         pathname: str | None,
         search: str | None,
         project: str | None,
         current: dict | None,
+        current_view: dict | None,
     ):
         # Shell-only outputs: this fires on every navigation, and Dash
         # raises ReferenceError when a dispatched callback writes a
         # component the current page does not mount (jernerics-8c9).
-        tray, error = analysis.hydrate_tray(service, project, pathname, search, current)
-        return no_update if tray is None else tray, error or ""
+        tray, tray_error = analysis.hydrate_tray(
+            service, project, pathname, search, current
+        )
+        view, view_error = analysis.hydrate_view(pathname, search, current_view)
+        message = tray_error or view_error
+        return (
+            no_update if tray is None else tray,
+            message or "",
+            no_update if view is None else view,
+        )
 
     @app.callback(
         Output("url", "search"),
         Input("url", "pathname"),
         Input("selection-store", "data"),
+        Input("view-store", "data"),
         State("url", "search"),
         State("project-store", "data"),
         prevent_initial_call=True,
@@ -259,12 +278,14 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     def _sync_selection_url(
         pathname: str | None,
         tray: dict | None,
+        view_doc: dict | None,
         current_search: str | None,
         project: str | None,
     ):
-        """Sole owner of ``url.search``: mints ``?sel=`` from tray edits
-        on the analysis page and drops it when navigating away. Only
-        shell-resident ids, so it can fire on any page."""
+        """Sole owner of ``url.search``: mints ``?sel=`` and ``?view=``
+        from tray/view edits on the analysis page and drops them when
+        navigating away. Only shell-resident ids, so it can fire on any
+        page."""
         triggered = {item["prop_id"] for item in dash.callback_context.triggered}
         target = analysis.synced_search(
             service,
@@ -272,6 +293,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             tray,
             current_search,
             project,
+            view_doc=view_doc,
             url_navigated="url.pathname" in triggered,
         )
         if target is None:
@@ -352,11 +374,88 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return rows, analysis.mounted_selection(selected, initial=is_initial())
 
     @app.callback(
-        Output("analysis-tray-summary", "children"),
+        Output("analysis-scope-bar", "children"),
         Input("selection-store", "data"),
+        Input("project-store", "data"),
     )
-    def _summarize_analysis_tray(tray: dict | None):
-        return analysis.tray_summary(tray)
+    def _render_scope_bar(tray: dict | None, project: str | None):
+        return analysis.scope_bar(service, project, tray)
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input("analysis-tabs", "value"),
+        Input("analysis-key", "value"),
+        Input("analysis-reduction", "value"),
+        Input("analysis-color", "value"),
+        Input("analysis-facet", "value"),
+        Input("analysis-contour-x", "value"),
+        Input("analysis-contour-y", "value"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_view_state(
+        active: str | None,
+        key: str | None,
+        reduction: str | None,
+        color: str | None,
+        facet: str | None,
+        contour_x: str | None,
+        contour_y: str | None,
+        current: dict | None,
+    ):
+        doc = analysis.view_from_controls(
+            current,
+            active=active,
+            key=key,
+            reduction=reduction,
+            color=color,
+            facet=facet,
+            contour_x=contour_x,
+            contour_y=contour_y,
+            edited=analysis.edited_fields(dash.callback_context.triggered_prop_ids),
+        )
+        # Hydration pushes state to the controls and their echo lands
+        # here; an unchanged document is not an edit.
+        if doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output("analysis-tabs", "value"),
+        Output("analysis-key", "value"),
+        Output("analysis-reduction", "value"),
+        Output("analysis-color", "value"),
+        Output("analysis-facet", "value"),
+        Output("analysis-contour-x", "value"),
+        Output("analysis-contour-y", "value"),
+        Input("view-store", "data"),
+        Input("analysis-key", "options"),
+        Input("analysis-color", "options"),
+        Input("analysis-facet", "options"),
+        Input("analysis-contour-x", "options"),
+        Input("analysis-contour-y", "options"),
+    )
+    def _sync_view_controls(
+        doc: dict | None,
+        key_options: list | None,
+        color_options: list | None,
+        facet_options: list | None,
+        contour_x_options: list | None,
+        contour_y_options: list | None,
+    ):
+        # Dropdown values ride along with their options: a value written
+        # before its options exist is dropped by the component and fires
+        # back as a spurious clear.
+        return analysis.control_values(
+            doc,
+            {
+                "key": analysis.loaded_option_values(key_options),
+                "color": analysis.loaded_option_values(color_options),
+                "facet": analysis.loaded_option_values(facet_options),
+                "contour_x": analysis.loaded_option_values(contour_x_options),
+                "contour_y": analysis.loaded_option_values(contour_y_options),
+            },
+        )
 
     @app.callback(
         Output("analysis-catalog", "children"),

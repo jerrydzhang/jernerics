@@ -12,6 +12,7 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 from dash import dcc, no_update
@@ -32,22 +33,35 @@ from jernerics_schema import (
 )
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
+    VIEW_VERSION,
+    ViewStateError,
+    analysis_href,
     analysis_page,
     catalog_tab,
     cold_start,
+    control_values,
+    decode_view_state,
+    default_view_state,
+    edited_fields,
+    encode_view_state,
     expand_values,
     hydrate_tray,
+    hydrate_view,
     mounted_selection,
     optuna_tab_content,
     points_tab,
     python_snippet,
     python_tab,
+    scope_bar,
+    search_from_state,
     search_from_tray,
+    series_entry_href,
     series_outputs,
     sweep_picker_rows,
     synced_search,
     tray_from_edit,
     tray_summary,
+    view_from_controls,
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
@@ -1248,6 +1262,372 @@ class TestUrlSync:
         )
 
 
+class TestViewStateCodec:
+    """jernerics-cdf.3: the dashboard-only ``view=`` document — version,
+    enums, JSON types, unknown-field dropping, defaults for missing
+    fields, and percent-encoded compact JSON round-trips."""
+
+    def test_round_trip_is_exact_and_url_safe(self):
+        doc = default_view_state()
+        doc["active"] = "series"
+        doc["series"] = {
+            **doc["series"],
+            "keys": ["loss", "accuracy"],
+            "reduction": "mean",
+            "trial_display": "short",
+            "context_filters": {"host": ["node00", "node01"]},
+            "color": "shard",
+            "axes": {"loss": "y1", "accuracy": "y2"},
+        }
+        doc["highlighted_families"] = [str(RA0)]
+        doc["auto_refresh"] = True
+        doc["optuna"] = {"contour_x": "lr", "contour_y": "seed"}
+        encoded = encode_view_state(doc)
+        assert all(char not in '{}":,&' for char in encoded)
+        assert decode_view_state(unquote(encoded)) == doc
+        assert encode_view_state(decode_view_state(unquote(encoded))) == encoded
+
+    def test_unknown_fields_are_dropped_and_not_re_emitted(self):
+        doc = default_view_state()
+        doc["active"] = "points"
+        payload = json.dumps(
+            {
+                **doc,
+                "layout": "saved",
+                "series": {**doc["series"], "hover": 1, "plotly": {"x": 2}},
+                "optuna": {**doc["optuna"], "zoom": "in"},
+            }
+        )
+        assert decode_view_state(payload) == doc
+
+    def test_missing_fields_take_defaults(self):
+        assert decode_view_state(json.dumps({"v": VIEW_VERSION})) == (
+            default_view_state()
+        )
+        partial = json.dumps({"v": VIEW_VERSION, "active": "optuna"})
+        assert decode_view_state(partial)["active"] == "optuna"
+        assert decode_view_state(partial)["series"]["keys"] == []
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "not json",
+            "[1, 2]",
+            json.dumps({"v": 2}),
+            json.dumps({"v": True}),
+            json.dumps({"v": VIEW_VERSION, "active": "selection"}),
+            json.dumps({"v": VIEW_VERSION, "active": "catalog", "series": []}),
+            json.dumps({"v": VIEW_VERSION, "series": {"keys": "loss"}}),
+            json.dumps({"v": VIEW_VERSION, "series": {"keys": [""]}}),
+            json.dumps({"v": VIEW_VERSION, "series": {"mode": "scatter"}}),
+            json.dumps({"v": VIEW_VERSION, "series": {"reduction": "latest"}}),
+            json.dumps({"v": VIEW_VERSION, "series": {"color": 3}}),
+            json.dumps({"v": VIEW_VERSION, "series": {"context_filters": []}}),
+            json.dumps(
+                {"v": VIEW_VERSION, "series": {"context_filters": {"host": "n0"}}}
+            ),
+            json.dumps({"v": VIEW_VERSION, "series": {"axes": {"loss": 1}}}),
+            json.dumps({"v": VIEW_VERSION, "highlighted_families": [7]}),
+            json.dumps({"v": VIEW_VERSION, "auto_refresh": "yes"}),
+            json.dumps({"v": VIEW_VERSION, "optuna": {"contour_x": 4}}),
+        ],
+    )
+    def test_bad_payloads_fail_with_descriptive_errors(self, payload):
+        with pytest.raises(ViewStateError):
+            decode_view_state(payload)
+
+    def test_error_messages_name_the_problem(self):
+        with pytest.raises(ViewStateError, match="expected version 1"):
+            decode_view_state(json.dumps({"v": 2}))
+        with pytest.raises(ViewStateError, match="unsupported analysis view"):
+            decode_view_state(json.dumps({"v": 1, "active": "selection"}))
+        with pytest.raises(ViewStateError, match="malformed"):
+            decode_view_state("%zz{")
+
+    def test_duplicate_keys_keep_first_occurrence_order(self):
+        doc = default_view_state()
+        doc["series"]["keys"] = ["loss", "accuracy", "loss"]
+        decoded = decode_view_state(json.dumps(doc))
+        assert decoded["series"]["keys"] == ["loss", "accuracy"]
+
+
+class TestViewHydration:
+    def test_valid_document_lands_in_the_store(self):
+        doc = dict(default_view_state(), active="series")
+        hydrated, error = hydrate_view(
+            "/dashboard/analysis", f"?view={encode_view_state(doc)}", None
+        )
+        assert error is None and hydrated == doc
+
+    def test_equal_state_is_left_alone(self):
+        doc = dict(default_view_state(), active="series")
+        search = f"?view={encode_view_state(doc)}"
+        assert hydrate_view("/dashboard/analysis", search, doc) == (None, None)
+
+    def test_no_parameter_means_defaults(self):
+        assert hydrate_view("/dashboard/analysis", "?sel=tok", None) == (
+            default_view_state(),
+            None,
+        )
+        doc = dict(default_view_state(), active="points")
+        assert hydrate_view("/dashboard/analysis", "", doc) == (
+            default_view_state(),
+            None,
+        )
+
+    def test_malformed_document_defaults_with_visible_error(self):
+        hydrated, error = hydrate_view(
+            "/dashboard/analysis", "?view=%7Bbroken", dict(default_view_state())
+        )
+        assert hydrated == default_view_state()
+        assert error is not None and "view state" in error
+
+    def test_off_analysis_route_the_store_is_untouched(self):
+        doc = dict(default_view_state(), active="points")
+        assert hydrate_view("/dashboard/sweep/x", "?view=%7Bbroken", doc) == (
+            None,
+            None,
+        )
+
+
+class TestViewSync:
+    """jernerics-cdf.3: one shell callback owns ``url.search`` and mints
+    ``?sel=`` + ``?view=`` together; defaults stay out of the URL, and
+    undecodable garbage is never silently rewritten away."""
+
+    def test_view_edit_mints_both_parameters(self, service):
+        tray = _tray()
+        doc = dict(default_view_state(), active="series")
+        target = search_from_state(service, PROJECT, tray, doc, "")
+        assert target is not None and target.startswith("?sel=")
+        assert "&view=" in target
+        raw = target.split("&view=")[1]
+        assert decode_view_state(unquote(raw)) == doc
+
+    def test_default_view_state_is_not_emitted(self, service):
+        target = search_from_state(service, PROJECT, _tray(), default_view_state(), "")
+        assert target == search_from_tray(service, PROJECT, _tray(), "")
+        assert target is None or "view=" not in target
+
+    def test_view_only_state_mints_without_sel(self, service):
+        doc = dict(default_view_state(), active="points")
+        target = search_from_state(service, PROJECT, None, doc, "")
+        assert target is not None and target.startswith("?view=")
+
+    def test_unchanged_state_is_not_rewritten(self, service):
+        tray = _tray()
+        doc = dict(default_view_state(), active="series")
+        target = search_from_state(service, PROJECT, tray, doc, "")
+        assert target is not None
+        assert search_from_state(service, PROJECT, tray, doc, target) is None
+
+    def test_undecodable_view_parameter_is_left_in_place(self, service):
+        tray = _tray()
+        sel = encode_selection_token(service.analysis_selection(PROJECT, tray))
+        current = "?sel=" + sel + "&view=%zz{"
+        assert (
+            search_from_state(service, PROJECT, tray, default_view_state(), current)
+            is None
+        )
+
+    _ALL_FIELDS = {
+        "active",
+        "key",
+        "reduction",
+        "color",
+        "facet",
+        "contour_x",
+        "contour_y",
+    }
+
+    def test_control_edits_rebuild_state_and_preserve_uncontrolled_fields(self):
+        doc = default_view_state()
+        doc["series"] = {
+            **doc["series"],
+            "keys": ["loss", "accuracy"],
+            "axes": {"loss": "y1"},
+            "context_filters": {"host": ["node00"]},
+        }
+        doc["auto_refresh"] = True
+        edited = view_from_controls(
+            doc,
+            active="series",
+            key="accuracy",
+            reduction="max",
+            color="shard",
+            facet=None,
+            contour_x="lr",
+            contour_y="seed",
+            edited=self._ALL_FIELDS,
+        )
+        assert edited["active"] == "series"
+        assert edited["series"]["keys"] == ["accuracy"]
+        assert edited["series"]["reduction"] == "max"
+        assert edited["series"]["axes"] == {"loss": "y1"}
+        assert edited["series"]["context_filters"] == {"host": ["node00"]}
+        assert edited["auto_refresh"] is True
+
+    def test_untriggered_controls_never_read_as_clears(self):
+        """The control-sync write fires the edit callback with every
+        input; a dropdown whose options have not loaded reports None and
+        must not wipe the hydrated key."""
+        doc = dict(default_view_state(), active="series")
+        doc["series"] = {
+            **doc["series"],
+            "keys": ["loss"],
+            "color": "shard",
+            "reduction": "mean",
+        }
+        tab_echo = view_from_controls(
+            doc,
+            active="series",
+            key=None,
+            reduction="mean",
+            color=None,
+            facet=None,
+            contour_x=None,
+            contour_y=None,
+            edited={"active", "reduction"},
+        )
+        assert tab_echo["series"]["keys"] == ["loss"]
+        assert tab_echo["series"]["color"] == "shard"
+        assert tab_echo == doc
+
+    def test_edited_fields_maps_triggered_prop_ids(self):
+        assert edited_fields({"analysis-tabs.value", "analysis-contour-x.value"}) == {
+            "active",
+            "contour_x",
+        }
+        assert edited_fields({"url.search"}) == set()
+
+    _LOADED = {
+        "key": {"loss", "accuracy", "summary"},
+        "color": {"host", "shard"},
+        "facet": {"host", "shard"},
+        "contour_x": {"lr", "seed"},
+        "contour_y": {"lr", "seed"},
+    }
+
+    def test_control_values_read_the_first_series_key(self):
+        doc = default_view_state()
+        doc["series"]["keys"] = ["loss", "accuracy"]
+        active, key, reduction, color, facet, cx, cy = control_values(doc, self._LOADED)
+        assert (active, key, reduction) == ("catalog", "loss", "none")
+        assert (color, facet, cx, cy) == (None, None, None, None)
+        assert control_values(None, self._LOADED)[1] is None
+
+    def test_values_wait_for_their_options(self):
+        """A value written before its options exist is dropped by the
+        dropdown and fires back as a spurious clear — gating keeps it
+        for the options-arrival write."""
+        doc = default_view_state()
+        doc["series"] = {**doc["series"], "keys": ["loss"], "color": "shard"}
+        doc["optuna"] = {**doc["optuna"], "contour_x": "lr"}
+        unloaded = {name: None for name in self._LOADED}
+        _active, key, _reduction, color, _facet, cx, _cy = control_values(doc, unloaded)
+        assert key is no_update
+        assert color is no_update
+        assert cx is no_update
+        partial = {**self._LOADED, "key": set()}
+        _active, key, _reduction, _color, _facet, cx, _cy = control_values(doc, partial)
+        assert key is no_update
+        assert cx == "lr"
+
+
+class TestScopeBar:
+    def test_shows_sweep_names_and_counts(self, service):
+        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_B)]))
+        rendered = str(bar)
+        assert "Scope: alpha, beta" in rendered
+        assert "2 sweep(s)" in rendered
+        assert "0 family/families" in rendered
+
+    def test_unknown_sweep_id_falls_back_to_short_id(self, service):
+        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_C)]))
+        assert "Scope: gamma" in str(bar)
+
+    def test_expansion_and_executions_surface_in_counts(self, service):
+        tray = _tray(families=[str(RA0)], executions=[str(EXA1)], expand=True)
+        rendered = str(scope_bar(service, PROJECT, tray))
+        assert "1 family/families" in rendered
+        assert "1 execution(s)" in rendered
+        assert "retry families expanded" in rendered
+
+    def test_projectless_bar_tells_the_user_to_pick(self):
+        rendered = str(scope_bar(None, None, None))
+        assert "Pick a project" in rendered
+
+    def test_scope_bar_sits_above_tabs_and_selection_tab_is_gone(self):
+        page = analysis_page()
+        rendered = str(page)
+        assert "Edit scope" in rendered
+        assert "analysis-scope-bar" in rendered
+        assert "analysis-sweep-grid" in rendered
+        assert "analysis-family-grid" in rendered
+        assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
+        tabs = next(
+            node
+            for node in _walk(page, lambda n: type(n).__name__ == "Tabs")
+            if node.id == "analysis-tabs"
+        )
+        assert [tab.value for tab in tabs.children] == [
+            "catalog",
+            "series",
+            "points",
+            "optuna",
+            "python",
+        ]
+
+
+class TestEntryPoints:
+    """Direct doors into Analysis: sweep detail's Analyze series and the
+    header tray."""
+
+    def test_series_entry_scopes_to_exactly_that_sweep_with_series_active(self):
+        href = series_entry_href(PROJECT, str(SWEEP_A))
+        assert href.startswith("/dashboard/analysis?")
+        sel, view = href.removeprefix("/dashboard/analysis?").split("&view=")
+        assert sel.startswith("sel=")
+        assert decode_selection_token(sel.removeprefix("sel=")) == Selection(
+            project=PROJECT, sweeps=(SWEEP_A,)
+        )
+        assert decode_view_state(unquote(view))["active"] == "series"
+
+    def test_series_entry_needs_no_workspace_selection(self):
+        href = series_entry_href(PROJECT, str(SWEEP_B))
+        assert "sweep-grid" not in href
+        selection = decode_selection_token(href.split("sel=")[1].split("&")[0])
+        assert selection.sweeps == (SWEEP_B,)
+        assert selection.trials is None
+
+    def test_tray_href_carries_the_current_scope(self, service):
+        href = analysis_href(service, PROJECT, _tray())
+        assert href.startswith("/dashboard/analysis?sel=")
+        token = href.split("sel=")[1]
+        assert decode_selection_token(token) == (
+            service.analysis_selection(PROJECT, _tray())
+        )
+
+    def test_empty_tray_href_is_a_plain_analysis_link(self, service):
+        assert analysis_href(service, PROJECT, dict(EMPTY_TRAY)) == (
+            "/dashboard/analysis"
+        )
+
+    def test_shell_tray_is_a_link_and_view_store_starts_at_defaults(self):
+        anchor = next(
+            node
+            for node in _walk(
+                shell(), lambda n: getattr(n, "id", None) == "selection-tray"
+            )
+        )
+        assert type(anchor).__name__ == "A"
+        store = next(
+            node
+            for node in _walk(shell(), lambda n: getattr(n, "id", None) == "view-store")
+        )
+        assert store.data == default_view_state()
+
+
 class TestCallbackGraphSafety:
     """jernerics-8c9 regression: a callback firable on any page — one
     with an input id mounted in the shell — must reference only
@@ -1363,6 +1743,12 @@ class TestColdStartMountedJourney:
         assert response.status_code == 200, response.text
         return response.json()["response"]
 
+    _HYDRATION_OUTPUTS = {
+        "selection-store.data",
+        "analysis-message-store.data",
+        "view-store.data",
+    }
+
     def test_cold_start_settles_picker_store_then_tray(self, authed, callback_map):
         token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = f"?sel={token}"
@@ -1389,14 +1775,19 @@ class TestColdStartMountedJourney:
         tray = self._dispatch(
             authed,
             callback_map,
-            {"selection-store.data", "analysis-message-store.data"},
+            self._HYDRATION_OUTPUTS,
             [
                 {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
                 {"id": "url", "property": "search", "value": search},
                 {"id": "project-store", "property": "data", "value": PROJECT},
             ],
             state=[
-                {"id": "selection-store", "property": "data", "value": dict(EMPTY_TRAY)}
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": dict(EMPTY_TRAY),
+                },
+                {"id": "view-store", "property": "data", "value": None},
             ],
         )
         assert tray["selection-store"]["data"]["sweeps"] == [str(SWEEP_A)]
@@ -1419,13 +1810,16 @@ class TestColdStartMountedJourney:
         message = self._dispatch(
             authed,
             callback_map,
-            {"selection-store.data", "analysis-message-store.data"},
+            self._HYDRATION_OUTPUTS,
             [
                 {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
                 {"id": "url", "property": "search", "value": f"?sel={token}"},
                 {"id": "project-store", "property": "data", "value": PROJECT},
             ],
-            state=[{"id": "selection-store", "property": "data", "value": None}],
+            state=[
+                {"id": "selection-store", "property": "data", "value": None},
+                {"id": "view-store", "property": "data", "value": None},
+            ],
         )
         assert "selection-store" not in message
         assert "not the current project" in message["analysis-message-store"]["data"]
@@ -1445,18 +1839,76 @@ class TestColdStartMountedJourney:
         cold = self._dispatch(
             authed,
             callback_map,
-            {"selection-store.data", "analysis-message-store.data"},
+            self._HYDRATION_OUTPUTS,
             [
                 {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
                 {"id": "url", "property": "search", "value": f"?sel={token}"},
                 {"id": "project-store", "property": "data", "value": None},
             ],
             state=[
-                {"id": "selection-store", "property": "data", "value": dict(EMPTY_TRAY)}
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": dict(EMPTY_TRAY),
+                },
+                {"id": "view-store", "property": "data", "value": None},
             ],
         )
         assert "selection-store" not in cold
         assert "project 'ghost'" in cold["analysis-message-store"]["data"]
+
+    def test_deep_link_settles_view_state_alongside_the_tray(
+        self, authed, callback_map
+    ):
+        doc = dict(default_view_state(), active="series")
+        doc["series"] = {**doc["series"], "keys": ["loss"], "reduction": "mean"}
+        sel = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        search = f"?sel={sel}&view={encode_view_state(doc)}"
+        result = self._dispatch(
+            authed,
+            callback_map,
+            self._HYDRATION_OUTPUTS,
+            [
+                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {"id": "url", "property": "search", "value": search},
+                {"id": "project-store", "property": "data", "value": PROJECT},
+            ],
+            state=[
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": dict(EMPTY_TRAY),
+                },
+                {"id": "view-store", "property": "data", "value": None},
+            ],
+        )
+        assert result["selection-store"]["data"]["sweeps"] == [str(SWEEP_A)]
+        assert result["view-store"]["data"] == doc
+
+    def test_malformed_view_parameter_defaults_and_errors(self, authed, callback_map):
+        sel = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        search = "?sel=" + sel + "&view=%zz{"
+        result = self._dispatch(
+            authed,
+            callback_map,
+            self._HYDRATION_OUTPUTS,
+            [
+                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {"id": "url", "property": "search", "value": search},
+                {"id": "project-store", "property": "data", "value": PROJECT},
+            ],
+            state=[
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": dict(EMPTY_TRAY),
+                },
+                {"id": "view-store", "property": "data", "value": None},
+            ],
+        )
+        assert result["selection-store"]["data"]["sweeps"] == [str(SWEEP_A)]
+        assert result["view-store"]["data"] == default_view_state()
+        assert "view state is malformed" in result["analysis-message-store"]["data"]
 
 
 class TestContinueInPython:
@@ -1497,6 +1949,9 @@ class TestAnalysisRouteServes:
         assert "analysis-selection-store" not in rendered
         assert "Selection" in rendered
         assert "Optuna views" in rendered
+        assert "analysis-scope-bar" in rendered
+        assert "Edit scope" in rendered
+        assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
 
     def test_deep_link_with_token_returns_200(self, authed):
         token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))

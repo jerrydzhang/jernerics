@@ -4,9 +4,10 @@ The shell owns all client-side state: ``dcc.Location`` carries the URL,
 ``project-store`` the active project, ``selection-store`` the unified
 selection tray (sweeps picked on any grid, retry families, and the
 expansion toggle — the typed ``Selection`` is built per query call in
-the service), ``analysis-message-store`` the analysis URL-hydration
-message, and ``poll`` is the conditional refresh interval pages
-enable or disable through the router callback.
+the service), ``view-store`` the analysis view state the ``view=``
+parameter round-trips, ``analysis-message-store`` the analysis
+URL-hydration message, and ``poll`` is the conditional refresh interval
+pages enable or disable through the router callback.
 
 Every page function is pure: data in, Dash components out. Callbacks
 fetch through DashboardService and hand the results here.
@@ -19,7 +20,7 @@ from dash_ag_grid import AgGrid
 from jernerics_schema import ExecutionRecord
 
 from . import artifacts, components
-from .analysis import EMPTY_TRAY
+from .analysis import EMPTY_TRAY, default_view_state, series_entry_href
 from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
 from .routes import ROUTES_BASE
 from .service import (
@@ -76,7 +77,7 @@ def shell() -> html.Div:
                         clearable=True,
                         className="project-picker",
                     ),
-                    html.Span(id="selection-tray", className="tray"),
+                    html.A(id="selection-tray", className="tray"),
                     html.Form(
                         [
                             html.Button("Log out", type="submit", className="logout"),
@@ -92,6 +93,7 @@ def shell() -> html.Div:
                 id="selection-store", storage_type="session", data=dict(EMPTY_TRAY)
             ),
             dcc.Store(id="analysis-message-store"),
+            dcc.Store(id="view-store", data=default_view_state()),
             dcc.Interval(id="poll", interval=POLL_INTERVAL_MS, disabled=True),
         ],
         className="shell",
@@ -438,6 +440,13 @@ def sweep_page(detail: SweepDetail, now_ns: int) -> html.Div:
                     html.A(
                         f"project {detail.context['project']}",
                         href=_project_href(detail.context["project"]),
+                    ),
+                    html.A(
+                        "Analyze series",
+                        href=series_entry_href(
+                            detail.context["project"], overview.sweep_id
+                        ),
+                        className="analyze-link",
                     ),
                 ]
             ),
