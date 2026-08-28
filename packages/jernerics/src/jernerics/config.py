@@ -87,6 +87,11 @@ class SlurmConfig:
     cpus: int = 4
     max_concurrent_jobs: int = 10
     exclude: str | None = None
+    # Post-hook runs on CPU nodes; on GPU-only trial partitions set
+    # post_hook_partition to a CPU partition instead of inheriting trials'.
+    post_hook_partition: str | None = None
+    post_hook_time: str = "0:10:00"
+    post_hook_mem: str = "1G"
 
     def defaults_dict(self) -> dict[str, str | None]:
         return {
@@ -246,6 +251,9 @@ def load_backend_config(
             cpus=slurm.get("cpus", 4),
             max_concurrent_jobs=slurm.get("max_concurrent_jobs", 10),
             exclude=slurm.get("exclude"),
+            post_hook_partition=slurm.get("post_hook_partition"),
+            post_hook_time=slurm.get("post_hook_time", "0:10:00"),
+            post_hook_mem=slurm.get("post_hook_mem", "1G"),
         )
     elif backend_type == "pueue":
         backend_specific = PueueConfig(

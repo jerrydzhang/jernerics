@@ -182,6 +182,8 @@ def _format_checker_script(
     cache_host: str,
     remote_dir: str,
     partition: str,
+    time: str,
+    mem: str,
     wrapped_checker: str,
     dependency_job_id: str | None = None,
 ) -> str:
@@ -191,8 +193,8 @@ def _format_checker_script(
         "#!/usr/bin/env bash",
         "#SBATCH --parsable",
         f"#SBATCH --partition={partition}",
-        "#SBATCH --time=0:10:00",
-        "#SBATCH --mem=1G",
+        f"#SBATCH --time={time}",
+        f"#SBATCH --mem={mem}",
         f"#SBATCH --output={cache_host}/logs/checker_%j.out",
         f"#SBATCH --error={cache_host}/logs/checker_%j.err",
         "#SBATCH --kill-on-invalid-dep=yes",
@@ -246,6 +248,9 @@ class SlurmAdapter:
         max_concurrent_jobs: int = 10,
         exclude: str | None = None,
         cache_host: str = "",
+        post_hook_partition: str | None = None,
+        post_hook_time: str = "0:10:00",
+        post_hook_mem: str = "1G",
     ):
         self.host = host
         self.remote_dir = remote_dir
@@ -256,6 +261,9 @@ class SlurmAdapter:
         self.max_concurrent_jobs = max_concurrent_jobs
         self.exclude = exclude
         self.cache_host = cache_host
+        self.post_hook_partition = post_hook_partition
+        self.post_hook_time = post_hook_time
+        self.post_hook_mem = post_hook_mem
 
     @classmethod
     def from_config(
@@ -290,6 +298,9 @@ class SlurmAdapter:
             max_concurrent_jobs=slurm.max_concurrent_jobs,
             exclude=slurm.exclude,
             cache_host=cache_host,
+            post_hook_partition=slurm.post_hook_partition,
+            post_hook_time=slurm.post_hook_time,
+            post_hook_mem=slurm.post_hook_mem,
         )
 
     def _array_spec(self, params: SweepSubmissionParams) -> str:
@@ -322,7 +333,10 @@ class SlurmAdapter:
         checker_script = _format_checker_script(
             cache_host=cache_host,
             remote_dir=self.remote_dir,
-            partition=params.overrides.get("partition", self.partition),
+            partition=self.post_hook_partition
+            or params.overrides.get("partition", self.partition),
+            time=self.post_hook_time,
+            mem=self.post_hook_mem,
             wrapped_checker=params.post_hook_command,
         )
         return _compose_chain(array_script, checker_script)

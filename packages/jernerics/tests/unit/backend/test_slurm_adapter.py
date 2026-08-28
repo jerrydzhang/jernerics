@@ -51,6 +51,10 @@ def _make_params(
     )
 
 
+def _checker_body(script: str) -> str:
+    return script.split("<<'EOF'\n")[2].split("\nEOF")[0]
+
+
 class TestRenderSweep:
     def test_produces_sbatch_script(self):
         adapter = _make_adapter()
@@ -216,6 +220,96 @@ class TestRenderOverrideAllowlist:
         script = adapter.render_sweep(params)
 
         assert "#SBATCH --partition=debug" in script
+
+
+class TestPostHookProfile:
+    GPU_OVERRIDES = {
+        "account": "qiy18011",
+        "gres": "gpu:1",
+        "cpus-per-task": "8",
+        "constraint": "a100",
+        "exclude": "gpu14",
+    }
+
+    def test_default_profile_keeps_partition_time_mem(self):
+        adapter = _make_adapter(partition="general")
+        params = _make_params(post_hook_command="wrapped_checker_cmd")
+
+        body = _checker_body(adapter.render_sweep(params))
+
+        assert "#SBATCH --partition=general" in body
+        assert "#SBATCH --time=0:10:00" in body
+        assert "#SBATCH --mem=1G" in body
+
+    def test_gpu_overrides_stay_out_of_post_hook(self):
+        adapter = _make_adapter(partition="general-gpu", post_hook_partition="general")
+        params = _make_params(
+            post_hook_command="wrapped_checker_cmd", overrides=self.GPU_OVERRIDES
+        )
+
+        script = adapter.render_sweep(params)
+        body = _checker_body(script)
+        assert "--dependency=afterany:$ARRAY_JOB_ID" in script
+        assert "#SBATCH --partition=general" in body
+        for key in self.GPU_OVERRIDES:
+            assert f"#SBATCH --{key}=" not in body
+        assert "#SBATCH --gres=gpu:1" in script
+        assert "#SBATCH --constraint=a100" in script
+
+    def test_post_hook_partition_wins_over_trial_partition(self):
+        adapter = _make_adapter(post_hook_partition="general")
+        params = _make_params(
+            post_hook_command="wrapped_checker_cmd",
+            overrides={"partition": "general-gpu", "gres": "gpu:1"},
+        )
+
+        body = _checker_body(adapter.render_sweep(params))
+
+        assert "#SBATCH --partition=general" in body
+        assert "general-gpu" not in body
+
+    def test_post_hook_partition_defaults_to_trial_partition(self):
+        adapter = _make_adapter(partition="general")
+        params = _make_params(
+            post_hook_command="wrapped_checker_cmd",
+            overrides={"partition": "debug"},
+        )
+
+        body = _checker_body(adapter.render_sweep(params))
+
+        assert "#SBATCH --partition=debug" in body
+
+    def test_post_hook_time_mem_overridable(self):
+        adapter = _make_adapter(post_hook_time="0:30:00", post_hook_mem="4G")
+        params = _make_params(post_hook_command="wrapped_checker_cmd")
+
+        body = _checker_body(adapter.render_sweep(params))
+
+        assert "#SBATCH --time=0:30:00" in body
+        assert "#SBATCH --mem=4G" in body
+
+    def test_from_config_threads_post_hook_profile(self):
+        config = BackendConfig(
+            shared=SharedConfig(
+                name="hpc",
+                type="slurm",
+                host="user@hpc",
+                remote_dir="/scratch/user/proj",
+                cache_dir="/scratch/user/cache",
+            ),
+            backend=SlurmConfig(
+                partition="general-gpu",
+                post_hook_partition="general",
+                post_hook_time="0:20:00",
+                post_hook_mem="2G",
+            ),
+        )
+
+        adapter = SlurmAdapter.from_config(config, host=StdoutHost())
+
+        assert adapter.post_hook_partition == "general"
+        assert adapter.post_hook_time == "0:20:00"
+        assert adapter.post_hook_mem == "2G"
 
 
 class TestSubmitSweep:

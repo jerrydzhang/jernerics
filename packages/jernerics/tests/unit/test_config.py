@@ -121,6 +121,50 @@ cache_dir = "/scratch/$USER/jernerics"
 
         assert config.shared.cache_dir == "/scratch/$USER/jernerics"
 
+    def test_load_backend_config_slurm_post_hook_profile(self, tmp_path):
+        project_dir = tmp_path / "posthook"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "posthook"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+
+[tool.jernerics.backends.hpc.slurm]
+partition = "general-gpu"
+post_hook_partition = "general"
+post_hook_time = "0:30:00"
+post_hook_mem = "4G"
+""")
+        config = load_backend_config("hpc", project_dir)
+
+        assert isinstance(config.backend, SlurmConfig)
+        assert config.backend.post_hook_partition == "general"
+        assert config.backend.post_hook_time == "0:30:00"
+        assert config.backend.post_hook_mem == "4G"
+
+    def test_load_backend_config_slurm_post_hook_defaults(self, tmp_path):
+        project_dir = tmp_path / "posthook-defaults"
+        project_dir.mkdir()
+        (project_dir / "pyproject.toml").write_text("""
+[project]
+name = "posthook-defaults"
+version = "0.1.0"
+
+[tool.jernerics.backends.hpc]
+type = "slurm"
+host = "user@hpc.example.edu"
+""")
+        config = load_backend_config("hpc", project_dir)
+
+        assert isinstance(config.backend, SlurmConfig)
+        assert config.backend.post_hook_partition is None
+        assert config.backend.post_hook_time == "0:10:00"
+        assert config.backend.post_hook_mem == "1G"
+
     def test_load_backend_config_multiple_backends(self, tmp_path):
         project_dir = tmp_path / "multi"
         project_dir.mkdir()
