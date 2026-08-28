@@ -646,11 +646,18 @@ class TestDashboardServiceFacts:
     def test_series(self, scenario):
         with Store(scenario.db_path) as store:
             service = DashboardService(queries=QueryService(store))
-            series = service.analysis_series(PROJECT, None, "loss")
-        assert len(series) == 2
-        for entry in series:
-            assert entry["points"] == [(0, pytest.approx(1.0)), (1, 0.75), (2, 0.5)]
-        assert len({entry["execution"] for entry in series}) == 2
+            grouped = service.analysis_series(PROJECT, None, ["loss", "missing"])
+        assert [entry["key"] for entry in grouped] == ["loss", "missing"]
+        loss, missing = grouped
+        assert missing["series"] == []
+        assert len(loss["series"]) == 2
+        for series in loss["series"]:
+            assert series["points"] == [
+                (0, pytest.approx(1.0)),
+                (1, 0.75),
+                (2, 0.5),
+            ]
+        assert len({series["execution"] for series in loss["series"]}) == 2
 
 
 class TestIdempotence:

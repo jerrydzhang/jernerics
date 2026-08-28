@@ -403,9 +403,7 @@ class SlurmAdapter:
         if self.exclude:
             parts = [p.strip() for p in self.exclude.split(",") if p.strip()]
             if parts:
-                nodes = ",".join(
-                    _validate_slurm_value(p, "exclude") for p in parts
-                )
+                nodes = ",".join(_validate_slurm_value(p, "exclude") for p in parts)
                 sbatch_script += f"#SBATCH --exclude={nodes}\n"
         if log_dir is not None:
             expanded = _expand_path(log_dir)

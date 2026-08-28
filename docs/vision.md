@@ -79,7 +79,10 @@ Near-term, three thrusts:
   humans doing quick check-ins, and agents reasoning about data (via
   `--json`). The typed `TrackingClient` serves programs. The dashboard —
   monitoring, cross-sweep analysis, artifact and stored-log views — is
-  mounted read-only on the server behind an API-key login. What's there now
+  mounted on the server behind an API-key login, read-only for tracking
+  facts, artifacts, and scheduler state: its only writes are sweep-curation
+  metadata (archived for organizational history, invalid with a required
+  reason for scientifically untrustworthy results). What's there now
   earned its place through dogfooding against real experiment data.
 - **Ergonomics** — make the CLI and trial-authoring UX as smooth as the
   mechanical parts of research allow.

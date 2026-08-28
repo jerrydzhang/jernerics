@@ -1564,3 +1564,34 @@ class TestMountedCurationJourney:
         assert "bad shards" in rendered
         row = store._curation_row(str(SWEEP_B))
         assert row[1] is not None and row[2] == "bad shards"
+
+    _TICK_OUTPUTS = {
+        "sweep-grid.rowData",
+        "sweep-grid.selectedRows",
+        "workspace-view.options",
+        "workspace-curation-note.children",
+    }
+
+    def test_tick_refreshes_grid_data_and_keeps_selection(self, mutable_client):
+        _store, client = mutable_client
+        callback_map = self._callback_map(client)
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._TICK_OUTPUTS,
+            [{"id": "poll", "property": "n_intervals", "value": 3}],
+            state=[
+                {"id": "project-store", "property": "data", "value": "ops"},
+                {"id": "workspace-store", "property": "data", "value": None},
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": {"sweeps": [str(SWEEP_B)], "trials": [], "families": []},
+                },
+            ],
+            changed=["poll.n_intervals"],
+        )
+        row_ids = [row["sweep_id"] for row in response["sweep-grid"]["rowData"]]
+        assert row_ids == [str(SWEEP_A), str(SWEEP_B)]
+        picked = [row["sweep_id"] for row in response["sweep-grid"]["selectedRows"]]
+        assert picked == [str(SWEEP_B)]

@@ -228,9 +228,18 @@ One process: SQLite store, artifacts on disk, the mounted dashboard.
 With `JERNERICS_API_KEY` set, every endpoint requires
 `Authorization: Bearer <key>` — and the dashboard's browser login
 exchanges that key once for a signed session cookie, so the key itself
-never stays in the browser. The dashboard is read-only: monitoring
-counts, sweep/trial/execution pages, artifact and stored-log viewers,
-and cross-sweep analysis views.
+never stays in the browser. Tracking facts, artifacts, and scheduler state
+are read-only in the dashboard: monitoring counts, sweep/trial/execution
+pages, artifact and stored-log viewers, and cross-sweep analysis views. The
+one write surface is sweep curation — authenticated dashboard sessions may
+archive organizational history and mark scientifically invalid sweeps (a
+reason is required); incomplete work stays visible in Current until it is
+terminal, and invalid sweeps carry their reason and a data warning into
+every analysis view. Series analysis stacks one panel per selected metric
+with independent linear/log scales and custom ranges, overlays explicitly
+on a shared axis when asked, compares dense sweeps through all-raw,
+highlighted, or median+IQR display, and round-trips the whole view — scope,
+keys, axes, filters, highlights — through the URL.
 
 ### Reading data back
 
@@ -333,7 +342,7 @@ The returned dict is passed to the config's `objective` lambda (e.g. `lambda res
 
 ## Features
 
-- **Tracking server** — A single HTTP process: ingests tagged events (`POST /ingest`), serves typed domain reads plus a read-only dashboard, raw SQL via `POST /query`, and artifact files (`GET /artifact/{id}`) from disk. Live metrics stream during the run; a final replay guarantees delivery.
+- **Tracking server** — A single HTTP process: ingests tagged events (`POST /ingest`), serves typed domain reads plus a dashboard whose only writes are sweep-curation metadata, raw SQL via `POST /query`, and artifact files (`GET /artifact/{id}`) from disk. Live metrics stream during the run; a final replay guarantees delivery.
 - **Artifact storage** — Immutable two-phase artifacts with versions by repeated key, stored on the tracking server's disk over HTTP — no external object storage.
 - **Retry system** — Heartbeat-based staleness detection for node deaths; retries carry lineage so families read as generations; configurable retries with persistent failure handling.
 - **Post-hook pipeline** — After a sweep completes, reconciles the optuna journal with server state, replays tracking data, and uploads pending artifact blobs.

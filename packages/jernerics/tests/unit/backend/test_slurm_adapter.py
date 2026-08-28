@@ -1,5 +1,6 @@
 """Tests for SlurmAdapter."""
 
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -10,7 +11,7 @@ from jernerics.config import BackendConfig, SharedConfig, SlurmConfig
 
 
 def _make_adapter(host=None, **overrides):
-    defaults = {
+    defaults: dict[str, Any] = {
         "remote_dir": "/scratch/user/proj",
         "partition": "priority",
         "time": "1:00:00",

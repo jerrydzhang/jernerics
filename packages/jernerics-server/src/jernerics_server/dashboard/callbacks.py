@@ -307,10 +307,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             tray=selection,
             project=project,
         )
-        if ticked and parse_route(pathname).kind == "analysis":
-            # A tick never re-mounts the analysis page — the data
-            # callbacks re-query on the same interval — but it is the
-            # moment auto-refresh turns itself off on terminal work.
+        if ticked and parse_route(pathname).kind in {"analysis", "workspace"}:
+            # A tick never re-mounts the analysis or workspace page —
+            # their data callbacks re-query on the same interval, and a
+            # re-mounted grid would drop row selection mid-review. The
+            # analysis tick is also the moment auto-refresh turns itself
+            # off on terminal work.
             page = no_update
         flip = (
             analysis.auto_refresh_flip(view_doc, polls)
@@ -598,6 +600,43 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             layout.action_message(ok, report),
             [layout.sweep_grid_row(summary, now) for summary in visible],
             [],
+            layout.view_options(view_counts(summaries)),
+            layout.curation_note(visible),
+        )
+
+    @app.callback(
+        Output("sweep-grid", "rowData", allow_duplicate=True),
+        Output("sweep-grid", "selectedRows", allow_duplicate=True),
+        Output("workspace-view", "options", allow_duplicate=True),
+        Output("workspace-curation-note", "children", allow_duplicate=True),
+        Input("poll", "n_intervals"),
+        State("project-store", "data"),
+        State("workspace-store", "data"),
+        State("selection-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _refresh_workspace_on_tick(
+        _tick: int | None,
+        project: str | None,
+        workspace: dict | None,
+        tray: dict | None,
+    ):
+        # Ticks refresh grid data without re-mounting the page; fresh
+        # rowData drops the grid's selection, so the tray's picks are
+        # re-applied over the rows that are still visible.
+        if not project:
+            raise PreventUpdate
+        summaries = service.sweep_overview(project)
+        state = workspace_state(workspace, project)
+        visible = workspace_visible(summaries, state["view"])
+        now = time.time_ns()
+        rows = [layout.sweep_grid_row(summary, now) for summary in visible]
+        picked = {str(sweep) for sweep in (tray or {}).get("sweeps") or []} & {
+            row["sweep_id"] for row in rows
+        }
+        return (
+            rows,
+            [row for row in rows if row["sweep_id"] in picked],
             layout.view_options(view_counts(summaries)),
             layout.curation_note(visible),
         )
@@ -922,12 +961,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("analysis-key", "value"),
         Output("analysis-mode", "value"),
         Output("analysis-reduction", "value"),
-        Output("analysis-display", "value"),
-        Output("analysis-auto-refresh", "value"),
         Output("analysis-color", "value"),
         Output("analysis-facet", "value"),
         Output("analysis-contour-x", "value"),
         Output("analysis-contour-y", "value"),
+        Output("analysis-display", "value"),
+        Output("analysis-auto-refresh", "value"),
         Input("view-store", "data"),
         Input("analysis-key", "options"),
         Input("analysis-color", "options"),

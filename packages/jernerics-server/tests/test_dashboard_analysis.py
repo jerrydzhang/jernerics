@@ -2283,6 +2283,60 @@ class TestColdStartMountedJourney:
         assert result["view-store"]["data"] == default_view_state()
         assert "view state is malformed" in result["analysis-message-store"]["data"]
 
+    _SYNC_OUTPUTS = {
+        "analysis-tabs.value",
+        "analysis-key.value",
+        "analysis-mode.value",
+        "analysis-reduction.value",
+        "analysis-color.value",
+        "analysis-facet.value",
+        "analysis-contour-x.value",
+        "analysis-contour-y.value",
+        "analysis-display.value",
+        "analysis-auto-refresh.value",
+    }
+
+    def test_control_sync_lands_each_value_on_its_component(self, authed, callback_map):
+        doc = dict(default_view_state(), active="series")
+        doc["series"] = {
+            **doc["series"],
+            "keys": ["loss"],
+            "mode": "overlay",
+            "reduction": "mean",
+            "color": "shard",
+            "facet": "host",
+            "trial_display": "median_iqr",
+        }
+        doc["optuna"] = {**doc["optuna"], "contour_x": "lr", "contour_y": "seed"}
+        doc["auto_refresh"] = True
+        options = [
+            {"label": name, "value": name}
+            for name in ("loss", "shard", "host", "lr", "seed")
+        ]
+        result = self._dispatch(
+            authed,
+            callback_map,
+            self._SYNC_OUTPUTS,
+            [
+                {"id": "view-store", "property": "data", "value": doc},
+                {"id": "analysis-key", "property": "options", "value": options},
+                {"id": "analysis-color", "property": "options", "value": options},
+                {"id": "analysis-facet", "property": "options", "value": options},
+                {"id": "analysis-contour-x", "property": "options", "value": options},
+                {"id": "analysis-contour-y", "property": "options", "value": options},
+            ],
+        )
+        assert result["analysis-tabs"]["value"] == "series"
+        assert result["analysis-key"]["value"] == ["loss"]
+        assert result["analysis-mode"]["value"] == "overlay"
+        assert result["analysis-reduction"]["value"] == "mean"
+        assert result["analysis-color"]["value"] == "shard"
+        assert result["analysis-facet"]["value"] == "host"
+        assert result["analysis-contour-x"]["value"] == "lr"
+        assert result["analysis-contour-y"]["value"] == "seed"
+        assert result["analysis-display"]["value"] == "median_iqr"
+        assert result["analysis-auto-refresh"]["value"] == ["auto"]
+
 
 class TestContinueInPython:
     def test_snippet_uses_real_client_api(self, service):

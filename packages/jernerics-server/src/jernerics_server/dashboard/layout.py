@@ -80,7 +80,11 @@ def shell() -> html.Div:
                         clearable=True,
                         className="project-picker",
                     ),
-                    html.A(id="selection-tray", className="tray"),
+                    html.A(
+                        id="selection-tray",
+                        className="tray",
+                        href=f"{ROUTES_BASE}/analysis",
+                    ),
                     html.Form(
                         [
                             html.Button("Log out", type="submit", className="logout"),
@@ -326,7 +330,12 @@ def workspace_actions() -> html.Div:
     """Selected-row action bar; buttons enable per the selection."""
     return html.Div(
         [
-            html.A("Analyze", id="ws-analyze", className="action analyze-link"),
+            html.A(
+                "Analyze",
+                id="ws-analyze",
+                className="action analyze-link",
+                href=f"{ROUTES_BASE}/analysis",
+            ),
             html.Button("Archive", id="ws-archive", disabled=True, className="action"),
             html.Button(
                 "Mark invalid", id="ws-invalid", disabled=True, className="action"

@@ -882,6 +882,8 @@ class DashboardService:
         """
         if reduction not in ANALYSIS_REDUCTIONS:
             raise ValueError(f"unknown reduction {reduction!r}")
+        if isinstance(keys, str):
+            keys = (keys,)
         wanted = list(dict.fromkeys(key for key in keys or [] if key))
         if not project or not wanted:
             return [{"key": key, "series": []} for key in wanted]
