@@ -5,9 +5,14 @@ to ``POST /ingest``: up to ``batch_size`` events, or every ``batch_window``
 seconds after the first pending event, whichever comes first. The cursor
 advances only after a 2xx acknowledgement, so a crashed or timed-out shipper
 leaves unacked events to be re-read with unchanged event ids (the ids live in
-the JSONL bytes). A failed batch is retried with exponential backoff and a
-byte-identical request body; server-side idempotence makes re-sends — e.g.
-overlapping with a later replay — duplicates.
+the JSONL bytes). A failed batch is retried with exponential backoff; the
+request body stays byte-identical for permanent failures (server-side
+idempotence makes re-sends — e.g. overlapping with a later replay —
+duplicates), but a ``validation`` rejection re-reads the file first: events
+appended after the batch closed can complete the batch (ingest applies
+canonical order within one request, so the missing entity snapshot joins),
+which clears the rejection instead of retrying a body that can never
+succeed.
 """
 
 import sys
@@ -17,7 +22,12 @@ from time import monotonic, sleep
 from typing import Protocol
 
 import httpx
-from jernerics_schema import PROTOCOL_VERSION, IngestRequest, TrackingEvent
+from jernerics_schema import (
+    PROTOCOL_VERSION,
+    IngestError,
+    IngestRequest,
+    TrackingEvent,
+)
 from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
 
 from .jsonl_io import read_cursor, scan_events, write_cursor
@@ -146,18 +156,17 @@ class StreamClient:
                     if self._stop.is_set():
                         break
             batch = pending[: self.batch_size]
-            rest = pending[self.batch_size :]
-            if self._ship_batch(url, batch):
-                write_cursor(self.path, batch[-1][1])
-                pending = rest
-            else:
+            shipped = self._ship_batch(url, batch)
+            if shipped is None:
                 return
+            write_cursor(self.path, shipped[-1][1])
+            offset = max(offset, shipped[-1][1])
+            pending = pending[len(shipped) :]
 
-    def _ship_batch(self, url: str, batch: list[tuple[TrackingEvent, int]]) -> bool:
-        body = IngestRequest(
-            protocol_version=PROTOCOL_VERSION,
-            events=[event for event, _ in batch],
-        ).model_dump_json()
+    def _ship_batch(
+        self, url: str, batch: list[tuple[TrackingEvent, int]]
+    ) -> list[tuple[TrackingEvent, int]] | None:
+        body = self._request_body(batch)
         retry_count = 0
         first_failure: float | None = None
         while True:
@@ -167,7 +176,7 @@ class StreamClient:
                     "unacked; leaving them for replay.",
                     file=sys.stderr,
                 )
-                return False
+                return None
             try:
                 response = self.transport.post(
                     url,
@@ -176,7 +185,7 @@ class StreamClient:
                     timeout=self.send_deadline,
                 )
                 if 200 <= response.status_code < 300:
-                    return True
+                    return batch
                 detail = f"HTTP {response.status_code}"
                 if retry_count == 0:
                     error_body = (
@@ -186,6 +195,11 @@ class StreamClient:
                     )
                     if error_body:
                         detail = f"{detail}: {error_body}"
+                regrown = self._regrow_for_validation(response, batch)
+                if regrown is not None:
+                    batch = regrown
+                    body = self._request_body(batch)
+                    continue
             except httpx.HTTPError as exc:
                 detail = repr(exc)
             now = monotonic()
@@ -197,7 +211,7 @@ class StreamClient:
                     f"Leaving {len(batch)} events for replay.",
                     file=sys.stderr,
                 )
-                return False
+                return None
             wait_time = min(self.poll_interval * 2**retry_count, RETRY_MAX_WAIT)
             retry_count += 1
             print(
@@ -209,6 +223,33 @@ class StreamClient:
                 sleep(wait_time)
             else:
                 self._stop.wait(wait_time)
+
+    def _regrow_for_validation(
+        self, response: TransportResponse, batch: list[tuple[TrackingEvent, int]]
+    ) -> list[tuple[TrackingEvent, int]] | None:
+        """Re-read the file when the server names an unmet ordering
+        precondition, absorbing events appended since the batch closed.
+        Returns the grown batch, or ``None`` when the rejection is not a
+        ``validation`` one or nothing new is readable.
+        """
+        if response.status_code != 409:
+            return None
+        try:
+            error = IngestError.model_validate_json(response.content)
+        except ValueError:
+            return None
+        if error.error != "validation":
+            return None
+        events, _ = scan_events(self.path, read_cursor(self.path), self.batch_size)
+        if len(events) <= len(batch):
+            return None
+        return events
+
+    def _request_body(self, batch: list[tuple[TrackingEvent, int]]) -> str:
+        return IngestRequest(
+            protocol_version=PROTOCOL_VERSION,
+            events=[event for event, _ in batch],
+        ).model_dump_json()
 
     def _drain_exceeded(self) -> bool:
         return (

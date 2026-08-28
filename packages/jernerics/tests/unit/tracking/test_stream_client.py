@@ -289,6 +289,65 @@ class TestRetry:
         assert read_cursor(path) == 0
         assert "max retry time" in capfd.readouterr().err
 
+    def test_validation_rejection_absorbs_events_written_after_batch_closed(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "events.jsonl"
+        first = _value_event("m0")
+        _write_events(path, [first])
+        late = _value_event("m1")
+        rejection = json.dumps(
+            {
+                "error": "validation",
+                "event_index": 0,
+                "event_id": str(first.event_id),
+                "detail": "value references unknown execution",
+            }
+        ).encode()
+        transport = FakeTransport(
+            [
+                _FakeResponse(409, content=rejection),
+                _FakeResponse(409, content=rejection),
+            ]
+        )
+        client = _make_client(path, transport)
+        client.start()
+        _wait_for(lambda: bool(transport.requests), what="first ship")
+        _write_events(path, [late])
+        _wait_for(lambda: read_cursor(path) == path.stat().st_size, what="recovery")
+        client.join()
+
+        assert _ids(transport.bodies[0]) == [str(first.event_id)]
+        assert _ids(transport.bodies[-1]) == [str(first.event_id), str(late.event_id)]
+        assert read_cursor(path) == path.stat().st_size
+
+    def test_conflict_rejection_keeps_frozen_body(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        first = _value_event("m0")
+        _write_events(path, [first])
+        late = _value_event("m1")
+        rejection = json.dumps(
+            {
+                "error": "conflict",
+                "event_index": 0,
+                "event_id": str(first.event_id),
+                "detail": "immutable mismatch",
+            }
+        ).encode()
+        transport = FakeTransport(always=_FakeResponse(409, content=rejection))
+        client = _make_client(path, transport, max_retry_time=0.3)
+        client.start()
+        _wait_for(lambda: bool(transport.requests), what="first ship")
+        _write_events(path, [late])
+        _wait_for(lambda: len(transport.requests) >= 2, what="retry")
+        client._thread.join(timeout=5.0)
+
+        assert not client._thread.is_alive()
+        assert len(transport.bodies) >= 2
+        assert all(body == transport.bodies[0] for body in transport.bodies)
+        assert _ids(transport.bodies[0]) == [str(first.event_id)]
+        assert read_cursor(path) == 0
+
 
 class TestCrashRestart:
     def test_new_instance_resumes_at_cursor_without_reshipping(
