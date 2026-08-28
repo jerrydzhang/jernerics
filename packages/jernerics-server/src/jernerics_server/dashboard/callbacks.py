@@ -9,7 +9,7 @@ the view document's ``focus`` field.
 import ast
 import json
 import time
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 import dash
@@ -222,14 +222,16 @@ def triggered_action(triggered: set[str], mapping: dict[str, str]) -> str | None
     return next((action for prop, action in mapping.items() if prop in triggered), None)
 
 
-def focus_from_trigger(triggered: Any) -> dict | str | None:
+def focus_from_trigger(triggered: Any) -> dict[str, str] | Literal[""] | None:
     """The focus a row-click or button event names: ``{kind, id}``,
     ``None`` to clear, or ``""`` when nothing focusable fired."""
     for prop_id in triggered or ():
         text = str(prop_id)
         if text.startswith("inspector-close."):
             return None
-        if text.startswith(("sweep-grid.", "family-grid.", "analysis-family-grid.")):
+        if text.startswith(("sweep-grid.", "analysis-family-grid.")) or (
+            '"focus-family"' in text
+        ):
             continue
         if ".cellClicked" not in text and ".n_clicks" not in text:
             continue
@@ -439,7 +441,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input("selection-store", "data"),
         Input("project-store", "data"),
     )
-    def _update_tray(tray: dict | None, project: str | None):
+    def _update_tray(tray: dict | None, _project: str | None):
         # The header summary is the one-click door into the scope
         # browser — it opens the browser, never a separate page.
         return analysis.tray_summary(tray)
@@ -459,12 +461,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("family-lineage-panel", "children"),
-        Input("family-grid", "selectedRows"),
+        Input({"focus-family": dash.ALL}, "selectedRows"),
         State("family-lineage-store", "data"),
         prevent_initial_call=True,
     )
-    def _show_lineage(rows: list[dict] | None, data: dict | None):
-        return lineage_panel(rows, data)
+    def _show_lineage(rows: list, data: dict | None):
+        picked = next((entry for entry in reversed(rows) if entry is not None), None)
+        return lineage_panel(picked, data)
 
     # -- Scope browser and workspace curation ----------------------------
 
@@ -554,17 +557,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("analysis-family-grid", "selectedRows"),
         Output("trial-browser-facts-store", "data"),
         Input("selection-store", "data"),
+        Input("project-store", "data"),
         Input("view-store", "data"),
         Input("poll", "n_intervals"),
-        State("project-store", "data"),
         State("analysis-series-data", "data"),
         State("trial-browser-facts-store", "data"),
     )
     def _load_browser_families(
         tray: dict | None,
+        project: str | None,
         view_doc: dict | None,
         _tick: int | None,
-        project: str | None,
         series_data: dict | None,
         facts: dict | None,
     ):
@@ -575,9 +578,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             "color": (view_doc or analysis.default_view_state())["series"]["color"],
         }
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
-        if "view-store.data" in triggered and (
-            desired["color"] == (facts or {}).get("color")
-        ):
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        if "view-store.data" in triggered and desired == facts:
             raise PreventUpdate
         columns, rows, selected = analysis.browser_trial_outputs(
             service, project, tray, view_doc, series_data
@@ -722,7 +724,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         ok, report = apply_curation(service, action, [sweep_id], reason or "")
         detail = service.sweep_detail(sweep_id)
         banner = (
-            workspace.detail_curation(detail.overview, time.time_ns())
+            workspace.detail_curation(detail.overview)
             if detail is not None
             else no_update
         )
@@ -763,7 +765,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input({"focus-object": dash.ALL}, "n_clicks"),
         Input("inspector-close", "n_clicks"),
         Input("sweep-grid", "cellClicked"),
-        Input("family-grid", "cellClicked"),
+        Input({"focus-family": dash.ALL}, "cellClicked"),
         Input("analysis-family-grid", "cellClicked"),
         State("view-store", "data"),
         prevent_initial_call=True,
@@ -772,7 +774,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         _buttons: Any,
         _close: int | None,
         sweep_click: dict | None,
-        family_click: dict | None,
+        family_clicks: list,
         browser_family_click: dict | None,
         current: dict | None,
     ):
@@ -782,8 +784,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         kind = None
         if fired.startswith("sweep-grid."):
             click, kind = sweep_click, "sweep"
-        elif fired.startswith("family-grid."):
-            click, kind = family_click, "trial"
+        elif '"focus-family"' in fired:
+            click, kind = next((c for c in reversed(family_clicks) if c), "trial")
         elif fired.startswith("analysis-family-grid."):
             click, kind = browser_family_click, "trial"
         if click is not None and kind is not None:
@@ -1009,7 +1011,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         State("view-store", "data"),
         prevent_initial_call=True,
     )
-    def _edit_context_filters(values: list | None, current: dict | None):
+    def _edit_context_filters(_values: list | None, current: dict | None):
         # Re-rendered filter dropdowns fire as additions; the resolved
         # id names the edited dimension and its value comes from the
         # ALL input list (dash 4 child-id resolution).
@@ -1495,7 +1497,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
     def _open_artifact(click: dict | None):
-        row_id = (click or {}).get("rowId")
+        row_id = click.get("rowId") if isinstance(click, dict) else None
         try:
             artifact_id = UUID(str(row_id))
         except ValueError:

@@ -152,7 +152,7 @@ def median_iqr_summary(
     for entry in per_key:
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for series in entry["series"]:
-            identity = identity_of(series, grouping) if grouped_all else "all trials"
+            identity = identity_of(series, grouping) if grouping else "all trials"
             grouped.setdefault((_facet_value(series, facet), identity), []).append(
                 series
             )

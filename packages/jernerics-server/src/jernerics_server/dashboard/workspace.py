@@ -20,7 +20,6 @@ from .service import (
 
 FOCUS_KINDS = ("sweep", "trial", "execution")
 
-_KIND_LABELS = {"sweep": "Sweep", "trial": "Trial", "execution": "Execution"}
 
 _INCOMPLETE_TRIAL_STATES = ("waiting", "running")
 
@@ -28,7 +27,6 @@ _MONITORING_ORDER = ("active", "quiet", "stale", "failed", "succeeded", UNKNOWN)
 
 _GRID_DEFAULTS: dict[str, Any] = {
     "sortable": True,
-    "filter": True,
     "resizable": True,
     "minWidth": 100,
 }
@@ -384,7 +382,7 @@ def lineage_chain(root: str | None, lineage: list[dict]) -> list[object]:
     ]
 
 
-def curation_banners(overview: SweepSummary, now_ns: int) -> list[html.Div]:
+def curation_banners(overview: SweepSummary) -> list[html.Div]:
     """Archived/invalid banners naming the state; invalid carries the
     reason and its timestamp."""
     banners = []
@@ -416,7 +414,7 @@ def curation_banners(overview: SweepSummary, now_ns: int) -> list[html.Div]:
     return banners
 
 
-def detail_curation(overview: SweepSummary, now_ns: int) -> html.Div:
+def detail_curation(overview: SweepSummary) -> html.Div:
     """Sweep-inspector banners plus the action row (refreshed after a
     mutation so button availability follows the new state)."""
     offered = curation_transitions(overview.archived, overview.invalid)
@@ -449,7 +447,7 @@ def detail_curation(overview: SweepSummary, now_ns: int) -> html.Div:
         ],
         className="action-bar",
     )
-    return html.Div([*curation_banners(overview, now_ns), actions])
+    return html.Div([*curation_banners(overview), actions])
 
 
 def _sweep_sections(detail: SweepDetail, now_ns: int) -> list[Any]:
@@ -457,7 +455,7 @@ def _sweep_sections(detail: SweepDetail, now_ns: int) -> list[Any]:
     return [
         html.Div(
             [
-                html.Div(detail_curation(overview, now_ns), id="detail-curation"),
+                html.Div(detail_curation(overview), id="detail-curation"),
                 dcc.Input(
                     id="detail-reason",
                     type="text",
@@ -490,7 +488,7 @@ def _sweep_sections(detail: SweepDetail, now_ns: int) -> list[Any]:
                 html.Div(
                     [
                         AgGrid(
-                            id="family-grid",
+                            id={"focus-family": "grid"},
                             rowData=[
                                 family_grid_row(family) for family in detail.families
                             ],
@@ -764,18 +762,31 @@ def _execution_sections(detail: ExecutionDetail, now_ns: int) -> list[Any]:
     return [facts, artifact_section, optimizer]
 
 
+def inspector_placeholder() -> html.Div:
+    """No-focus inspector region; keeps the close control in the layout."""
+    return html.Div(
+        [
+            html.Button(
+                "✕",
+                id="inspector-close",
+                title="Close inspector",
+                style={"display": "none"},
+            ),
+            "Click a sweep, trial, or execution row to inspect it here.",
+        ],
+        className="inspector-hint",
+    )
+
+
 def inspector_content(
     service: DashboardService, focus: dict[str, Any] | None, now_ns: int
 ) -> html.Div:
     """The focused object's factual content; a missing id is named, not
     hidden."""
     if not focus:
-        return html.Div(
-            "Click a sweep, trial, or execution row to inspect it here.",
-            className="inspector-hint",
-        )
+        return inspector_placeholder()
     kind, object_id = focus.get("kind"), str(focus.get("id") or "")
-    label = _KIND_LABELS.get(kind, kind)
+
     if kind == "sweep":
         detail = service.sweep_detail(object_id)
         body = (
@@ -1126,10 +1137,14 @@ def workspace_page(
                         ],
                         className="workspace-canvas",
                     ),
+                    html.Aside(
+                        id="inspector",
+                        className="inspector",
+                        children=inspector_placeholder(),
+                    ),
                 ],
                 className="workspace-main",
             ),
-            html.Aside(id="inspector", className="inspector"),
         ],
         className="page workspace",
     )

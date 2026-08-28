@@ -29,6 +29,7 @@ from jernerics_schema import (
     SweepSnapshotEvent,
     TrialSnapshotEvent,
     TrialState,
+    TrackingEvent,
     ValueEvent,
 )
 from jernerics_server.dashboard.analysis import (
@@ -2338,7 +2339,9 @@ class TestColdStartMountedJourney:
     }
 
     def test_control_sync_lands_each_value_on_its_component(self, authed, callback_map):
-        doc = dict(default_view_state(), active="series")
+        doc = {**default_view_state()}
+        doc["active"] = "series"
+
         doc["series"] = {
             **doc["series"],
             "keys": ["loss"],
@@ -4008,7 +4011,7 @@ class TestContextDiscoveryBeyondPagination:
         trial = uuid.uuid4()
         execution = uuid.uuid4()
         ingest = IngestService(store)
-        head = [
+        head: list[TrackingEvent] = [
             SweepSnapshotEvent(
                 event_id=uuid.uuid4(),
                 recorded_at=now,
@@ -4041,7 +4044,7 @@ class TestContextDiscoveryBeyondPagination:
         assert not result.conflicts
         chunk = 100
         for start in range(0, 101_000, chunk):
-            events = [
+            events: list[TrackingEvent] = [
                 ValueEvent(
                     event_id=uuid.uuid4(),
                     recorded_at=now,

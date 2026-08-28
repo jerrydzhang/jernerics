@@ -298,16 +298,6 @@ a.project-row:hover {
   margin: 0;
 }
 
-.nav .nav-link {
-  color: #444;
-  text-decoration: none;
-  font-weight: 500;
-}
-
-.nav .nav-link:hover {
-  color: #000;
-}
-
 .analysis-controls {
   display: flex;
   gap: 1rem;
@@ -408,33 +398,6 @@ a.project-row:hover {
 .scope-bar .scope-counts {
   color: #555;
   font-size: 0.9rem;
-}
-
-.scope-editor {
-  margin: 0 0 0.8rem;
-}
-
-.scope-editor summary {
-  cursor: pointer;
-  font-weight: 500;
-  color: #444;
-}
-
-.scope-editor .grid {
-  margin: 0.4rem 0;
-}
-
-.analyze-link {
-  border: 1px solid #ccc;
-  background: #f7f7f7;
-  padding: 0.2rem 0.6rem;
-  border-radius: 4px;
-  text-decoration: none;
-  color: inherit;
-}
-
-.analyze-link:hover {
-  background: #e8ecef;
 }
 
 .figure-grid {
@@ -592,23 +555,6 @@ a.project-row:hover {
   color: #fff;
 }
 
-.workspace-controls {
-  display: flex;
-  gap: 1.2rem;
-  align-items: center;
-  margin: 0.4rem 0 0.2rem;
-  flex-wrap: wrap;
-}
-
-.workspace-controls .workspace-views {
-  display: inline-flex;
-  gap: 0.2rem;
-}
-
-.workspace-controls .quick-filter {
-  margin-bottom: 0;
-}
-
 .action-bar {
   display: flex;
   gap: 0.5rem;
@@ -727,11 +673,6 @@ a.project-row:hover {
 .filter-label {
   font-size: 0.85rem;
   font-weight: 600;
-}
-
-.trial-grid {
-  height: 16rem;
-  margin: 0.4rem 0 0.8rem;
 }
 
 .panel-instruction {

@@ -669,7 +669,7 @@ class TestCellTextSelection:
         assert sweep_options["rowSelection"] == {"mode": "multiRow"}
 
         inspector = _inspector(service, "sweep", SWEEP_A)
-        family_options = _grid(inspector, "family-grid").dashGridOptions
+        family_options = _grid(inspector, {"focus-family": "grid"}).dashGridOptions
         assert family_options["enableCellTextSelection"] is True
         assert family_options["ensureDomOrder"] is True
 
@@ -762,7 +762,7 @@ class TestTrialFamilies:
             assert row["current_trial"] == family.current_trial
             assert row["root_short"] == short_id(family.root)
             assert row["current_short"] == short_id(family.current_trial)
-        grid = _grid(_inspector(service, "sweep", SWEEP_A), "family-grid")
+        grid = _grid(_inspector(service, "sweep", SWEEP_A), {"focus-family": "grid"})
         columns = {column["field"]: column for column in grid.columnDefs}
         assert columns["root_short"]["field"] == "root_short"
         assert grid.getRowId == {"function": "jernericsTrialRowId(params)"}
@@ -1306,7 +1306,7 @@ class TestSweepInspectorCuration:
         store.mark_sweep_invalid(str(SWEEP_B), "kept for audit")
         detail = service.sweep_detail(str(SWEEP_B))
         assert detail is not None
-        rendered = str(detail_curation(detail.overview, 0))
+        rendered = str(detail_curation(detail.overview))
         assert "badge-invalid" in rendered
         assert "kept for audit" in rendered
 

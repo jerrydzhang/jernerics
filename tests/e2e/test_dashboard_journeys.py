@@ -40,7 +40,14 @@ from jernerics.post_hook import PipelineResult, run_pipeline
 from jernerics.retry import RetryContext
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import ship_events_file
+from jernerics_schema import Selection
 from jernerics_server.dashboard import workspace
+from jernerics_server.dashboard.analysis import (
+    EMPTY_TRAY,
+    default_view_state,
+    encode_view_state,
+    with_focus,
+)
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.artifacts import raw_href, viewer_href
 from jernerics_server.dashboard.auth import COOKIE_NAME
@@ -48,6 +55,7 @@ from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.components import short_id
 from jernerics_server.dashboard.layout import shell
 from jernerics_server.dashboard.routes import ROUTES_BASE, parse_route
+from jernerics_server.dashboard.selection_tokens import encode_selection_token
 from jernerics_server.http import create_app
 from jernerics_server.store import Store
 from optuna.storages.journal import JournalFileBackend, JournalStorage
@@ -457,6 +465,111 @@ class TestLinkGraphJourney:
         }
 
 
+class TestWorkspaceStateJourney:
+    """Scope edits, Series activation, and shared-URL restore over the
+    mounted server — the state journeys a working browser performs."""
+
+    @staticmethod
+    def _callback_key(callback_map, wanted: set[str]) -> str:
+        def outputs_of(key):
+            stripped = key.removeprefix("..").removesuffix("..")
+            return {part.split("@")[0] for part in stripped.split("...") if part}
+
+        return next(key for key in callback_map if outputs_of(key) == wanted)
+
+    def _post(self, scenario, wanted, inputs, state=(), changed=()):
+        key = self._callback_key(
+            build_dash_app(scenario.app.state.dashboard).callback_map, wanted
+        )
+        specs = [
+            part.split("@")[0]
+            for part in key.removeprefix("..").removesuffix("..").split("...")
+            if part
+        ]
+        outputs = [
+            {"id": spec.split(".")[0], "property": spec.split(".")[1]} for spec in specs
+        ]
+        return httpx.post(
+            f"{scenario.base_url}{ROUTES_BASE}/_dash-update-component",
+            headers={"Authorization": f"Bearer {API_KEY}"},
+            json={
+                "output": key,
+                "outputs": outputs[0] if len(outputs) == 1 else outputs,
+                "inputs": inputs,
+                "state": list(state),
+                "changedPropIds": list(changed),
+            },
+        )
+
+    def test_scope_then_series_streams_the_scoped_trials(self, scenario):
+        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
+        tray = {**EMPTY_TRAY, "project": PROJECT, "sweeps": [sweep_id]}
+        doc = default_view_state()
+        doc["active"] = "series"
+        doc["series"]["keys"] = ["loss"]
+        response = self._post(
+            scenario,
+            {
+                "analysis-series-data.data",
+                "analysis-updated.children",
+                "analysis-refresh-store.data",
+            },
+            [
+                {"id": "selection-store", "property": "data", "value": tray},
+                {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
+                {"id": "poll", "property": "n_intervals", "value": 1},
+                {"id": "analysis-tabs", "property": "value", "value": "series"},
+            ],
+            state=[
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {"id": "view-store", "property": "data", "value": doc},
+                {"id": "analysis-series-data", "property": "data", "value": None},
+            ],
+            changed=["analysis-tabs.value"],
+        )
+        assert response.status_code == 200
+        snapshot = response.json()["response"]["analysis-series-data"]["data"]
+        assert snapshot["fingerprint"]
+        assert "loss" in snapshot["per_key"]
+
+    def test_shared_workspace_url_restores_scope_view_and_focus(self, scenario):
+        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
+        trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
+        token = encode_selection_token(Selection(project=PROJECT, sweeps=[sweep_id]))
+        doc = with_focus(
+            {**default_view_state(), "active": "series"},
+            {"kind": "trial", "id": trial_id},
+        )
+        search = f"?sel={token}&view={encode_view_state(doc)}"
+        response = self._post(
+            scenario,
+            {"selection-store.data", "analysis-message-store.data", "view-store.data"},
+            [
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"{ROUTES_BASE}/project/{PROJECT}",
+                },
+                {"id": "url", "property": "search", "value": search},
+                {"id": "project-store", "property": "data", "value": PROJECT},
+            ],
+            state=[
+                {"id": "selection-store", "property": "data", "value": None},
+                {"id": "view-store", "property": "data", "value": None},
+            ],
+            changed=["url.search"],
+        )
+        assert response.status_code == 200
+        restored = response.json()["response"]
+        assert restored["selection-store"]["data"]["sweeps"] == [sweep_id]
+        assert restored["view-store"]["data"]["active"] == "series"
+        assert restored["view-store"]["data"]["focus"] == {
+            "kind": "trial",
+            "id": trial_id,
+        }
+        assert restored["analysis-message-store"]["data"] == ""
+
+
 class TestMountedDashboardHttp:
     def test_login_exchanges_key_for_session_and_index_renders(self, scenario):
         guarded = httpx.get(f"{scenario.base_url}/dashboard/", follow_redirects=False)
@@ -483,7 +596,7 @@ class TestMountedDashboardHttp:
         assert "jernerics dashboard" in index.text
 
     def test_deep_link_login_round_trip_lands_on_target(self, scenario):
-        deep = f"{ROUTES_BASE}/analysis?sel=tok%3D1"
+        deep = f"{ROUTES_BASE}/project/{PROJECT}?sel=tok%3D1"
         guarded = httpx.get(f"{scenario.base_url}{deep}", follow_redirects=False)
         assert guarded.status_code == 303
         assert guarded.headers["location"] == (

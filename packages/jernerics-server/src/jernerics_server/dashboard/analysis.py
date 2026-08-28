@@ -263,7 +263,7 @@ def decode_focus(value: Any) -> dict[str, str] | None:
     _require(kind in _FOCUS_KINDS, "focus.kind must be sweep, trial, or execution")
     focus_id = _optional_key(value.get("id"), "focus.id")
     _require(focus_id is not None, "focus.id must be a non-empty string")
-    return {"kind": kind, "id": focus_id}
+    return {"kind": str(kind), "id": str(focus_id)}
 
 
 def with_focus(
@@ -1341,7 +1341,7 @@ def series_outputs(
     tray: dict[str, Any] | None,
     view_doc: dict[str, Any] | None,
 ) -> tuple[
-    list[Any], dict, list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]
+    list[Any], dict, list[dict[str, str]], list[dict[str, Any]], list[dict[str, str]]
 ]:
     """One-shot composition: build the snapshot, then render it. The
     callbacks keep the snapshot in the store and render from it; this
@@ -2025,7 +2025,7 @@ def series_view_outputs(
     if not usable:
         snapshot = series_snapshot(service, project, tray, doc, now_ns)
         persist = snapshot
-    elif missing:
+    elif missing and service is not None and snapshot is not None:
         snapshot = merge_series_keys(
             service, project or "", tray, snapshot, missing, now_ns
         )
