@@ -27,7 +27,10 @@ _DASHES = ("solid", "dot", "dash", "longdash", "dashdot", "longdashdot")
 """Line styles distinguishing executions within one trial."""
 
 _PALETTE = pc.qualitative.Safe
-"""One color per trial/family identity — stable across panels and modes."""
+"""One color per trial/color-group identity — stable across panels and modes."""
+
+_SEQUENTIAL = pc.sequential.Viridis
+"""Sequential palette for equal-width numeric color ranges."""
 
 _UIREVISION = "analysis-series"
 """Stable Plotly revision: re-renders preserve user zoom and axes."""
@@ -38,7 +41,15 @@ _DENSE_SERIES_LIMIT = 100
 _STUDY_FIG_MAX_PARAMS = 8
 """Slice subplot cap per sweep; extra params are omitted, not merged."""
 
-_PANEL_HEIGHT = 240
+_PANEL_HEIGHT = 360
+"""Height of one series subplot row."""
+
+_RANGE_BINS = 8
+"""Equal-width ranges for a numeric param with more than this many values."""
+
+_MISSING_LABEL = "missing"
+_MISSING_COLOR = "#7f7f7f"
+_PARAM_COLOR_PREFIX = "param:"
 
 
 def _is_number(value: Any) -> bool:
@@ -125,16 +136,23 @@ def percentile(values: list[float], q: int) -> float:
 def median_iqr_summary(
     per_key: list[dict[str, Any]], color: str | None = None, facet: str | None = None
 ) -> dict[str, list[dict[str, Any]]]:
-    """Per key and explicit (facet, color-identity) group: median, q25,
+    """Per key and explicit (facet, color-group) group: median, q25,
     q75, and contributing count at each OBSERVED step — absent steps stay
-    absent, values are never interpolated."""
+    absent, values are never interpolated. Without a color choice every
+    series of a key forms one group."""
+    grouped_all = color is not None
+    grouping = (
+        color_grouping(
+            [series for entry in per_key for series in entry["series"]], color
+        )
+        if grouped_all
+        else None
+    )
     summaries: dict[str, list[dict[str, Any]]] = {}
     for entry in per_key:
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for series in entry["series"]:
-            identity = (
-                str((series.get("context") or {}).get(color)) if color else "all trials"
-            )
+            identity = identity_of(series, grouping) if grouped_all else "all trials"
             grouped.setdefault((_facet_value(series, facet), identity), []).append(
                 series
             )
@@ -173,26 +191,121 @@ def count_note(series_count: int, display: str) -> list[str]:
     return notes
 
 
-def identity_of(series: dict[str, Any], color: str | None) -> str:
-    """Stable color identity: the chosen context dimension's value when
-    picked, else the trial."""
-    if color:
-        return str((series.get("context") or {}).get(color))
-    return short_id(series["trial"])
+def parse_color(color: str | None) -> tuple[str | None, str | None]:
+    """(kind, key) of a Color-by token: ``("param", key)``,
+    ``("context", key)``, or ``(None, None)`` for no choice."""
+    if not color:
+        return None, None
+    if color.startswith(_PARAM_COLOR_PREFIX):
+        return "param", color[len(_PARAM_COLOR_PREFIX) :]
+    return "context", color
 
 
-def identity_color_map(
-    per_key: list[dict[str, Any]], color: str | None
-) -> dict[str, str]:
-    """One palette slot per identity; the same map colors every panel
-    and both modes."""
-    identities = sorted(
-        {identity_of(series, color) for entry in per_key for series in entry["series"]}
-    )
+def value_text(value: Any) -> str:
+    """Deterministic text for one sampled/context value in labels and cells."""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int | float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _context_label(value: Any) -> str:
+    return _MISSING_LABEL if value is None else str(value)
+
+
+def _param_label(value: Any, bins: dict | None) -> str:
+    if value is None:
+        return _MISSING_LABEL
+    if bins is not None and _is_number(value):
+        slot = min(int((value - bins["low"]) / bins["width"]), _RANGE_BINS - 1)
+        return bins["labels"][max(slot, 0)]
+    return value_text(value)
+
+
+def _numeric_bins(values: list[float]) -> dict | None:
+    """Eight labeled equal-width range slots over the observed extent;
+    ``None`` when the values do not need ranges (eight or fewer)."""
+    distinct = sorted(set(values))
+    if len(distinct) <= _RANGE_BINS:
+        return None
+    low = distinct[0]
+    width = (distinct[-1] - low) / _RANGE_BINS or 1.0
     return {
-        identity: _PALETTE[index % len(_PALETTE)]
-        for index, identity in enumerate(identities)
+        "low": low,
+        "width": width,
+        "labels": [
+            f"{low + index * width:g}-{low + (index + 1) * width:g}"
+            for index in range(_RANGE_BINS)
+        ],
     }
+
+
+def color_grouping(records: list[dict[str, Any]], color: str | None = None) -> dict:
+    """Color groups over records (dicts with ``trial``/``params``/
+    ``context``): one palette slot per categorical label, eight labeled
+    equal-width sequential-palette ranges for a numeric param with more
+    than eight distinct values, gray for missing. The same map colors
+    raw traces, summaries, facets, legends, and browser swatches."""
+    kind, key = parse_color(color)
+    bins: dict | None = None
+    if kind == "context":
+        labels = sorted(
+            {
+                _context_label((record.get("context") or {}).get(key))
+                for record in records
+            }
+        )
+    elif kind == "param":
+        values = [
+            value
+            for record in records
+            if (value := (record.get("params") or {}).get(key)) is not None
+        ]
+        numeric = [float(value) for value in values if _is_number(value)]
+        bins = _numeric_bins(numeric) if len(numeric) == len(values) else None
+        labels = (
+            bins["labels"]
+            if bins is not None
+            else sorted(
+                {
+                    _param_label((record.get("params") or {}).get(key), None)
+                    for record in records
+                }
+            )
+        )
+    else:
+        key = None
+        labels = sorted({short_id(record["trial"]) for record in records})
+    if bins is not None:
+        colors = dict(
+            zip(
+                bins["labels"],
+                pc.sample_colorscale(_SEQUENTIAL, _RANGE_BINS),
+                strict=True,
+            )
+        )
+    else:
+        colors = {
+            label: (
+                _MISSING_COLOR
+                if label == _MISSING_LABEL
+                else _PALETTE[index % len(_PALETTE)]
+            )
+            for index, label in enumerate(labels)
+        }
+    colors.setdefault(_MISSING_LABEL, _MISSING_COLOR)
+    return {"kind": kind, "key": key, "labels": labels, "colors": colors, "bins": bins}
+
+
+def identity_of(record: dict[str, Any], grouping: dict) -> str:
+    """The record's color-group label under one :func:`color_grouping` map."""
+    kind, key = grouping["kind"], grouping["key"]
+    if kind == "context":
+        return _context_label((record.get("context") or {}).get(key))
+    if kind == "param":
+        return _param_label((record.get("params") or {}).get(key), grouping["bins"])
+    return short_id(record["trial"])
 
 
 def _execution_dash_factory(
@@ -217,6 +330,26 @@ def _execution_dash_factory(
     return dash_of
 
 
+def hover_identity(series: dict[str, Any]) -> str:
+    """Compact hover identity: ``sweep/trial/execution`` short ids — the
+    sweep appears only when the builder attached one."""
+    bits = []
+    if series.get("sweep"):
+        bits.append(short_id(series["sweep"]))
+    bits.append(short_id(series["trial"]))
+    if series.get("execution"):
+        bits.append(short_id(series["execution"]))
+    return "/".join(bits)
+
+
+def trace_hovertemplate(series: dict[str, Any]) -> str:
+    """Hover text: identity, step/value, and the varying configuration."""
+    lines = [f"{hover_identity(series)} · value %{{y:.6g}} @ step %{{x}}"]
+    if series.get("config"):
+        lines.append(series["config"])
+    return "<br>".join(lines) + "<extra></extra>"
+
+
 def _scatter(
     series: dict[str, Any],
     *,
@@ -238,6 +371,7 @@ def _scatter(
         line={"color": color, "dash": dash},
         marker={"color": color},
         customdata=[series["trial"]] * len(series["points"]),
+        hovertemplate=trace_hovertemplate(series),
         **kwargs,
     )
 
@@ -350,14 +484,20 @@ def stacked_figure(
     facet: str | None = None,
     display: str = "all",
     highlighted: Sequence[str] = (),
-    color_map: dict[str, str] | None = None,
+    grouping: dict | None = None,
 ) -> go.Figure:
     """One vertically stacked subplot per key in picker order: panels
     share the step x domain (linked zoom) and keep independent y axes.
     ``display`` picks raw traces (all, dimmed to ``highlighted`` picks),
     highlighted-only traces, or per-group median + IQR summaries. A key
-    with no observations keeps its panel and says so."""
-    colors = color_map or identity_color_map(per_key, color)
+    with no observations keeps its panel and says so. Legends name color
+    groups only; without a color choice trial identity lives in the
+    browser. ``grouping`` overrides the grouping derived from ``color``
+    (pre-filter, so filtering never reshuffles colors)."""
+    pooled = [series for entry in per_key for series in entry["series"]]
+    grouping = grouping or color_grouping(pooled, color)
+    colors = grouping["colors"]
+    semantic = grouping["kind"] is not None
     dash_of = _execution_dash_factory(per_key)
     picks = set(highlighted)
     summaries = (
@@ -404,16 +544,16 @@ def stacked_figure(
             for series in matching:
                 if display == "highlighted" and series["trial"] not in picks:
                     continue
-                identity = identity_of(series, color)
+                identity = identity_of(series, grouping)
                 dimmed = bool(picks) and series["trial"] not in picks
                 figure.add_trace(
                     _scatter(
                         series,
-                        name=series_label(series),
+                        name=identity if semantic else series_label(series),
                         color=colors.get(identity, _PALETTE[0]),
                         dash=dash_of(series["trial"], series.get("execution")),
                         legendgroup=identity,
-                        showlegend=identity not in legend_seen,
+                        showlegend=semantic and identity not in legend_seen,
                         opacity=0.25 if dimmed else None,
                     ),
                     row=row_index,
@@ -441,15 +581,18 @@ def overlay_figure(
     facet: str | None = None,
     display: str = "all",
     highlighted: Sequence[str] = (),
-    color_map: dict[str, str] | None = None,
+    grouping: dict | None = None,
 ) -> go.Figure:
     """Every selected key on ONE shared, unnormalized y axis (never a
     second axis, never rescaled data); log is refused while any plotted
     observation anywhere is non-positive. ``display`` mirrors
-    :func:`stacked_figure`."""
+    :func:`stacked_figure`; legends name color groups only and
+    ``grouping`` overrides the one derived from ``color``."""
     pooled = [series for entry in per_key for series in entry["series"]]
     resolved = resolve_axis(axis, pooled)
-    colors = color_map or identity_color_map(per_key, color)
+    grouping = grouping or color_grouping(pooled, color)
+    colors = grouping["colors"]
+    semantic = grouping["kind"] is not None
     dash_of = _execution_dash_factory(per_key)
     picks = set(highlighted)
     summaries = (
@@ -492,22 +635,27 @@ def overlay_figure(
                     continue
                 if display == "highlighted" and series["trial"] not in picks:
                     continue
-                identity = identity_of(series, color)
+                identity = identity_of(series, grouping)
                 dimmed = bool(picks) and series["trial"] not in picks
+                group_key = f"{identity} · {entry['key']}"
                 figure.add_trace(
                     _scatter(
                         series,
-                        name=f"{entry['key']} · {series_label(series)}",
+                        name=(
+                            f"{entry['key']} · {identity}"
+                            if semantic
+                            else f"{entry['key']} · {series_label(series)}"
+                        ),
                         color=colors.get(identity, _PALETTE[0]),
                         dash=dash_of(series["trial"], series.get("execution")),
-                        legendgroup=f"{identity} · {entry['key']}",
-                        showlegend=f"{identity} · {entry['key']}" not in legend_seen,
+                        legendgroup=group_key,
+                        showlegend=semantic and group_key not in legend_seen,
                         opacity=0.25 if dimmed else None,
                     ),
                     row=row_index,
                     col=1,
                 )
-                legend_seen.add(f"{identity} · {entry['key']}")
+                legend_seen.add(group_key)
         if not pooled:
             _annotate_empty(figure, row_index, "no observations under this scope")
         figure.update_yaxes(row=row_index, col=1, **_yaxis_kwargs(resolved))

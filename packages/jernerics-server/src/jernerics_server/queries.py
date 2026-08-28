@@ -1104,11 +1104,16 @@ class QueryService:
 
     def trial_families(self, selection: Selection) -> list[dict[str, Any]]:
         """One row per retry family (root trial): the current (latest
-        generation) trial with its state/objective plus generation count."""
+        generation) trial with its state/objective, generation count,
+        and the current trial's execution short ids."""
         where, params = self._trial_scope(selection)
         _, rows = self._store.query(
-            "SELECT trial_id, retry_root_trial_id, retry_index, state, "
-            "objective, number, generations FROM ("
+            "SELECT f.trial_id, f.retry_root_trial_id, f.retry_index, f.state, "
+            "f.objective, f.number, f.generations, COALESCE(("
+            "SELECT group_concat(x, ', ') FROM ("
+            "SELECT substr(e.execution_id, 1, 8) AS x FROM executions e "
+            "WHERE e.trial_id = f.trial_id ORDER BY e.execution_id)), '') "
+            "FROM ("
             "SELECT t.trial_id AS trial_id, "
             "t.retry_root_trial_id AS retry_root_trial_id, "
             "t.retry_index AS retry_index, t.state AS state, "
@@ -1117,7 +1122,7 @@ class QueryService:
             "ORDER BY t.retry_index DESC, t.trial_id) AS rn, "
             "COUNT(*) OVER (PARTITION BY t.retry_root_trial_id) AS generations "
             "FROM trials t JOIN sweeps s ON t.sweep_id = s.sweep_id "
-            f"WHERE {where}) WHERE rn = 1 ORDER BY retry_root_trial_id",
+            f"WHERE {where}) AS f WHERE f.rn = 1 ORDER BY f.retry_root_trial_id",
             params,
         )
         return [
@@ -1129,6 +1134,7 @@ class QueryService:
                 "objective": row[4],
                 "number": row[5],
                 "generations": row[6],
+                "executions": row[7],
             }
             for row in rows
         ]

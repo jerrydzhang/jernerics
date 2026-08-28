@@ -16,3 +16,11 @@ dagfuncs.jernericsSweepRowId = function (params) {
 dagfuncs.jernericsTrialRowId = function (params) {
     return params.data.root || params.data.trial_id;
 };
+
+dagfuncs.jernericsColorSwatch = function (params) {
+    const span = document.createElement("span");
+    span.className = "trace-swatch";
+    span.title = params.value || "";
+    span.style.background = params.value || "#7f7f7f";
+    return span;
+};

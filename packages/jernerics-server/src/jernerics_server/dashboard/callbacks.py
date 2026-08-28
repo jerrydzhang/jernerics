@@ -501,19 +501,29 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         )
 
     @app.callback(
+        Output("analysis-family-grid", "columnDefs"),
         Output("analysis-family-grid", "rowData"),
         Output("analysis-family-grid", "selectedRows"),
         Input("selection-store", "data"),
+        Input("view-store", "data"),
+        Input("poll", "n_intervals"),
         State("project-store", "data"),
+        State("analysis-series-data", "data"),
     )
-    def _load_browser_families(tray: dict | None, project: str | None):
-        if not project:
-            return [], analysis.mounted_selection([], initial=is_initial())
-        rows, selected = analysis.family_picker_rows(
-            service.analysis_families(project, (tray or {}).get("sweeps") or []),
-            tray,
+    def _load_browser_families(
+        tray: dict | None,
+        view_doc: dict | None,
+        _tick: int | None,
+        project: str | None,
+        series_data: dict | None,
+    ):
+        # The trial browser re-derives its swatch colors whenever the
+        # color choice or scope changes; context coloring reads the
+        # series payload store rather than re-querying values.
+        columns, rows, selected = analysis.browser_trial_outputs(
+            service, project, tray, view_doc, series_data
         )
-        return rows, analysis.mounted_selection(selected, initial=is_initial())
+        return columns, rows, analysis.mounted_selection(selected, initial=is_initial())
 
     @app.callback(
         Output("analysis-scope-bar", "children"),
@@ -927,27 +937,56 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("view-store", "data", allow_duplicate=True),
-        Input("analysis-trial-grid", "selectedRows"),
-        State("view-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _edit_highlights(rows: list[dict] | None, current: dict | None):
-        doc = analysis.view_from_highlights(current, rows)
-        if doc == (current or {}):
-            raise PreventUpdate
-        return doc
-
-    @app.callback(
-        Output("view-store", "data", allow_duplicate=True),
         Input("analysis-series-figure", "clickData"),
         State("view-store", "data"),
         prevent_initial_call=True,
     )
-    def _toggle_plot_highlight(click: dict | None, current: dict | None):
-        doc = analysis.view_from_plot_click(current, click)
+    def _focus_from_trace_click(click: dict | None, current: dict | None):
+        doc = analysis.view_from_trace_click(current, click)
         if doc is None or doc == (current or {}):
             raise PreventUpdate
         return doc
+
+    app.clientside_callback(
+        """
+        function(hover, figure, rows) {
+            const no = window.dash_clientside.no_update;
+            const trial = hover && hover.points && hover.points.length
+                ? String(hover.points[0].customdata) : null;
+            let figureOut = no;
+            if (figure && figure.data) {
+                const data = figure.data.map((trace) => {
+                    const mine = trace.customdata && trial
+                        && String(trace.customdata[0]) === trial;
+                    const opacity = trial ? (mine ? 1 : 0.15) : null;
+                    const width = trial && mine ? 4 : 2;
+                    if (trace.opacity === opacity && trace.line
+                        && trace.line.width === width) {
+                        return trace;
+                    }
+                    return Object.assign({}, trace, {
+                        opacity,
+                        line: Object.assign({}, trace.line, {width}),
+                    });
+                });
+                figureOut = Object.assign({}, figure, {data});
+            }
+            let rowsOut = no;
+            if (Array.isArray(rows)) {
+                rowsOut = rows.map((row) => Object.assign({}, row, {
+                    _hovered: trial !== null && row.trial_id === trial,
+                }));
+            }
+            return [figureOut, rowsOut];
+        }
+        """,
+        Output("analysis-series-figure", "figure", allow_duplicate=True),
+        Output("analysis-family-grid", "rowData", allow_duplicate=True),
+        Input("analysis-series-figure", "hoverData"),
+        State("analysis-series-figure", "figure"),
+        State("analysis-family-grid", "rowData"),
+        prevent_initial_call=True,
+    )
 
     @app.callback(
         Output("analysis-tabs", "value"),
@@ -1092,28 +1131,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if not error:
             raise PreventUpdate
         return error
-
-    @app.callback(
-        Output("analysis-trial-grid", "columnDefs"),
-        Output("analysis-trial-grid", "rowData"),
-        Output("analysis-trial-grid", "selectedRows"),
-        Input("selection-store", "data"),
-        Input("view-store", "data"),
-        Input("analysis-refresh", "n_clicks"),
-        Input("poll", "n_intervals"),
-        State("project-store", "data"),
-    )
-    def _load_analysis_trials(
-        tray: dict | None,
-        view_doc: dict | None,
-        _clicks: int | None,
-        _tick: int | None,
-        project: str | None,
-    ):
-        columns, rows, selected = analysis.trial_table_outputs(
-            service, project, tray, view_doc
-        )
-        return columns, rows, analysis.mounted_selection(selected, initial=is_initial())
 
     @app.callback(
         Output("view-store", "data", allow_duplicate=True),

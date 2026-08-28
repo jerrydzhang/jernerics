@@ -896,7 +896,7 @@ def _series_tab() -> html.Div:
                         value="stacked",
                         inline=True,
                     ),
-                    dcc.Dropdown(id="analysis-color", placeholder="Color by context…"),
+                    dcc.Dropdown(id="analysis-color", placeholder="Color by…"),
                     dcc.Dropdown(
                         id="analysis-facet",
                         placeholder="Facet rows by context…",
@@ -945,24 +945,15 @@ def _series_tab() -> html.Div:
             html.P(
                 "Display mode says how trials compare: All raw renders every "
                 "series (line density warns above 100), Highlighted only "
-                "renders the trial-table selection, Median + IQR aggregates "
-                "per color/facet group at each observed step. Execution "
-                "reduction stays separate: “none” shows every (trial, "
-                "execution) series as logged; mean/min/max fold executions "
-                "within each trial — never an implicit latest value.",
+                "renders the highlighted trials — a trace click highlights "
+                "and focuses that trial — and Median + IQR aggregates per "
+                "color/facet group at each observed step. Execution reduction "
+                "stays separate: “none” shows every (trial, execution) series "
+                "as logged; mean/min/max fold executions within each trial — "
+                "never an implicit latest value.",
                 className="hint",
             ),
             html.Div(id="analysis-context-filters", className="context-filters"),
-            AgGrid(
-                id="analysis-trial-grid",
-                rowData=[],
-                columnDefs=[],
-                defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions=components.grid_options(
-                    rowSelection={"mode": "multiRow"}
-                ),
-                className="ag-theme-alpine grid trial-grid",
-            ),
             html.Div(id="analysis-series-panels"),
             dcc.Graph(id="analysis-series-figure"),
             dcc.Store(id="analysis-series-figure-store"),
@@ -1064,13 +1055,16 @@ def workspace_page(
                             AgGrid(
                                 id="analysis-family-grid",
                                 rowData=[],
-                                columnDefs=_FAMILY_PICKER_COLUMNS,
+                                columnDefs=[],
                                 defaultColDef=_GRID_DEFAULTS,
                                 dashGridOptions=components.grid_options(
-                                    rowSelection={"mode": "multiRow"}
+                                    rowSelection={"mode": "multiRow"},
+                                    rowClassRules={
+                                        "row-hover-emphasis": "data && data._hovered"
+                                    },
                                 ),
                                 getRowId=_TRIAL_ROW_ID,
-                                className="ag-theme-alpine grid",
+                                className="ag-theme-alpine grid trial-browser",
                             ),
                             dcc.Checklist(
                                 id="analysis-expand",
@@ -1135,16 +1129,6 @@ def workspace_page(
         ],
         className="page workspace",
     )
-
-
-_FAMILY_PICKER_COLUMNS: list[dict[str, Any]] = [
-    {"headerName": "Family root", "field": "root_short"},
-    {"headerName": "Current trial", "field": "current_short"},
-    {"headerName": "#", "field": "number"},
-    {"headerName": "State", "field": "state"},
-    {"headerName": "Objective", "field": "objective"},
-    {"headerName": "Generations", "field": "generations"},
-]
 
 
 def focus_incomplete(service: DashboardService, focus: dict[str, Any] | None) -> bool:

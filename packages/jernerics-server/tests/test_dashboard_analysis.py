@@ -39,6 +39,8 @@ from jernerics_server.dashboard.analysis import (
     auto_refresh_flip,
     auto_refresh_polls,
     axis_state_edit,
+    browser_trial_columns,
+    browser_trial_outputs,
     catalog_tab,
     cold_start,
     context_filter_controls,
@@ -55,6 +57,7 @@ from jernerics_server.dashboard.analysis import (
     mounted_selection,
     moved_keys,
     optuna_tab_content,
+    param_text,
     points_tab,
     python_snippet,
     python_tab,
@@ -67,13 +70,13 @@ from jernerics_server.dashboard.analysis import (
     synced_search,
     tray_from_edit,
     tray_summary,
-    trial_table_outputs,
+    trial_config_text,
     updated_ago,
+    varying_param_keys,
     view_from_context_filter,
     view_from_controls,
-    view_from_highlights,
     view_from_include,
-    view_from_plot_click,
+    view_from_trace_click,
     workspace_focus_href,
 )
 from jernerics_server.dashboard.app import build_dash_app
@@ -87,7 +90,9 @@ from jernerics_server.dashboard.callbacks import (
 from jernerics_server.dashboard.figures import (
     axis_notes,
     clipped_count,
+    color_grouping,
     count_note,
+    identity_of,
     median_iqr_summary,
     non_positive_count,
     overlay_figure,
@@ -696,17 +701,11 @@ class TestUnifiedSelectionStore:
             str(SWEEP_A)
         ]
 
-
-class TestCellTextSelection:
-    """jernerics-eqn: all four analysis grids carry the copyability pair
-    through the shared helper, keeping rowSelection where present."""
-
     def test_browser_grids_carry_the_pair_and_multi_row_selection(self):
         pickers = _grids(workspace_page(PROJECT))
         assert [grid.id for grid in pickers] == [
             "sweep-grid",
             "analysis-family-grid",
-            "analysis-trial-grid",
         ]
         for grid in pickers:
             options = grid.dashGridOptions
@@ -985,8 +984,16 @@ class TestSeriesPanels:
         assert "steps 0-1" in labels["accuracy"]
         assert "delta" in labels
         assert "score" not in labels
-        assert {option["value"] for option in color_options} == {"host", "shard"}
-        assert facet_options == color_options
+        groups = {group["label"]: group["options"] for group in color_options}
+        assert {option["value"] for option in groups["Logged context"]} == {
+            "host",
+            "shard",
+        }
+        assert {option["value"] for option in groups["Sampled parameters"]} == {
+            "param:lr",
+            "param:seed",
+        }
+        assert {option["value"] for option in facet_options} == {"host", "shard"}
 
     def test_non_scalar_keys_stay_unselected_and_absent_keys_are_kept(
         self,
@@ -1021,15 +1028,28 @@ class TestSeriesPanels:
         panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
         graph = _panel_graphs(panels)[0]
         assert len(graph.figure.data) == 4
-        by_name = {trace.name: trace for trace in graph.figure.data}
+        by_trial = {trace.customdata[0]: trace for trace in graph.figure.data}
         shard_zero = [
-            by_name["cc310000/dd310000"],
-            by_name["cc310200/dd310100"],
-            by_name["cc310300/dd310300"],
+            by_trial[str(RA0)],
+            next(
+                trace
+                for trace in graph.figure.data
+                if trace.customdata[0] == str(RA2) and trace.line.dash == "solid"
+            ),
+            by_trial[str(TA)],
         ]
         assert len({trace.line.color for trace in shard_zero}) == 1
-        assert by_name["cc310200/dd310200"].line.color != shard_zero[0].line.color
+        assert (
+            next(
+                trace
+                for trace in graph.figure.data
+                if trace.customdata[0] == str(RA2) and trace.line.dash != "solid"
+            ).line.color
+            != shard_zero[0].line.color
+        )
         assert len({trace.line.color for trace in graph.figure.data}) == 2
+        legend_names = {trace.name for trace in graph.figure.data if trace.showlegend}
+        assert legend_names == {"0", "1"}
 
     def test_execution_dash_distinguishes_executions_of_one_trial(self, service):
         doc = _series_doc(keys=["loss"])
@@ -2039,6 +2059,10 @@ class TestCallbackGraphSafety:
                 key,
                 sorted(output_ids),
             )
+            # A callback whose outputs are all page-local is pruned on
+            # every other page, so its states may be page-local too.
+            if output_ids and not (output_ids & shell_ids):
+                continue
             states = {dep["id"] for dep in spec.get("state", [])}
             assert states <= shell_ids, key
 
@@ -3533,53 +3557,203 @@ class TestContextFilters:
             assert trace.line.color == unfiltered[trace.name]
 
 
-class TestLinkedTrialTable:
+class TestTrialBrowser:
     def test_columns_and_rows_from_existing_data(self, service):
-        columns, rows, selected = trial_table_outputs(
+        columns, rows, selected = browser_trial_outputs(
             service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), _series_doc(keys=["loss"])
         )
         assert [column["field"] for column in columns] == [
+            "swatch",
             "number",
             "trial_short",
             "state",
             "objective",
+            "executions",
+            "generations",
             "p_lr",
             "p_seed",
         ]
+        assert columns[0]["cellRenderer"] == {
+            "function": "jernericsColorSwatch(params)"
+        }
         by_trial = {row["trial_short"]: row for row in rows}
         assert by_trial["cc310200"]["objective"] == "0.12"
         assert by_trial["cc310200"]["p_lr"] == "0.1"
         assert by_trial["cc310200"]["state"] == "completed"
+        assert by_trial["cc310200"]["executions"] == "dd310100, dd310200"
+        assert by_trial["cc310200"]["swatch"]
         assert selected == []
 
-    def test_selection_follows_highlighted_identities(self, service):
-        doc = _series_doc(keys=["loss"])
-        doc["highlighted_trials"] = [str(TA), str(RA2)]
-        _columns, _rows, selected = trial_table_outputs(
-            service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), doc
+    def test_selection_follows_picked_family_roots(self, service):
+        tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [{"root": str(RA0)}], [], None)
+        _columns, rows, selected = browser_trial_outputs(
+            service, PROJECT, tray, _series_doc(keys=["loss"])
         )
-        assert [row["trial_id"] for row in selected] == [str(RA2), str(TA)]
+        assert [row["trial_id"] for row in selected] == [str(RA2)]
+        assert [row["root"] for row in rows] == [str(RA0), str(TA)]
 
-    def test_highlights_edit_keeps_order_and_other_fields(self):
-        doc = _series_doc(keys=["loss"])
-        edited = view_from_highlights(
-            doc, [{"trial_id": str(TB)}, {"trial_id": str(TC)}]
+    def test_sweep_column_appears_only_for_multi_sweep_scope(self, service):
+        multi = _tray(sweeps=[str(SWEEP_A), str(SWEEP_B)])
+        columns, _rows, _selected = browser_trial_outputs(
+            service, PROJECT, multi, _series_doc(keys=["loss"])
         )
-        assert edited["highlighted_trials"] == [str(TB), str(TC)]
-        assert edited["series"]["keys"] == ["loss"]
-        assert view_from_highlights(doc, None)["highlighted_trials"] == []
+        assert "sweep" in [column["field"] for column in columns]
+        single = browser_trial_outputs(
+            service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), _series_doc(keys=["loss"])
+        )
+        assert "sweep" not in [column["field"] for column in single[0]]
 
-    def test_plot_click_toggles_the_identity(self):
+    def test_swatch_matches_chart_color_for_a_sampled_param(self, service):
+        doc = _series_doc(keys=["loss"], color="param:lr")
+        _panels, payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
+        chart = {
+            trace.customdata[0]: trace.line.color
+            for trace in _panel_graphs(panels)[0].figure.data
+        }
+        _columns, rows, _selected = browser_trial_outputs(
+            service, PROJECT, _tray(), doc, payload
+        )
+        for row in rows:
+            assert row["swatch"] == chart[row["trial_id"]]
+
+
+class TestVaryingParams:
+    """jernerics-igq.2: browser comparison facts name exactly the
+    parameters that differ across the scoped trials."""
+
+    def _lambda_trials(self):
+        base = {
+            "optimizer": "adam",
+            "batch_size": 32,
+            "lambda_": 0.01,
+            "lambda_schedule": "constant",
+            "lambda_warmup_steps": 0,
+        }
+        variants = [
+            {"lambda_": 0.1},
+            {"lambda_schedule": "cosine_ramp"},
+            {"lambda_warmup_steps": 10000},
+        ]
+        return [
+            {"trial_id": f"t{i}", "params": {**base, **delta}}
+            for i, delta in enumerate([{}, *variants])
+        ]
+
+    def test_only_varying_params_become_comparison_columns(self):
+        trials = self._lambda_trials()
+        assert varying_param_keys(trials) == [
+            "lambda_",
+            "lambda_schedule",
+            "lambda_warmup_steps",
+        ]
+        columns = browser_trial_columns(varying_param_keys(trials), multi_sweep=False)
+        assert [column["field"] for column in columns][-3:] == [
+            "p_lambda_",
+            "p_lambda_schedule",
+            "p_lambda_warmup_steps",
+        ]
+
+    def test_presence_difference_alone_varies(self):
+        trials = [
+            {"trial_id": "a", "params": {"x": 1}},
+            {"trial_id": "b", "params": {}},
+        ]
+        assert varying_param_keys(trials) == ["x"]
+        assert varying_param_keys([{"trial_id": "a", "params": {"x": 1}}]) == []
+
+    def test_config_text_covers_the_varying_configuration(self):
+        trials = self._lambda_trials()
+        text = trial_config_text(trials[1], varying_param_keys(trials))
+        assert text == "lambda_=0.1 · lambda_schedule=constant · lambda_warmup_steps=0"
+        assert param_text(None) == "—"
+
+
+class TestColorGrouping:
+    def _records(self, values):
+        return [
+            {"trial": f"t{i}", "params": {"lr": value}, "context": {}}
+            for i, value in enumerate(values)
+        ]
+
+    def test_categorical_and_small_numeric_are_discrete(self):
+        grouping = color_grouping(self._records([0.1, 0.01, 0.1]), "param:lr")
+        assert grouping["labels"] == ["0.01", "0.1"]
+        assert grouping["colors"]["0.01"] != grouping["colors"]["0.1"]
+
+    def test_numeric_over_eight_values_use_labeled_ranges(self):
+        values = [round(i / 10, 1) for i in range(11)]
+        grouping = color_grouping(self._records(values), "param:lr")
+        assert grouping["labels"] == [
+            "0-0.125",
+            "0.125-0.25",
+            "0.25-0.375",
+            "0.375-0.5",
+            "0.5-0.625",
+            "0.625-0.75",
+            "0.75-0.875",
+            "0.875-1",
+        ]
+        assert identity_of(self._records([0.05])[0], grouping) == "0-0.125"
+        assert identity_of(self._records([1.0])[0], grouping) == "0.875-1"
+
+    def test_missing_values_are_gray(self):
+        records = [
+            {"trial": "a", "params": {"lr": 0.1}, "context": {}},
+            {"trial": "b", "params": {}, "context": {}},
+        ]
+        grouping = color_grouping(records, "param:lr")
+        assert grouping["colors"]["missing"] == "#7f7f7f"
+        assert identity_of(records[1], grouping) == "missing"
+
+
+class TestTraceHoverAndLegend:
+    def test_hover_identifies_sweep_trial_execution_and_config(self, service):
+        doc = _series_doc(keys=["loss", "accuracy"])
+        panels, payload, *_rest = series_outputs(service, PROJECT, _all_sweeps(), doc)
+        traces = _panel_graphs(panels)[0].figure.data
+        hover = next(trace for trace in traces if trace.name == "cc310200/dd310100")
+        assert "value %{y:.6g} @ step %{x}" in hover.hovertemplate
+        assert "lr=" in hover.hovertemplate and "seed=" in hover.hovertemplate
+        assert "cc310200" in hover.hovertemplate
+        assert any(
+            entry["config"]
+            for entry in payload["per_key"]["loss"]["series"]
+            if entry["trial"] == str(RA2)
+        )
+
+    def test_sweep_short_id_appears_in_hover_under_multi_sweep_scope(self, service):
+        doc = _series_doc(keys=["loss"])
+        panels, *_rest = series_outputs(service, PROJECT, _all_sweeps(), doc)
+        trace = _panel_graphs(panels)[0].figure.data[0]
+        assert "aa3" in trace.hovertemplate
+
+    def test_no_per_trial_legend_without_a_color_choice(self, service):
+        doc = _series_doc(keys=["loss"])
+        panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
+        assert not any(
+            trace.showlegend for trace in _panel_graphs(panels)[0].figure.data
+        )
+
+    def test_one_row_stacked_height_is_450_px(self, service):
+        doc = _series_doc(keys=["loss"])
+        panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
+        assert _panel_graphs(panels)[0].figure.layout.height == 450
+
+    def test_plot_click_sets_focus_and_toggles_highlight(self):
         doc = _series_doc(keys=["loss"])
         click = {"points": [{"customdata": str(RA2)}]}
-        picked = view_from_plot_click(doc, click)
+        picked = view_from_trace_click(doc, click)
         assert picked is not None
         assert picked["highlighted_trials"] == [str(RA2)]
-        cleared = view_from_plot_click(picked, click)
+        assert picked["focus"] == {"kind": "trial", "id": str(RA2)}
+        cleared = view_from_trace_click(picked, click)
         assert cleared is not None
         assert cleared["highlighted_trials"] == []
-        assert view_from_plot_click(doc, {"points": [{}]}) is None
-        assert view_from_plot_click(doc, None) is None
+        assert cleared["focus"] == {"kind": "trial", "id": str(RA2)}
+        assert view_from_trace_click(doc, {"points": [{}]}) is None
+        assert view_from_trace_click(doc, None) is None
+        assert picked["series"]["keys"] == ["loss"]
 
     def test_traces_carry_the_trial_identity_for_plot_clicks(self, service):
         doc = _series_doc(keys=["loss"])

@@ -302,15 +302,23 @@ def hydrate_view(
 
 
 def loaded_option_values(options: Any) -> set[str] | None:
-    """Value set of dropdown options as Dash reports them; ``None`` when
-    the options are not loaded yet (not a list)."""
+    """Value set of dropdown options as Dash reports them, flattening
+    grouped options; ``None`` when the list has not loaded yet."""
     if not isinstance(options, list):
         return None
-    return {
-        option["value"]
-        for option in options
-        if isinstance(option, dict) and "value" in option
-    }
+    values: set[str] = set()
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        if "options" in option:
+            values.update(
+                entry["value"]
+                for entry in option["options"]
+                if isinstance(entry, dict) and "value" in entry
+            )
+        elif "value" in option:
+            values.add(option["value"])
+    return values
 
 
 def _gated_value(desired: str | None, loaded: set[str] | None) -> Any:
@@ -988,7 +996,7 @@ def _overlay_panel(
     facet: str | None,
     display: str = "all",
     highlighted: Sequence[str] = (),
-    color_map: dict[str, str] | None = None,
+    grouping: dict | None = None,
 ) -> list[Any]:
     """The explicit shared-axis overlay: one control block, one figure,
     no per-key axes disturbed."""
@@ -1005,7 +1013,7 @@ def _overlay_panel(
             facet=facet,
             display=display,
             highlighted=highlighted,
-            color_map=color_map,
+            grouping=grouping,
         ),
     )
     return [
@@ -1052,6 +1060,79 @@ def apply_context_filters(
     ]
 
 
+def param_text(value: Any) -> str:
+    """Deterministic comparison text for one sampled value; the missing
+    marker when the trial never reported it."""
+    return MISSING if value is None else figures.value_text(value)
+
+
+def varying_param_keys(trials: list[dict[str, Any]]) -> list[str]:
+    """Param keys whose value or presence differs across the scoped
+    trials, in deterministic (sorted) order."""
+    keys = {key for trial in trials for key in trial.get("params") or {}}
+    return [
+        key
+        for key in sorted(keys)
+        if len({param_text((trial.get("params") or {}).get(key)) for trial in trials})
+        > 1
+    ]
+
+
+def param_cardinality(trials: list[dict[str, Any]], key: str) -> int:
+    """Distinct comparison texts one param takes across the trials."""
+    return len({param_text((trial.get("params") or {}).get(key)) for trial in trials})
+
+
+def trial_config_text(trial: dict[str, Any], keys: Sequence[str]) -> str:
+    """``key=value`` joined text of one trial's varying configuration."""
+    return " · ".join(
+        f"{key}={param_text((trial.get('params') or {}).get(key))}" for key in keys
+    )
+
+
+def color_dropdown_options(
+    dims: list[dict[str, Any]], trials: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Grouped Color-by options: logged context dimensions and sampled
+    parameters (``param:<key>`` tokens)."""
+    groups = [
+        {
+            "label": "Logged context",
+            "options": [
+                {
+                    "label": f"{entry['key']} · {entry['cardinality']}",
+                    "value": entry["key"],
+                }
+                for entry in dims
+            ],
+        },
+        {
+            "label": "Sampled parameters",
+            "options": [
+                {
+                    "label": f"{key} · {param_cardinality(trials, key)}",
+                    "value": f"param:{key}",
+                }
+                for key in varying_param_keys(trials)
+            ],
+        },
+    ]
+    return [group for group in groups if group["options"]]
+
+
+def _enrich_series(per_key: list[dict[str, Any]], trials: list[dict[str, Any]]) -> None:
+    """Attach each series' trial facts (params, sweep, varying config)
+    so coloring, hover, and the browser swatch agree."""
+    meta = {trial["trial_id"]: trial for trial in trials}
+    varying = varying_param_keys(trials)
+    for entry in per_key:
+        for series in entry["series"]:
+            trial = meta.get(series["trial"]) or {}
+            series["params"] = trial.get("params") or {}
+            series["sweep"] = trial.get("sweep_id")
+            series["config"] = trial_config_text(trial, varying)
+
+
 def series_outputs(
     service: DashboardService | None,
     project: str | None,
@@ -1085,17 +1166,23 @@ def series_outputs(
         {"label": offered.get(key, f"{key} · absent under this scope"), "value": key}
         for key in sorted({*offered, *keys})
     ]
+    dims = service.analysis_context_dims(project, tray)
+    trials = service.analysis_trials(project, tray)
     dim_options = [
         {
             "label": f"{entry['key']} · {entry['cardinality']}",
             "value": entry["key"],
         }
-        for entry in service.analysis_context_dims(project, tray)
+        for entry in dims
     ]
     per_key = service.analysis_series(
         project, tray, keys, series_doc["reduction"] or "none"
     )
-    color_map = figures.identity_color_map(per_key, series_doc["color"])
+    _enrich_series(per_key, trials)
+    grouping = figures.color_grouping(
+        [series for entry in per_key for series in entry["series"]],
+        series_doc["color"],
+    )
     per_key = apply_context_filters(per_key, series_doc["context_filters"])
     payload = _series_payload(per_key, keys)
     display = series_doc["trial_display"]
@@ -1115,7 +1202,7 @@ def series_outputs(
             facet=series_doc["facet"],
             display=display,
             highlighted=highlighted,
-            color_map=color_map,
+            grouping=grouping,
         )
     else:
         panels = [
@@ -1123,8 +1210,8 @@ def series_outputs(
             (
                 html.Div(
                     Empty(
-                        "Highlighted only: select rows in the trial table (or "
-                        "click a trace) — nothing is highlighted yet, so no "
+                        "Highlighted only: click a trace to highlight and "
+                        "focus that trial — nothing is highlighted yet, so no "
                         "series render. All raw is one click away; nothing "
                         "switches on its own."
                     ),
@@ -1139,12 +1226,18 @@ def series_outputs(
                         facet=series_doc["facet"],
                         display=display,
                         highlighted=highlighted,
-                        color_map=color_map,
+                        grouping=grouping,
                     ),
                 )
             ),
         ]
-    return panels, payload, key_options, dim_options, dim_options
+    return (
+        panels,
+        payload,
+        key_options,
+        color_dropdown_options(dims, trials),
+        dim_options,
+    )
 
 
 def axis_state_edit(
@@ -1577,90 +1670,124 @@ def view_from_context_filter(
     }
 
 
-_TRIAL_PARAM_COLUMNS = 3
-"""Sampled-param columns the compact linked table shows."""
+_SWATCH_COLUMN: dict[str, Any] = {
+    "headerName": "",
+    "field": "swatch",
+    "cellRenderer": {"function": "jernericsColorSwatch(params)"},
+    "maxWidth": 48,
+    "minWidth": 48,
+    "sortable": False,
+    "filter": False,
+    "resizable": False,
+    "pinned": "left",
+}
 
 
-def trial_table_columns(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Compact family/trial table columns: number, short id, objective,
-    state, and up to three key sampled params."""
-    param_keys = sorted(
-        {key for trial in trials for key in (trial.get("params") or {})}
-    )[:_TRIAL_PARAM_COLUMNS]
+def browser_trial_columns(
+    param_keys: Sequence[str], *, multi_sweep: bool
+) -> list[dict[str, Any]]:
+    """Persistent trial-browser columns: the trace color swatch, trial
+    identity, sweep when the scope spans several, and one column per
+    varying sampled parameter (horizontal scroll, never a truncation)."""
     return [
+        dict(_SWATCH_COLUMN),
         {"headerName": "#", "field": "number", "maxWidth": 80},
         {"headerName": "Trial", "field": "trial_short"},
+        *([{"headerName": "Sweep", "field": "sweep"}] if multi_sweep else []),
         {"headerName": "State", "field": "state"},
         {"headerName": "Objective", "field": "objective"},
+        {"headerName": "Executions", "field": "executions"},
+        {"headerName": "Generations", "field": "generations", "maxWidth": 120},
         *({"headerName": key, "field": f"p_{key}"} for key in param_keys),
     ]
 
 
-def trial_table_rows(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One row per trial under the effective selection; ``trial_id`` is
-    the linking identity carried by row selection and plot clicks."""
+def _browser_records(
+    trials: list[dict[str, Any]], color: str | None, series_data: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Records whose color grouping matches the chart's: the pooled
+    series for a context choice (context lives on values), the scoped
+    trials otherwise."""
+    if color is not None and figures.parse_color(color)[0] == "context":
+        return [
+            series
+            for entry in (series_data or {}).get("per_key", {}).values()
+            for series in entry.get("series", [])
+        ]
     return [
-        {
-            "trial_id": trial["trial_id"],
-            "number": trial["number"],
-            "trial_short": short_id(trial["trial_id"]),
-            "state": trial["state"],
-            "objective": components.objective_text(trial["objective"]),
-            **{
-                f"p_{key}": _format_payload(value)
-                for key, value in (trial.get("params") or {}).items()
-                if key
-                in {
-                    column["field"][2:]
-                    for column in trial_table_columns(trials)
-                    if column["field"].startswith("p_")
-                }
-            },
-        }
+        {"trial": trial["trial_id"], "params": trial.get("params") or {}, "context": {}}
         for trial in trials
     ]
 
 
-def trial_table_outputs(
+def browser_trial_outputs(
     service: DashboardService | None,
     project: str | None,
     tray: dict[str, Any] | None,
     view_doc: dict[str, Any] | None,
+    series_data: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """(columns, rows, selected rows) for the linked trial table."""
-    doc = view_doc or default_view_state()
+    """(columns, rows, selected rows) for the persistent trial browser:
+    one row per retry family with its current trial, the trace color
+    swatch under the active color choice, execution short ids, and every
+    varying sampled parameter."""
     if not project or service is None:
         return [], [], []
     trials = service.analysis_trials(project, tray)
-    rows = trial_table_rows(trials)
-    picked = set(doc["highlighted_trials"])
-    return (
-        trial_table_columns(trials),
-        rows,
-        [row for row in rows if row["trial_id"] in picked],
+    meta = {trial["trial_id"]: trial for trial in trials}
+    param_keys = varying_param_keys(trials)
+    families = service.analysis_families(project, (tray or {}).get("sweeps") or [])
+    color = (view_doc or default_view_state())["series"]["color"]
+    grouping = figures.color_grouping(
+        _browser_records(trials, color, series_data), color
     )
-
-
-def view_from_highlights(
-    current: dict[str, Any] | None, rows: list[dict[str, Any]] | None
-) -> dict[str, Any]:
-    """View doc after a trial-table selection edit; the ordered row ids
-    are the highlighted identities every panel shares."""
-    doc = current or default_view_state()
-    return {
-        **doc,
-        "highlighted_trials": [
-            str(row["trial_id"]) for row in rows or [] if row.get("trial_id")
-        ],
+    colors = grouping["colors"]
+    series_by_trial = {
+        series["trial"]: series
+        for entry in (series_data or {}).get("per_key", {}).values()
+        for series in entry.get("series", [])
     }
+    rows = []
+    for family in families:
+        trial_id = family["current_trial"]
+        trial = meta.get(trial_id) or {}
+        record = series_by_trial.get(trial_id) or {
+            "trial": trial_id,
+            "params": trial.get("params") or {},
+            "context": {},
+        }
+        rows.append(
+            {
+                "root": family["root"],
+                "trial_id": trial_id,
+                "number": family["number"],
+                "trial_short": short_id(trial_id),
+                "sweep": trial.get("sweep_name", trial.get("sweep_id", "")),
+                "state": family["state"],
+                "objective": components.objective_text(family["objective"]),
+                "executions": family.get("executions") or "",
+                "generations": family["generations"],
+                "swatch": colors.get(figures.identity_of(record, grouping), "#7f7f7f"),
+                **{
+                    f"p_{key}": param_text((trial.get("params") or {}).get(key))
+                    for key in param_keys
+                },
+            }
+        )
+    picked = set((tray or {}).get("families") or [])
+    columns = browser_trial_columns(
+        param_keys,
+        multi_sweep=len({row["sweep"] for row in rows if row["sweep"]}) > 1,
+    )
+    return columns, rows, [row for row in rows if row["root"] in picked]
 
 
-def view_from_plot_click(
+def view_from_trace_click(
     current: dict[str, Any] | None, click: dict[str, Any] | None
 ) -> dict[str, Any] | None:
-    """View doc after a trace click: highlight that trial alone, or clear
-    when it was the only highlight. ``None`` when Plotly exposed no
-    usable identity."""
+    """View doc after a trace click: focus that trial (inspector opens,
+    scope untouched) and highlight it alone — or clear the highlight when
+    it was the only one. ``None`` when Plotly exposed no identity."""
     points = (click or {}).get("points") or []
     identity = points[0].get("customdata") if points else None
     if not identity:
@@ -1669,7 +1796,11 @@ def view_from_plot_click(
     picked = [str(identity)]
     if doc["highlighted_trials"] == picked:
         picked = []
-    return {**doc, "highlighted_trials": picked}
+    return {
+        **doc,
+        "highlighted_trials": picked,
+        "focus": {"kind": "trial", "id": str(identity)},
+    }
 
 
 def series_status(
