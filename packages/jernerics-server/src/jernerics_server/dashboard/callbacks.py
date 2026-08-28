@@ -80,11 +80,15 @@ def page_content(
     selected_sweeps: list[str] | None = None,
     now_ns: int | None = None,
     workspace: dict | None = None,
+    view_doc: dict | None = None,
+    tray: dict | None = None,
+    project: str | None = None,
 ) -> tuple[html.Div, bool]:
     """(page, poll enabled) for a URL, with live data.
 
     ``poll enabled`` is True only while the page's selected work is
-    incomplete: waiting/running trials or non-terminal executions.
+    incomplete: waiting/running trials or non-terminal executions. The
+    analysis page polls only under the persisted auto-refresh intent.
     """
     spec = parse_route(pathname)
     now = time.time_ns() if now_ns is None else now_ns
@@ -140,9 +144,11 @@ def page_content(
             )
         return artifacts.viewer_page(service, view, now), False
     if spec.kind == "analysis":
-        # Interactive, user-driven exploration: no polling, so tab state
-        # survives until the next navigation.
-        return analysis.analysis_page(), False
+        # Interactive exploration: the page never re-mounts on a poll
+        # tick (the data callbacks re-fire instead); polling runs only
+        # under the auto-refresh intent while work is incomplete.
+        polls = analysis.auto_refresh_polls(service, project, tray, view_doc)
+        return analysis.analysis_page(), polls
     return layout.not_found_page(pathname or ""), False
 
 
@@ -272,24 +278,79 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("page-container", "children"),
         Output("poll", "disabled"),
+        Output("view-store", "data", allow_duplicate=True),
         Input("url", "pathname"),
         Input("poll", "n_intervals"),
         State("selection-store", "data"),
         State("workspace-store", "data"),
+        State("view-store", "data"),
+        State("project-store", "data"),
+        prevent_initial_call="initial_duplicate",
     )
     def _render_page(
         pathname: str | None,
         _tick: int | None,
         selection: dict | None,
         workspace: dict | None,
+        view_doc: dict | None,
+        project: str | None,
     ):
+        ticked = "poll.n_intervals" in {
+            str(prop) for prop in dash.callback_context.triggered_prop_ids
+        }
         page, polls = page_content(
             pathname,
             service,
             selected_sweeps=(selection or {}).get("sweeps") or [],
             workspace=workspace,
+            view_doc=view_doc,
+            tray=selection,
+            project=project,
         )
-        return page, not polls
+        if ticked and parse_route(pathname).kind == "analysis":
+            # A tick never re-mounts the analysis page — the data
+            # callbacks re-query on the same interval — but it is the
+            # moment auto-refresh turns itself off on terminal work.
+            page = no_update
+        flip = (
+            analysis.auto_refresh_flip(view_doc, polls)
+            if ticked and parse_route(pathname).kind == "analysis"
+            else None
+        )
+        return page, not polls, no_update if flip is None else flip
+
+    @app.callback(
+        Output("poll", "disabled", allow_duplicate=True),
+        Input("url", "pathname"),
+        Input("view-store", "data"),
+        Input("selection-store", "data"),
+        State("project-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _gate_analysis_poll(
+        pathname: str | None, view_doc: dict | None, tray: dict | None, project: str
+    ):
+        # The router only fires on navigation and ticks; view and tray
+        # edits must re-evaluate the interval themselves.
+        if parse_route(pathname).kind != "analysis":
+            raise PreventUpdate
+        return not analysis.auto_refresh_polls(service, project, tray, view_doc)
+
+    app.clientside_callback(
+        """
+        function(active) {
+            const display = (value) => ({display: active === value ? "block" : "none"});
+            return [display("catalog"), display("series"), display("points"),
+                    display("optuna"), display("python")];
+        }
+        """,
+        Output("analysis-catalog", "style"),
+        Output("analysis-series-tab", "style"),
+        Output("analysis-points", "style"),
+        Output("analysis-optuna-tab", "style"),
+        Output("analysis-python", "style"),
+        Input("analysis-tabs", "value"),
+    )
 
     @app.callback(
         Output("project-picker", "options"),
@@ -761,6 +822,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input("analysis-key", "value"),
         Input("analysis-mode", "value"),
         Input("analysis-reduction", "value"),
+        Input("analysis-display", "value"),
+        Input("analysis-auto-refresh", "value"),
         Input("analysis-color", "value"),
         Input("analysis-facet", "value"),
         Input("analysis-contour-x", "value"),
@@ -773,12 +836,22 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         keys: list | None,
         mode: str | None,
         reduction: str | None,
+        display: str | None,
+        auto_flags: list | None,
         color: str | None,
         facet: str | None,
         contour_x: str | None,
         contour_y: str | None,
         current: dict | None,
     ):
+        edited = analysis.edited_fields(dash.callback_context.triggered_prop_ids)
+        # The control-sync echo fires with every input "changed"; under
+        # dash 4's radix components the collected values can arrive
+        # positionally scrambled, and applying them would poison the
+        # store with a state the codec rejects. Genuine user edits
+        # change one or two fields — bursts are echoes, never edits.
+        if len(edited) > 2:
+            raise PreventUpdate
         doc = analysis.view_from_controls(
             current,
             active=active,
@@ -789,7 +862,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             facet=facet,
             contour_x=contour_x,
             contour_y=contour_y,
-            edited=analysis.edited_fields(dash.callback_context.triggered_prop_ids),
+            trial_display=display,
+            auto_refresh="auto" in (auto_flags or []),
+            edited=edited,
         )
         # Hydration pushes state to the controls and their echo lands
         # here; an unchanged document is not an edit.
@@ -798,10 +873,57 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return doc
 
     @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input({"context-filter": dash.ALL}, "value"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_context_filters(values: list | None, current: dict | None):
+        # Re-rendered filter dropdowns fire as additions; the resolved
+        # id names the edited dimension and its value comes from the
+        # ALL input list (dash 4 child-id resolution).
+        dimension, control = pattern_trigger(dash.callback_context)
+        if control != "context-filter" or dimension is None:
+            raise PreventUpdate
+        value = pattern_input_value(
+            dash.callback_context.inputs_list, 0, "context-filter", dimension
+        )
+        doc = analysis.view_from_context_filter(current, dimension, value)
+        if doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input("analysis-trial-grid", "selectedRows"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_highlights(rows: list | None, current: dict | None):
+        doc = analysis.view_from_highlights(current, rows)
+        if doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input("analysis-series-figure", "clickData"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _toggle_plot_highlight(click: dict | None, current: dict | None):
+        doc = analysis.view_from_plot_click(current, click)
+        if doc is None or doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
         Output("analysis-tabs", "value"),
         Output("analysis-key", "value"),
         Output("analysis-mode", "value"),
         Output("analysis-reduction", "value"),
+        Output("analysis-display", "value"),
+        Output("analysis-auto-refresh", "value"),
         Output("analysis-color", "value"),
         Output("analysis-facet", "value"),
         Output("analysis-contour-x", "value"),
@@ -838,9 +960,14 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("analysis-catalog", "children"),
         Input("selection-store", "data"),
+        Input("analysis-refresh", "n_clicks"),
+        Input("poll", "n_intervals"),
         State("project-store", "data"),
     )
-    def _render_analysis_catalog(tray: dict | None, project: str | None):
+    def _render_analysis_catalog(
+        tray: dict | None, _clicks: int | None, _tick: int | None, project: str | None
+    ):
+        # Refresh re-queries series, catalog, and context data alike.
         return analysis.catalog_tab(service, project, tray)
 
     @app.callback(
@@ -849,17 +976,112 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("analysis-key", "options"),
         Output("analysis-color", "options"),
         Output("analysis-facet", "options"),
+        Output("analysis-context-filters", "children"),
+        Output("analysis-series-status", "children"),
+        Output("analysis-updated", "children"),
+        Output("analysis-series-figure-store", "data"),
+        Output("analysis-refresh-store", "data"),
         Input("selection-store", "data"),
         Input("view-store", "data"),
+        Input("analysis-refresh", "n_clicks"),
+        Input("poll", "n_intervals"),
         State("project-store", "data"),
     )
     def _render_analysis_series(
-        tray: dict | None, view_doc: dict | None, project: str | None
+        tray: dict | None,
+        view_doc: dict | None,
+        _clicks: int | None,
+        _tick: int | None,
+        project: str | None,
     ):
-        # One render per tray/view state: every panel, the picker
-        # options, and the data store behind the axis callbacks come
-        # from a single multi-key values read.
-        return analysis.series_outputs(service, project, tray, view_doc)
+        # One render per tray/view/refresh event: panels, options, the
+        # data store, the context-filter controls, and the refresh
+        # facts. A failed refresh keeps the last successful everything.
+        try:
+            return analysis.series_tab_outputs(
+                service, project, tray, view_doc, time.time_ns()
+            )
+        except Exception as error:
+            return analysis.refresh_failure(error, time.time_ns())
+
+    app.clientside_callback(
+        """
+        function(figure, relayout) {
+            if (!figure || !figure.data) {
+                return window.dash_clientside.no_update;
+            }
+            if (!relayout) {
+                return figure;
+            }
+            const ends = {};
+            for (const [key, value] of Object.entries(relayout)) {
+                const dot = key.indexOf(".");
+                if (dot < 0) continue;
+                const axis = key.slice(0, dot);
+                const rest = key.slice(dot + 1);
+                if (!/^[xy]axis[0-9]*$/.test(axis)) continue;
+                if (rest === "range" && Array.isArray(value)
+                        && value.length === 2) {
+                    ends[axis] = [value[0], value[1]];
+                } else if (rest === "range[0]" || rest === "range[1]") {
+                    const slot = ends[axis] || [null, null];
+                    slot[rest === "range[0]" ? 0 : 1] = value;
+                    ends[axis] = slot;
+                }
+            }
+            const layout = Object.assign({}, figure.layout);
+            let touched = false;
+            for (const [axis, pair] of Object.entries(ends)) {
+                if (pair[0] === null || pair[1] === null) continue;
+                if (!(axis in layout)) continue;
+                layout[axis] = Object.assign({}, layout[axis], {
+                    range: pair, autorange: false,
+                });
+                touched = true;
+            }
+            return touched ? Object.assign({}, figure, {layout}) : figure;
+        }
+        """,
+        Output("analysis-series-figure", "figure"),
+        Input("analysis-series-figure-store", "data"),
+        State("analysis-series-figure", "relayoutData"),
+    )
+
+    @app.callback(
+        Output("analysis-message-store", "data", allow_duplicate=True),
+        Input("analysis-refresh-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _surface_refresh_error(state: dict | None):
+        # Only failures reach the page-level message region; recovery
+        # shows in the status line and the next navigation rewrites the
+        # message store anyway.
+        error = (state or {}).get("error") or ""
+        if not error:
+            raise PreventUpdate
+        return error
+
+    @app.callback(
+        Output("analysis-trial-grid", "columnDefs"),
+        Output("analysis-trial-grid", "rowData"),
+        Output("analysis-trial-grid", "selectedRows"),
+        Input("selection-store", "data"),
+        Input("view-store", "data"),
+        Input("analysis-refresh", "n_clicks"),
+        Input("poll", "n_intervals"),
+        State("project-store", "data"),
+    )
+    def _load_analysis_trials(
+        tray: dict | None,
+        view_doc: dict | None,
+        _clicks: int | None,
+        _tick: int | None,
+        project: str | None,
+    ):
+        columns, rows, selected = analysis.trial_table_outputs(
+            service, project, tray, view_doc
+        )
+        return columns, rows, analysis.mounted_selection(selected, initial=is_initial())
 
     @app.callback(
         Output("view-store", "data", allow_duplicate=True),

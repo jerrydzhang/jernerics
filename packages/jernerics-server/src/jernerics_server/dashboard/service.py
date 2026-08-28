@@ -323,6 +323,10 @@ class DashboardService:
             project=project,
             sweeps=tuple(uuid.UUID(s) for s in sweep_ids) or None,
         )
+        return self._sweep_summaries(selection)
+
+    def _sweep_summaries(self, selection: Selection) -> list[SweepSummary]:
+        """SweepSummary rows for a fully-formed selection."""
         return [
             SweepSummary(
                 sweep_id=row["sweep_id"],
@@ -758,6 +762,35 @@ class DashboardService:
         if not project:
             return []
         return self.queries.context_catalog(self.analysis_selection(project, tray))
+
+    def analysis_context_values(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> list[dict[str, Any]]:
+        """Every distinct flat-context value per dimension under the
+        scope, from one values read — the multi-value filter options,
+        discovered from stored contexts with no key special-cased."""
+        if not project:
+            return []
+        dims: dict[str, set[str]] = {}
+        for record in self._follow_values(self.analysis_selection(project, tray), None):
+            for key, value in (record.context.root if record.context else {}).items():
+                dims.setdefault(key, set()).add(_format_param(value))
+        return [
+            {"key": key, "values": sorted(values)}
+            for key, values in sorted(dims.items())
+        ]
+
+    def analysis_scope_incomplete(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> bool:
+        """True while any sweep under the tray's effective selection has
+        waiting/running trials or non-terminal executions."""
+        if not project:
+            return False
+        return any(
+            summary.incomplete
+            for summary in self._sweep_summaries(self.analysis_selection(project, tray))
+        )
 
     def analysis_param_coverage(
         self, project: str | None, tray: dict[str, Any] | None

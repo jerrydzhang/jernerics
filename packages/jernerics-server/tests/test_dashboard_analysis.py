@@ -37,9 +37,13 @@ from jernerics_server.dashboard.analysis import (
     ViewStateError,
     analysis_href,
     analysis_page,
+    apply_context_filters,
+    auto_refresh_flip,
+    auto_refresh_polls,
     axis_state_edit,
     catalog_tab,
     cold_start,
+    context_filter_controls,
     control_values,
     decode_view_state,
     default_axis_state,
@@ -56,17 +60,25 @@ from jernerics_server.dashboard.analysis import (
     points_tab,
     python_snippet,
     python_tab,
+    refresh_failure,
     scope_bar,
     search_from_state,
     search_from_tray,
     series_entry_href,
     series_outputs,
+    series_status,
+    series_tab_outputs,
     sweep_picker_rows,
     synced_search,
     tray_from_edit,
     tray_summary,
+    trial_table_outputs,
+    updated_ago,
+    view_from_context_filter,
     view_from_controls,
+    view_from_highlights,
     view_from_include,
+    view_from_plot_click,
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
@@ -79,8 +91,11 @@ from jernerics_server.dashboard.callbacks import (
 from jernerics_server.dashboard.figures import (
     axis_notes,
     clipped_count,
+    count_note,
+    median_iqr_summary,
     non_positive_count,
     overlay_figure,
+    percentile,
     resolve_axis,
     stacked_figure,
 )
@@ -690,6 +705,7 @@ class TestCellTextSelection:
         assert [grid.id for grid in pickers] == [
             "analysis-sweep-grid",
             "analysis-family-grid",
+            "analysis-trial-grid",
         ]
         for grid in pickers:
             assert grid.dashGridOptions == {
@@ -1427,7 +1443,7 @@ class TestViewStateCodec:
             "keys": ["loss", "accuracy", "delta"],
             "mode": "overlay",
             "reduction": "mean",
-            "trial_display": "short",
+            "trial_display": "highlighted",
             "context_filters": {"host": ["node00", "node01"]},
             "color": "shard",
             "axes": {
@@ -1854,8 +1870,11 @@ class TestViewSync:
     def test_control_values_read_the_ordered_series_keys(self):
         doc = default_view_state()
         doc["series"]["keys"] = ["accuracy", "loss"]
-        active, keys, mode, reduction, color, facet, cx, cy = control_values(
-            doc, self._LOADED
+        active, keys, mode, reduction, color, facet, cx, cy, display, auto = (
+            control_values(
+                doc,
+                self._LOADED,
+            )
         )
         assert (active, keys, mode, reduction) == (
             "catalog",
@@ -1864,7 +1883,11 @@ class TestViewSync:
             "none",
         )
         assert (color, facet, cx, cy) == (None, None, None, None)
+        assert (display, auto) == ("all", [])
         assert control_values(None, self._LOADED)[1] == []
+        doc["series"]["trial_display"] = "median_iqr"
+        doc["auto_refresh"] = True
+        assert control_values(doc, self._LOADED)[8:] == ("median_iqr", ["auto"])
 
     def test_values_wait_for_their_options(self):
         """A value written before its options exist is dropped by the
@@ -1874,12 +1897,12 @@ class TestViewSync:
         doc["series"] = {**doc["series"], "keys": ["loss"], "color": "shard"}
         doc["optuna"] = {**doc["optuna"], "contour_x": "lr"}
         unloaded: dict[str, set[str] | None] = {name: None for name in self._LOADED}
-        _a, keys, _m, _r, color, _f, cx, _cy = control_values(doc, unloaded)
+        _a, keys, _m, _r, color, _f, cx, _cy, _d, _ar = control_values(doc, unloaded)
         assert keys is no_update
         assert color is no_update
         assert cx is no_update
         partial = {**self._LOADED, "keys": set()}
-        _a, keys, _m, _r, _c, _f, cx, _cy = control_values(doc, partial)
+        _a, keys, _m, _r, _c, _f, cx, _cy, _d, _ar = control_values(doc, partial)
         assert keys is no_update
         assert cx == "lr"
 
@@ -2980,3 +3003,625 @@ class TestKeyOrdering:
         hydrated, error = hydrate_view("/dashboard/analysis", search, None)
         assert error is None and hydrated is not None
         assert hydrated["series"]["keys"] == ["accuracy", "loss"]
+
+
+SWEEP_D = uuid.UUID("aa340000-0000-4000-8000-000000000000")
+TD0 = uuid.UUID("cc340000-0000-4000-8000-000000000000")
+EXD0 = uuid.UUID("dd340000-0000-4000-8000-000000000000")
+
+
+def _live_service(tmp_path) -> DashboardService:
+    """Seeded service plus one genuinely incomplete sweep: a running
+    trial with an open execution the auto-refresh transition drives to
+    terminal mid-test."""
+    store = _seeded_store(tmp_path)
+    now = datetime.now(UTC)
+    events: list[Any] = [
+        SweepSnapshotEvent(
+            event_id=uuid.uuid4(),
+            recorded_at=now,
+            project=PROJECT,
+            sweep_id=SWEEP_D,
+            name="delta-live",
+            state="running",
+        ),
+        TrialSnapshotEvent(
+            event_id=uuid.uuid4(),
+            recorded_at=now,
+            trial_id=TD0,
+            sweep_id=SWEEP_D,
+            number=1,
+            state=TrialState.RUNNING,
+            retry_root_trial_id=TD0,
+        ),
+        ExecutionStartEvent(
+            event_id=uuid.uuid4(),
+            recorded_at=now,
+            execution_id=EXD0,
+            trial_id=TD0,
+            hostname="node30",
+            started_at=now,
+        ),
+        ValueEvent(
+            event_id=uuid.uuid4(),
+            recorded_at=now,
+            trial_id=TD0,
+            key="loss",
+            step=0,
+            value=1.1,
+            context=FlatContext({"host": "node30", "shard": 0}),
+        ),
+    ]
+    ingest = IngestService(store)
+    result = ingest.apply(
+        IngestRequest(protocol_version=PROTOCOL_VERSION, events=events)
+    )
+    assert not result.conflicts
+    return DashboardService(QueryService(store))
+
+
+class TestTrialDisplayCodec:
+    """jernerics-cdf.5: ``series.trial_display`` becomes the explicit
+    all/highlighted/median_iqr enum, validated on decode."""
+
+    def test_null_and_absent_mean_all_and_bad_values_are_rejected(self):
+        assert (
+            decode_view_state(json.dumps({"v": 1}))["series"]["trial_display"] == "all"
+        )
+        assert (
+            decode_view_state(json.dumps({"v": 1, "series": {"trial_display": None}}))[
+                "series"
+            ]["trial_display"]
+            == "all"
+        )
+        with pytest.raises(ViewStateError, match="unsupported trial display"):
+            decode_view_state(
+                json.dumps({"v": 1, "series": {"trial_display": "latest"}})
+            )
+
+    def test_filters_display_and_highlights_round_trip_the_url(self, service):
+        doc = _series_doc(
+            keys=["loss"],
+            trial_display="median_iqr",
+            context_filters={"host": ["node01"]},
+        )
+        doc["highlighted_families"] = [str(RA2)]
+        doc["auto_refresh"] = True
+        search = f"?view={encode_view_state(doc)}"
+        hydrated, error = hydrate_view("/dashboard/analysis", search, None)
+        assert error is None and hydrated == doc
+        target = search_from_state(service, PROJECT, _tray(), doc, "")
+        assert target is not None
+        decoded = decode_view_state(unquote(target.split("view=")[1]))
+        assert decoded["series"]["trial_display"] == "median_iqr"
+        assert decoded["series"]["context_filters"] == {"host": ["node01"]}
+        assert decoded["highlighted_families"] == [str(RA2)]
+        assert decoded["auto_refresh"] is True
+
+    def test_edits_validate_the_enum_and_preserve_dormant_filters(self):
+        doc = _series_doc(
+            keys=["loss"],
+            trial_display="all",
+            context_filters={"shard": ["0"]},
+        )
+        edited = view_from_controls(
+            doc,
+            active=None,
+            keys=None,
+            mode=None,
+            reduction=None,
+            color=None,
+            facet=None,
+            contour_x=None,
+            contour_y=None,
+            trial_display="garbage",
+            edited={"trial_display"},
+        )
+        assert edited["series"]["trial_display"] == "all"
+        assert edited["series"]["context_filters"] == {"shard": ["0"]}
+
+    def test_empty_string_control_values_never_reach_the_url(self):
+        """A cleared dropdown reports ""; the codec rejects empty
+        strings, so the edit side must normalize to None or the next
+        hydration resets the whole view to defaults."""
+        doc = _series_doc(keys=["loss"], color="shard")
+        doc["optuna"] = {"contour_x": "lr", "contour_y": "seed"}
+        edited = view_from_controls(
+            doc,
+            active=None,
+            keys=None,
+            mode=None,
+            reduction=None,
+            color="",
+            facet="",
+            contour_x="",
+            contour_y="",
+            edited={"color", "facet", "contour_x", "contour_y"},
+        )
+        assert edited["series"]["color"] is None
+        assert edited["series"]["facet"] is None
+        assert edited["optuna"] == {"contour_x": None, "contour_y": None}
+        decoded = decode_view_state(unquote(encode_view_state(edited)))
+        assert decoded == edited
+
+    def test_auto_refresh_edit_round_trips_through_view_from_controls(self):
+        doc = default_view_state()
+        edited = view_from_controls(
+            doc,
+            active=None,
+            keys=None,
+            mode=None,
+            reduction=None,
+            color=None,
+            facet=None,
+            contour_x=None,
+            contour_y=None,
+            auto_refresh=True,
+            edited={"auto_refresh"},
+        )
+        assert edited["auto_refresh"] is True
+        untouched = view_from_controls(
+            edited,
+            active=None,
+            keys=None,
+            mode=None,
+            reduction=None,
+            color=None,
+            facet=None,
+            contour_x=None,
+            contour_y=None,
+            edited=set(),
+        )
+        assert untouched["auto_refresh"] is True
+
+
+class TestPercentileMath:
+    """Pure stdlib percentile: linear interpolation on observed values
+    only, with deterministic boundary behavior."""
+
+    @pytest.mark.parametrize(
+        ("values", "q", "expected"),
+        [
+            ([7.0], 50, 7.0),
+            ([7.0], 25, 7.0),
+            ([1.0, 2.0], 25, 1.25),
+            ([1.0, 2.0], 50, 1.5),
+            ([1.0, 2.0], 75, 1.75),
+            ([1.0, 3.0, 5.0], 50, 3.0),
+            ([1.0, 3.0, 5.0], 25, 2.0),
+            ([5.0, 1.0, 3.0], 75, 4.0),
+            ([1.0, 2.0, 3.0, 4.0], 50, 2.5),
+            ([1.0, 2.0, 3.0, 4.0], 25, 1.75),
+            ([2.0, 2.0, 2.0, 2.0], 75, 2.0),
+            ([1.0, 2.0], 0, 1.0),
+            ([1.0, 2.0], 100, 2.0),
+        ],
+    )
+    def test_linear_interpolation_boundaries(self, values, q, expected):
+        assert percentile(values, q) == pytest.approx(expected)
+
+    def test_never_invents_points_outside_observed_values(self):
+        values = [3.0, 1.0, 4.0]
+        for q in (0, 10, 25, 50, 75, 90, 100):
+            assert min(values) <= percentile(values, q) <= max(values)
+
+    def test_duplicate_values_are_first_class(self):
+        assert percentile([5.0, 5.0, 1.0, 5.0], 50) == pytest.approx(5.0)
+        assert percentile([5.0, 5.0, 1.0, 5.0], 25) == pytest.approx(4.0)
+        assert percentile([2.0, 2.0, 2.0, 2.0], 75) == pytest.approx(2.0)
+
+
+class TestMedianIqrSummary:
+    def _loss_per_key(self):
+        return [
+            {
+                "key": "loss",
+                "series": [
+                    {
+                        "trial": str(RA0),
+                        "execution": str(EXA0),
+                        "points": [(0, 0.9)],
+                        "context": {"host": "node00", "shard": 0},
+                    },
+                    {
+                        "trial": str(RA2),
+                        "execution": str(EXA1),
+                        "points": [(0, 0.5), (1, 0.4), (2, 0.3)],
+                        "context": {"host": "node01", "shard": 0},
+                    },
+                    {
+                        "trial": str(RA2),
+                        "execution": str(EXA2),
+                        "points": [(0, 0.6), (1, 0.5), (2, 0.4), (3, 0.35)],
+                        "context": {"host": "node01", "shard": 1},
+                    },
+                    {
+                        "trial": str(TA),
+                        "execution": str(EXA3),
+                        "points": [(0, 0.45), (1, 0.38)],
+                        "context": {"host": "node02", "shard": 0},
+                    },
+                ],
+            }
+        ]
+
+    def test_one_group_without_explicit_color_choices(self):
+        summary = median_iqr_summary(self._loss_per_key())
+        (group,) = summary["loss"]
+        assert group["identity"] == "all trials"
+        assert group["series_count"] == 4
+        assert group["steps"] == [0, 1, 2, 3]
+        assert group["median"] == pytest.approx([0.55, 0.4, 0.35, 0.35])
+        assert group["q25"] == pytest.approx([0.4875, 0.39, 0.325, 0.35])
+        assert group["q75"] == pytest.approx([0.675, 0.45, 0.375, 0.35])
+        assert group["counts"] == [4, 3, 2, 1]
+
+    def test_groups_only_by_explicit_color_choice(self):
+        summary = median_iqr_summary(self._loss_per_key(), color="shard")
+        identities = [group["identity"] for group in summary["loss"]]
+        assert identities == ["0", "1"]
+        by_identity = {group["identity"]: group for group in summary["loss"]}
+        assert by_identity["0"]["series_count"] == 3
+        assert by_identity["0"]["median"] == pytest.approx([0.5, 0.39, 0.3])
+        assert by_identity["1"]["steps"] == [0, 1, 2, 3]
+
+    def test_missing_steps_stay_missing_no_interpolation(self):
+        summary = median_iqr_summary(self._loss_per_key(), color="shard")
+        by_identity = {group["identity"]: group for group in summary["loss"]}
+        assert by_identity["0"]["steps"] == [0, 1, 2]
+        assert 3 not in by_identity["0"]["steps"]
+        assert by_identity["0"]["counts"] == [3, 2, 1]
+
+    def test_deterministic_across_calls(self):
+        first = median_iqr_summary(self._loss_per_key(), color="shard")
+        second = median_iqr_summary(self._loss_per_key(), color="shard")
+        assert first == second
+
+
+class TestDisplayModes:
+    def test_all_raw_renders_every_series_and_states_the_count(self, service):
+        doc = _series_doc(keys=["loss"])
+        panels, _payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        assert len(graph.figure.data) == 4
+        assert "4 series" in str(_panel_headers(panels))
+        assert graph.figure.layout.uirevision == "analysis-series"
+
+    def test_density_warning_above_100_without_sampling(self):
+        dense = [
+            {
+                "key": "loss",
+                "series": [
+                    {
+                        "trial": f"0000000{i:02d}-0000-4000-8000-000000000000",
+                        "execution": None,
+                        "points": [(0, float(i))],
+                        "context": {},
+                    }
+                    for i in range(120)
+                ],
+            }
+        ]
+        figure = stacked_figure(dense, {}, display="all")
+        assert len(figure.data) == 120
+        notes = count_note(120, "all")
+        assert any("line density" in note for note in notes)
+        assert count_note(99, "all") == ["99 series"]
+        assert count_note(120, "median_iqr") == ["120 series"]
+
+    def test_highlighted_without_selection_shows_instruction(self, service):
+        doc = _series_doc(keys=["loss"], trial_display="highlighted")
+        panels, _payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        assert _panel_graphs(panels) == []
+        assert "Highlighted only" in str(panels)
+        assert "nothing is highlighted" in str(panels)
+
+    def test_highlighted_renders_only_the_selected_identities(self, service):
+        doc = _series_doc(keys=["loss"], trial_display="highlighted")
+        doc["highlighted_families"] = [str(RA2)]
+        panels, _payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        assert {trace.name for trace in graph.figure.data} == {
+            "cc310200/dd310100",
+            "cc310200/dd310200",
+        }
+        assert {trace.customdata[0] for trace in graph.figure.data} == {str(RA2)}
+
+    def test_all_mode_dims_everything_not_highlighted(self, service):
+        doc = _series_doc(keys=["loss"])
+        doc["highlighted_families"] = [str(TA)]
+        panels, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        by_name = {trace.name: trace for trace in graph.figure.data}
+        assert by_name["cc310300/dd310300"].opacity is None
+        assert by_name["cc310200/dd310200"].opacity == pytest.approx(0.25)
+
+    def test_median_iqr_traces_report_counts_and_bands(self, service):
+        doc = _series_doc(keys=["loss"], trial_display="median_iqr")
+        panels, _payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        names = [trace.name for trace in graph.figure.data if trace.name]
+        assert names == ["all trials · median (4 series)"]
+        median_trace = next(t for t in graph.figure.data if t.name)
+        assert list(median_trace.x) == [0, 1, 2, 3]
+        assert list(median_trace.customdata) == [4, 3, 2, 1]
+        bands = [t for t in graph.figure.data if t.fill == "tonexty"]
+        assert len(bands) == 1
+
+    def test_median_iqr_groups_only_by_explicit_color(self, service):
+        doc = _series_doc(keys=["loss"], trial_display="median_iqr", color="shard")
+        panels, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        names = [trace.name for trace in graph.figure.data if trace.name]
+        assert names == [
+            "0 · median (3 series)",
+            "1 · median (1 series)",
+        ]
+
+    def test_status_line_states_both_choices(self, service):
+        doc = _series_doc(keys=["loss"], trial_display="median_iqr", reduction="mean")
+        _panels, payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        assert (
+            series_status(doc, payload, incomplete=False)
+            == "display: median_iqr · reduction: mean · 3 series · scope terminal"
+        )
+
+    def test_updated_ago_reads_like_every_other_page(self):
+        assert updated_ago(0).startswith("Updated ")
+
+
+class TestContextFilters:
+    def test_service_discovers_every_dimension_value(self, service):
+        dims = {
+            entry["key"]: entry["values"]
+            for entry in service.analysis_context_values(PROJECT, _tray())
+        }
+        assert dims["host"] == ["node00", "node01", "node02"]
+        assert dims["shard"] == ["0", "1"]
+        assert service.analysis_context_values(None, None) == []
+
+    def test_filter_edits_add_drop_and_normalize(self):
+        doc = _series_doc(keys=["loss"])
+        added = view_from_context_filter(doc, "host", ["node01", "node00"])
+        assert added["series"]["context_filters"] == {"host": ["node01", "node00"]}
+        narrowed = view_from_context_filter(added, "host", ["node01"])
+        assert narrowed["series"]["context_filters"] == {"host": ["node01"]}
+        cleared = view_from_context_filter(narrowed, "host", [])
+        assert cleared["series"]["context_filters"] == {}
+        assert cleared["series"]["keys"] == ["loss"]
+
+    def test_filters_apply_before_rendering_and_missing_dims_exclude(self, service):
+        doc = _series_doc(keys=["loss"], context_filters={"host": ["node01"]})
+        panels, payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        assert {trace.name for trace in graph.figure.data} == {
+            "cc310200/dd310100",
+            "cc310200/dd310200",
+        }
+        assert len(payload["per_key"]["loss"]["series"]) == 2
+
+    def test_series_missing_the_dimension_never_matches(self):
+        per_key = [
+            {
+                "key": "loss",
+                "series": [
+                    {
+                        "trial": "a",
+                        "execution": None,
+                        "points": [(0, 1.0)],
+                        "context": {},
+                    },
+                    {
+                        "trial": "b",
+                        "execution": None,
+                        "points": [(0, 2.0)],
+                        "context": {"host": "node01"},
+                    },
+                ],
+            }
+        ]
+        filtered = apply_context_filters(per_key, {"host": ["node01"]})
+        assert [series["trial"] for series in filtered[0]["series"]] == ["b"]
+
+    def test_filter_controls_carry_all_values_and_doc_selection(self):
+        dims = [
+            {"key": "host", "values": ["node00", "node01"]},
+            {"key": "shard", "values": ["0", "1"]},
+        ]
+        controls = context_filter_controls(dims, {"host": ["node01"]})
+        dropdowns = [
+            node
+            for control in controls
+            for node in _walk(control, lambda item: isinstance(item, dcc.Dropdown))
+        ]
+        assert [dropdown.id["context-filter"] for dropdown in dropdowns] == [
+            "host",
+            "shard",
+        ]
+        assert dropdowns[0].value == ["node01"]
+        assert [option["value"] for option in dropdowns[0].options] == [
+            "node00",
+            "node01",
+        ]
+        assert dropdowns[1].value == []
+        assert "No context dimensions" in str(context_filter_controls([], {}))
+
+    def test_filters_survive_reload_through_the_url(self, service):
+        doc = _series_doc(keys=["loss"], context_filters={"shard": ["0"]})
+        search = f"?view={encode_view_state(doc)}"
+        hydrated, error = hydrate_view("/dashboard/analysis", search, None)
+        assert error is None and hydrated is not None
+        assert hydrated["series"]["context_filters"] == {"shard": ["0"]}
+
+    def test_color_assignment_is_stable_under_filtering(self, service):
+        unfiltered_doc = _series_doc(keys=["loss"])
+        panels, *_rest = series_outputs(service, PROJECT, _tray(), unfiltered_doc)
+        unfiltered = {
+            trace.name: trace.line.color
+            for trace in _panel_graphs(panels)[0].figure.data
+        }
+        filtered_doc = _series_doc(keys=["loss"], context_filters={"host": ["node01"]})
+        panels, *_rest = series_outputs(service, PROJECT, _tray(), filtered_doc)
+        for trace in _panel_graphs(panels)[0].figure.data:
+            assert trace.line.color == unfiltered[trace.name]
+
+
+class TestLinkedTrialTable:
+    def test_columns_and_rows_from_existing_data(self, service):
+        columns, rows, selected = trial_table_outputs(
+            service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), _series_doc(keys=["loss"])
+        )
+        assert [column["field"] for column in columns] == [
+            "number",
+            "trial_short",
+            "state",
+            "objective",
+            "p_lr",
+            "p_seed",
+        ]
+        by_trial = {row["trial_short"]: row for row in rows}
+        assert by_trial["cc310200"]["objective"] == "0.12"
+        assert by_trial["cc310200"]["p_lr"] == "0.1"
+        assert by_trial["cc310200"]["state"] == "completed"
+        assert selected == []
+
+    def test_selection_follows_highlighted_identities(self, service):
+        doc = _series_doc(keys=["loss"])
+        doc["highlighted_families"] = [str(TA), str(RA2)]
+        _columns, _rows, selected = trial_table_outputs(
+            service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), doc
+        )
+        assert [row["trial_id"] for row in selected] == [str(RA2), str(TA)]
+
+    def test_highlights_edit_keeps_order_and_other_fields(self):
+        doc = _series_doc(keys=["loss"])
+        edited = view_from_highlights(
+            doc, [{"trial_id": str(TB)}, {"trial_id": str(TC)}]
+        )
+        assert edited["highlighted_families"] == [str(TB), str(TC)]
+        assert edited["series"]["keys"] == ["loss"]
+        assert view_from_highlights(doc, None)["highlighted_families"] == []
+
+    def test_plot_click_toggles_the_identity(self):
+        doc = _series_doc(keys=["loss"])
+        click = {"points": [{"customdata": str(RA2)}]}
+        picked = view_from_plot_click(doc, click)
+        assert picked is not None
+        assert picked["highlighted_families"] == [str(RA2)]
+        cleared = view_from_plot_click(picked, click)
+        assert cleared is not None
+        assert cleared["highlighted_families"] == []
+        assert view_from_plot_click(doc, {"points": [{}]}) is None
+        assert view_from_plot_click(doc, None) is None
+
+    def test_traces_carry_the_trial_identity_for_plot_clicks(self, service):
+        doc = _series_doc(keys=["loss"])
+        panels, *_rest = series_outputs(service, PROJECT, _tray(), doc)
+        graph = _panel_graphs(panels)[0]
+        assert {trace.customdata[0] for trace in graph.figure.data} == {
+            str(RA0),
+            str(RA2),
+            str(TA),
+        }
+
+
+class TestRefreshBehavior:
+    def test_scope_incompleteness_follows_running_work(self, tmp_path):
+        service = _live_service(tmp_path)
+        assert service.analysis_scope_incomplete(PROJECT, _tray(sweeps=[str(SWEEP_D)]))
+        assert not service.analysis_scope_incomplete(
+            PROJECT, _tray(sweeps=[str(SWEEP_A)])
+        )
+
+    def test_auto_refresh_polls_gates_on_intent_and_incompleteness(self, tmp_path):
+        service = _live_service(tmp_path)
+        live_tray = _tray(sweeps=[str(SWEEP_D)])
+        done_tray = _tray(sweeps=[str(SWEEP_A)])
+        doc = dict(default_view_state(), auto_refresh=True)
+        assert auto_refresh_polls(service, PROJECT, live_tray, doc)
+        assert not auto_refresh_polls(service, PROJECT, done_tray, doc)
+        assert not auto_refresh_polls(service, PROJECT, live_tray, default_view_state())
+        assert not auto_refresh_polls(None, None, None, doc)
+
+    def test_page_content_enables_analysis_polling_conditionally(self, tmp_path):
+        service = _live_service(tmp_path)
+        live_tray = _tray(sweeps=[str(SWEEP_D)])
+        doc = dict(default_view_state(), auto_refresh=True)
+        _page, polls = page_content(
+            "/dashboard/analysis",
+            service,
+            view_doc=doc,
+            tray=live_tray,
+            project=PROJECT,
+        )
+        assert polls is True
+        _page, polls = page_content(
+            "/dashboard/analysis",
+            service,
+            view_doc=dict(default_view_state()),
+            tray=live_tray,
+            project=PROJECT,
+        )
+        assert polls is False
+
+    def test_auto_refresh_flips_off_only_when_terminal(self):
+        doc = dict(default_view_state(), auto_refresh=True)
+        assert auto_refresh_flip(doc, True) is None
+        flipped = auto_refresh_flip(doc, False)
+        assert flipped is not None and flipped["auto_refresh"] is False
+        assert auto_refresh_flip(default_view_state(), False) is None
+
+    def test_series_tab_outputs_shape(self, tmp_path):
+        service = _live_service(tmp_path)
+        doc = _series_doc(keys=["loss"], context_filters={"host": ["node01"]})
+        outputs = series_tab_outputs(
+            service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), doc, 1_000
+        )
+        (
+            panels,
+            _payload,
+            key_options,
+            color_options,
+            facet_options,
+            filters,
+            status,
+            updated,
+            figure,
+            refresh,
+        ) = outputs
+        assert _panel_graphs(panels) == []
+        assert figure is not None and figure.layout.uirevision == "analysis-series"
+        assert key_options and color_options == facet_options
+        dropdowns = [
+            node
+            for control in filters
+            for node in _walk(control, lambda item: isinstance(item, dcc.Dropdown))
+        ]
+        assert [dropdown.id["context-filter"] for dropdown in dropdowns] == [
+            "host",
+            "shard",
+        ]
+        assert status.startswith("display: all · reduction: none · ")
+        assert updated.startswith("Updated ")
+        assert refresh == {"error": "", "at_ns": 1_000}
+
+    def test_refresh_failure_keeps_last_success_and_surfaces_error(self):
+        failure = refresh_failure(RuntimeError("store is gone"), 42)
+        assert failure[0] is no_update
+        assert "refresh failed" in str(failure[6])
+        assert "store is gone" in str(failure[6])
+        assert failure[7] is no_update
+        assert failure[8] is no_update
+        assert failure[9] == {
+            "error": "refresh failed — keeping the last successful view: store is gone",
+            "at_ns": 42,
+        }
+
+    def test_broken_service_read_raises_through_to_the_callback_wrap(self):
+        class BrokenService:
+            def analysis_value_keys(self, *args, **kwargs):
+                raise RuntimeError("boom")
+
+        broken: Any = BrokenService()
+        with pytest.raises(RuntimeError, match="boom"):
+            series_tab_outputs(broken, PROJECT, _tray(), None, 1)

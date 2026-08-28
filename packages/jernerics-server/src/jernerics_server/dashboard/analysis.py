@@ -15,6 +15,7 @@ flows through DashboardService.
 import json
 import math
 import uuid
+from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qs, quote
 
@@ -23,7 +24,7 @@ from dash_ag_grid import AgGrid
 from jernerics_schema import Selection
 
 from . import components, figures
-from .components import MISSING, Badge, Empty, short_id
+from .components import MISSING, Badge, Empty, Error, relative_time, short_id
 from .routes import ROUTES_BASE, parse_route
 from .selection_tokens import (
     SelectionTokenError,
@@ -57,6 +58,7 @@ VIEW_VERSION = 1
 
 _ANALYSIS_VIEWS = ("catalog", "series", "points", "optuna", "python")
 _SERIES_MODES = ("stacked", "overlay")
+_TRIAL_DISPLAYS = ("all", "highlighted", "median_iqr")
 _AXIS_SCALES = ("linear", "log")
 _AXIS_RANGES = ("auto", "custom")
 
@@ -79,7 +81,7 @@ def default_view_state() -> dict[str, Any]:
             "keys": [],
             "mode": "stacked",
             "reduction": "none",
-            "trial_display": None,
+            "trial_display": "all",
             "context_filters": {},
             "color": None,
             "facet": None,
@@ -191,9 +193,14 @@ def decode_view_state(raw: str) -> dict[str, Any]:
         f"unsupported execution reduction {reduction!r}",
     )
     doc["series"]["reduction"] = reduction
-    doc["series"]["trial_display"] = _optional_key(
-        series.get("trial_display"), "series.trial_display"
+    trial_display = series.get("trial_display")
+    if trial_display is None:
+        trial_display = "all"
+    _require(
+        trial_display in _TRIAL_DISPLAYS,
+        f"unsupported trial display {trial_display!r}",
     )
+    doc["series"]["trial_display"] = trial_display
     filters = series.get("context_filters", {})
     _require(isinstance(filters, dict), "series.context_filters must be an object")
     for name, values in filters.items():
@@ -309,8 +316,9 @@ def control_values(
     loaded: dict[str, set[str] | None],
 ) -> tuple[Any, ...]:
     """(active, keys, mode, reduction, color, facet, contour_x,
-    contour_y) the analysis controls take from the view state; dropdown
-    values arrive only once their options carry them."""
+    contour_y, trial_display, auto_refresh) the analysis controls take
+    from the view state; dropdown values arrive only once their options
+    carry them."""
     doc = doc or default_view_state()
     return (
         doc["active"],
@@ -321,6 +329,8 @@ def control_values(
         _gated_value(doc["series"]["facet"], loaded.get("facet")),
         _gated_value(doc["optuna"]["contour_x"], loaded.get("contour_x")),
         _gated_value(doc["optuna"]["contour_y"], loaded.get("contour_y")),
+        doc["series"]["trial_display"],
+        ["auto"] if doc["auto_refresh"] else [],
     )
 
 
@@ -335,6 +345,8 @@ def view_from_controls(
     facet: str | None,
     contour_x: str | None,
     contour_y: str | None,
+    trial_display: str | None = None,
+    auto_refresh: bool | None = None,
     edited: set[str],
 ) -> dict[str, Any]:
     """View state after a control edit. Only the fields named in
@@ -342,9 +354,8 @@ def view_from_controls(
     authoritative; the rest survive from ``current`` — a control-sync
     write fires the edit callback with every input, and a control whose
     options have not loaded reports None, which must not read as a
-    clear. Fields without controls at all (trial display, context
-    filters, per-key axes, the overlay axis, highlighted families,
-    auto-refresh) always survive."""
+    clear. Fields without controls at all (context filters, per-key
+    axes, the overlay axis, highlighted families) always survive."""
     doc = current or default_view_state()
     series = dict(doc["series"])
     if "keys" in edited:
@@ -355,15 +366,22 @@ def view_from_controls(
         series["mode"] = mode
     if "reduction" in edited:
         series["reduction"] = reduction if reduction in ANALYSIS_REDUCTIONS else "none"
+    if "trial_display" in edited:
+        series["trial_display"] = (
+            trial_display if trial_display in _TRIAL_DISPLAYS else "all"
+        )
     if "color" in edited:
-        series["color"] = color
+        series["color"] = color or None
     if "facet" in edited:
-        series["facet"] = facet
+        series["facet"] = facet or None
     optuna = dict(doc["optuna"])
     if "contour_x" in edited:
-        optuna["contour_x"] = contour_x
+        optuna["contour_x"] = contour_x or None
     if "contour_y" in edited:
-        optuna["contour_y"] = contour_y
+        optuna["contour_y"] = contour_y or None
+    auto_refresh_state = bool(doc["auto_refresh"])
+    if "auto_refresh" in edited and auto_refresh is not None:
+        auto_refresh_state = bool(auto_refresh)
     return {
         **doc,
         "active": (
@@ -373,6 +391,7 @@ def view_from_controls(
         ),
         "series": series,
         "optuna": optuna,
+        "auto_refresh": auto_refresh_state,
     }
 
 
@@ -381,6 +400,8 @@ _CONTROL_IDS = {
     "analysis-key": "keys",
     "analysis-mode": "mode",
     "analysis-reduction": "reduction",
+    "analysis-display": "trial_display",
+    "analysis-auto-refresh": "auto_refresh",
     "analysis-color": "color",
     "analysis-facet": "facet",
     "analysis-contour-x": "contour_x",
@@ -477,33 +498,33 @@ def analysis_page() -> html.Div:
                 id="analysis-tabs",
                 value="catalog",
                 children=[
-                    dcc.Tab(
-                        label="Data catalog",
-                        value="catalog",
-                        children=html.Div(id="analysis-catalog"),
-                    ),
-                    dcc.Tab(
-                        label="Series panels",
-                        value="series",
-                        children=_series_tab(),
-                    ),
-                    dcc.Tab(
-                        label="Points",
-                        value="points",
-                        children=html.Div(id="analysis-points"),
-                    ),
-                    dcc.Tab(
-                        label="Optuna views",
-                        value="optuna",
-                        children=_optuna_tab(),
-                    ),
-                    dcc.Tab(
-                        label="Continue in Python",
-                        value="python",
-                        children=html.Div(id="analysis-python"),
-                    ),
+                    dcc.Tab(label="Data catalog", value="catalog"),
+                    dcc.Tab(label="Series panels", value="series"),
+                    dcc.Tab(label="Points", value="points"),
+                    dcc.Tab(label="Optuna views", value="optuna"),
+                    dcc.Tab(label="Continue in Python", value="python"),
                 ],
             ),
+            # Content stays mounted across tab switches: dash scrambles
+            # callback inputs positionally when a callback spans mounted
+            # and unmounted components, so the visibility toggle is
+            # clientside CSS, never a re-mount.
+            html.Div(
+                id="analysis-catalog",
+                style={"display": "block"},
+            ),
+            html.Div(
+                _series_tab().children,
+                id="analysis-series-tab",
+                style={"display": "none"},
+            ),
+            html.Div(id="analysis-points", style={"display": "none"}),
+            html.Div(
+                _optuna_tab().children,
+                id="analysis-optuna-tab",
+                style={"display": "none"},
+            ),
+            html.Div(id="analysis-python", style={"display": "none"}),
         ],
         className="page",
     )
@@ -592,17 +613,61 @@ def _series_tab() -> html.Div:
                 ],
                 className="analysis-controls",
             ),
+            html.Div(
+                [
+                    dcc.RadioItems(
+                        id="analysis-display",
+                        options=[
+                            {"label": " All raw", "value": "all"},
+                            {"label": " Highlighted only", "value": "highlighted"},
+                            {"label": " Median + IQR", "value": "median_iqr"},
+                        ],
+                        value="all",
+                        inline=True,
+                    ),
+                    html.Button("Refresh", id="analysis-refresh", n_clicks=0),
+                    dcc.Checklist(
+                        id="analysis-auto-refresh",
+                        options=[
+                            {
+                                "label": " Auto-refresh while incomplete",
+                                "value": "auto",
+                            }
+                        ],
+                        value=[],
+                        inline=True,
+                    ),
+                    html.Span(id="analysis-series-status", className="series-status"),
+                    html.Span(id="analysis-updated", className="series-updated"),
+                ],
+                className="series-toolbar",
+            ),
             html.P(
-                "Stacked (default): one linked-x panel per key with its own "
-                "y axis. Overlay (explicit): every key on ONE shared, "
-                "unnormalized y axis. Group executions: “none” shows every "
-                "(trial, execution) series as logged; mean/min/max fold "
-                "executions within each trial, per step — never an implicit "
-                "latest value.",
+                "Display mode says how trials compare: All raw renders every "
+                "series (line density warns above 100), Highlighted only "
+                "renders the trial-table selection, Median + IQR aggregates "
+                "per color/facet group at each observed step. Execution "
+                "reduction stays separate: “none” shows every (trial, "
+                "execution) series as logged; mean/min/max fold executions "
+                "within each trial — never an implicit latest value.",
                 className="hint",
             ),
+            html.Div(id="analysis-context-filters", className="context-filters"),
+            AgGrid(
+                id="analysis-trial-grid",
+                rowData=[],
+                columnDefs=[],
+                defaultColDef=_GRID_DEFAULTS,
+                dashGridOptions=components.grid_options(
+                    rowSelection={"mode": "multiRow"}
+                ),
+                className="ag-theme-alpine grid trial-grid",
+            ),
             html.Div(id="analysis-series-panels"),
+            dcc.Graph(id="analysis-series-figure"),
+            dcc.Store(id="analysis-series-figure-store"),
             dcc.Store(id="analysis-series-data"),
+            dcc.Store(id="analysis-refresh-store"),
         ]
     )
 
@@ -1198,20 +1263,31 @@ def _note_span(notes: list[str], note_id: Any) -> html.Span:
     )
 
 
+def _panel_notes(
+    series: list[dict[str, Any]], axis: dict[str, Any] | None, display: str
+) -> list[str]:
+    """Header notes for one panel: coverage, axis facts, and the raw
+    series count with its density warning above 100."""
+    resolved = figures.resolve_axis(axis, series)
+    notes = [*figures.axis_notes(resolved), *figures.count_note(len(series), display)]
+    if not series:
+        notes = ["no observations under this scope", *notes]
+    return notes
+
+
 def _panel_headers(
     per_key: list[dict[str, Any]],
     axes: dict[str, dict[str, Any]],
+    *,
+    display: str = "all",
 ) -> list[html.Div]:
     """Per-key header rows in picker order: title, reorder buttons, the
-    compact axis controls, and the coverage/clipping notes."""
+    compact axis controls, and the coverage/clipping/count notes."""
     headers = []
     for index, entry in enumerate(per_key, start=1):
         key = entry["key"]
         axis = axes.get(key) or default_axis_state()
-        resolved = figures.resolve_axis(axis, entry["series"])
-        notes = figures.axis_notes(resolved)
-        if not entry["series"]:
-            notes = ["no observations under this scope", *notes]
+        notes = _panel_notes(entry["series"], axis, display)
         headers.append(
             html.Div(
                 [
@@ -1241,11 +1317,10 @@ def panel_notes(view_doc: dict[str, Any] | None, data: dict[str, Any] | None) ->
     notes = []
     for key in doc["series"]["keys"]:
         series = (data or {}).get("per_key", {}).get(key, {}).get("series", [])
-        resolved = figures.resolve_axis(doc["series"]["axes"].get(key), series)
-        parts = figures.axis_notes(resolved)
-        if not series:
-            parts = ["no observations under this scope", *parts]
-        notes.append(" · ".join(parts))
+        axis = doc["series"]["axes"].get(key)
+        notes.append(
+            " · ".join(_panel_notes(series, axis, doc["series"]["trial_display"]))
+        )
     return notes
 
 
@@ -1255,24 +1330,69 @@ def _overlay_panel(
     *,
     color: str | None,
     facet: str | None,
+    display: str = "all",
+    highlighted: Sequence[str] = (),
+    color_map: dict[str, str] | None = None,
 ) -> list[Any]:
     """The explicit shared-axis overlay: one control block, one figure,
     no per-key axes disturbed."""
     pooled = [series for entry in per_key for series in entry["series"]]
-    resolved = figures.resolve_axis(overlay_axis, pooled)
+    notes = [
+        *figures.axis_notes(figures.resolve_axis(overlay_axis, pooled)),
+        *figures.count_note(len(pooled), display),
+    ]
     figure = dcc.Graph(
-        figure=figures.overlay_figure(per_key, overlay_axis, color=color, facet=facet)
+        figure=figures.overlay_figure(
+            per_key,
+            overlay_axis,
+            color=color,
+            facet=facet,
+            display=display,
+            highlighted=highlighted,
+            color_map=color_map,
+        ),
     )
     return [
         html.Div(
             [
                 html.Span("Shared y axis (unnormalized)", className="panel-title"),
                 *_axis_controls(overlay_axis, None, overlay=True),
-                _note_span(figures.axis_notes(resolved), "analysis-overlay-note"),
+                _note_span(notes, "analysis-overlay-note"),
             ],
             className="panel-header",
         ),
         figure,
+    ]
+
+
+def series_passes_filters(
+    series: dict[str, Any], filters: dict[str, list[str]]
+) -> bool:
+    """A series renders only when every active context filter matches its
+    context; a series missing the dimension does not match."""
+    context = series.get("context") or {}
+    return all(
+        str(context.get(dimension)) in values
+        for dimension, values in filters.items()
+        if values
+    )
+
+
+def apply_context_filters(
+    per_key: list[dict[str, Any]], filters: dict[str, list[str]]
+) -> list[dict[str, Any]]:
+    """The per-key entries after context filtering — filters apply before
+    raw, highlighted, and summary rendering alike."""
+    return [
+        {
+            "key": entry["key"],
+            "series": [
+                series
+                for series in entry["series"]
+                if series_passes_filters(series, filters)
+            ],
+        }
+        for entry in per_key
     ]
 
 
@@ -1286,8 +1406,8 @@ def series_outputs(
 ]:
     """(panels, data payload, key options, color options, facet options)
     for the series tab — the callback's output order: every panel comes
-    from ONE multi-key values read; per-key axis state rides the view
-    doc."""
+    from ONE multi-key values read; per-key axis state, context filters,
+    display mode, and highlights ride the view doc."""
     doc = view_doc or default_view_state()
     series_doc = doc["series"]
     keys = list(series_doc["keys"])
@@ -1319,7 +1439,11 @@ def series_outputs(
     per_key = service.analysis_series(
         project, tray, keys, series_doc["reduction"] or "none"
     )
+    color_map = figures.identity_color_map(per_key, series_doc["color"])
+    per_key = apply_context_filters(per_key, series_doc["context_filters"])
     payload = _series_payload(per_key, keys)
+    display = series_doc["trial_display"]
+    highlighted = list(doc["highlighted_families"])
     if not keys:
         panels = [
             Empty(
@@ -1333,16 +1457,34 @@ def series_outputs(
             series_doc["overlay_axis"],
             color=series_doc["color"],
             facet=series_doc["facet"],
+            display=display,
+            highlighted=highlighted,
+            color_map=color_map,
         )
     else:
         panels = [
-            *_panel_headers(per_key, series_doc["axes"]),
-            dcc.Graph(
-                figure=figures.stacked_figure(
-                    per_key,
-                    series_doc["axes"],
-                    color=series_doc["color"],
-                    facet=series_doc["facet"],
+            *_panel_headers(per_key, series_doc["axes"], display=display),
+            (
+                html.Div(
+                    Empty(
+                        "Highlighted only: select rows in the trial table (or "
+                        "click a trace) — nothing is highlighted yet, so no "
+                        "series render. All raw is one click away; nothing "
+                        "switches on its own."
+                    ),
+                    className="panel-instruction",
+                )
+                if display == "highlighted" and not highlighted
+                else dcc.Graph(
+                    figure=figures.stacked_figure(
+                        per_key,
+                        series_doc["axes"],
+                        color=series_doc["color"],
+                        facet=series_doc["facet"],
+                        display=display,
+                        highlighted=highlighted,
+                        color_map=color_map,
+                    ),
                 )
             ),
         ]
@@ -1725,4 +1867,271 @@ def python_tab(
                 className="section",
             ),
         ]
+    )
+
+
+def context_filter_controls(
+    dims: list[dict[str, Any]], filters: dict[str, list[str]]
+) -> list[Any]:
+    """One multi-value dropdown per discovered context dimension; values
+    come from the view doc, options from unfiltered discovery so filters
+    never shrink each other's options."""
+    if not dims:
+        return [html.Span("No context dimensions under this scope.", className="hint")]
+    return [
+        html.Div(
+            [
+                html.Label(dimension["key"], className="filter-label"),
+                dcc.Dropdown(
+                    id={"context-filter": dimension["key"]},
+                    options=[
+                        {"label": value, "value": value}
+                        for value in dimension["values"]
+                    ],
+                    value=list(filters.get(dimension["key"]) or []),
+                    multi=True,
+                    placeholder=f"Filter {dimension['key']}…",
+                ),
+            ],
+            className="context-filter",
+        )
+        for dimension in dims
+    ]
+
+
+def view_from_context_filter(
+    current: dict[str, Any] | None, dimension: str, values: list[str] | None
+) -> dict[str, Any]:
+    """View doc after one context-filter edit; empty selections drop the
+    dimension so the canonical doc never carries no-op filters."""
+    doc = current or default_view_state()
+    filters = {
+        name: list(entries)
+        for name, entries in doc["series"]["context_filters"].items()
+        if entries
+    }
+    picked = [str(value) for value in values or [] if str(value)]
+    if picked:
+        filters[dimension] = picked
+    else:
+        filters.pop(dimension, None)
+    return {
+        **doc,
+        "series": {**doc["series"], "context_filters": filters},
+    }
+
+
+_TRIAL_PARAM_COLUMNS = 3
+"""Sampled-param columns the compact linked table shows."""
+
+
+def trial_table_columns(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Compact family/trial table columns: number, short id, objective,
+    state, and up to three key sampled params."""
+    param_keys = sorted(
+        {key for trial in trials for key in (trial.get("params") or {})}
+    )[:_TRIAL_PARAM_COLUMNS]
+    return [
+        {"headerName": "#", "field": "number", "maxWidth": 80},
+        {"headerName": "Trial", "field": "trial_short"},
+        {"headerName": "State", "field": "state"},
+        {"headerName": "Objective", "field": "objective"},
+        *({"headerName": key, "field": f"p_{key}"} for key in param_keys),
+    ]
+
+
+def trial_table_rows(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per trial under the effective selection; ``trial_id`` is
+    the linking identity carried by row selection and plot clicks."""
+    return [
+        {
+            "trial_id": trial["trial_id"],
+            "number": trial["number"],
+            "trial_short": short_id(trial["trial_id"]),
+            "state": trial["state"],
+            "objective": _objective(trial["objective"]),
+            **{
+                f"p_{key}": _format_payload(value)
+                for key, value in (trial.get("params") or {}).items()
+                if key
+                in {
+                    column["field"][2:]
+                    for column in trial_table_columns(trials)
+                    if column["field"].startswith("p_")
+                }
+            },
+        }
+        for trial in trials
+    ]
+
+
+def trial_table_outputs(
+    service: DashboardService | None,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    view_doc: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """(columns, rows, selected rows) for the linked trial table."""
+    doc = view_doc or default_view_state()
+    if not project or service is None:
+        return [], [], []
+    trials = service.analysis_trials(project, tray)
+    rows = trial_table_rows(trials)
+    picked = set(doc["highlighted_families"])
+    return (
+        trial_table_columns(trials),
+        rows,
+        [row for row in rows if row["trial_id"] in picked],
+    )
+
+
+def view_from_highlights(
+    current: dict[str, Any] | None, rows: list[dict[str, Any]] | None
+) -> dict[str, Any]:
+    """View doc after a trial-table selection edit; the ordered row ids
+    are the highlighted identities every panel shares."""
+    doc = current or default_view_state()
+    return {
+        **doc,
+        "highlighted_families": [
+            str(row["trial_id"]) for row in rows or [] if row.get("trial_id")
+        ],
+    }
+
+
+def view_from_plot_click(
+    current: dict[str, Any] | None, click: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """View doc after a trace click: highlight that trial alone, or clear
+    when it was the only highlight. ``None`` when Plotly exposed no
+    usable identity."""
+    points = (click or {}).get("points") or []
+    identity = points[0].get("customdata") if points else None
+    if not identity:
+        return None
+    doc = current or default_view_state()
+    picked = [str(identity)]
+    if doc["highlighted_families"] == picked:
+        picked = []
+    return {**doc, "highlighted_families": picked}
+
+
+def series_status(
+    doc: dict[str, Any] | None,
+    payload: dict[str, Any] | None,
+    *,
+    incomplete: bool,
+) -> str:
+    """One line stating both explicit choices — display mode and
+    execution reduction — plus the rendered series count and scope
+    liveness."""
+    doc = doc or default_view_state()
+    per_key = (payload or {}).get("per_key", {})
+    count = sum(len(entry.get("series", [])) for entry in per_key.values())
+    scope = "scope incomplete" if incomplete else "scope terminal"
+    return (
+        f"display: {doc['series']['trial_display']} · "
+        f"reduction: {doc['series']['reduction']} · "
+        f"{count} series · {scope}"
+    )
+
+
+def updated_ago(at_ns: int) -> str:
+    """The refresh fact line; ages at render time like every page."""
+    return f"Updated {relative_time(at_ns)}"
+
+
+def auto_refresh_polls(
+    service: DashboardService | None,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    view_doc: dict[str, Any] | None,
+) -> bool:
+    """The poll interval runs only while the persisted auto-refresh
+    intent is on AND the selected scope still has incomplete work."""
+    if not (view_doc or {}).get("auto_refresh"):
+        return False
+    if service is None or not project:
+        return False
+    return service.analysis_scope_incomplete(project, tray)
+
+
+def auto_refresh_flip(
+    view_doc: dict[str, Any] | None, incomplete: bool
+) -> dict[str, Any] | None:
+    """Doc clearing auto-refresh once the scope turned terminal; ``None``
+    keeps the persisted intent."""
+    if not view_doc or not view_doc.get("auto_refresh") or incomplete:
+        return None
+    return {**view_doc, "auto_refresh": False}
+
+
+def _extract_series_figure(panels: list[Any]) -> tuple[list[Any], Any]:
+    """(panels without the embedded graph, its figure): the callback
+    writes the figure to the layout-level graph, so Plotly's uirevision
+    keeps user zoom across refreshes instead of losing a replaced div."""
+    for index, node in enumerate(panels):
+        if isinstance(node, dcc.Graph):
+            return [*panels[:index], *panels[index + 1 :]], node.figure
+    return panels, figures.empty_figure()
+
+
+def series_tab_outputs(
+    service: DashboardService | None,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    view_doc: dict[str, Any] | None,
+    now_ns: int,
+) -> tuple[Any, ...]:
+    """The series callback's outputs: panels/payload/options from the
+    series read, the context-filter controls from the discovery read,
+    the figure for the stable graph (a clientside merge re-applies the
+    user's zoom), the status/updated facts, and the refresh-state store
+    payload."""
+    doc = view_doc or default_view_state()
+    panels, payload, key_options, dim_options, _facet = series_outputs(
+        service, project, tray, doc
+    )
+    panels, figure = _extract_series_figure(panels)
+    dims = (
+        service.analysis_context_values(project, tray)
+        if project and service is not None
+        else []
+    )
+    filters_ui = context_filter_controls(dims, doc["series"]["context_filters"])
+    incomplete = (
+        service.analysis_scope_incomplete(project, tray)
+        if project and service is not None
+        else False
+    )
+    return (
+        panels,
+        payload,
+        key_options,
+        dim_options,
+        dim_options,
+        filters_ui,
+        series_status(doc, payload, incomplete=incomplete),
+        updated_ago(now_ns),
+        figure,
+        {"error": "", "at_ns": now_ns},
+    )
+
+
+def refresh_failure(error: Exception, now_ns: int) -> tuple[Any, ...]:
+    """The series callback's no_update tuple for a failed refresh: the
+    last successful panels, figure, options, and controls survive and
+    the error surfaces in the status and message regions."""
+    message = f"refresh failed — keeping the last successful view: {error}"
+    return (
+        no_update,
+        no_update,
+        no_update,
+        no_update,
+        no_update,
+        no_update,
+        Error(message),
+        no_update,
+        no_update,
+        {"error": message, "at_ns": now_ns},
     )

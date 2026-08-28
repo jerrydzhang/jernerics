@@ -661,3 +661,56 @@ a.project-row:hover {
 .include-toggle {
   margin: 0.6rem 0 0.2rem;
 }
+
+/* Dense comparison, linked table, and refresh (jernerics-cdf.5) */
+
+.series-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 0.6rem 0;
+}
+
+.series-toolbar button {
+  flex: none;
+}
+
+.series-status,
+.series-updated {
+  font-size: 0.9rem;
+  color: #444;
+}
+
+.series-updated {
+  margin-left: auto;
+}
+
+.context-filters {
+  display: flex;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  margin: 0.4rem 0 0.8rem;
+}
+
+.context-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 14rem;
+}
+
+.filter-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.trial-grid {
+  height: 16rem;
+  margin: 0.4rem 0 0.8rem;
+}
+
+.panel-instruction {
+  padding: 1.5rem;
+}

@@ -13,6 +13,7 @@ dimension; anything harder would degrade to color-only.
 """
 
 import math
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -22,17 +23,22 @@ from plotly.subplots import make_subplots
 
 from .components import short_id
 
-_STUDY_FIG_MAX_PARAMS = 8
-"""Slice subplot cap per sweep; extra params are omitted, not merged."""
+_DASHES = ("solid", "dot", "dash", "longdash", "dashdot", "longdashdot")
+"""Line styles distinguishing executions within one trial."""
 
 _PALETTE = pc.qualitative.Safe
 """One color per trial/family identity — stable across panels and modes."""
 
-_DASHES = ("solid", "dot", "dash", "longdash", "dashdot", "longdashdot")
-"""Line styles distinguishing executions within one trial."""
+_UIREVISION = "analysis-series"
+"""Stable Plotly revision: re-renders preserve user zoom and axes."""
+
+_DENSE_SERIES_LIMIT = 100
+"""Raw series per panel above which the density warning shows."""
+
+_STUDY_FIG_MAX_PARAMS = 8
+"""Slice subplot cap per sweep; extra params are omitted, not merged."""
 
 _PANEL_HEIGHT = 240
-"""Pixel height budget per stacked panel."""
 
 
 def _is_number(value: Any) -> bool:
@@ -98,6 +104,75 @@ def series_label(series: dict[str, Any]) -> str:
     return f"{trial}/{execution}" if execution else trial
 
 
+def empty_figure() -> go.Figure:
+    """A blank figure with the stable uirevision for no-figure states."""
+    return go.Figure(layout={"uirevision": _UIREVISION})
+
+
+def percentile(values: list[float], q: int) -> float:
+    """Linear-interpolation percentile (numpy's default method) over
+    observed values only; ``q`` is 0-100."""
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * (q / 100)
+    low = math.floor(position)
+    high = math.ceil(position)
+    if low == high:
+        return ordered[low]
+    weight = position - low
+    return ordered[low] * (1 - weight) + ordered[high] * weight
+
+
+def median_iqr_summary(
+    per_key: list[dict[str, Any]], color: str | None = None, facet: str | None = None
+) -> dict[str, list[dict[str, Any]]]:
+    """Per key and explicit (facet, color-identity) group: median, q25,
+    q75, and contributing count at each OBSERVED step — absent steps stay
+    absent, values are never interpolated."""
+    summaries: dict[str, list[dict[str, Any]]] = {}
+    for entry in per_key:
+        grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for series in entry["series"]:
+            identity = (
+                str((series.get("context") or {}).get(color)) if color else "all trials"
+            )
+            grouped.setdefault((_facet_value(series, facet), identity), []).append(
+                series
+            )
+        rows = []
+        for (facet_value, identity), members in sorted(grouped.items()):
+            by_step: dict[int, list[float]] = {}
+            for series in members:
+                for step, value in series["points"]:
+                    by_step.setdefault(step, []).append(value)
+            steps = sorted(by_step)
+            rows.append(
+                {
+                    "facet": facet_value,
+                    "identity": identity,
+                    "series_count": len(members),
+                    "steps": steps,
+                    "median": [percentile(by_step[step], 50) for step in steps],
+                    "q25": [percentile(by_step[step], 25) for step in steps],
+                    "q75": [percentile(by_step[step], 75) for step in steps],
+                    "counts": [len(by_step[step]) for step in steps],
+                }
+            )
+        summaries[entry["key"]] = rows
+    return summaries
+
+
+def count_note(series_count: int, display: str) -> list[str]:
+    """Raw-series count note plus the line-density warning above 100 in
+    All-raw mode (never a silent sample or mode switch)."""
+    notes = [f"{series_count} series"]
+    if display == "all" and series_count > _DENSE_SERIES_LIMIT:
+        notes.append(
+            f"line density: {series_count} series may render slowly — "
+            "consider Highlighted only or Median + IQR"
+        )
+    return notes
+
+
 def identity_of(series: dict[str, Any], color: str | None) -> str:
     """Stable color identity: the chosen context dimension's value when
     picked, else the trial."""
@@ -150,7 +225,9 @@ def _scatter(
     dash: str,
     legendgroup: str,
     showlegend: bool,
+    opacity: float | None = None,
 ) -> go.Scatter:
+    kwargs: dict[str, Any] = {"opacity": opacity} if opacity is not None else {}
     return go.Scatter(
         x=[step for step, _value in series["points"]],
         y=[value for _step, value in series["points"]],
@@ -160,7 +237,80 @@ def _scatter(
         showlegend=showlegend,
         line={"color": color, "dash": dash},
         marker={"color": color},
+        customdata=[series["trial"]] * len(series["points"]),
+        **kwargs,
     )
+
+
+def _rgba(color: str, alpha: float) -> str:
+    """``rgba(...)`` from a plotly ``rgb(...)`` or ``#rrggbb`` color."""
+    if color.startswith("rgb("):
+        red, green, blue = (int(part) for part in color[4:-1].split(","))
+    else:
+        digits = color.lstrip("#")
+        red, green, blue = (int(digits[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({red}, {green}, {blue}, {alpha})"
+
+
+def _add_summary_traces(
+    figure: go.Figure,
+    group: dict[str, Any],
+    *,
+    color: str,
+    row: int,
+    name_prefix: str = "",
+    legend_seen: set[str],
+) -> None:
+    """One median line with a q25-q75 band; the legend carries the
+    contributing series count, the hover the per-step count."""
+    legendgroup = f"summary-{group['identity']}-{name_prefix}"
+    name = f"{name_prefix}{group['identity']} · median ({group['series_count']} series)"
+    showlegend = legendgroup not in legend_seen
+    figure.add_trace(
+        go.Scatter(
+            x=group["steps"],
+            y=group["q25"],
+            line={"width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+            legendgroup=legendgroup,
+        ),
+        row=row,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=group["steps"],
+            y=group["q75"],
+            fill="tonexty",
+            fillcolor=_rgba(color, 0.18),
+            line={"width": 0},
+            hoverinfo="skip",
+            showlegend=False,
+            legendgroup=legendgroup,
+        ),
+        row=row,
+        col=1,
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=group["steps"],
+            y=group["median"],
+            mode="lines+markers",
+            name=name,
+            legendgroup=legendgroup,
+            showlegend=showlegend,
+            line={"color": color},
+            customdata=group["counts"],
+            hovertemplate=(
+                f"{group['identity']}<br>step %{{x}} · median %{{y:.4g}}"
+                "<br>%{customdata} contributing series<extra></extra>"
+            ),
+        ),
+        row=row,
+        col=1,
+    )
+    legend_seen.add(legendgroup)
 
 
 def _facet_value(series: dict[str, Any], facet: str | None) -> str:
@@ -198,15 +348,27 @@ def stacked_figure(
     *,
     color: str | None = None,
     facet: str | None = None,
+    display: str = "all",
+    highlighted: Sequence[str] = (),
+    color_map: dict[str, str] | None = None,
 ) -> go.Figure:
     """One vertically stacked subplot per key in picker order: panels
     share the step x domain (linked zoom) and keep independent y axes.
-    A key with no observations keeps its panel and says so."""
-    color_map = identity_color_map(per_key, color)
+    ``display`` picks raw traces (all, dimmed to ``highlighted`` picks),
+    highlighted-only traces, or per-group median + IQR summaries. A key
+    with no observations keeps its panel and says so."""
+    colors = color_map or identity_color_map(per_key, color)
     dash_of = _execution_dash_factory(per_key)
+    picks = set(highlighted)
+    summaries = (
+        median_iqr_summary(per_key, color, facet) if display == "median_iqr" else None
+    )
     rows: list[tuple[str, str]] = []
     for entry in per_key:
-        values = sorted({_facet_value(series, facet) for series in entry["series"]})
+        if summaries is not None:
+            values = sorted({group["facet"] for group in summaries[entry["key"]]})
+        else:
+            values = sorted({_facet_value(series, facet) for series in entry["series"]})
         for value in values or [""]:
             rows.append((entry["key"], value))
     figure = make_subplots(
@@ -227,30 +389,46 @@ def stacked_figure(
             for series in entry["series"]
             if _facet_value(series, facet) == facet_value
         ]
-        resolved = resolve_axis(axes.get(key), matching)
-        for series in matching:
-            identity = identity_of(series, color)
-            name = series_label(series)
-            figure.add_trace(
-                _scatter(
-                    series,
-                    name=name,
-                    color=color_map[identity],
-                    dash=dash_of(series["trial"], series.get("execution")),
-                    legendgroup=identity,
-                    showlegend=identity not in legend_seen,
-                ),
-                row=row_index,
-                col=1,
-            )
-            legend_seen.add(identity)
-        if not matching:
+        if summaries is not None:
+            for group in summaries[key]:
+                if group["facet"] != facet_value:
+                    continue
+                _add_summary_traces(
+                    figure,
+                    group,
+                    color=colors.get(group["identity"], _PALETTE[0]),
+                    row=row_index,
+                    legend_seen=legend_seen,
+                )
+        else:
+            for series in matching:
+                if display == "highlighted" and series["trial"] not in picks:
+                    continue
+                identity = identity_of(series, color)
+                dimmed = bool(picks) and series["trial"] not in picks
+                figure.add_trace(
+                    _scatter(
+                        series,
+                        name=series_label(series),
+                        color=colors.get(identity, _PALETTE[0]),
+                        dash=dash_of(series["trial"], series.get("execution")),
+                        legendgroup=identity,
+                        showlegend=identity not in legend_seen,
+                        opacity=0.25 if dimmed else None,
+                    ),
+                    row=row_index,
+                    col=1,
+                )
+                legend_seen.add(identity)
+        if (summaries is not None and not summaries[key]) or not matching:
             _annotate_empty(figure, row_index, "no observations under this scope")
+        resolved = resolve_axis(axes.get(key), matching)
         figure.update_yaxes(row=row_index, col=1, **_yaxis_kwargs(resolved))
     figure.update_xaxes(title="step", row=len(rows) or 1, col=1)
     figure.update_layout(
         hovermode="x unified",
         height=_PANEL_HEIGHT * (len(rows) or 1) + 90,
+        uirevision=_UIREVISION,
     )
     return figure
 
@@ -261,15 +439,30 @@ def overlay_figure(
     *,
     color: str | None = None,
     facet: str | None = None,
+    display: str = "all",
+    highlighted: Sequence[str] = (),
+    color_map: dict[str, str] | None = None,
 ) -> go.Figure:
     """Every selected key on ONE shared, unnormalized y axis (never a
     second axis, never rescaled data); log is refused while any plotted
-    observation anywhere is non-positive."""
+    observation anywhere is non-positive. ``display`` mirrors
+    :func:`stacked_figure`."""
     pooled = [series for entry in per_key for series in entry["series"]]
     resolved = resolve_axis(axis, pooled)
-    color_map = identity_color_map(per_key, color)
+    colors = color_map or identity_color_map(per_key, color)
     dash_of = _execution_dash_factory(per_key)
-    facet_values = sorted({_facet_value(series, facet) for series in pooled}) or [""]
+    picks = set(highlighted)
+    summaries = (
+        median_iqr_summary(per_key, color, facet) if display == "median_iqr" else None
+    )
+    if summaries is not None:
+        facet_values = sorted(
+            {group["facet"] for groups in summaries.values() for group in groups}
+        ) or [""]
+    else:
+        facet_values = sorted({_facet_value(series, facet) for series in pooled}) or [
+            ""
+        ]
     figure = make_subplots(
         rows=len(facet_values),
         cols=1,
@@ -281,19 +474,35 @@ def overlay_figure(
     legend_seen: set[str] = set()
     for row_index, facet_value in enumerate(facet_values, start=1):
         for entry in per_key:
+            if summaries is not None:
+                for group in summaries[entry["key"]]:
+                    if group["facet"] != facet_value:
+                        continue
+                    _add_summary_traces(
+                        figure,
+                        group,
+                        color=colors.get(group["identity"], _PALETTE[0]),
+                        row=row_index,
+                        name_prefix=f"{entry['key']} · ",
+                        legend_seen=legend_seen,
+                    )
+                continue
             for series in entry["series"]:
                 if _facet_value(series, facet) != facet_value:
                     continue
+                if display == "highlighted" and series["trial"] not in picks:
+                    continue
                 identity = identity_of(series, color)
-                name = f"{entry['key']} · {series_label(series)}"
+                dimmed = bool(picks) and series["trial"] not in picks
                 figure.add_trace(
                     _scatter(
                         series,
-                        name=name,
-                        color=color_map[identity],
+                        name=f"{entry['key']} · {series_label(series)}",
+                        color=colors.get(identity, _PALETTE[0]),
                         dash=dash_of(series["trial"], series.get("execution")),
                         legendgroup=f"{identity} · {entry['key']}",
                         showlegend=f"{identity} · {entry['key']}" not in legend_seen,
+                        opacity=0.25 if dimmed else None,
                     ),
                     row=row_index,
                     col=1,
@@ -307,6 +516,7 @@ def overlay_figure(
     figure.update_layout(
         hovermode="x unified",
         height=_PANEL_HEIGHT * len(facet_values) + 90,
+        uirevision=_UIREVISION,
     )
     return figure
 
