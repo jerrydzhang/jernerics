@@ -266,12 +266,24 @@ def decode_focus(value: Any) -> dict[str, str] | None:
     return {"kind": str(kind), "id": str(focus_id)}
 
 
+def edited_view(
+    current: dict[str, Any] | None, changes: dict[str, Any]
+) -> dict[str, Any]:
+    """The one door for view-doc writes: ``changes`` applied over
+    ``current`` (defaults when absent); the current ``focus`` survives
+    every edit except one that names it (jernerics-gk6)."""
+    doc = {**(current or default_view_state()), **changes}
+    if "focus" not in changes:
+        doc["focus"] = (current or {}).get("focus")
+    return doc
+
+
 def with_focus(
     current: dict[str, Any] | None, focus: dict[str, str] | None
 ) -> dict[str, Any]:
     """View doc after a focus edit; nothing but ``focus`` changes — focus
     edits never narrow scope."""
-    return {**(current or default_view_state()), "focus": focus}
+    return edited_view(current, {"focus": focus})
 
 
 def _view_param(search: str | None) -> str | None:
@@ -287,17 +299,24 @@ def hydrate_view(
     """(doc, error) for a URL carrying ``?view=``. ``None`` means leave
     the view store alone (off the workspace route, or already showing
     this state). No parameter means defaults; a malformed or unsupported
-    document yields defaults plus a visible error."""
+    document yields defaults plus a visible error. The inspector focus
+    survives both — only a parameter that names one, or an explicit
+    focus edit, moves it (jernerics-gk6)."""
     if parse_route(pathname).kind != "workspace":
         return None, None
     raw = _view_param(search)
-    defaults = default_view_state()
-    if raw is None:
-        return (None if current == defaults else defaults), None
-    try:
-        doc = decode_view_state(raw)
-    except ViewStateError as error:
-        return defaults, str(error)
+    changes: dict[str, Any] = {
+        key: value for key, value in default_view_state().items() if key != "focus"
+    }
+    if raw is not None:
+        try:
+            decoded = decode_view_state(raw)
+        except ViewStateError as error:
+            return edited_view(current, changes), str(error)
+        changes = {key: value for key, value in decoded.items() if key != "focus"}
+        if decoded["focus"] is not None:
+            changes["focus"] = decoded["focus"]
+    doc = edited_view(current, changes)
     return (None if current == doc else doc), None
 
 
@@ -412,17 +431,19 @@ def view_from_controls(
     auto_refresh_state = bool(doc["auto_refresh"])
     if "auto_refresh" in edited and auto_refresh is not None:
         auto_refresh_state = bool(auto_refresh)
-    return {
-        **doc,
-        "active": (
-            active
-            if "active" in edited and active in _ANALYSIS_VIEWS
-            else doc["active"]
-        ),
-        "series": series,
-        "optuna": optuna,
-        "auto_refresh": auto_refresh_state,
-    }
+    return edited_view(
+        doc,
+        {
+            "active": (
+                active
+                if "active" in edited and active in _ANALYSIS_VIEWS
+                else doc["active"]
+            ),
+            "series": series,
+            "optuna": optuna,
+            "auto_refresh": auto_refresh_state,
+        },
+    )
 
 
 _CONTROL_IDS = {
@@ -633,11 +654,13 @@ def view_from_include(
     """View state after an include-control edit; only the two include
     flags change."""
     picked = set(values or [])
-    return {
-        **(current or default_view_state()),
-        "include_archived": "archived" in picked,
-        "include_invalid": "invalid" in picked,
-    }
+    return edited_view(
+        current,
+        {
+            "include_archived": "archived" in picked,
+            "include_invalid": "invalid" in picked,
+        },
+    )
 
 
 def synced_search(
@@ -1417,7 +1440,7 @@ def axis_state_edit(
         else:
             axes[metric] = axis
         series["axes"] = axes
-    edited = {**doc, "series": series}
+    edited = edited_view(doc, {"series": series})
     if edited == doc:
         return None, None
     return edited, " · ".join(figures.axis_notes(resolved))
@@ -1450,7 +1473,7 @@ def moved_keys(
         return None
     keys[index], keys[target] = keys[target], keys[index]
     series = dict(doc["series"], keys=keys)
-    return {**doc, "series": series}
+    return edited_view(doc, {"series": series})
 
 
 def _format_payload(payload: Any) -> str:
@@ -1768,10 +1791,7 @@ def view_from_context_filter(
         filters[dimension] = picked
     else:
         filters.pop(dimension, None)
-    return {
-        **doc,
-        "series": {**doc["series"], "context_filters": filters},
-    }
+    return edited_view(doc, {"series": {**doc["series"], "context_filters": filters}})
 
 
 _SWATCH_COLUMN: dict[str, Any] = {
@@ -1905,11 +1925,13 @@ def view_from_trace_click(
     picked = [str(identity)]
     if doc["highlighted_trials"] == picked:
         picked = []
-    return {
-        **doc,
-        "highlighted_trials": picked,
-        "focus": {"kind": "trial", "id": str(identity)},
-    }
+    return edited_view(
+        doc,
+        {
+            "highlighted_trials": picked,
+            "focus": {"kind": "trial", "id": str(identity)},
+        },
+    )
 
 
 def series_status(
@@ -1959,7 +1981,7 @@ def auto_refresh_flip(
     keeps the persisted intent."""
     if not view_doc or not view_doc.get("auto_refresh") or incomplete:
         return None
-    return {**view_doc, "auto_refresh": False}
+    return edited_view(view_doc, {"auto_refresh": False})
 
 
 def _extract_series_figure(panels: list[Any]) -> tuple[list[Any], Any]:

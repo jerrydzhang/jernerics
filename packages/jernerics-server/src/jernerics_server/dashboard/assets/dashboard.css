@@ -170,6 +170,10 @@ a.project-row:hover {
   border: 1px solid #e3e3e3;
   border-radius: 6px;
   background: #fcfcfc;
+  /* Wide tables scroll inside their section instead of widening the
+     document (jernerics-jum). */
+  overflow-x: auto;
+  max-width: 100%;
 }
 
 .section h3 {
@@ -253,12 +257,52 @@ a.project-row:hover {
 
 .grid {
   width: 100%;
+  /* A grid wrapper must never stretch its track or column — AG Grid's
+     own horizontal scroll engages instead (jernerics-jum). */
+  min-width: 0;
   height: 26rem;
 }
 
 .hint {
   color: #666;
   font-size: 0.85rem;
+}
+
+/* Badge-style state/health cells in the overview sweep grid
+   (jernerics-7bd): color-only, matching the artifact listing's state
+   cells. */
+
+.grid .cell-state {
+  font-weight: 600;
+}
+
+.grid .cell-state.state-active,
+.grid .cell-state.state-succeeded,
+.grid .cell-state.state-healthy,
+.grid .cell-state.state-completed {
+  color: #1e7e34;
+}
+
+.grid .cell-state.state-quiet,
+.grid .cell-state.state-attention,
+.grid .cell-state.state-running,
+.grid .cell-state.state-waiting {
+  color: #8a6d3b;
+}
+
+.grid .cell-state.state-stale,
+.grid .cell-state.state-unknown {
+  color: #b06d0b;
+}
+
+.grid .cell-state.state-failed,
+.grid .cell-state.state-failing {
+  color: #b00020;
+}
+
+.grid .cell-state.state-ended,
+.grid .cell-state.state-cancelled {
+  color: #4c5161;
 }
 
 .trial-header {
@@ -684,6 +728,13 @@ a.project-row:hover {
   grid-template-columns: minmax(18rem, 22rem) minmax(0, 1fr) minmax(16rem, 22rem);
   gap: 1rem;
   align-items: start;
+}
+
+/* Grid items default to min-width: auto, so a wide grid or table can
+   stretch the single 1fr column past the viewport (jernerics-jum). */
+.scope-browser,
+.workspace-canvas {
+  min-width: 0;
 }
 
 .scope-browser {

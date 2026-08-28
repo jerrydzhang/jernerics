@@ -1,5 +1,6 @@
 import json
 import time
+from collections import Counter
 from collections.abc import Sequence
 from typing import Any
 
@@ -266,12 +267,18 @@ def _correlation_table(jobs: list[dict]) -> html.Table:
     )
 
 
+def _monitoring_badges(counts: dict[str, int]) -> list[html.Span]:
+    """One pill per monitoring label, in the canonical order."""
+    return [
+        Badge(f"{label} {counts[label]}", kind=label) for label in _MONITORING_ORDER
+    ]
+
+
 def _monitoring_counts(summary: SweepSummary) -> html.Div:
     return html.Div(
-        [
-            Badge(f"{label} {getattr(summary, label)}", kind=label)
-            for label in _MONITORING_ORDER
-        ],
+        _monitoring_badges(
+            {label: getattr(summary, label) for label in _MONITORING_ORDER}
+        ),
         className="monitoring-row",
     )
 
@@ -835,12 +842,127 @@ def inspector_content(
     )
 
 
+def _badge_cell(field: str) -> dict[str, Any]:
+    """Column def rendering the field's value as a badge-styled cell."""
+    return {
+        "field": field,
+        "cellClass": {"function": "'cell-state state-' + (params.value || 'unknown')"},
+    }
+
+
+_OVERVIEW_SWEEP_COLUMNS: list[dict[str, Any]] = [
+    {"headerName": "Sweep", "field": "name"},
+    {"headerName": "State", **_badge_cell("state")},
+    {"headerName": "Health", **_badge_cell("health")},
+    {"headerName": "Monitoring", "field": "monitoring"},
+    {"headerName": "Curation", "field": "curation"},
+    {"headerName": "Expected trials", "field": "expected_trials"},
+    {"headerName": "Last activity", "field": "last_activity"},
+]
+
+
+def _monitoring_summary(summary: SweepSummary) -> str:
+    """Compact nonzero monitoring text for one overview grid row."""
+    parts = [
+        f"{label} {getattr(summary, label)}"
+        for label in _MONITORING_ORDER
+        if getattr(summary, label)
+    ]
+    return " · ".join(parts) if parts else MISSING
+
+
+def overview_sweep_rows(
+    scoped: Sequence[SweepSummary], now_ns: int | None = None
+) -> list[dict[str, Any]]:
+    """One overview-grid row per scoped sweep; deep detail stays in the
+    inspector behind a row click."""
+    now = time.time_ns() if now_ns is None else now_ns
+    return [
+        {
+            "sweep_id": summary.sweep_id,
+            "name": summary.name,
+            "state": summary.state,
+            "health": summary.health,
+            "monitoring": _monitoring_summary(summary),
+            "curation": sweep_curation(summary),
+            "expected_trials": (
+                MISSING if summary.expected_trials is None else summary.expected_trials
+            ),
+            "last_activity": (
+                MISSING
+                if summary.latest_submitted_ns is None
+                else components.relative_time(summary.latest_submitted_ns, now)
+            ),
+        }
+        for summary in scoped
+    ]
+
+
+def overview_rollup(scoped: Sequence[SweepSummary], now_ns: int) -> html.Section:
+    """Aggregate operational facts for the scoped sweeps: counts by
+    state and health, execution monitoring totals, in-flight
+    executions, and the most recent activity."""
+    states = Counter(summary.state for summary in scoped)
+    healths = Counter(summary.health for summary in scoped)
+    monitoring = {
+        label: sum(getattr(summary, label) for summary in scoped)
+        for label in _MONITORING_ORDER
+    }
+    in_flight = sum(max(0, summary.started - summary.terminal) for summary in scoped)
+    activity = max(
+        (
+            summary.latest_submitted_ns
+            for summary in scoped
+            if summary.latest_submitted_ns is not None
+        ),
+        default=None,
+    )
+    return html.Section(
+        [
+            html.H3("Scope roll-up"),
+            html.P(
+                [
+                    html.Span(f"sweeps {len(scoped)}"),
+                    *(
+                        Badge(f"{state} {count}", kind=state)
+                        for state, count in sorted(states.items())
+                    ),
+                ],
+                className="fact-row",
+            ),
+            html.P(
+                [
+                    Badge(f"health {label} {count}", kind=label)
+                    for label, count in sorted(healths.items())
+                ],
+                className="fact-row",
+            ),
+            html.P(
+                [
+                    *_monitoring_badges(monitoring),
+                    html.Span(f"in-flight executions {in_flight}"),
+                    html.Span(
+                        "last activity "
+                        + (
+                            UNKNOWN
+                            if activity is None
+                            else components.relative_time(activity, now_ns)
+                        )
+                    ),
+                ],
+                className="fact-row",
+            ),
+        ],
+        className="section overview-rollup",
+    )
+
+
 def overview_tab(
     service: DashboardService, project: str | None, tray: dict[str, Any] | None
 ) -> html.Div:
-    """Operational facts for every sweep in scope: curation state,
-    submissions/jobs, execution monitoring, executions, in-flight
-    progress. An empty scope means the whole project."""
+    """Bounded operational summary for the scope: an aggregate roll-up
+    plus one virtualized grid row per sweep. Per-sweep depth lives in
+    the inspector; an empty scope means the whole project."""
     if not project:
         return html.Div(
             components.Empty("Pick a project in the header to browse its sweeps.")
@@ -852,39 +974,37 @@ def overview_tab(
         )
     picked = set((tray or {}).get("sweeps") or [])
     scoped = [s for s in summaries if not picked or s.sweep_id in picked]
-    now = time.time_ns()
-    sections = []
-    for summary in scoped:
-        detail = service.sweep_detail(summary.sweep_id)
-        header = html.P(
-            [
-                Badge(summary.state),
-                Badge(f"health {summary.health}", kind=summary.health),
-                focus_button(summary.name, "sweep", summary.sweep_id),
-                *([Badge("archived", kind="archived")] if summary.archived else []),
-                *([Badge("invalid", kind="invalid")] if summary.invalid else []),
-            ],
-            className="fact-row",
+    if not scoped:
+        return html.Div(
+            components.Empty(f"No picked sweeps remain in project {project}.")
         )
-        body: list[Any] = [_monitoring_counts(summary)]
-        if detail is not None:
-            body = [
-                _correlation_table(detail.jobs),
-                _monitoring_counts(summary),
-                _executions_table(detail.executions, now),
-                _progress_list(detail.progress),
-            ]
-        sections.append(
+    now = time.time_ns()
+    return html.Div(
+        [
+            overview_rollup(scoped, now),
             html.Section(
                 [
-                    html.H3(f"Sweep {summary.name} · {short_id(summary.sweep_id)}"),
-                    header,
-                    *body,
+                    html.H3("Sweeps in scope"),
+                    AgGrid(
+                        id="overview-sweep-grid",
+                        rowData=overview_sweep_rows(scoped, now),
+                        columnDefs=_OVERVIEW_SWEEP_COLUMNS,
+                        defaultColDef=_GRID_DEFAULTS,
+                        dashGridOptions=components.grid_options(),
+                        getRowId=_SWEEP_ROW_ID,
+                        className="ag-theme-alpine grid",
+                    ),
+                    html.P(
+                        "A row click inspects that sweep in the inspector; the "
+                        "grid virtualizes, so any scope size renders as one "
+                        "bounded region.",
+                        className="hint",
+                    ),
                 ],
-                className="section overview-sweep",
-            )
-        )
-    return html.Div(sections)
+                className="section overview-sweeps",
+            ),
+        ]
+    )
 
 
 def _series_tab() -> html.Div:

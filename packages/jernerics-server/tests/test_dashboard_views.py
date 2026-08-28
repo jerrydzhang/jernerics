@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from dash import html
 from dash.development.base_component import Component
 from dash_ag_grid import AgGrid
 from fastapi.testclient import TestClient
@@ -53,6 +54,7 @@ from jernerics_server.dashboard.workspace import (
     detail_curation,
     family_grid_row,
     inspector_content,
+    overview_tab,
     selection_transitions,
 )
 from jernerics_server.http import create_app
@@ -1031,6 +1033,94 @@ class TestOverviewCuration:
         assert alpha is not None
         assert alpha.overview.invalid_reason == "kept for audit"
         assert alpha.overview.current is True
+
+
+class TestOverviewTab:
+    """jernerics-7bd: the overview is a bounded roll-up plus one
+    virtualized grid row per sweep — never a card per sweep."""
+
+    def test_no_project_and_empty_scope_guards(self, service):
+        rendered = str(overview_tab(service, None, None))
+        assert "Pick a project in the header" in rendered
+        assert "overview-sweep-grid" not in rendered
+        rendered = str(overview_tab(service, "ghost", None))
+        assert "No sweeps tracked for project ghost yet." in rendered
+        rendered = str(overview_tab(service, "ops", {"sweeps": [str(uuid.uuid4())]}))
+        assert "No picked sweeps remain in project ops." in rendered
+
+    def test_overview_never_fetches_per_sweep_detail(self, service, monkeypatch):
+        def forbidden(_self, _sweep_id):
+            raise AssertionError("overview render must not call sweep_detail")
+
+        monkeypatch.setattr(DashboardService, "sweep_detail", forbidden)
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        assert "overview-sweep-grid" in str(overview)
+
+    def test_overview_is_one_rollup_section_plus_one_grid_section(self, service):
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        sections = [
+            node.className for node in _walk(overview) if isinstance(node, html.Section)
+        ]
+        assert sections == ["section overview-rollup", "section overview-sweeps"]
+        rendered = str(overview)
+        assert "Scope roll-up" in rendered
+        assert "Sweeps in scope" in rendered
+
+    def test_rollup_aggregates_scope_not_sweeps(self, service):
+        rendered = str(overview_tab(service, "ops", {"sweeps": []}))
+        assert "sweeps 2" in rendered
+        assert "running 1" in rendered
+        assert "completed 1" in rendered
+        assert "health failing 1" in rendered
+        assert "health healthy 1" in rendered
+        assert "active 1" in rendered
+        assert "succeeded 2" in rendered
+        assert "in-flight executions 4" in rendered
+        assert "last activity " in rendered
+        assert "ago" in rendered
+
+    def test_grid_rows_carry_operational_facts_and_stable_ids(self, service):
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        grid = _grid(overview, "overview-sweep-grid")
+        assert grid.getRowId == "params.data.sweep_id"
+        options = grid.dashGridOptions
+        assert options["enableCellTextSelection"] is True
+        assert options["ensureDomOrder"] is True
+        assert {column["field"] for column in grid.columnDefs} == {
+            "name",
+            "state",
+            "health",
+            "monitoring",
+            "curation",
+            "expected_trials",
+            "last_activity",
+        }
+        rows = {row["sweep_id"]: row for row in grid.rowData}
+        alpha = rows[str(SWEEP_A)]
+        assert alpha["name"] == "alpha"
+        assert alpha["state"] == "running"
+        assert alpha["health"] == "failing"
+        assert alpha["curation"] == ""
+        assert alpha["expected_trials"] == 8
+        assert alpha["monitoring"] == (
+            "active 1 · quiet 1 · stale 1 · failed 1 · succeeded 1 · unknown 1"
+        )
+        assert alpha["last_activity"].endswith("ago")
+        beta = rows[str(SWEEP_B)]
+        assert beta["state"] == "completed"
+        assert beta["expected_trials"] == 1
+        assert beta["monitoring"] == "succeeded 1"
+
+    def test_tray_scope_narrows_rollup_rows_and_keeps_curation(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        overview = overview_tab(service, "ops", {"sweeps": [str(SWEEP_B)]})
+        grid = _grid(overview, "overview-sweep-grid")
+        assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
+        assert grid.rowData[0]["curation"] == "invalid"
+        rendered = str(overview)
+        assert "sweeps 1" in rendered
+        assert "completed 1" in rendered
 
 
 class TestNoSqlInCallbacks:

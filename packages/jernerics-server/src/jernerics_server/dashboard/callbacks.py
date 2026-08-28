@@ -222,18 +222,39 @@ def triggered_action(triggered: set[str], mapping: dict[str, str]) -> str | None
     return next((action for prop, action in mapping.items() if prop in triggered), None)
 
 
-def focus_from_trigger(triggered: Any) -> dict[str, str] | Literal[""] | None:
-    """The focus a row-click or button event names: ``{kind, id}``,
-    ``None`` to clear, or ``""`` when nothing focusable fired."""
-    for prop_id in triggered or ():
-        text = str(prop_id)
+def _event_field(event: Any, name: str) -> Any:
+    """One ``triggered`` entry field; Dash has shipped both dict and
+    attribute event shapes."""
+    if isinstance(event, dict):
+        return event.get(name)
+    return getattr(event, name, None)
+
+
+def focus_from_trigger(events: Any) -> dict[str, str] | Literal[""] | None:
+    """The focus a real row-click or button press names: ``{kind, id}``,
+    ``None`` to clear, or ``""`` when nothing was actually clicked.
+
+    Only truthy ``n_clicks`` count: an inspector re-render recreates the
+    close and focus buttons, which changes their props without a press —
+    treating those as actions cleared the focus on every poll refresh
+    (jernerics-gk6).
+    """
+    for event in events or ():
+        text = str(_event_field(event, "prop_id") or "")
+        value = _event_field(event, "value")
         if text.startswith("inspector-close."):
-            return None
-        if text.startswith(("sweep-grid.", "analysis-family-grid.")) or (
-            '"focus-family"' in text
-        ):
+            return None if value else ""
+        if text.startswith(
+            (
+                "sweep-grid.",
+                "overview-sweep-grid.",
+                "analysis-family-grid.",
+            )
+        ) or ('"focus-family"' in text):
             continue
         if ".cellClicked" not in text and ".n_clicks" not in text:
+            continue
+        if ".n_clicks" in text and not value:
             continue
         head, _, _prop = text.rpartition(".")
         try:
@@ -780,6 +801,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input({"focus-object": dash.ALL}, "n_clicks"),
         Input("inspector-close", "n_clicks"),
         Input("sweep-grid", "cellClicked"),
+        Input("overview-sweep-grid", "cellClicked"),
         Input({"focus-family": dash.ALL}, "cellClicked"),
         Input("analysis-family-grid", "cellClicked"),
         State("view-store", "data"),
@@ -789,30 +811,34 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         _buttons: Any,
         _close: int | None,
         sweep_click: dict | None,
+        overview_click: dict | None,
         family_clicks: list,
         browser_family_click: dict | None,
         current: dict | None,
     ):
         triggered = dash.callback_context.triggered_prop_ids
-        fired = str(next(iter(triggered), ""))
-        click = None
-        kind = None
-        if fired.startswith("sweep-grid."):
-            click, kind = sweep_click, "sweep"
-        elif '"focus-family"' in fired:
-            click = next((c for c in reversed(family_clicks) if c), None)
-            kind = "trial"
-        elif fired.startswith("analysis-family-grid."):
-            click, kind = browser_family_click, "trial"
-        if click is not None and kind is not None:
+        for text in (str(prop) for prop in triggered or ()):
+            click = None
+            kind = None
+            if text.startswith("sweep-grid."):
+                click, kind = sweep_click, "sweep"
+            elif text.startswith("overview-sweep-grid."):
+                click, kind = overview_click, "sweep"
+            elif text.startswith("analysis-family-grid."):
+                click, kind = browser_family_click, "trial"
+            elif '"focus-family"' in text:
+                click = next((c for c in reversed(family_clicks) if c), None)
+                kind = "trial"
+            if click is None or kind is None:
+                continue
             row_id = str((click or {}).get("rowId") or "")
-            if row_id:
-                doc = analysis.with_focus(current, {"kind": kind, "id": row_id})
-                if doc == (current or {}):
-                    raise PreventUpdate
-                return doc
-            raise PreventUpdate
-        focus = focus_from_trigger(triggered)
+            if not row_id:
+                raise PreventUpdate
+            doc = analysis.with_focus(current, {"kind": kind, "id": row_id})
+            if doc == (current or {}):
+                raise PreventUpdate
+            return doc
+        focus = focus_from_trigger(dash.callback_context.triggered)
         if focus == "":
             raise PreventUpdate
         doc = analysis.with_focus(current, focus)
