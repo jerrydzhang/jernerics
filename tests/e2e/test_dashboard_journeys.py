@@ -443,7 +443,6 @@ class TestLinkGraphJourney:
         assert {grid.id for _, grid in grids} >= {
             "sweep-grid",
             "analysis-family-grid",
-            "analysis-trial-grid",
         }
         for url, grid in grids:
             options = grid.dashGridOptions or {}

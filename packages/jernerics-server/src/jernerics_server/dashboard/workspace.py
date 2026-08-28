@@ -1006,6 +1006,10 @@ def workspace_page(
         [
             html.H2(f"Project {project}"),
             html.Div(id="analysis-error"),
+            dcc.Store(id="inspector-render-store"),
+            dcc.Store(id="sweep-browser-facts-store"),
+            dcc.Store(id="trial-browser-facts-store"),
+            dcc.Store(id="scroll-restore-store"),
             html.Div(
                 [
                     html.Details(

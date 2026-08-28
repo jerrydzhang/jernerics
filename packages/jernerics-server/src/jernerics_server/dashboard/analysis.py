@@ -756,7 +756,7 @@ def catalog_tab(
     if not project:
         return _pick_project_first()
     values = service.analysis_value_keys(project, tray)
-    context = service.analysis_context_dims(project, tray)
+    context = service.analysis_context_catalog(project, tray)
     coverage = service.analysis_param_coverage(project, tray)
     artifacts = service.analysis_artifacts(project, tray)
     sweep_names = [coverage["names"].get(sweep, sweep) for sweep in coverage["sweeps"]]
@@ -851,14 +851,114 @@ def _coverage_label(entry: dict[str, Any]) -> str:
     )
 
 
-def _series_payload(per_key: list[dict[str, Any]], keys: list[str]) -> dict[str, Any]:
-    """The analysis-series-data store payload: every fetched observation
-    behind the panels, for axis edits that must not re-query."""
-    per_key_data = {key: {"series": []} for key in keys}
-    per_key_data.update(
-        {entry["key"]: {"series": entry["series"]} for entry in per_key}
+def scope_fingerprint(project: str | None, tray: dict[str, Any] | None) -> str:
+    """Canonical identity of the (project, tray) scope a snapshot serves."""
+    return json.dumps(
+        {"project": project or "", "tray": tray or {}},
+        sort_keys=True,
+        separators=(",", ":"),
     )
-    return {"keys": keys, "per_key": per_key_data}
+
+
+def series_snapshot(
+    service: DashboardService | None,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    view_doc: dict[str, Any] | None,
+    now_ns: int,
+) -> dict[str, Any]:
+    """The canonical ``analysis-series-data`` payload: scope fingerprint
+    and reduction, unfiltered per-key enriched series, trial/config and
+    varying-param facts, key options, context dimensions with every
+    filter value, and scope liveness — everything presentation rebuilds
+    from with zero further reads."""
+    doc = view_doc or default_view_state()
+    series_doc = doc["series"]
+    keys = list(series_doc["keys"])
+    if not project or service is None:
+        return {
+            "fingerprint": "",
+            "reduction": series_doc["reduction"],
+            "incomplete": False,
+            "at_ns": now_ns,
+            "per_key": {key: {"series": []} for key in keys},
+            "trials": [],
+            "varying": [],
+            "key_options": [],
+            "dims": [],
+        }
+    fingerprint = scope_fingerprint(project, tray)
+    coverage = service.analysis_value_keys(project, tray)
+    offered = {
+        entry["key"]: _coverage_label(entry)
+        for entry in coverage
+        if entry["kind"] == "scalar" and entry["steps"]
+    }
+    per_key = service.analysis_series(
+        project, tray, keys, series_doc["reduction"] or "none"
+    )
+    trials = service.analysis_trials(project, tray)
+    _enrich_series(per_key, trials)
+    return {
+        "fingerprint": fingerprint,
+        "reduction": series_doc["reduction"],
+        "incomplete": service.analysis_scope_incomplete(project, tray),
+        "at_ns": now_ns,
+        "per_key": {entry["key"]: {"series": entry["series"]} for entry in per_key},
+        "trials": trials,
+        "varying": varying_param_keys(trials),
+        "key_options": [
+            {
+                "label": offered.get(key, f"{key} · absent under this scope"),
+                "value": key,
+            }
+            for key in sorted({*offered, *keys})
+        ],
+        "dims": service.analysis_context_catalog(project, tray),
+    }
+
+
+def snapshot_status(
+    snapshot: dict[str, Any] | None,
+    fingerprint: str,
+    reduction: str,
+    keys: Sequence[str],
+) -> tuple[bool, list[str]]:
+    """(usable, missing keys) for a snapshot against the current scope,
+    reduction, and wanted keys; ``usable`` False means rebuild from
+    scratch, otherwise only the missing keys need fetching."""
+    if snapshot is None:
+        return False, []
+    if (
+        snapshot.get("fingerprint") != fingerprint
+        or snapshot.get("reduction") != reduction
+    ):
+        return False, []
+    return True, [key for key in keys if key not in (snapshot.get("per_key") or {})]
+
+
+def merge_series_keys(
+    service: DashboardService,
+    project: str,
+    tray: dict[str, Any] | None,
+    snapshot: dict[str, Any],
+    added: Sequence[str],
+    now_ns: int,
+) -> dict[str, Any]:
+    """Snapshot after fetching ONLY the added keys and merging their
+    enriched series; every other fact is reused untouched."""
+    per_key = service.analysis_series(
+        project, tray, list(added), snapshot["reduction"] or "none"
+    )
+    _enrich_series(per_key, snapshot.get("trials") or [])
+    return {
+        **snapshot,
+        "at_ns": now_ns,
+        "per_key": {
+            **snapshot["per_key"],
+            **{entry["key"]: {"series": entry["series"]} for entry in per_key},
+        },
+    }
 
 
 def _axis_controls(axis: dict[str, Any], pattern: Any, *, overlay: bool = False):
@@ -1133,61 +1233,45 @@ def _enrich_series(per_key: list[dict[str, Any]], trials: list[dict[str, Any]]) 
             series["config"] = trial_config_text(trial, varying)
 
 
-def series_outputs(
-    service: DashboardService | None,
-    project: str | None,
-    tray: dict[str, Any] | None,
+def render_series_outputs(
     view_doc: dict[str, Any] | None,
+    snapshot: dict[str, Any] | None,
 ) -> tuple[
-    list[Any], dict, list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]
+    list[Any],
+    dict[str, Any],
+    list[dict[str, str]],
+    list[dict[str, str]],
+    list[dict[str, str]],
+    list[Any],
+    str,
 ]:
-    """(panels, data payload, key options, color options, facet options)
-    for the series tab — the callback's output order: every panel comes
-    from ONE multi-key values read; per-key axis state, context filters,
-    display mode, and highlights ride the view doc."""
+    """(panels, payload, key options, color options, facet options,
+    context-filter controls, status line) built entirely from the
+    snapshot — zero QueryService reads for every view-only edit."""
     doc = view_doc or default_view_state()
     series_doc = doc["series"]
     keys = list(series_doc["keys"])
-    if not project or service is None:
-        return (
-            [Empty("Pick a project in the header to analyze its sweeps.")],
-            _series_payload([], keys),
-            [],
-            [],
-            [],
-        )
-    coverage = service.analysis_value_keys(project, tray)
-    offered = {
-        entry["key"]: _coverage_label(entry)
-        for entry in coverage
-        if entry["kind"] == "scalar" and entry["steps"]
-    }
-    key_options = [
-        {"label": offered.get(key, f"{key} · absent under this scope"), "value": key}
-        for key in sorted({*offered, *keys})
-    ]
-    dims = service.analysis_context_dims(project, tray)
-    trials = service.analysis_trials(project, tray)
-    dim_options = [
+    payload = snapshot or {}
+    stored = payload.get("per_key") or {}
+    per_key = [
         {
-            "label": f"{entry['key']} · {entry['cardinality']}",
-            "value": entry["key"],
+            "key": key,
+            "series": list(stored.get(key, {}).get("series", [])),
         }
-        for entry in dims
+        for key in keys
     ]
-    per_key = service.analysis_series(
-        project, tray, keys, series_doc["reduction"] or "none"
-    )
-    _enrich_series(per_key, trials)
+    dims = payload.get("dims") or []
+    trials = payload.get("trials") or []
     grouping = figures.color_grouping(
         [series for entry in per_key for series in entry["series"]],
         series_doc["color"],
     )
     per_key = apply_context_filters(per_key, series_doc["context_filters"])
-    payload = _series_payload(per_key, keys)
     display = series_doc["trial_display"]
     highlighted = list(doc["highlighted_trials"])
-    if not keys:
+    if not payload.get("fingerprint"):
+        panels = [Empty("Pick a project in the header to analyze its sweeps.")]
+    elif not keys:
         panels = [
             Empty(
                 "No value keys selected — pick one or more scalar step keys; "
@@ -1231,13 +1315,42 @@ def series_outputs(
                 )
             ),
         ]
+    dim_options = [
+        {
+            "label": f"{entry['key']} · {entry['cardinality']}",
+            "value": entry["key"],
+        }
+        for entry in dims
+    ]
     return (
         panels,
         payload,
-        key_options,
+        list(payload.get("key_options") or []),
         color_dropdown_options(dims, trials),
         dim_options,
+        context_filter_controls(dims, series_doc["context_filters"]),
+        series_status(
+            doc, {"per_key": stored}, incomplete=bool(payload.get("incomplete"))
+        ),
     )
+
+
+def series_outputs(
+    service: DashboardService | None,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    view_doc: dict[str, Any] | None,
+) -> tuple[
+    list[Any], dict, list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]
+]:
+    """One-shot composition: build the snapshot, then render it. The
+    callbacks keep the snapshot in the store and render from it; this
+    serves fresh one-shot renders."""
+    snapshot = series_snapshot(service, project, tray, view_doc, 0)
+    panels, _payload, key_options, color_options, facet_options, *_rest = (
+        render_series_outputs(view_doc, snapshot)
+    )
+    return panels, snapshot, key_options, color_options, facet_options
 
 
 def axis_state_edit(
@@ -1863,55 +1976,84 @@ def _extract_series_figure(panels: list[Any]) -> tuple[list[Any], Any]:
     return panels, figures.empty_figure()
 
 
-def series_tab_outputs(
+def series_data_outputs(
     service: DashboardService | None,
     project: str | None,
     tray: dict[str, Any] | None,
     view_doc: dict[str, Any] | None,
     now_ns: int,
-) -> tuple[Any, ...]:
-    """The series callback's outputs: panels/payload/options from the
-    series read, the context-filter controls from the discovery read,
-    the figure for the stable graph (a clientside merge re-applies the
-    user's zoom), the status/updated facts, and the refresh-state store
-    payload."""
-    doc = view_doc or default_view_state()
-    panels, payload, key_options, dim_options, _facet = series_outputs(
-        service, project, tray, doc
-    )
-    panels, figure = _extract_series_figure(panels)
-    dims = (
-        service.analysis_context_values(project, tray)
-        if project and service is not None
-        else []
-    )
-    filters_ui = context_filter_controls(dims, doc["series"]["context_filters"])
-    incomplete = (
-        service.analysis_scope_incomplete(project, tray)
-        if project and service is not None
-        else False
-    )
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    """The data callback's outputs: the fresh canonical snapshot, the
+    updated-ago line, and the refresh state (no error)."""
     return (
-        panels,
-        payload,
-        key_options,
-        dim_options,
-        dim_options,
-        filters_ui,
-        series_status(doc, payload, incomplete=incomplete),
+        series_snapshot(service, project, tray, view_doc, now_ns),
         updated_ago(now_ns),
-        figure,
         {"error": "", "at_ns": now_ns},
     )
 
 
-def refresh_failure(error: Exception, now_ns: int) -> tuple[Any, ...]:
-    """The series callback's no_update tuple for a failed refresh: the
-    last successful panels, figure, options, and controls survive and
-    the error surfaces in the status and message regions."""
+def series_data_failure(error: Exception, now_ns: int) -> tuple[Any, ...]:
+    """The data callback's no_update tuple for a failed refresh: the
+    last successful snapshot survives and the error surfaces in the
+    refresh-state store."""
+    message = f"refresh failed — keeping the last successful view: {error}"
+    return no_update, no_update, {"error": message, "at_ns": now_ns}
+
+
+def series_view_outputs(
+    service: DashboardService | None,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    view_doc: dict[str, Any] | None,
+    snapshot: dict[str, Any] | None,
+    now_ns: int,
+) -> tuple[Any, ...]:
+    """The view callback's outputs: the presentation tuple (panels,
+    snapshot to persist, key/color/facet options, filter controls,
+    status, figure) rebuilt from the stored snapshot. View-only edits
+    reuse it with zero reads; added keys fetch only the missing ones;
+    scope/reduction changes rebuild. ``no_update`` in slot 2 means the
+    stored snapshot already serves the view."""
+    doc = view_doc or default_view_state()
+    series_doc = doc["series"]
+    usable, missing = snapshot_status(
+        snapshot,
+        scope_fingerprint(project, tray),
+        series_doc["reduction"],
+        series_doc["keys"],
+    )
+    if not usable:
+        snapshot = series_snapshot(service, project, tray, doc, now_ns)
+        persist = snapshot
+    elif missing:
+        snapshot = merge_series_keys(
+            service, project or "", tray, snapshot, missing, now_ns
+        )
+        persist = snapshot
+    else:
+        persist = no_update
+    panels, _payload, key_options, color_options, facet_options, filters, status = (
+        render_series_outputs(doc, snapshot)
+    )
+    panels, figure = _extract_series_figure(panels)
+    return (
+        panels,
+        persist,
+        key_options,
+        color_options,
+        facet_options,
+        filters,
+        status,
+        figure,
+    )
+
+
+def series_view_failure(error: Exception) -> tuple[Any, ...]:
+    """The view callback's no_update tuple for a failed render: the last
+    successful presentation survives and the error reaches the message
+    region through the refresh-state store."""
     message = f"refresh failed — keeping the last successful view: {error}"
     return (
-        no_update,
         no_update,
         no_update,
         no_update,
@@ -1920,5 +2062,4 @@ def refresh_failure(error: Exception, now_ns: int) -> tuple[Any, ...]:
         Error(message),
         no_update,
         no_update,
-        {"error": message, "at_ns": now_ns},
     )

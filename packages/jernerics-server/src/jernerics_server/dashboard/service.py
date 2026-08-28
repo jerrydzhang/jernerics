@@ -634,8 +634,9 @@ class DashboardService:
         raise ValueError("analysis read exceeded the pagination follow limit")
 
     def _follow_values(
-        self, selection: Selection, keys: tuple[str, ...] | None
+        self, selection: Selection, keys: tuple[str, ...]
     ) -> list[ValueRecord]:
+        """Key-filtered values only; context discovery never follows pages."""
         return self._follow_pages(
             lambda sel, page, token: self.queries.values(
                 sel, keys=keys, page=page, page_token=token
@@ -727,29 +728,15 @@ class DashboardService:
             for row in self.queries.value_key_coverage(selection)
         ]
 
-    def analysis_context_dims(
+    def analysis_context_catalog(
         self, project: str | None, tray: dict[str, Any] | None
     ) -> list[dict[str, Any]]:
+        """Flat context dimensions under the scope: one DISTINCT-SQL row
+        per key with every distinct formatted value (filter options),
+        cardinality, and samples — never a paginated values read."""
         if not project:
             return []
         return self.queries.context_catalog(self.analysis_selection(project, tray))
-
-    def analysis_context_values(
-        self, project: str | None, tray: dict[str, Any] | None
-    ) -> list[dict[str, Any]]:
-        """Every distinct flat-context value per dimension under the
-        scope, from one values read — the multi-value filter options,
-        discovered from stored contexts with no key special-cased."""
-        if not project:
-            return []
-        dims: dict[str, set[str]] = {}
-        for record in self._follow_values(self.analysis_selection(project, tray), None):
-            for key, value in (record.context.root if record.context else {}).items():
-                dims.setdefault(key, set()).add(_format_param(value))
-        return [
-            {"key": key, "values": sorted(values)}
-            for key, values in sorted(dims.items())
-        ]
 
     def analysis_scope_incomplete(
         self, project: str | None, tray: dict[str, Any] | None

@@ -1142,27 +1142,31 @@ class QueryService:
     def context_catalog(self, selection: Selection) -> list[dict[str, Any]]:
         """Flat context dimensions across the selection's tracked values.
 
-        One row per context key: distinct-value cardinality plus up to
-        five sample values, discovered purely from the stored context
-        JSON via ``json_each`` — no key is special-cased.
+        One row per context key from a single DISTINCT ``json_each`` scan:
+        every distinct formatted value (the filter options), the
+        cardinality, and up to five samples — no key is special-cased
+        and no paginated values read is followed.
         """
         where, params = self._trial_scope(selection)
         _, rows = self._store.query(
-            "SELECT DISTINCT je.key, CAST(je.value AS TEXT) "
+            "SELECT DISTINCT je.key, je.type, CAST(je.value AS TEXT) "
             "FROM tracked_values v "
             "JOIN executions e ON v.execution_id = e.execution_id "
             "JOIN trials t ON e.trial_id = t.trial_id "
             "JOIN sweeps s ON t.sweep_id = s.sweep_id "
             "CROSS JOIN json_each(v.context) je "
-            f"WHERE {where} ORDER BY je.key, 2",
+            f"WHERE {where} ORDER BY je.key, 3",
             params,
         )
         grouped: dict[str, list[str]] = {}
-        for key, value in rows:
+        for key, json_type, value in rows:
+            if json_type in ("true", "false"):
+                value = json_type
             grouped.setdefault(key, []).append(value)
         return [
             {
                 "key": key,
+                "values": values,
                 "cardinality": len(values),
                 "samples": values[:_CONTEXT_SAMPLE_LIMIT],
             }

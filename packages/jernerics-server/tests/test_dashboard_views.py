@@ -1478,6 +1478,7 @@ class TestMountedCurationJourney:
         "sweep-grid.rowData",
         "sweep-grid.selectedRows",
         "workspace-curation-note.children",
+        "sweep-browser-facts-store.data",
     }
 
     def test_tick_refreshes_grid_data_and_keeps_selection(self, mutable_client):
@@ -1496,6 +1497,9 @@ class TestMountedCurationJourney:
                 },
                 {"id": "view-store", "property": "data", "value": None},
                 {"id": "poll", "property": "n_intervals", "value": 3},
+            ],
+            state=[
+                {"id": "sweep-browser-facts-store", "property": "data", "value": None},
             ],
             changed=["poll.n_intervals"],
         )

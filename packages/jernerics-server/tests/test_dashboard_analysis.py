@@ -61,12 +61,15 @@ from jernerics_server.dashboard.analysis import (
     points_tab,
     python_snippet,
     python_tab,
-    refresh_failure,
+    scope_fingerprint,
     search_from_state,
     search_from_tray,
+    series_data_failure,
+    series_data_outputs,
     series_outputs,
+    series_snapshot,
     series_status,
-    series_tab_outputs,
+    series_view_outputs,
     synced_search,
     tray_from_edit,
     tray_summary,
@@ -809,7 +812,7 @@ class TestDataCatalog:
     def test_context_dimensions_with_cardinality(self, service):
         dims = {
             entry["key"]: entry
-            for entry in service.analysis_context_dims(
+            for entry in service.analysis_context_catalog(
                 PROJECT, _tray(sweeps=[str(SWEEP_A)])
             )
         }
@@ -899,7 +902,7 @@ class TestSeriesPanels:
             service, PROJECT, _all_sweeps(), doc
         )
         assert reads == [("loss", "accuracy", "score")]
-        assert payload["keys"] == ["loss", "accuracy", "score"]
+        assert set(payload["per_key"]) == {"loss", "accuracy", "score"}
         graph = _panel_graphs(panels)[0]
         titles = [
             annotation.text
@@ -1067,7 +1070,8 @@ class TestSeriesPanels:
         )
         assert "Pick a project" in str(panels)
         assert key_options == []
-        assert payload == {"keys": ["loss"], "per_key": {"loss": {"series": []}}}
+        assert payload["fingerprint"] == ""
+        assert payload["per_key"] == {"loss": {"series": []}}
 
     def test_no_keys_renders_guidance(self, service):
         panels, *_rest = series_outputs(service, PROJECT, _all_sweeps(), _series_doc())
@@ -3465,11 +3469,11 @@ class TestContextFilters:
     def test_service_discovers_every_dimension_value(self, service):
         dims = {
             entry["key"]: entry["values"]
-            for entry in service.analysis_context_values(PROJECT, _tray())
+            for entry in service.analysis_context_catalog(PROJECT, _tray())
         }
         assert dims["host"] == ["node00", "node01", "node02"]
         assert dims["shard"] == ["0", "1"]
-        assert service.analysis_context_values(None, None) == []
+        assert service.analysis_context_catalog(None, None) == []
 
     def test_filter_edits_add_drop_and_normalize(self):
         doc = _series_doc(keys=["loss"])
@@ -3489,7 +3493,7 @@ class TestContextFilters:
             "cc310200/dd310100",
             "cc310200/dd310200",
         }
-        assert len(payload["per_key"]["loss"]["series"]) == 2
+        assert len(payload["per_key"]["loss"]["series"]) == 4
 
     def test_series_missing_the_dimension_never_matches(self):
         per_key = [
@@ -3798,27 +3802,43 @@ class TestRefreshBehavior:
         assert flipped is not None and flipped["auto_refresh"] is False
         assert auto_refresh_flip(default_view_state(), False) is None
 
-    def test_series_tab_outputs_shape(self, tmp_path):
+    def test_series_data_and_view_outputs_shape(self, tmp_path):
         service = _live_service(tmp_path)
         doc = _series_doc(keys=["loss"], context_filters={"host": ["node01"]})
-        outputs = series_tab_outputs(
+        snapshot, updated, refresh = series_data_outputs(
             service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), doc, 1_000
         )
+        assert updated.startswith("Updated ")
+        assert refresh == {"error": "", "at_ns": 1_000}
+        assert snapshot["reduction"] == "none"
+        assert snapshot["fingerprint"] == scope_fingerprint(
+            PROJECT, _tray(sweeps=[str(SWEEP_A)])
+        )
+        assert set(snapshot["per_key"]) == {"loss"}
+        assert snapshot["dims"] and snapshot["key_options"]
         (
             panels,
-            _payload,
+            persist,
             key_options,
             color_options,
             facet_options,
             filters,
             status,
-            updated,
             figure,
-            refresh,
-        ) = outputs
+        ) = series_view_outputs(
+            service,
+            PROJECT,
+            _tray(sweeps=[str(SWEEP_A)]),
+            doc,
+            snapshot,
+            1_000,
+        )
         assert _panel_graphs(panels) == []
         assert figure is not None and figure.layout.uirevision == "analysis-series"
-        assert key_options and color_options == facet_options
+        assert persist is no_update
+        assert key_options
+        assert [option["value"] for option in facet_options] == ["host", "shard"]
+        assert color_options
         dropdowns = [
             node
             for control in filters
@@ -3829,17 +3849,12 @@ class TestRefreshBehavior:
             "shard",
         ]
         assert status.startswith("display: all · reduction: none · ")
-        assert updated.startswith("Updated ")
-        assert refresh == {"error": "", "at_ns": 1_000}
 
-    def test_refresh_failure_keeps_last_success_and_surfaces_error(self):
-        failure = refresh_failure(RuntimeError("store is gone"), 42)
+    def test_series_data_failure_keeps_last_success_and_surfaces_error(self):
+        failure = series_data_failure(RuntimeError("store is gone"), 42)
         assert failure[0] is no_update
-        assert "refresh failed" in str(failure[6])
-        assert "store is gone" in str(failure[6])
-        assert failure[7] is no_update
-        assert failure[8] is no_update
-        assert failure[9] == {
+        assert failure[1] is no_update
+        assert failure[2] == {
             "error": "refresh failed — keeping the last successful view: store is gone",
             "at_ns": 42,
         }
@@ -3851,4 +3866,436 @@ class TestRefreshBehavior:
 
         broken: Any = BrokenService()
         with pytest.raises(RuntimeError, match="boom"):
-            series_tab_outputs(broken, PROJECT, _tray(), None, 1)
+            series_snapshot(broken, PROJECT, _tray(), None, 1)
+
+
+class TestSeriesSnapshotQueryCounts:
+    """jernerics-igq.3 query-count contract: view-only edits, removals,
+    and reorders reuse the stored snapshot with zero reads; additions
+    read only the missing keys; reduction changes rebuild."""
+
+    _READS = (
+        "values",
+        "value_key_coverage",
+        "context_catalog",
+        "trial_numbers_objectives",
+    )
+
+    @staticmethod
+    def _counting(service, monkeypatch):
+        from collections import Counter
+
+        counts = Counter()
+        for name in TestSeriesSnapshotQueryCounts._READS:
+            original = getattr(service.queries, name)
+
+            def spy(*args, _name=name, _original=original, **kwargs):
+                counts[_name] += 1
+                return _original(*args, **kwargs)
+
+            monkeypatch.setattr(service.queries, name, spy)
+        return counts
+
+    def test_view_only_edits_and_removal_read_nothing(self, service, monkeypatch):
+        from collections import Counter
+
+        counts = self._counting(service, monkeypatch)
+        tray = _tray()
+        doc = _series_doc(keys=["loss", "accuracy"])
+        snapshot = series_snapshot(service, PROJECT, tray, doc, 0)
+        baseline = Counter(counts)
+        assert baseline["values"] == 1
+        assert baseline["value_key_coverage"] == 1
+        assert baseline["context_catalog"] == 1
+        assert baseline["trial_numbers_objectives"] == 1
+        view_edits = [
+            _series_doc(keys=["loss", "accuracy"], mode="overlay"),
+            _series_doc(keys=["loss", "accuracy"], trial_display="median_iqr"),
+            _series_doc(keys=["loss", "accuracy"], color="shard"),
+            _series_doc(keys=["loss", "accuracy"], facet="host"),
+            _series_doc(
+                keys=["loss", "accuracy"], context_filters={"host": ["node01"]}
+            ),
+            {
+                **_series_doc(keys=["loss", "accuracy"]),
+                "series": {
+                    **_series_doc(keys=["loss", "accuracy"])["series"],
+                    "axes": {
+                        "loss": {
+                            "scale": "log",
+                            "range": "auto",
+                            "min": None,
+                            "max": None,
+                        }
+                    },
+                },
+            },
+            {
+                **_series_doc(keys=["loss", "accuracy"]),
+                "highlighted_trials": [str(RA2)],
+            },
+            _series_doc(keys=["accuracy", "loss"]),
+            _series_doc(keys=["loss"]),
+            _series_doc(keys=[]),
+        ]
+        for edited in view_edits:
+            outputs = series_view_outputs(service, PROJECT, tray, edited, snapshot, 1)
+            assert outputs[1] is no_update, edited
+        assert counts == baseline
+
+    def test_adding_one_key_reads_only_that_key(self, service, monkeypatch):
+        from collections import Counter
+
+        counts = self._counting(service, monkeypatch)
+        tray = _tray()
+        snapshot = series_snapshot(
+            service, PROJECT, tray, _series_doc(keys=["loss"]), 0
+        )
+        counts.clear()
+        outputs = series_view_outputs(
+            service, PROJECT, tray, _series_doc(keys=["loss", "accuracy"]), snapshot, 1
+        )
+        assert counts == Counter({"values": 1})
+        merged = outputs[1]
+        assert merged is not no_update
+        assert set(merged["per_key"]) == {"loss", "accuracy"}
+        assert merged["fingerprint"] == snapshot["fingerprint"]
+        counts.clear()
+        again = series_view_outputs(
+            service, PROJECT, tray, _series_doc(keys=["loss", "accuracy"]), merged, 2
+        )
+        assert counts == Counter()
+        assert again[1] is no_update
+
+    def test_reduction_change_rebuilds_the_snapshot(self, service, monkeypatch):
+        from collections import Counter
+
+        counts = self._counting(service, monkeypatch)
+        tray = _tray()
+        snapshot = series_snapshot(
+            service, PROJECT, tray, _series_doc(keys=["loss"]), 0
+        )
+        counts.clear()
+        outputs = series_view_outputs(
+            service,
+            PROJECT,
+            tray,
+            _series_doc(keys=["loss"], reduction="mean"),
+            snapshot,
+            1,
+        )
+        assert counts == Counter(
+            {
+                "values": 1,
+                "value_key_coverage": 1,
+                "context_catalog": 1,
+                "trial_numbers_objectives": 1,
+            }
+        )
+        assert outputs[1] is not no_update
+        assert outputs[1]["reduction"] == "mean"
+
+
+class TestContextDiscoveryBeyondPagination:
+    """>100 pages of stored values must not page through tracked_values
+    to discover context filter options."""
+
+    @staticmethod
+    def _big_store(tmp_path):
+        store = Store(tmp_path / "big.sqlite")
+        now = datetime.now(UTC)
+        sweep = uuid.uuid4()
+        trial = uuid.uuid4()
+        execution = uuid.uuid4()
+        ingest = IngestService(store)
+        head = [
+            SweepSnapshotEvent(
+                event_id=uuid.uuid4(),
+                recorded_at=now,
+                project=PROJECT,
+                sweep_id=sweep,
+                name="big",
+                state="completed",
+            ),
+            TrialSnapshotEvent(
+                event_id=uuid.uuid4(),
+                recorded_at=now,
+                trial_id=trial,
+                sweep_id=sweep,
+                number=1,
+                state=TrialState.COMPLETED,
+                retry_root_trial_id=trial,
+            ),
+            ExecutionStartEvent(
+                event_id=uuid.uuid4(),
+                recorded_at=now,
+                execution_id=execution,
+                trial_id=trial,
+                hostname="node00",
+                started_at=now,
+            ),
+        ]
+        result = ingest.apply(
+            IngestRequest(protocol_version=PROTOCOL_VERSION, events=head)
+        )
+        assert not result.conflicts
+        chunk = 100
+        for start in range(0, 101_000, chunk):
+            events = [
+                ValueEvent(
+                    event_id=uuid.uuid4(),
+                    recorded_at=now,
+                    trial_id=trial,
+                    execution_id=execution,
+                    key="loss",
+                    step=step,
+                    value=float(step),
+                    context=FlatContext({"host": "node00", "shard": step % 2}),
+                )
+                for step in range(start, min(start + chunk, 101_000))
+            ]
+            result = ingest.apply(
+                IngestRequest(protocol_version=PROTOCOL_VERSION, events=events)
+            )
+            assert not result.conflicts
+        return store
+
+    def test_project_wide_discovery_skips_value_pages(self, tmp_path, monkeypatch):
+        store = self._big_store(tmp_path)
+        queries = QueryService(store)
+        service = DashboardService(queries)
+        monkeypatch.setattr(
+            queries, "values", lambda *a, **k: pytest.fail("paginated values read")
+        )
+        dims = {
+            entry["key"]: entry["values"]
+            for entry in service.analysis_context_catalog(PROJECT, None)
+        }
+        assert dims["host"] == ["node00"]
+        assert dims["shard"] == ["0", "1"]
+
+
+class TestWorkspaceChurnGates:
+    """jernerics-igq.3: hidden tabs never query or render, the project
+    picker ignores URL view edits once a project is established, the
+    inspector runs only on focus changes and polls, and the scroll
+    capture/restore clientside callbacks stay wired."""
+
+    @pytest.fixture(scope="class")
+    def dash_app(self, tmp_path_factory):
+        service = DashboardService(
+            QueryService(_seeded_store(tmp_path_factory.mktemp("churn-gates")))
+        )
+        ctx = DashboardContext(
+            api_key=API_KEY,
+            queries=service.queries,
+            service=service,
+            signer=SessionSigner(b"\x00" * 32),
+        )
+        return build_dash_app(ctx)
+
+    @staticmethod
+    def _callback_key(callback_map, wanted: set[str]) -> str:
+        def outputs_of(key):
+            stripped = key.removeprefix("..").removesuffix("..")
+            return {part.split("@")[0] for part in stripped.split("...") if part}
+
+        return next(key for key in callback_map if outputs_of(key) == wanted)
+
+    def _post(self, client, callback_map, wanted, inputs, state=(), changed=()):
+        key = self._callback_key(callback_map, wanted)
+        specs = [
+            part.split("@")[0]
+            for part in key.removeprefix("..").removesuffix("..").split("...")
+            if part
+        ]
+        outputs = [
+            {"id": spec.split(".")[0], "property": spec.split(".")[1]} for spec in specs
+        ]
+        return client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": key,
+                "outputs": outputs[0] if len(outputs) == 1 else outputs,
+                "inputs": inputs,
+                "state": list(state),
+                "changedPropIds": list(changed),
+            },
+        )
+
+    _CATALOG_OUTPUTS = {"analysis-catalog.children"}
+
+    def test_hidden_catalog_tab_neither_queries_nor_renders(self, authed, dash_app):
+        inputs = [
+            {"id": "selection-store", "property": "data", "value": dict(EMPTY_TRAY)},
+            {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
+            {"id": "poll", "property": "n_intervals", "value": 1},
+            {"id": "analysis-tabs", "property": "value", "value": "overview"},
+        ]
+        hidden = self._post(
+            authed,
+            dash_app.callback_map,
+            self._CATALOG_OUTPUTS,
+            inputs,
+            state=[{"id": "project-store", "property": "data", "value": PROJECT}],
+            changed=["poll.n_intervals"],
+        )
+        assert hidden.status_code == 204
+        visible = self._post(
+            authed,
+            dash_app.callback_map,
+            self._CATALOG_OUTPUTS,
+            [
+                *inputs[:-1],
+                {"id": "analysis-tabs", "property": "value", "value": "catalog"},
+            ],
+            state=[{"id": "project-store", "property": "data", "value": PROJECT}],
+            changed=["analysis-tabs.value"],
+        )
+        assert visible.status_code == 200
+        assert "analysis-catalog" in visible.json()["response"]
+
+    _SERIES_DATA_OUTPUTS = {
+        "analysis-series-data.data",
+        "analysis-updated.children",
+        "analysis-refresh-store.data",
+    }
+
+    def test_hidden_series_tab_fetches_nothing(self, authed, dash_app):
+        hidden = self._post(
+            authed,
+            dash_app.callback_map,
+            self._SERIES_DATA_OUTPUTS,
+            [
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": dict(EMPTY_TRAY),
+                },
+                {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
+                {"id": "poll", "property": "n_intervals", "value": 2},
+                {"id": "analysis-tabs", "property": "value", "value": "overview"},
+            ],
+            state=[
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {"id": "view-store", "property": "data", "value": None},
+                {"id": "analysis-series-data", "property": "data", "value": None},
+            ],
+            changed=["poll.n_intervals"],
+        )
+        assert hidden.status_code == 204
+        visible = self._post(
+            authed,
+            dash_app.callback_map,
+            self._SERIES_DATA_OUTPUTS,
+            [
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": dict(EMPTY_TRAY),
+                },
+                {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
+                {"id": "poll", "property": "n_intervals", "value": 2},
+                {"id": "analysis-tabs", "property": "value", "value": "series"},
+            ],
+            state=[
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {"id": "view-store", "property": "data", "value": None},
+                {"id": "analysis-series-data", "property": "data", "value": None},
+            ],
+            changed=["analysis-tabs.value"],
+        )
+        assert visible.status_code == 200
+        snapshot = visible.json()["response"]["analysis-series-data"]["data"]
+        assert snapshot["fingerprint"]
+
+    def test_picker_ignores_url_view_edits_once_a_project_is_established(
+        self, authed, dash_app
+    ):
+        view_url = f"?view={encode_view_state(default_view_state())}"
+        cascade = self._post(
+            authed,
+            dash_app.callback_map,
+            {"project-picker.value"},
+            [
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {"id": "url", "property": "search", "value": view_url},
+            ],
+            changed=["url.search"],
+        )
+        assert cascade.status_code == 204
+        settle = self._post(
+            authed,
+            dash_app.callback_map,
+            {"project-picker.value"},
+            [
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {"id": "url", "property": "search", "value": view_url},
+            ],
+            changed=["project-store.data"],
+        )
+        assert settle.status_code == 200
+        assert settle.json()["response"]["project-picker"]["value"] == PROJECT
+
+    def test_inspector_runs_only_on_focus_changes_and_polls(self, authed, dash_app):
+        focus = {"kind": "sweep", "id": str(SWEEP_A)}
+        inputs = [
+            {
+                "id": "view-store",
+                "property": "data",
+                "value": {"focus": focus},
+            },
+            {"id": "poll", "property": "n_intervals", "value": 0},
+        ]
+        same = self._post(
+            authed,
+            dash_app.callback_map,
+            {"inspector.children", "inspector-render-store.data"},
+            inputs,
+            state=[
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {
+                    "id": "inspector-render-store",
+                    "property": "data",
+                    "value": {"focus": focus},
+                },
+            ],
+            changed=["view-store.data"],
+        )
+        assert same.status_code == 204
+        changed_focus = self._post(
+            authed,
+            dash_app.callback_map,
+            {"inspector.children", "inspector-render-store.data"},
+            inputs,
+            state=[
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {"id": "inspector-render-store", "property": "data", "value": None},
+            ],
+            changed=["view-store.data"],
+        )
+        assert changed_focus.status_code == 200
+
+    def test_scroll_capture_and_restore_callbacks_are_wired(self, dash_app):
+        def specs(output_id):
+            found = []
+            for key, spec in dash_app.callback_map.items():
+                outputs = {
+                    part.split("@")[0]
+                    for part in key.removeprefix("..").removesuffix("..").split("...")
+                    if part
+                }
+                if outputs == {f"{output_id}.data"}:
+                    found.append(spec)
+            return found
+
+        capture = specs("scroll-restore-store")
+        assert any(
+            {dep["id"] for dep in spec["inputs"]} == {"analysis-refresh", "poll"}
+            for spec in capture
+        )
+        assert any(
+            {dep["id"] for dep in spec["inputs"]} == {"analysis-refresh-store"}
+            and {dep["id"] for dep in spec.get("state", [])} == {"scroll-restore-store"}
+            for spec in capture
+        )
