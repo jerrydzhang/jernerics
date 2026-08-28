@@ -1,6 +1,5 @@
 ---
 name: jernerics
-disable-model-invocation: true
 description: |
   Use when writing or running experiments with jernerics — experiment
   runner with multi-backend execution, hyperparameter sweeps, tracking,

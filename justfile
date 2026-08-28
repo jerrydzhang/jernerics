@@ -28,7 +28,3 @@ test-remote:
     if [ "$ps" -ne 0 ] || [ "$hs" -ne 0 ]; then exit 1; fi
 
 check: lint format-check typecheck test
-
-install-skills:
-    mkdir -p ~/.pi/agent/skills
-    ln -sfn {{justfile_directory()}}/skills/jernerics ~/.pi/agent/skills/jernerics
