@@ -14,7 +14,6 @@ flows through DashboardService.
 
 import json
 import math
-import uuid
 from collections.abc import Sequence
 from typing import Any
 from urllib.parse import parse_qs, quote
@@ -24,7 +23,7 @@ from dash_ag_grid import AgGrid
 from jernerics_schema import Selection
 
 from . import components, figures
-from .components import MISSING, Badge, Empty, Error, relative_time, short_id
+from .components import MISSING, Empty, Error, relative_time, short_id
 from .routes import ROUTES_BASE, parse_route
 from .selection_tokens import (
     SelectionTokenError,
@@ -56,11 +55,12 @@ _GRID_DEFAULTS: dict[str, Any] = {
 VIEW_VERSION = 1
 """Wire version of the dashboard-only ``view=`` URL document."""
 
-_ANALYSIS_VIEWS = ("catalog", "series", "points", "optuna", "python")
+_ANALYSIS_VIEWS = ("overview", "catalog", "series", "points", "optuna", "python")
 _SERIES_MODES = ("stacked", "overlay")
 _TRIAL_DISPLAYS = ("all", "highlighted", "median_iqr")
 _AXIS_SCALES = ("linear", "log")
 _AXIS_RANGES = ("auto", "custom")
+_FOCUS_KINDS = ("sweep", "trial", "execution")
 
 
 class ViewStateError(Exception):
@@ -76,7 +76,7 @@ def default_view_state() -> dict[str, Any]:
     """The v1 view document with every control at its default."""
     return {
         "v": VIEW_VERSION,
-        "active": "catalog",
+        "active": "overview",
         "series": {
             "keys": [],
             "mode": "stacked",
@@ -88,7 +88,8 @@ def default_view_state() -> dict[str, Any]:
             "axes": {},
             "overlay_axis": default_axis_state(),
         },
-        "highlighted_families": [],
+        "highlighted_trials": [],
+        "focus": None,
         "auto_refresh": False,
         "include_archived": False,
         "include_invalid": False,
@@ -224,9 +225,10 @@ def decode_view_state(raw: str) -> dict[str, Any]:
     doc["series"]["overlay_axis"] = decode_axis_state(
         series.get("overlay_axis", default_axis_state()), "series.overlay_axis"
     )
-    doc["highlighted_families"] = _string_list(
-        payload.get("highlighted_families", []), "highlighted_families"
+    doc["highlighted_trials"] = _string_list(
+        payload.get("highlighted_trials", []), "highlighted_trials"
     )
+    doc["focus"] = decode_focus(payload.get("focus"))
     auto_refresh = payload.get("auto_refresh", False)
     _require(isinstance(auto_refresh, bool), "auto_refresh must be a boolean")
     doc["auto_refresh"] = auto_refresh
@@ -252,6 +254,26 @@ def encode_view_state(doc: dict[str, Any]) -> str:
     return quote(json.dumps(doc, separators=(",", ":"), sort_keys=True), safe="")
 
 
+def decode_focus(value: Any) -> dict[str, str] | None:
+    """A validated focus object ``{kind, id}``; ``None`` when absent."""
+    if value is None:
+        return None
+    _require(isinstance(value, dict), "focus must be an object")
+    kind = value.get("kind")
+    _require(kind in _FOCUS_KINDS, "focus.kind must be sweep, trial, or execution")
+    focus_id = _optional_key(value.get("id"), "focus.id")
+    _require(focus_id is not None, "focus.id must be a non-empty string")
+    return {"kind": kind, "id": focus_id}
+
+
+def with_focus(
+    current: dict[str, Any] | None, focus: dict[str, str] | None
+) -> dict[str, Any]:
+    """View doc after a focus edit; nothing but ``focus`` changes — focus
+    edits never narrow scope."""
+    return {**(current or default_view_state()), "focus": focus}
+
+
 def _view_param(search: str | None) -> str | None:
     values = parse_qs((search or "").lstrip("?")).get("view")
     return values[0] if values else None
@@ -263,10 +285,10 @@ def hydrate_view(
     current: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """(doc, error) for a URL carrying ``?view=``. ``None`` means leave
-    the view store alone (off the analysis route, or already showing
+    the view store alone (off the workspace route, or already showing
     this state). No parameter means defaults; a malformed or unsupported
     document yields defaults plus a visible error."""
-    if parse_route(pathname).kind != "analysis":
+    if parse_route(pathname).kind != "workspace":
         return None, None
     raw = _view_param(search)
     defaults = default_view_state()
@@ -420,360 +442,6 @@ def edited_fields(triggered: Any) -> set[str]:
     }
 
 
-def analysis_page() -> html.Div:
-    """The analysis surface; interactive state lives in the shell's
-    unified selection store, the view store, and the URL."""
-    return html.Div(
-        [
-            html.H2("Analysis"),
-            html.Div(id="analysis-error"),
-            html.Div(id="analysis-scope-bar", className="scope-bar"),
-            html.Details(
-                [
-                    html.Summary("Edit scope"),
-                    html.P(
-                        "Pick sweeps and retry families from the project; the "
-                        "scope drives every view and is shared through the "
-                        "URL token.",
-                        className="hint",
-                    ),
-                    dcc.Checklist(
-                        id="analysis-include",
-                        options=[
-                            {
-                                "label": " include archived sweeps",
-                                "value": "archived",
-                            },
-                            {
-                                "label": " include invalid sweeps",
-                                "value": "invalid",
-                            },
-                        ],
-                        value=[],
-                        className="include-toggle",
-                    ),
-                    html.P(
-                        "Terminal archived and invalid sweeps stay out of "
-                        "discovery until included; sweeps already in the "
-                        "scope are never removed, and their badges and "
-                        "warnings stay visible above.",
-                        className="hint",
-                    ),
-                    AgGrid(
-                        id="analysis-sweep-grid",
-                        rowData=[],
-                        columnDefs=_SWEEP_PICKER_COLUMNS,
-                        defaultColDef=_GRID_DEFAULTS,
-                        dashGridOptions=components.grid_options(
-                            rowSelection={"mode": "multiRow"}
-                        ),
-                        className="ag-theme-alpine grid",
-                    ),
-                    AgGrid(
-                        id="analysis-family-grid",
-                        rowData=[],
-                        columnDefs=_FAMILY_PICKER_COLUMNS,
-                        defaultColDef=_GRID_DEFAULTS,
-                        dashGridOptions=components.grid_options(
-                            rowSelection={"mode": "multiRow"}
-                        ),
-                        className="ag-theme-alpine grid",
-                    ),
-                    dcc.Checklist(
-                        id="analysis-expand",
-                        options=[
-                            {
-                                "label": " include retry families — expand "
-                                "picked roots to every generation",
-                                "value": "expand",
-                            }
-                        ],
-                        value=[],
-                        className="expand-toggle",
-                    ),
-                ],
-                className="scope-editor",
-            ),
-            dcc.Tabs(
-                id="analysis-tabs",
-                value="catalog",
-                children=[
-                    dcc.Tab(label="Data catalog", value="catalog"),
-                    dcc.Tab(label="Series panels", value="series"),
-                    dcc.Tab(label="Points", value="points"),
-                    dcc.Tab(label="Optuna views", value="optuna"),
-                    dcc.Tab(label="Continue in Python", value="python"),
-                ],
-            ),
-            # Content stays mounted across tab switches: dash scrambles
-            # callback inputs positionally when a callback spans mounted
-            # and unmounted components, so the visibility toggle is
-            # clientside CSS, never a re-mount.
-            html.Div(
-                id="analysis-catalog",
-                style={"display": "block"},
-            ),
-            html.Div(
-                _series_tab().children,
-                id="analysis-series-tab",
-                style={"display": "none"},
-            ),
-            html.Div(id="analysis-points", style={"display": "none"}),
-            html.Div(
-                _optuna_tab().children,
-                id="analysis-optuna-tab",
-                style={"display": "none"},
-            ),
-            html.Div(id="analysis-python", style={"display": "none"}),
-        ],
-        className="page",
-    )
-
-
-def scope_bar(
-    service: DashboardService | None,
-    project: str | None,
-    tray: dict[str, Any] | None,
-) -> html.Div:
-    """The persistent scope line above every analysis view: selected
-    sweep names, curation badges, and the tray's counts. Curated sweeps
-    stay in scope with their state named — never silently removed."""
-    tray = tray or EMPTY_TRAY
-    if not project or service is None:
-        return html.Div(
-            Empty("Pick a project in the header to analyze its sweeps."),
-            className="scope-bar",
-        )
-    summaries = {
-        summary.sweep_id: summary for summary in service.sweep_overview(project)
-    }
-    picked_ids = list(tray.get("sweeps") or [])
-    picked = [
-        (summaries[sweep_id].name if sweep_id in summaries else short_id(sweep_id))
-        for sweep_id in picked_ids
-    ]
-    label = ", ".join(picked) if picked else "nothing selected"
-    children: list[Any] = [
-        html.Span(f"Scope: {label}", className="scope-sweeps"),
-        html.Span(tray_summary(tray), className="scope-counts"),
-    ]
-    for sweep_id, name in zip(picked_ids, picked, strict=True):
-        summary = summaries.get(sweep_id)
-        if summary is None:
-            continue
-        if summary.archived:
-            children.append(Badge(f"{name} archived", kind="archived"))
-        if summary.invalid:
-            children.append(Badge(f"{name} invalid", kind="invalid"))
-            children.append(
-                html.Span(
-                    f"{name} is marked scientifically invalid — reason: "
-                    f"{summary.invalid_reason}. Continue only with that "
-                    "in mind, or remove it from the scope.",
-                    className="scope-warning",
-                )
-            )
-    return html.Div(children, className="scope-bar")
-
-
-def _series_tab() -> html.Div:
-    return html.Div(
-        [
-            html.Div(
-                [
-                    dcc.Dropdown(
-                        id="analysis-key",
-                        placeholder="Value keys… (order = panel order)",
-                        multi=True,
-                        searchable=True,
-                    ),
-                    dcc.RadioItems(
-                        id="analysis-mode",
-                        options=[
-                            {"label": " Stacked panels", "value": "stacked"},
-                            {"label": " Shared-axis overlay", "value": "overlay"},
-                        ],
-                        value="stacked",
-                        inline=True,
-                    ),
-                    dcc.Dropdown(id="analysis-color", placeholder="Color by context…"),
-                    dcc.Dropdown(
-                        id="analysis-facet",
-                        placeholder="Facet rows by context…",
-                    ),
-                    dcc.RadioItems(
-                        id="analysis-reduction",
-                        options=[
-                            {"label": f" {name}", "value": name}
-                            for name in ANALYSIS_REDUCTIONS
-                        ],
-                        value="none",
-                        inline=True,
-                    ),
-                ],
-                className="analysis-controls",
-            ),
-            html.Div(
-                [
-                    dcc.RadioItems(
-                        id="analysis-display",
-                        options=[
-                            {"label": " All raw", "value": "all"},
-                            {"label": " Highlighted only", "value": "highlighted"},
-                            {"label": " Median + IQR", "value": "median_iqr"},
-                        ],
-                        value="all",
-                        inline=True,
-                    ),
-                    html.Button("Refresh", id="analysis-refresh", n_clicks=0),
-                    dcc.Checklist(
-                        id="analysis-auto-refresh",
-                        options=[
-                            {
-                                "label": " Auto-refresh while incomplete",
-                                "value": "auto",
-                            }
-                        ],
-                        value=[],
-                        inline=True,
-                    ),
-                    html.Span(id="analysis-series-status", className="series-status"),
-                    html.Span(id="analysis-updated", className="series-updated"),
-                ],
-                className="series-toolbar",
-            ),
-            html.P(
-                "Display mode says how trials compare: All raw renders every "
-                "series (line density warns above 100), Highlighted only "
-                "renders the trial-table selection, Median + IQR aggregates "
-                "per color/facet group at each observed step. Execution "
-                "reduction stays separate: “none” shows every (trial, "
-                "execution) series as logged; mean/min/max fold executions "
-                "within each trial — never an implicit latest value.",
-                className="hint",
-            ),
-            html.Div(id="analysis-context-filters", className="context-filters"),
-            AgGrid(
-                id="analysis-trial-grid",
-                rowData=[],
-                columnDefs=[],
-                defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions=components.grid_options(
-                    rowSelection={"mode": "multiRow"}
-                ),
-                className="ag-theme-alpine grid trial-grid",
-            ),
-            html.Div(id="analysis-series-panels"),
-            dcc.Graph(id="analysis-series-figure"),
-            dcc.Store(id="analysis-series-figure-store"),
-            dcc.Store(id="analysis-series-data"),
-            dcc.Store(id="analysis-refresh-store"),
-        ]
-    )
-
-
-def _optuna_tab() -> html.Div:
-    return html.Div(
-        [
-            html.P(
-                "Study-style views rebuilt from canonical trial snapshots "
-                "with plain plotly — this server does not depend on optuna. "
-                "One figure set per selected sweep; contour additionally "
-                "needs two numeric params.",
-                className="hint",
-            ),
-            html.Div(
-                [
-                    dcc.Dropdown(
-                        id="analysis-contour-x", placeholder="Contour x param…"
-                    ),
-                    dcc.Dropdown(
-                        id="analysis-contour-y", placeholder="Contour y param…"
-                    ),
-                ],
-                className="analysis-controls",
-            ),
-            html.Div(id="analysis-optuna"),
-        ]
-    )
-
-
-_SWEEP_PICKER_COLUMNS: list[dict[str, Any]] = [
-    {
-        "headerName": "Sweep",
-        "field": "name",
-    },
-    {"headerName": "Id", "field": "sweep_id"},
-    {"headerName": "State", "field": "state"},
-    {"headerName": "Curation", "field": "curation"},
-    {"headerName": "Health", "field": "health"},
-    {"headerName": "Backend", "field": "backend"},
-]
-
-_FAMILY_PICKER_COLUMNS: list[dict[str, Any]] = [
-    {"headerName": "Family root", "field": "root_short"},
-    {"headerName": "Current trial", "field": "current_short"},
-    {"headerName": "#", "field": "number"},
-    {"headerName": "State", "field": "state"},
-    {"headerName": "Objective", "field": "objective"},
-    {"headerName": "Generations", "field": "generations"},
-]
-
-
-def _objective(objective: float | None) -> str:
-    return MISSING if objective is None else f"{objective:g}"
-
-
-def sweep_picker_rows(
-    summaries: list[Any],
-    tray: dict[str, Any] | None,
-    *,
-    include_archived: bool = False,
-    include_invalid: bool = False,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Sweep-picker grid rows, selected rows matching the tray's sweeps.
-
-    Terminal archived/invalid sweeps stay out of discovery until the
-    include controls reveal them; sweeps already picked (through a
-    ``sel=`` token, the workspace grid, or Analyze series) are never
-    dropped, and incomplete sweeps always stay discoverable — curation
-    never hides active work.
-    """
-    picked = set((tray or {}).get("sweeps") or [])
-    rows = []
-    for summary in summaries:
-        hidden_curation = (summary.invalid and not include_invalid) or (
-            summary.archived and not summary.invalid and not include_archived
-        )
-        if (
-            hidden_curation
-            and not summary.incomplete
-            and summary.sweep_id not in picked
-        ):
-            continue
-        rows.append(
-            {
-                "sweep_id": summary.sweep_id,
-                "name": summary.name,
-                "state": summary.state,
-                "health": summary.health,
-                "backend": summary.backend or MISSING,
-                "curation": _picker_curation(summary),
-            }
-        )
-    selected = [row for row in rows if row["sweep_id"] in picked]
-    return rows, selected
-
-
-def _picker_curation(summary: Any) -> str:
-    """Distinct curation marker for picker cells; invalid outranks archived."""
-    if summary.invalid:
-        return "invalid"
-    if summary.archived:
-        return "archived"
-    return ""
-
-
 def family_picker_rows(
     families: list[dict[str, Any]], tray: dict[str, Any] | None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -785,7 +453,7 @@ def family_picker_rows(
             "current_short": short_id(row["current_trial"]),
             "number": row["number"],
             "state": row["state"],
-            "objective": _objective(row["objective"]),
+            "objective": components.objective_text(row["objective"]),
             "generations": row["generations"],
         }
         for row in families
@@ -897,7 +565,7 @@ def hydrate_tray(
     re-fires when project-store settles, while a token the dashboard
     cannot act on surfaces its error instead of silently empty grids."""
     token = _sel_param(search)
-    if not token or parse_route(pathname).kind != "analysis":
+    if not token or parse_route(pathname).kind != "workspace":
         return None, None
     if not project:
         _selection, error = cold_start(service, search)
@@ -975,15 +643,15 @@ def synced_search(
     url_navigated: bool,
 ) -> str | None:
     """The URL search after a navigation or a tray/view edit; ``None``
-    leaves it alone. Navigations may only drop the analysis parameters —
+    leaves it alone. Navigations may only drop the workspace parameters —
     minting on navigation would let a stale session tray clobber a
     freshly opened deep link before hydration lands. Tray and view
-    edits mint, and only on the analysis page."""
+    edits mint, and only on the workspace page."""
     if url_navigated:
-        if current_search and parse_route(pathname).kind != "analysis":
+        if current_search and parse_route(pathname).kind != "workspace":
             return ""
         return None
-    if parse_route(pathname).kind != "analysis":
+    if parse_route(pathname).kind != "workspace":
         return None
     return search_from_state(service, project, tray, view_doc, current_search)
 
@@ -1061,23 +729,11 @@ def search_from_state(
     return target
 
 
-def analysis_href(
-    service: DashboardService, project: str | None, tray: dict[str, Any] | None
-) -> str:
-    """Analysis URL carrying the tray's current scope (header tray)."""
-    fragment = selection_query(service, project, tray)
-    return f"{ROUTES_BASE}/analysis{_query_search([fragment])}"
-
-
-def series_entry_href(project: str, sweep_id: str) -> str:
-    """Analysis URL scoped to one sweep with the Series view active
-    (sweep detail's Analyze series action)."""
-    selection = Selection(project=project, sweeps=(uuid.UUID(sweep_id),))
-    doc = dict(default_view_state(), active="series")
-    return (
-        f"{ROUTES_BASE}/analysis?sel={encode_selection_token(selection)}"
-        f"&view={encode_view_state(doc)}"
-    )
+def workspace_focus_href(project: str, kind: str, object_id: str) -> str:
+    """Workspace URL whose view document focuses one object (the
+    artifact viewer's back-links)."""
+    doc = dict(default_view_state(), focus={"kind": kind, "id": object_id})
+    return f"{ROUTES_BASE}/project/{project}?view={encode_view_state(doc)}"
 
 
 def _pick_project_first() -> html.Div:
@@ -1443,7 +1099,7 @@ def series_outputs(
     per_key = apply_context_filters(per_key, series_doc["context_filters"])
     payload = _series_payload(per_key, keys)
     display = series_doc["trial_display"]
-    highlighted = list(doc["highlighted_families"])
+    highlighted = list(doc["highlighted_trials"])
     if not keys:
         panels = [
             Empty(
@@ -1949,7 +1605,7 @@ def trial_table_rows(trials: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "number": trial["number"],
             "trial_short": short_id(trial["trial_id"]),
             "state": trial["state"],
-            "objective": _objective(trial["objective"]),
+            "objective": components.objective_text(trial["objective"]),
             **{
                 f"p_{key}": _format_payload(value)
                 for key, value in (trial.get("params") or {}).items()
@@ -1977,7 +1633,7 @@ def trial_table_outputs(
         return [], [], []
     trials = service.analysis_trials(project, tray)
     rows = trial_table_rows(trials)
-    picked = set(doc["highlighted_families"])
+    picked = set(doc["highlighted_trials"])
     return (
         trial_table_columns(trials),
         rows,
@@ -1993,7 +1649,7 @@ def view_from_highlights(
     doc = current or default_view_state()
     return {
         **doc,
-        "highlighted_families": [
+        "highlighted_trials": [
             str(row["trial_id"]) for row in rows or [] if row.get("trial_id")
         ],
     }
@@ -2011,9 +1667,9 @@ def view_from_plot_click(
         return None
     doc = current or default_view_state()
     picked = [str(identity)]
-    if doc["highlighted_families"] == picked:
+    if doc["highlighted_trials"] == picked:
         picked = []
-    return {**doc, "highlighted_families": picked}
+    return {**doc, "highlighted_trials": picked}
 
 
 def series_status(

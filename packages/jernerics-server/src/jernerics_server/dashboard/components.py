@@ -19,6 +19,12 @@ def short_id(identifier: str | None) -> str:
     return identifier.replace("-", "")[:8]
 
 
+def objective_text(objective: float | None) -> str:
+    """Grid/table cell text for an objective value; the missing marker
+    when the trial never reported one."""
+    return MISSING if objective is None else f"{objective:g}"
+
+
 def relative_time(ns: int | None, now_ns: int | None = None) -> str:
     """ "3m ago"-style recency; ``unknown`` when the fact is missing."""
     if ns is None:

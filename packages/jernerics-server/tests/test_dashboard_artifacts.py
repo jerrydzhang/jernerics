@@ -44,6 +44,7 @@ from jernerics_server.dashboard.artifacts import (
 )
 from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.routes import parse_route
+from jernerics_server.dashboard.workspace import inspector_content
 from jernerics_server.http import create_app
 from jernerics_server.store import Store
 
@@ -273,8 +274,10 @@ class TestVersionList:
         assert all(row.available for row in rows)
         assert rows[0].sha256 != rows[1].sha256
 
-    def test_trial_page_grid_lists_every_artifact_with_state(self, env):
-        page, _ = page_content(f"/dashboard/trial/{TRIAL}", env.service)
+    def test_trial_inspector_grid_lists_every_artifact_with_state(self, env):
+        page = inspector_content(
+            env.service, {"kind": "trial", "id": str(TRIAL)}, 0
+        )
         grid = _find(page, AgGrid, "artifact-grid")[0]
         by_key = {}
         for row in grid.rowData:
@@ -285,8 +288,10 @@ class TestVersionList:
         assert by_key["inspection.json"][0]["context"] == "stage=eval"
         assert by_key["stdout"][0]["source"] == "system"
 
-    def test_execution_page_grid_lists_execution_bound_artifacts(self, env):
-        page, _ = page_content(f"/dashboard/execution/{EXECUTION}", env.service)
+    def test_execution_inspector_grid_lists_execution_bound_artifacts(self, env):
+        page = inspector_content(
+            env.service, {"kind": "execution", "id": str(EXECUTION)}, 0
+        )
         grid = _find(page, AgGrid, "artifact-grid")[0]
         keys = {row["key"] for row in grid.rowData}
         assert {
@@ -307,7 +312,9 @@ class TestCellTextSelection:
     sha256) stay copyable, without dropping existing options."""
 
     def test_listing_grid_carries_the_pair(self, env):
-        page, _ = page_content(f"/dashboard/trial/{TRIAL}", env.service)
+        page = inspector_content(
+            env.service, {"kind": "trial", "id": str(TRIAL)}, 0
+        )
         options = _find(page, AgGrid, "artifact-grid")[0].dashGridOptions
         assert options["enableCellTextSelection"] is True
         assert options["ensureDomOrder"] is True
@@ -556,9 +563,10 @@ class TestViewerFacts:
         assert "v2 of 2" in rendered
         assert "model-v2.bin" in rendered
         assert hashlib.sha256(b"model-two-bytes").hexdigest() in rendered
-        assert f"/dashboard/trial/{TRIAL}" in rendered
-        assert f"/dashboard/execution/{EXECUTION}" in rendered
-        assert f"/dashboard/sweep/{SWEEP}" in rendered
+        assert "/dashboard/project/lab?view=" in rendered
+        assert str(TRIAL) in rendered
+        assert str(EXECUTION) in rendered
+        assert str(SWEEP) in rendered
         assert "section-artifact-facts" in rendered
         assert "section-artifact-content" in rendered
 

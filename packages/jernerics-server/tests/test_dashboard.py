@@ -163,20 +163,22 @@ class TestLoginNext:
 
     def test_query_string_is_carried_inside_next(self, client):
         response = client.get(
-            "/dashboard/analysis", params={"sel": "tok=1"}, follow_redirects=False
+            "/dashboard/project/ops",
+            params={"sel": "tok=1"},
+            follow_redirects=False,
         )
         assert response.status_code == 303
         assert response.headers["location"] == _login_url(
-            "/dashboard/analysis?sel=tok%3D1"
+            "/dashboard/project/ops?sel=tok%3D1"
         )
 
     def test_login_page_embeds_next_as_hidden_field(self, client):
         response = client.get(
-            "/dashboard/login", params={"next": "/dashboard/sweep/abc"}
+            "/dashboard/login", params={"next": "/dashboard/project/abc"}
         )
         assert response.status_code == 200
         assert '<input name="next" type="hidden"' in response.text
-        assert 'value="/dashboard/sweep/abc"' in response.text
+        assert 'value="/dashboard/project/abc"' in response.text
 
     def test_login_page_drops_unsafe_next(self, client):
         response = client.get("/dashboard/login", params={"next": "https://evil.com"})
@@ -186,20 +188,23 @@ class TestLoginNext:
     def test_valid_key_lands_on_next_target_with_query(self, client):
         response = client.post(
             "/dashboard/login",
-            data={"api_key": API_KEY, "next": "/dashboard/analysis?sel=tok=1"},
+            data={
+                "api_key": API_KEY,
+                "next": "/dashboard/project/ops?sel=tok=1",
+            },
             follow_redirects=False,
         )
         assert response.status_code == 303
-        assert response.headers["location"] == "/dashboard/analysis?sel=tok=1"
+        assert response.headers["location"] == "/dashboard/project/ops?sel=tok=1"
 
     def test_wrong_key_keeps_next_for_retry(self, client):
         response = client.post(
             "/dashboard/login",
-            data={"api_key": "nope", "next": "/dashboard/trial/abc"},
+            data={"api_key": "nope", "next": "/dashboard/project/abc"},
             follow_redirects=False,
         )
         assert response.status_code == 401
-        assert 'value="/dashboard/trial/abc"' in response.text
+        assert 'value="/dashboard/project/abc"' in response.text
 
     @pytest.mark.parametrize(
         "evil",
@@ -209,7 +214,7 @@ class TestLoginNext:
             "/\\evil.com/dashboard",
             "http://localhost/dashboard",
             "/other/page",
-            "dashboard/analysis",
+            "dashboard/project/x",
             "/dashboard\nSet-Cookie: pwn=1",
             "/dashboard%0d%0aSet-Cookie:%20pwn=1",
             "/dashboard\\@evil.com",
@@ -355,9 +360,8 @@ class TestMount:
 
     def test_deep_link_routes_return_200(self, authed):
         for path in (
-            "/dashboard/sweep/0123456789abcdef0123456789abcdef",
-            "/dashboard/trial/deadbeefdeadbeefdeadbeefdeadbeef",
-            "/dashboard/execution/feedfacefeedfacefeedfacefeedface",
+            "/dashboard/project/0123456789abcdef",
+            "/dashboard/artifact-view/0123456789abcdef0123456789abcdef",
         ):
             response = authed.get(path)
             assert response.status_code == 200
@@ -384,21 +388,44 @@ class TestRoutesAndPages:
     def test_parse_route_covers_every_shell_route(self):
         assert parse_route("/dashboard").kind == "project"
         assert parse_route("/dashboard/").kind == "project"
-        assert parse_route("/dashboard/sweep/abc").kind == "sweep"
-        assert parse_route("/dashboard/sweep/abc").object_id == "abc"
-        assert parse_route("/dashboard/trial/abc").kind == "trial"
-        assert parse_route("/dashboard/execution/abc").kind == "execution"
+        assert parse_route("/dashboard/project/ops").kind == "workspace"
+        assert parse_route("/dashboard/project/ops").object_id == "ops"
+        spec = parse_route(
+            "/dashboard/artifact-view/0123456789abcdef0123456789abcdef"
+        )
+        assert spec.kind == "artifact"
+        assert spec.object_id == "0123456789abcdef0123456789abcdef"
         assert parse_route("/dashboard/whatever").kind == "not-found"
 
-    def test_object_pages_with_unknown_ids_render_empty_surface(self, tmp_path):
+    def test_removed_detail_routes_are_not_found(self):
+        for kind in ("sweep", "trial", "execution", "analysis"):
+            assert parse_route(f"/dashboard/{kind}/abc").kind == "not-found"
+        assert parse_route("/dashboard/analysis").kind == "not-found"
+
+    def test_unknown_artifact_renders_empty_surface(self, tmp_path):
+        client = _build(tmp_path)
+        service = _ctx(client).service
+        page, polls = page_content(
+            "/dashboard/artifact-view/0123456789abcdef0123456789abcdef", service
+        )
+        rendered = str(page)
+        assert "0123456789abcdef" in rendered
+        assert "Nothing here yet" in rendered
+        assert polls is False
+
+    def test_focused_unknown_object_renders_empty_inspector(self, tmp_path):
+        from jernerics_server.dashboard import workspace
+
         client = _build(tmp_path)
         service = _ctx(client).service
         for kind in ("sweep", "trial", "execution"):
-            page, polls = page_content(f"/dashboard/{kind}/0123456789abcdef", service)
-            rendered = str(page)
+            rendered = str(
+                workspace.inspector_content(
+                    service, {"kind": kind, "id": "0123456789abcdef"}, 0
+                )
+            )
             assert "0123456789abcdef" in rendered
             assert "Nothing here yet" in rendered
-            assert polls is False
 
     def test_workspace_route_parses(self):
         spec = parse_route("/dashboard/project/ops")

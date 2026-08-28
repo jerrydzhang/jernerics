@@ -1,14 +1,12 @@
 """URL <-> page mapping for the dashboard shell.
 
 Deep links: ``/dashboard`` (project catalog), ``/dashboard/project/<name>``
-(workspace sweep grid), ``/dashboard/sweep/<id>``, ``/dashboard/trial/<id>``,
-``/dashboard/execution/<id>``, ``/dashboard/artifact-view/<hex>`` (the
-viewer; ``/dashboard/artifact/<hex>`` is the raw download alias served by
-the HTTP layer, not a page), and ``/dashboard/analysis`` (cross-sweep
-analysis; its query string carries the selection token). Unknown paths
-render the not-found surface. ``polls`` on a PageSpec is only the
-route-level default; live pages decide from fetched facts (see
-callbacks.page_content).
+(the persistent workspace; its query string carries the selection token and
+the view document), and ``/dashboard/artifact-view/<hex>`` (the viewer;
+``/dashboard/artifact/<hex>`` is the raw download alias served by the HTTP
+layer, not a page). Unknown paths render the not-found surface. ``polls``
+on a PageSpec is only the route-level default; live pages decide from
+fetched facts (see callbacks.page_content).
 """
 
 from dataclasses import dataclass
@@ -19,15 +17,9 @@ ROUTES_BASE = "/dashboard"
 PageKind = Literal[
     "project",
     "workspace",
-    "sweep",
-    "trial",
-    "execution",
     "artifact",
-    "analysis",
     "not-found",
 ]
-
-_KINDS: tuple[PageKind, ...] = ("sweep", "trial", "execution")
 
 _PROJECT_PREFIX = f"{ROUTES_BASE}/project/"
 _ARTIFACT_VIEW_PREFIX = f"{ROUTES_BASE}/artifact-view/"
@@ -47,8 +39,6 @@ def parse_route(pathname: str | None) -> PageSpec:
     path = pathname or f"{ROUTES_BASE}/"
     if path in (ROUTES_BASE, f"{ROUTES_BASE}/"):
         return PageSpec(kind="project")
-    if path == f"{ROUTES_BASE}/analysis":
-        return PageSpec(kind="analysis")
     if path.startswith(_PROJECT_PREFIX):
         project = path[len(_PROJECT_PREFIX) :].strip("/")
         if project:
@@ -57,10 +47,4 @@ def parse_route(pathname: str | None) -> PageSpec:
         artifact_id = path[len(_ARTIFACT_VIEW_PREFIX) :].strip("/")
         if artifact_id:
             return PageSpec(kind="artifact", object_id=artifact_id)
-    for kind in _KINDS:
-        prefix = f"{ROUTES_BASE}/{kind}/"
-        if path.startswith(prefix):
-            object_id = path[len(prefix) :].strip("/")
-            if object_id:
-                return PageSpec(kind=kind, object_id=object_id)
     return PageSpec(kind="not-found")

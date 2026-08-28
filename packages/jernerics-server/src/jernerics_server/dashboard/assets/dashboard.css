@@ -34,14 +34,13 @@ body {
   color: #555;
   font-size: 0.9rem;
   white-space: nowrap;
-}
-.nav a.tray {
-  color: #555;
-  text-decoration: none;
-  white-space: nowrap;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
 }
 
-.nav a.tray:hover {
+.nav .tray:hover {
   color: #000;
   text-decoration: underline;
 }
@@ -713,4 +712,90 @@ a.project-row:hover {
 
 .panel-instruction {
   padding: 1.5rem;
+}
+
+.workspace-main {
+  display: grid;
+  grid-template-columns: minmax(18rem, 22rem) minmax(0, 1fr) minmax(16rem, 22rem);
+  gap: 1rem;
+  align-items: start;
+}
+
+.scope-browser {
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 0.5rem;
+}
+
+.scope-browser summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.inspector {
+  border-left: 1px solid #ddd;
+  padding-left: 1rem;
+  min-width: 0;
+}
+
+.inspector:empty {
+  display: none;
+}
+
+.inspector-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.inspector-title {
+  margin: 0;
+}
+
+.inspector-hint {
+  color: #777;
+}
+
+.focus-link {
+  background: none;
+  border: none;
+  color: #0366d6;
+  cursor: pointer;
+  padding: 0;
+  font: inherit;
+  text-decoration: underline;
+}
+
+@media (max-width: 60rem) {
+  .workspace-main {
+    grid-template-columns: 1fr;
+  }
+
+  .scope-browser[open] {
+    position: fixed;
+    top: 3.5rem;
+    left: 0;
+    bottom: 0;
+    width: min(24rem, 92vw);
+    overflow-y: auto;
+    background: #fff;
+    border-right: 1px solid #ddd;
+    box-shadow: 0.25rem 0 0.5rem rgba(0, 0, 0, 0.08);
+    z-index: 20;
+  }
+
+  .inspector:not(:empty) {
+    position: fixed;
+    top: 3.5rem;
+    right: 0;
+    bottom: 0;
+    width: min(34rem, 92vw);
+    overflow-y: auto;
+    background: #fff;
+    border-left: 1px solid #ddd;
+    box-shadow: -0.25rem 0 0.5rem rgba(0, 0, 0, 0.08);
+    padding: 0.75rem;
+    z-index: 20;
+  }
 }

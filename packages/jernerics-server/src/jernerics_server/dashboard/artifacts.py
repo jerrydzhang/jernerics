@@ -16,7 +16,7 @@ from typing import Any
 from dash import dcc, html
 from dash_ag_grid import AgGrid
 
-from . import components
+from . import analysis, components
 from .components import MISSING, Badge, Empty, human_size, relative_time, short_id
 from .routes import ROUTES_BASE
 from .service import ArtifactRow, ArtifactView, DashboardService
@@ -162,7 +162,10 @@ def _viewer_header(view: ArtifactView, now_ns: int) -> html.Section:
             (
                 "Trial",
                 html.A(
-                    short_id(view.trial_id), href=f"{ROUTES_BASE}/trial/{view.trial_id}"
+                    short_id(view.trial_id),
+                    href=analysis.workspace_focus_href(
+                        view.project, "trial", view.trial_id
+                    ),
                 ),
             ),
             (
@@ -170,7 +173,9 @@ def _viewer_header(view: ArtifactView, now_ns: int) -> html.Section:
                 (
                     html.A(
                         short_id(view.execution_id),
-                        href=f"{ROUTES_BASE}/execution/{view.execution_id}",
+                        href=analysis.workspace_focus_href(
+                            view.project, "execution", view.execution_id
+                        ),
                     )
                     if view.execution_id
                     else MISSING
@@ -178,7 +183,12 @@ def _viewer_header(view: ArtifactView, now_ns: int) -> html.Section:
             ),
             (
                 "Sweep",
-                html.A(view.sweep_name, href=f"{ROUTES_BASE}/sweep/{view.sweep_id}"),
+                html.A(
+                    view.sweep_name,
+                    href=analysis.workspace_focus_href(
+                        view.project, "sweep", view.sweep_id
+                    ),
+                ),
             ),
         ],
     )

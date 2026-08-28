@@ -1,4 +1,4 @@
-"""Operational monitoring views (jernerics-h5d.12).
+"""Workspace browser, inspector, and curation coverage.
 
 Callback-layer coverage over a seeded v3 store: the orchestrator
 browser-drives the mounted dashboard after merge, so these tests assert
@@ -6,12 +6,10 @@ on the pure helpers the Dash callbacks wrap plus TestClient page 200s.
 """
 
 import re
-import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
 
 import pytest
 from dash.development.base_component import Component
@@ -33,10 +31,6 @@ from jernerics_schema import (
     TrialState,
     ValueEvent,
 )
-from jernerics_server.dashboard.analysis import (
-    decode_view_state,
-    sweep_picker_rows,
-)
 from jernerics_server.dashboard.callbacks import (
     apply_curation,
     lineage_panel,
@@ -47,21 +41,19 @@ from jernerics_server.dashboard.callbacks import (
     workspace_state,
 )
 from jernerics_server.dashboard.components import grid_options, short_id
-from jernerics_server.dashboard.layout import (
-    curation_note,
-    curation_transitions,
-    family_grid_row,
-    selection_transitions,
-    sweep_grid_row,
-    view_options,
-)
-from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import (
     CurationRejectedError,
     CurationUnavailableError,
     DashboardService,
-    view_counts,
-    workspace_visible,
+)
+from jernerics_server.dashboard.workspace import (
+    browser_sweep_rows,
+    curation_note,
+    curation_transitions,
+    detail_curation,
+    family_grid_row,
+    inspector_content,
+    selection_transitions,
 )
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
@@ -547,6 +539,17 @@ def _grid(page: Any, grid_id: str) -> Any:
     return found[0]
 
 
+def _inspector(service: DashboardService, kind: str, object_id) -> Any:
+    return inspector_content(service, {"kind": kind, "id": str(object_id)}, 0)
+
+
+def _focus_ref(kind: str, object_id) -> str:
+    return f"{{'focus-object': '{kind}:{object_id}'}}"
+
+
+NOW = 0
+
+
 class TestProjectsPage:
     def test_counts_recent_sweep_and_relative_activity(self, service):
         catalog = service.project_catalog()
@@ -571,51 +574,73 @@ class TestProjectsPage:
         assert polls is False
 
 
-class TestSweepGrid:
-    def test_counts_backend_and_health_per_sweep(self, service):
-        summaries = {row.name: row for row in service.sweep_overview("ops")}
-        alpha = summaries["alpha"]
-        assert alpha.submitted_jobs == 2
-        assert alpha.expected_trials == 8
-        assert alpha.started == 6
-        assert alpha.terminal == 2
-        assert alpha.backend == "slurm"
-        assert alpha.failed == 1
-        assert alpha.health == "failing"
-        beta = summaries["beta"]
-        assert beta.submitted_jobs == 0
-        assert beta.expected_trials == 1
-        assert beta.started == 1
-        assert beta.terminal == 1
-        assert beta.backend == "local"
-        assert beta.health == "healthy"
-
-    def test_grid_rows_show_unknown_optimizer_and_direction(self, service):
-        alpha = next(
-            row for row in service.sweep_overview("ops") if row.name == "alpha"
-        )
-        row = sweep_grid_row(alpha, time.time_ns())
-        assert row["optimizer"] == "—"
-        assert row["health"] == "failing"
-        assert row["latest_submission"] == "10m ago"
-
-    def test_rendered_workspace_links_every_sweep_page(self, service):
-        page, _ = page_content("/dashboard/project/ops", service)
+class TestWorkspaceLayout:
+    def test_workspace_mounts_browser_tabs_and_inspector_once(self, service):
+        page, polls = page_content("/dashboard/project/ops", service)
         rendered = str(page)
-        for summary in service.sweep_overview("ops"):
-            link = f"[{summary.name}](/dashboard/sweep/{summary.sweep_id})"
-            assert link in rendered
+        assert "Project ops" in rendered
+        assert "id='scope-browser'" in rendered
+        assert "id='sweep-grid'" in rendered
+        assert "id='analysis-family-grid'" in rendered
+        assert "id='analysis-expand'" in rendered
+        assert "id='analysis-include'" in rendered
+        assert "id='workspace-quick'" in rendered
+        assert "id='inspector'" in rendered
+        assert "id='workspace-overview'" in rendered
+        for tab in ("overview", "catalog", "series", "points", "optuna", "python"):
+            assert f"value='{tab}'" in rendered
+        for button in ("ws-archive", "ws-invalid", "ws-restore-validity", "ws-restore"):
+            assert f"id='{button}'" in rendered
+        assert "id='ws-reason'" in rendered
+        assert "id='workspace-message'" in rendered
+        assert "id='workspace-curation-note'" in rendered
+        assert polls is True  # alpha is incomplete
 
-    def test_sweep_column_links_without_a_second_checkbox(self, service):
-        """jernerics-sey: AG Grid 35's rowSelection multiRow already
-        renders the selection column; a columnDef checkboxSelection
-        duplicated it (two checkboxes per row)."""
+    def test_browser_grid_has_stable_row_ids(self, service):
         page, _ = page_content("/dashboard/project/ops", service)
-        sweep_column = _grid(page, "sweep-grid").columnDefs[0]
-        assert sweep_column["field"] == "name"
-        assert sweep_column["cellRenderer"] == "markdown"
-        assert "checkboxSelection" not in sweep_column
-        assert "headerCheckboxSelection" not in sweep_column
+        sweep_grid = _grid(page, "sweep-grid")
+        assert sweep_grid.getRowId == {"function": "jernericsSweepRowId(params)"}
+        family_grid = _grid(page, "analysis-family-grid")
+        assert family_grid.getRowId == {"function": "jernericsTrialRowId(params)"}
+
+    def test_browser_rows_carry_operational_facts(self, service):
+        rows = {
+            row["sweep_id"]: row
+            for row in browser_sweep_rows(service.sweep_overview("ops"), {"sweeps": []})
+        }
+        alpha = rows[str(SWEEP_A)]
+        assert alpha["name"] == "alpha"
+        assert alpha["state"] == "running"
+        assert alpha["submitted_jobs"] == 2
+        assert alpha["expected_trials"] == 8
+        assert alpha["backend"] == "slurm"
+        assert alpha["health"] == "failing"
+        assert alpha["curation"] == ""
+        beta = rows[str(SWEEP_B)]
+        assert beta["backend"] == "local"
+        assert beta["health"] == "healthy"
+
+    def test_workspace_state_reapplies_sort_and_filters(self, service):
+        state = {
+            "quick": "alpha",
+            "filters": {
+                "state": {"filterType": "text", "type": "equals", "filter": "running"}
+            },
+            "sort": [{"colId": "backend", "sort": "desc"}],
+        }
+        page, _polls = page_content(
+            "/dashboard/project/ops", service, workspace_state_doc={"ops": state}
+        )
+        grid = _grid(page, "sweep-grid")
+        columns = {column["field"]: column for column in grid.columnDefs}
+        assert columns["backend"]["sort"] == "desc"
+        assert "sort" not in columns["name"]
+        quick = next(
+            node
+            for node in _walk(page)
+            if getattr(node, "id", None) == "workspace-quick"
+        )
+        assert quick.value == "alpha"
 
 
 class TestCellTextSelection:
@@ -636,29 +661,27 @@ class TestCellTextSelection:
             "quickFilterText": "x",
         }
 
-    def test_sweep_and_family_grids_stay_selectable(self, service):
-        workspace, _ = page_content("/dashboard/project/ops", service)
-        sweep_options = _grid(workspace, "sweep-grid").dashGridOptions
+    def test_browser_and_family_grids_stay_selectable(self, service):
+        workspace_page, _ = page_content("/dashboard/project/ops", service)
+        sweep_options = _grid(workspace_page, "sweep-grid").dashGridOptions
         assert sweep_options["enableCellTextSelection"] is True
         assert sweep_options["ensureDomOrder"] is True
         assert sweep_options["rowSelection"] == {"mode": "multiRow"}
 
-        sweep_page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
-        family_options = _grid(sweep_page, "family-grid").dashGridOptions
+        inspector = _inspector(service, "sweep", SWEEP_A)
+        family_options = _grid(inspector, "family-grid").dashGridOptions
         assert family_options["enableCellTextSelection"] is True
         assert family_options["ensureDomOrder"] is True
-        assert family_options["rowSelection"] == {"mode": "singleRow"}
 
 
-class TestSweepPage:
+class TestSweepInspector:
     def test_job_correlation_rows(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
         assert detail is not None
         jobs = {(job["scheduler_job_id"], job["role"]) for job in detail.jobs}
         assert jobs == {("9400001", "trials"), ("9400002", "checker")}
         assert {job["backend"] for job in detail.jobs} == {"slurm"}
-        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "sweep", SWEEP_A))
         assert "9400001" in rendered
         assert "checker" in rendered
 
@@ -672,8 +695,7 @@ class TestSweepPage:
         assert overview.failed == 1
         assert overview.succeeded == 1
         assert overview.unknown == 1
-        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "sweep", SWEEP_A))
         for label in ("active", "quiet", "stale", "failed", "succeeded"):
             assert f"{label} 1" in rendered
         assert "unknown 1" in rendered
@@ -689,50 +711,32 @@ class TestSweepPage:
         terminal_detail = service.sweep_detail(str(SWEEP_B))
         assert terminal_detail is not None
         assert terminal_detail.progress == []
-        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
-        assert "7/10 epoch" in str(page)
-        assert "3/10 epoch" in str(page)
+        rendered = str(_inspector(service, "sweep", SWEEP_A))
+        assert "7/10 epoch" in rendered
+        assert "3/10 epoch" in rendered
 
-    def test_executions_section_lists_and_links_every_execution(self, service):
+    def test_executions_section_focuses_every_execution(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
         assert detail is not None
         assert {str(record.execution_id) for record in detail.executions} == {
             str(execution_id) for execution_id in (E1, E3, E4, E5, E6, E7)
         }
-        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "sweep", SWEEP_A))
         assert "Executions" in rendered
         for execution_id in (E1, E3, E4, E5, E6, E7):
-            assert f"/dashboard/execution/{execution_id}" in rendered
-        assert f"/dashboard/execution/{E8}" not in rendered
+            assert _focus_ref("execution", execution_id) in rendered
+        assert _focus_ref("execution", E8) not in rendered
         assert "node07" not in rendered
         finished = service.sweep_detail(str(SWEEP_B))
         assert finished is not None
         assert {str(record.execution_id) for record in finished.executions} == {str(E8)}
-        finished_page, _ = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
-        assert f"/dashboard/execution/{E8}" in str(finished_page)
-        assert "node07" in str(finished_page)
+        assert _focus_ref("execution", E8) in str(_inspector(service, "sweep", SWEEP_B))
+        assert "node07" in str(_inspector(service, "sweep", SWEEP_B))
 
-    def test_header_breadcrumbs_to_project_workspace(self, service):
-        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
-        rendered = str(page)
-        assert "project ops" in rendered
-        assert "/dashboard/project/ops" in rendered
-
-    def test_analyze_series_deep_link_needs_no_workspace_pick(self, service):
-        page: Any = page_content(f"/dashboard/sweep/{SWEEP_A}", service)[0]
-        link = next(
-            node
-            for node in _walk(page)
-            if getattr(node, "className", None) == "analyze-link"
-        )
-        assert link.children == "Analyze series"
-        sel, view = link.href.split("?", 1)[1].split("&view=")
-        selection = decode_selection_token(sel.removeprefix("sel="))
-        assert selection.project == "ops"
-        assert selection.sweeps == (SWEEP_A,)
-        assert selection.trials is None
-        assert decode_view_state(unquote(view))["active"] == "series"
+    def test_sweep_inspector_offers_close_control(self, service):
+        rendered = str(_inspector(service, "sweep", SWEEP_A))
+        assert "id='inspector-close'" in rendered
+        assert f"Sweep alpha · {short_id(str(SWEEP_A))}" in rendered
 
 
 class TestTrialFamilies:
@@ -749,29 +753,19 @@ class TestTrialFamilies:
         row = family_grid_row(family)
         assert row["params"] == "batch=32, depth=4, lr=0.1, +1"
 
-    def test_family_cells_link_root_and_current_trials(self, service):
+    def test_family_rows_identify_root_and_current_trial(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
         assert detail is not None
         for family in detail.families:
             row = family_grid_row(family)
             assert row["root"] == family.root
             assert row["current_trial"] == family.current_trial
-            assert row["root_short"] == (
-                f"[{short_id(family.root)}](/dashboard/trial/{family.root})"
-            )
-            assert row["current_short"] == (
-                f"[{short_id(family.current_trial)}]"
-                f"(/dashboard/trial/{family.current_trial})"
-            )
-        page, _ = page_content(f"/dashboard/sweep/{SWEEP_A}", service)
-        rendered = str(page)
-        for family in detail.families:
-            assert f"/dashboard/trial/{family.current_trial}" in rendered
-        columns = {
-            column["field"]: column for column in _grid(page, "family-grid").columnDefs
-        }
-        assert columns["root_short"]["cellRenderer"] == "markdown"
-        assert columns["current_short"]["cellRenderer"] == "markdown"
+            assert row["root_short"] == short_id(family.root)
+            assert row["current_short"] == short_id(family.current_trial)
+        grid = _grid(_inspector(service, "sweep", SWEEP_A), "family-grid")
+        columns = {column["field"]: column for column in grid.columnDefs}
+        assert columns["root_short"]["field"] == "root_short"
+        assert grid.getRowId == {"function": "jernericsTrialRowId(params)"}
 
     def test_lineage_side_panel_chain_is_exact(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
@@ -811,10 +805,9 @@ class TestTrialFamilies:
         }
 
 
-class TestTrialPage:
+class TestTrialInspector:
     def test_family_header_params_catalog_and_executions(self, service):
-        page, polls = page_content(f"/dashboard/trial/{F2}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "trial", F2))
         assert "cc110000 → cc120000 → cc130000" in rendered
         assert "retry index 2" in rendered
         assert "completed" in rendered
@@ -822,15 +815,15 @@ class TestTrialPage:
         assert "sampled" in rendered and "manual" in rendered
         assert "loss" in rendered
         assert "node01" in rendered and "node02" in rendered
-        assert f"/dashboard/execution/{E1}" in rendered
-        assert f"/dashboard/execution/{E3}" in rendered
-        assert polls is False
+        assert _focus_ref("execution", E1) in rendered
+        assert _focus_ref("execution", E3) in rendered
+        assert _focus_ref("sweep", SWEEP_A) in rendered
+        assert "id='section-optimizer-state'" in rendered
 
 
-class TestExecutionPage:
+class TestExecutionInspector:
     def test_timeline_failure_summary_and_separate_sections(self, service):
-        page, _polls = page_content(f"/dashboard/execution/{E1}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "execution", E1))
         assert "id='section-execution-facts'" in rendered
         assert "id='section-optimizer-state'" in rendered
         facts_at = rendered.index("id='section-execution-facts'")
@@ -846,9 +839,7 @@ class TestExecutionPage:
         assert "failed" in rendered  # optimizer trial state of F0
 
     def test_progress_params_resolved_config_and_provenance(self, service):
-        page, polls = page_content(f"/dashboard/execution/{E4}", service)
-        rendered = str(page)
-        assert polls is True
+        rendered = str(_inspector(service, "execution", E4))
         assert "7/10 epoch" in rendered
         assert "host node03" in rendered
         assert '"lr": 0.1' in rendered
@@ -859,29 +850,59 @@ class TestExecutionPage:
         assert "running" in rendered
 
     def test_stale_execution_renders_stale_not_failed(self, service):
-        page, _ = page_content(f"/dashboard/execution/{E6}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "execution", E6))
         assert "badge-stale" in rendered
         assert "Span(children='stale'" in rendered
         assert "failed" not in rendered
 
     def test_missing_heartbeat_renders_unknown(self, service):
-        page, _ = page_content(f"/dashboard/execution/{E7}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "execution", E7))
         assert "badge-unknown" in rendered
         assert "Span(children='unknown'" in rendered
         assert "Last heartbeat" in rendered
 
+    def test_execution_inspector_links_back_to_trial_and_sweep(self, service):
+        detail = service.execution_detail(str(E4))
+        assert detail is not None
+        rendered = str(_inspector(service, "execution", E4))
+        assert _focus_ref("trial", detail.context["trial_id"]) in rendered
+        assert _focus_ref("sweep", SWEEP_A) in rendered
+        assert "id='section-execution-artifacts'" in rendered
+
 
 class TestPolling:
-    def test_interval_enabled_only_while_work_incomplete(self, service):
+    def test_workspace_polls_while_any_sweep_is_incomplete(self, service):
+
         assert page_content("/dashboard/project/ops", service)[1] is True
-        assert page_content(f"/dashboard/sweep/{SWEEP_A}", service)[1] is True
-        assert page_content(f"/dashboard/sweep/{SWEEP_B}", service)[1] is False
-        assert page_content(f"/dashboard/trial/{T4}", service)[1] is True
-        assert page_content(f"/dashboard/trial/{F2}", service)[1] is False
-        assert page_content(f"/dashboard/execution/{E4}", service)[1] is True
-        assert page_content(f"/dashboard/execution/{E8}", service)[1] is False
+
+    def test_focus_polls_only_while_the_focused_object_is_open(self, service):
+        from jernerics_server.dashboard import workspace
+
+        assert (
+            workspace.focus_incomplete(service, {"kind": "sweep", "id": str(SWEEP_A)})
+            is True
+        )
+        assert (
+            workspace.focus_incomplete(service, {"kind": "sweep", "id": str(SWEEP_B)})
+            is False
+        )
+        assert (
+            workspace.focus_incomplete(service, {"kind": "trial", "id": str(T4)})
+            is True
+        )
+        assert (
+            workspace.focus_incomplete(service, {"kind": "trial", "id": str(F2)})
+            is False
+        )
+        assert (
+            workspace.focus_incomplete(service, {"kind": "execution", "id": str(E4)})
+            is True
+        )
+        assert (
+            workspace.focus_incomplete(service, {"kind": "execution", "id": str(E8)})
+            is False
+        )
+        assert workspace.focus_incomplete(service, None) is False
 
 
 class TestCurrentSemantics:
@@ -1029,11 +1050,6 @@ class TestRoutesServe:
         for url in (
             "/dashboard/",
             "/dashboard/project/ops",
-            f"/dashboard/sweep/{SWEEP_A}",
-            f"/dashboard/sweep/{SWEEP_B}",
-            f"/dashboard/trial/{F2}",
-            f"/dashboard/execution/{E1}",
-            f"/dashboard/execution/{E4}",
         ):
             response = authed.get(url)
             assert response.status_code == 200, url
@@ -1094,112 +1110,61 @@ class TestServiceCurationMutations:
             service.archive_sweep(str(SWEEP_B))
 
 
-class TestWorkspaceViews:
-    def test_view_counts_and_visibility_match_current_semantics(self, curated):
-        store, service = curated
-        store.archive_sweep(str(CUR_SWEEP_NEW))
-        store.mark_sweep_invalid(str(CUR_SWEEP_DONE), "wrong dataset")
-        summaries = service.sweep_overview("curate") + service.sweep_overview("done")
-        assert view_counts(summaries) == {"current": 1, "archived": 2, "all": 3}
-        names = {
-            view: {s.name for s in workspace_visible(summaries, view)}
-            for view in ("current", "archived", "all")
-        }
-        assert names["current"] == {"older"}
-        assert names["archived"] == {"newer", "only"}
-        assert names["all"] == {"older", "newer", "only"}
-        assert workspace_visible(summaries, "nonsense") == workspace_visible(
-            summaries, "current"
-        )
+class TestBrowserDiscovery:
+    def test_terminal_archived_hidden_until_included(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        summaries = service.sweep_overview("ops")
+        rows = browser_sweep_rows(summaries, {"sweeps": []})
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
+        rows = browser_sweep_rows(summaries, {"sweeps": []}, include_archived=True)
+        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
+        rows = browser_sweep_rows(summaries, {"sweeps": []}, include_invalid=True)
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
 
-    def test_incomplete_curated_sweep_stays_in_current_with_note(
+    def test_terminal_invalid_needs_its_own_include(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        summaries = service.sweep_overview("ops")
+        rows = browser_sweep_rows(summaries, {"sweeps": []})
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
+        rows = browser_sweep_rows(summaries, {"sweeps": []}, include_archived=True)
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
+        rows = browser_sweep_rows(summaries, {"sweeps": []}, include_invalid=True)
+        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
+
+    def test_picked_curated_sweep_is_never_dropped(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "kept for audit")
+        summaries = service.sweep_overview("ops")
+        rows = browser_sweep_rows(summaries, {"sweeps": [str(SWEEP_B)]})
+        beta = next(row for row in rows if row["sweep_id"] == str(SWEEP_B))
+        assert beta["curation"] == "invalid"
+
+    def test_incomplete_curated_sweep_stays_discoverable_with_note(
         self, store_and_service
     ):
         store, service = store_and_service
         store.archive_sweep(str(SWEEP_A))
         store.mark_sweep_invalid(str(SWEEP_A), "still running")
-        summaries = service.sweep_overview("ops")
-        assert [s.name for s in workspace_visible(summaries, "current")] == [
-            "alpha",
-            "beta",
-        ]
-        assert [s.name for s in workspace_visible(summaries, "archived")] == []
-        visible = workspace_visible(summaries, "current")
-        assert "does not cancel or hide active work" in str(curation_note(visible))
+        rows = browser_sweep_rows(service.sweep_overview("ops"), {"sweeps": []})
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A), str(SWEEP_B)]
+        assert "does not cancel or hide active work" in str(curation_note(rows))
 
-    def test_workspace_page_renders_controls_counts_and_action_bar(
-        self, store_and_service
-    ):
-        _store, service = store_and_service
-        summaries = service.sweep_overview("ops")
-        page = page_content("/dashboard/project/ops", service)[0]
-        rendered = str(page)
-        assert "Current · 2" in rendered
-        assert "Archived · 0" in rendered
-        assert "All · 2" in rendered
-        assert "id='workspace-view'" in rendered
-        assert "id='workspace-quick'" in rendered
-        for button in ("ws-archive", "ws-invalid", "ws-restore-validity", "ws-restore"):
-            assert f"id='{button}'" in rendered
-        assert "id='ws-reason'" in rendered
-        assert "id='workspace-message'" in rendered
-        assert "id='workspace-curation-note'" in rendered
-
-    def test_workspace_state_reapplies_quick_filter_sort_and_columns(
-        self, store_and_service
-    ):
-        _store, service = store_and_service
-        state = {
-            "view": "all",
-            "quick": "alpha",
-            "filters": {
-                "state": {"filterType": "text", "type": "equals", "filter": "running"}
-            },
-            "sort": [{"colId": "started", "sort": "desc"}],
-        }
-        page, _polls = page_content(
-            "/dashboard/project/ops", service, workspace={"ops": state}
-        )
-        grid = _grid(page, "sweep-grid")
-        assert grid.filterModel == state["filters"]
-        columns = {column["field"]: column for column in grid.columnDefs}
-        assert columns["started"]["sort"] == "desc"
-        assert "sort" not in columns["name"]
-        assert grid.dashGridOptions["quickFilterText"] == "alpha"
-        views = next(
-            node
-            for node in _walk(page)
-            if getattr(node, "id", None) == "workspace-view"
-        )
-        assert views.value == "all"
-
-    def test_archived_view_renders_only_terminal_archived_rows(self, store_and_service):
-        store, service = store_and_service
-        store.archive_sweep(str(SWEEP_B))
-        page, _polls = page_content(
-            "/dashboard/project/ops",
-            service,
-            workspace={"ops": {"view": "archived", "quick": ""}},
-        )
-        grid = _grid(page, "sweep-grid")
-        assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
-        assert "Current · 1" in str(page)
-
-
-class TestWorkspaceActions:
     def test_grid_rows_carry_distinct_curation_markers(self, store_and_service):
         store, service = store_and_service
         store.archive_sweep(str(SWEEP_B))
         store.mark_sweep_invalid(str(SWEEP_A), "misconfigured")
-        rows = {
-            row["sweep_id"]: row
-            for row in (sweep_grid_row(s, 0) for s in service.sweep_overview("ops"))
-        }
-        assert rows[str(SWEEP_A)]["curation"] == "invalid"
-        assert rows[str(SWEEP_A)]["invalid"] is True
-        assert rows[str(SWEEP_B)]["curation"] == "archived"
-        assert rows[str(SWEEP_B)]["archived"] is True
+        rows = browser_sweep_rows(
+            service.sweep_overview("ops"),
+            {"sweeps": [str(SWEEP_A), str(SWEEP_B)]},
+        )
+        by_id = {row["sweep_id"]: row for row in rows}
+        assert by_id[str(SWEEP_A)]["curation"] == "invalid"
+        assert by_id[str(SWEEP_B)]["curation"] == "archived"
 
+
+class TestWorkspaceActions:
     def test_curation_transitions_matrix(self):
         assert curation_transitions(False, False) == {
             "archive": True,
@@ -1240,42 +1205,32 @@ class TestWorkspaceActions:
             "restore": False,
         }
 
-    def test_view_options_carry_counts(self):
-        assert view_options({"current": 3, "archived": 1, "all": 4}) == [
-            {"label": " Current · 3", "value": "current"},
-            {"label": " Archived · 1", "value": "archived"},
-            {"label": " All · 4", "value": "all"},
-        ]
-
 
 class TestWorkspacePersistence:
     def test_sort_extraction_from_column_state(self):
         assert sort_from_columns(
             [
                 {"colId": "name", "sort": None, "width": 120},
-                {"colId": "started", "sort": "desc", "width": 90},
+                {"colId": "backend", "sort": "desc", "width": 90},
                 "junk",
             ]
-        ) == [{"colId": "started", "sort": "desc"}]
+        ) == [{"colId": "backend", "sort": "desc"}]
         assert sort_from_columns([]) is None
         assert sort_from_columns(None) is None
 
     def test_defaults_and_saved_state_per_project(self):
         assert workspace_state(None, "ops") == {
-            "view": "current",
             "quick": "",
             "filters": None,
             "sort": None,
         }
-        saved = {"ops": {"view": "archived", "quick": "x"}}
-        assert workspace_state(saved, "ops")["view"] == "archived"
-        assert workspace_state(saved, "beta")["view"] == "current"
-        assert workspace_state({"ops": {"view": "weird"}}, "ops")["view"] == "current"
+        saved = {"ops": {"quick": "x"}}
+        assert workspace_state(saved, "ops")["quick"] == "x"
+        assert workspace_state(saved, "beta")["quick"] == ""
 
     def test_remember_merges_only_the_edited_field(self):
         current = {
             "ops": {
-                "view": "all",
                 "quick": "x",
                 "filters": None,
                 "sort": [{"colId": "name", "sort": "asc"}],
@@ -1284,16 +1239,15 @@ class TestWorkspacePersistence:
         updated = remember_workspace(current, "ops", quick="")
         assert updated is not None
         assert updated["ops"] == {
-            "view": "all",
             "quick": "",
             "filters": None,
             "sort": [{"colId": "name", "sort": "asc"}],
         }
         assert remember_workspace(updated, "ops", quick="") is None
-        other = remember_workspace(updated, "beta", view="archived")
+        other = remember_workspace(updated, "beta", quick="y")
         assert other is not None
         assert other["ops"] == updated["ops"]
-        assert other["beta"]["view"] == "archived"
+        assert other["beta"]["quick"] == "y"
 
 
 class TestApplyCuration:
@@ -1313,12 +1267,11 @@ class TestApplyCuration:
         assert "Failed" in report and ghost.replace("-", "")[:8] in report
 
 
-class TestSweepDetailCuration:
+class TestSweepInspectorCuration:
     def test_archived_banner_and_disabled_transitions(self, store_and_service):
         store, service = store_and_service
         store.archive_sweep(str(SWEEP_B))
-        page, _polls = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "sweep", SWEEP_B))
         assert "This sweep is archived" in rendered
         assert "id='detail-curation'" in rendered
         assert "id='detail-reason'" in rendered
@@ -1328,38 +1281,34 @@ class TestSweepDetailCuration:
     def test_invalid_banner_names_reason_and_timestamp(self, store_and_service):
         store, service = store_and_service
         store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
-        page, _polls = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
-        rendered = str(page)
+        rendered = str(_inspector(service, "sweep", SWEEP_B))
         assert "Marked scientifically invalid" in rendered
         assert "contaminated dataset" in rendered
         assert "UTC" in rendered
         assert "badge-invalid" in rendered
 
-    def test_detail_buttons_follow_valid_transitions(self, store_and_service):
+    def test_inspector_buttons_follow_valid_transitions(self, store_and_service):
         store, service = store_and_service
         store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
-        page, _polls = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
         buttons = {
             node.id: node
-            for node in _walk(page)
-            if getattr(node, "id", "").startswith("detail-")
+            for node in _walk(_inspector(service, "sweep", SWEEP_B))
+            if isinstance(getattr(node, "id", None), str)
+            and node.id.startswith("detail-")
         }
         assert buttons["detail-archive"].disabled is True
         assert buttons["detail-invalid"].disabled is True
         assert buttons["detail-restore-validity"].disabled is False
         assert buttons["detail-restore"].disabled is True
 
-    def test_curated_sweep_still_resolves_and_links_analysis(self, store_and_service):
+    def test_detail_curation_banners_and_buttons(self, store_and_service):
         store, service = store_and_service
         store.mark_sweep_invalid(str(SWEEP_B), "kept for audit")
-        page, _polls = page_content(f"/dashboard/sweep/{SWEEP_B}", service)
-        link = next(
-            node
-            for node in _walk(page)
-            if getattr(node, "className", None) == "analyze-link"
-        )
-        selection = decode_selection_token(link.href.split("sel=")[1].split("&")[0])
-        assert selection.sweeps == (SWEEP_B,)
+        detail = service.sweep_detail(str(SWEEP_B))
+        assert detail is not None
+        rendered = str(detail_curation(detail.overview, 0))
+        assert "badge-invalid" in rendered
+        assert "kept for audit" in rendered
 
 
 class TestProjectPageCuration:
@@ -1382,46 +1331,6 @@ class TestProjectPageCuration:
         page, _polls = page_content("/dashboard/", service)
         rendered = str(page)
         assert "failed 1" in rendered  # alpha's failed execution stays Current
-
-
-class TestAnalysisCuratedDiscovery:
-    def test_terminal_archived_hidden_until_included(self, store_and_service):
-        store, service = store_and_service
-        store.archive_sweep(str(SWEEP_B))
-        summaries = service.sweep_overview("ops")
-        rows, _selected = sweep_picker_rows(summaries, {"sweeps": []})
-        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
-        rows, _selected = sweep_picker_rows(
-            summaries, {"sweeps": []}, include_archived=True
-        )
-        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
-        rows, _selected = sweep_picker_rows(
-            summaries, {"sweeps": []}, include_invalid=True
-        )
-        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
-
-    def test_terminal_invalid_needs_its_own_include(self, store_and_service):
-        store, service = store_and_service
-        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
-        summaries = service.sweep_overview("ops")
-        rows, _selected = sweep_picker_rows(summaries, {"sweeps": []})
-        rows, _selected = sweep_picker_rows(
-            summaries, {"sweeps": []}, include_archived=True
-        )
-        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
-        rows, _selected = sweep_picker_rows(
-            summaries, {"sweeps": []}, include_invalid=True
-        )
-        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
-
-    def test_picked_curated_sweep_is_never_dropped(self, store_and_service):
-        store, service = store_and_service
-        store.mark_sweep_invalid(str(SWEEP_B), "kept for audit")
-        summaries = service.sweep_overview("ops")
-        rows, selected = sweep_picker_rows(summaries, {"sweeps": [str(SWEEP_B)]})
-        assert [row["sweep_id"] for row in selected] == [str(SWEEP_B)]
-        beta = next(row for row in rows if row["sweep_id"] == str(SWEEP_B))
-        assert beta["curation"] == "invalid"
 
 
 class TestMountedCurationJourney:
@@ -1471,11 +1380,12 @@ class TestMountedCurationJourney:
         "workspace-message.children",
         "sweep-grid.rowData",
         "sweep-grid.selectedRows",
-        "workspace-view.options",
         "workspace-curation-note.children",
     }
 
-    def test_workspace_archive_refreshes_grid_and_counts(self, mutable_client):
+    def test_workspace_archive_refreshes_grid_and_clears_selection(
+        self, mutable_client
+    ):
         store, client = mutable_client
         callback_map = self._callback_map(client)
         row = {"sweep_id": str(SWEEP_B), "archived": False, "invalid": False}
@@ -1493,7 +1403,7 @@ class TestMountedCurationJourney:
                 {"id": "sweep-grid", "property": "selectedRows", "value": [row]},
                 {"id": "ws-reason", "property": "value", "value": ""},
                 {"id": "project-store", "property": "data", "value": "ops"},
-                {"id": "workspace-store", "property": "data", "value": None},
+                {"id": "view-store", "property": "data", "value": None},
             ],
             changed=["ws-archive.n_clicks"],
         )
@@ -1501,9 +1411,8 @@ class TestMountedCurationJourney:
             "children"
         ].startswith("Archived beta")
         row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
-        assert row_ids == [str(SWEEP_A)]  # beta left the Current view
-        labels = [option["label"] for option in response["workspace-view"]["options"]]
-        assert labels == [" Current · 1", " Archived · 1", " All · 2"]
+        assert row_ids == [str(SWEEP_A)]  # beta left discovery until included
+        assert response["sweep-grid"]["selectedRows"] == []
         assert store._curation_row(str(SWEEP_B))[0] is not None
 
     def test_workspace_mark_invalid_requires_reason(self, mutable_client):
@@ -1524,7 +1433,7 @@ class TestMountedCurationJourney:
                 {"id": "sweep-grid", "property": "selectedRows", "value": [row]},
                 {"id": "ws-reason", "property": "value", "value": "   "},
                 {"id": "project-store", "property": "data", "value": "ops"},
-                {"id": "workspace-store", "property": "data", "value": None},
+                {"id": "view-store", "property": "data", "value": None},
             ],
             changed=["ws-invalid.n_clicks"],
         )
@@ -1549,9 +1458,9 @@ class TestMountedCurationJourney:
             ],
             state=[
                 {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": f"/dashboard/sweep/{SWEEP_B}",
+                    "id": "view-store",
+                    "property": "data",
+                    "value": {"focus": {"kind": "sweep", "id": str(SWEEP_B)}},
                 },
                 {"id": "detail-reason", "property": "value", "value": "bad shards"},
             ],
@@ -1568,7 +1477,6 @@ class TestMountedCurationJourney:
     _TICK_OUTPUTS = {
         "sweep-grid.rowData",
         "sweep-grid.selectedRows",
-        "workspace-view.options",
         "workspace-curation-note.children",
     }
 
@@ -1579,15 +1487,15 @@ class TestMountedCurationJourney:
             client,
             callback_map,
             self._TICK_OUTPUTS,
-            [{"id": "poll", "property": "n_intervals", "value": 3}],
-            state=[
+            [
                 {"id": "project-store", "property": "data", "value": "ops"},
-                {"id": "workspace-store", "property": "data", "value": None},
                 {
                     "id": "selection-store",
                     "property": "data",
                     "value": {"sweeps": [str(SWEEP_B)], "trials": [], "families": []},
                 },
+                {"id": "view-store", "property": "data", "value": None},
+                {"id": "poll", "property": "n_intervals", "value": 3},
             ],
             changed=["poll.n_intervals"],
         )

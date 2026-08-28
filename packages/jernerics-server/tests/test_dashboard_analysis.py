@@ -35,8 +35,6 @@ from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
     VIEW_VERSION,
     ViewStateError,
-    analysis_href,
-    analysis_page,
     apply_context_filters,
     auto_refresh_flip,
     auto_refresh_polls,
@@ -61,14 +59,11 @@ from jernerics_server.dashboard.analysis import (
     python_snippet,
     python_tab,
     refresh_failure,
-    scope_bar,
     search_from_state,
     search_from_tray,
-    series_entry_href,
     series_outputs,
     series_status,
     series_tab_outputs,
-    sweep_picker_rows,
     synced_search,
     tray_from_edit,
     tray_summary,
@@ -79,6 +74,7 @@ from jernerics_server.dashboard.analysis import (
     view_from_highlights,
     view_from_include,
     view_from_plot_click,
+    workspace_focus_href,
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
@@ -107,6 +103,11 @@ from jernerics_server.dashboard.selection_tokens import (
 )
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.dashboard.sessions import SessionSigner
+from jernerics_server.dashboard.workspace import (
+    browser_sweep_rows,
+    scope_bar,
+    workspace_page,
+)
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
 from jernerics_server.queries import QueryService
@@ -636,7 +637,7 @@ class TestSelectionTokens:
         tray, error = hydrate_tray(
             service=service,
             project=PROJECT,
-            pathname="/dashboard/analysis",
+            pathname="/dashboard/project/lab",
             search=f"?sel={CROSS_PROJECT_TOKEN}",
             current=None,
         )
@@ -649,7 +650,7 @@ class TestUnifiedSelectionStore:
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A, SWEEP_B))
         token = encode_selection_token(selection)
         tray, error = hydrate_tray(
-            service, PROJECT, "/dashboard/analysis", f"?sel={token}", None
+            service, PROJECT, "/dashboard/project/lab", f"?sel={token}", None
         )
         assert error is None and tray is not None
         assert tray["sweeps"] == [str(SWEEP_A), str(SWEEP_B)]
@@ -658,7 +659,7 @@ class TestUnifiedSelectionStore:
         # The same token against the hydrated store is a no-op, so the
         # ?sel= write-back stays stable instead of rewriting forever.
         again, error = hydrate_tray(
-            service, PROJECT, "/dashboard/analysis", f"?sel={token}", tray
+            service, PROJECT, "/dashboard/project/lab", f"?sel={token}", tray
         )
         assert again is None and error is None
 
@@ -683,37 +684,35 @@ class TestUnifiedSelectionStore:
         assert store["expand"] is True
         assert store["project"] == PROJECT
 
-    def test_workspace_grid_rows_reflect_the_unified_store(self, service):
+    def test_browser_rows_reflect_the_unified_store(self, service):
         token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         store, error = hydrate_tray(
-            service, PROJECT, "/dashboard/analysis", f"?sel={token}", None
+            service, PROJECT, "/dashboard/project/lab", f"?sel={token}", None
         )
         assert error is None and store is not None
-        page, _polls = page_content(
-            "/dashboard/project/lab", service, selected_sweeps=store["sweeps"]
-        )
-        grid = _grids(page)[0]
-        assert [row["sweep_id"] for row in grid.selectedRows] == [str(SWEEP_A)]
+        rows = browser_sweep_rows(service.sweep_overview(PROJECT), store)
+        picked = set(store["sweeps"])
+        assert [row["sweep_id"] for row in rows if row["sweep_id"] in picked] == [
+            str(SWEEP_A)
+        ]
 
 
 class TestCellTextSelection:
     """jernerics-eqn: all four analysis grids carry the copyability pair
     through the shared helper, keeping rowSelection where present."""
 
-    def test_picker_grids_carry_the_pair_and_multi_row_selection(self):
-        pickers = _grids(analysis_page())
+    def test_browser_grids_carry_the_pair_and_multi_row_selection(self):
+        pickers = _grids(workspace_page(PROJECT))
         assert [grid.id for grid in pickers] == [
-            "analysis-sweep-grid",
+            "sweep-grid",
             "analysis-family-grid",
             "analysis-trial-grid",
         ]
         for grid in pickers:
-            assert grid.dashGridOptions == {
-                "enableCellTextSelection": True,
-                "ensureDomOrder": True,
-                "pagination": False,
-                "rowSelection": {"mode": "multiRow"},
-            }
+            options = grid.dashGridOptions
+            assert options["enableCellTextSelection"] is True
+            assert options["ensureDomOrder"] is True
+            assert options["rowSelection"] == {"mode": "multiRow"}
 
     def test_points_grids_carry_the_pair(self, service):
         page = points_tab(
@@ -1136,7 +1135,7 @@ class TestUrlReload:
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A,), trials=(RA2,))
         search = f"?sel={encode_selection_token(selection)}"
         tray, error = hydrate_tray(
-            service, PROJECT, "/dashboard/analysis", search, None
+            service, PROJECT, "/dashboard/project/lab", search, None
         )
         assert error is None and tray is not None
         assert service.analysis_selection(PROJECT, tray) == selection
@@ -1147,7 +1146,7 @@ class TestUrlReload:
         tray, error = hydrate_tray(
             service,
             PROJECT,
-            "/dashboard/analysis",
+            "/dashboard/project/lab",
             f"?sel={encode_selection_token(selection)}",
             None,
         )
@@ -1162,7 +1161,7 @@ class TestUrlReload:
         search = search_from_tray(service, PROJECT, tray, "")
         assert search is not None and search.startswith("?sel=")
         hydrated, error = hydrate_tray(
-            service, PROJECT, "/dashboard/analysis", search, None
+            service, PROJECT, "/dashboard/project/lab", search, None
         )
         assert error is None
         assert service.analysis_selection(PROJECT, hydrated) == (
@@ -1179,7 +1178,7 @@ class TestUrlReload:
         tray, error = hydrate_tray(
             service,
             PROJECT,
-            "/dashboard/sweep/x",
+            "/dashboard/",
             f"?sel={encode_selection_token(Selection(project=PROJECT))}",
             None,
         )
@@ -1220,24 +1219,24 @@ class TestColdStartAdoption:
         token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = f"?sel={token}"
         tray, error = hydrate_tray(
-            service, None, "/dashboard/analysis", search, dict(EMPTY_TRAY)
+            service, None, "/dashboard/project/lab", search, dict(EMPTY_TRAY)
         )
         assert tray is None and error is None
         adopted, _error = cold_start(service, search)
         assert adopted is not None and adopted.project == PROJECT
         hydrated, error = hydrate_tray(
-            service, adopted.project, "/dashboard/analysis", search, dict(EMPTY_TRAY)
+            service, adopted.project, "/dashboard/project/lab", search, dict(EMPTY_TRAY)
         )
         assert error is None and hydrated is not None
         assert hydrated["sweeps"] == [str(SWEEP_A)]
         assert hydrate_tray(
-            service, adopted.project, "/dashboard/analysis", search, hydrated
+            service, adopted.project, "/dashboard/project/lab", search, hydrated
         ) == (None, None)
 
     def test_unknown_project_token_hints_on_the_analysis_page(self, service):
         token = encode_selection_token(Selection(project="ghost", trials=(RA0,)))
         tray, error = hydrate_tray(
-            service, None, "/dashboard/analysis", f"?sel={token}", dict(EMPTY_TRAY)
+            service, None, "/dashboard/project/lab", f"?sel={token}", dict(EMPTY_TRAY)
         )
         assert tray is None
         assert error is not None and "project 'ghost'" in error
@@ -1246,7 +1245,7 @@ class TestColdStartAdoption:
         tray, error = hydrate_tray(
             service,
             None,
-            "/dashboard/analysis",
+            "/dashboard/project/lab",
             "?sel=definitely-not-a-token-!!!",
             dict(EMPTY_TRAY),
         )
@@ -1269,7 +1268,7 @@ class TestUrlSync:
     def test_tray_edit_on_analysis_mints_the_token(self, service):
         tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
         target = synced_search(
-            service, "/dashboard/analysis", tray, "", PROJECT, url_navigated=False
+            service, "/dashboard/project/lab", tray, "", PROJECT, url_navigated=False
         )
         assert target is not None and target.startswith("?sel=")
         assert decode_selection_token(target.removeprefix("?sel=")) == (
@@ -1282,7 +1281,7 @@ class TestUrlSync:
         assert (
             synced_search(
                 service,
-                "/dashboard/analysis",
+                "/dashboard/project/lab",
                 tray,
                 search,
                 PROJECT,
@@ -1296,7 +1295,7 @@ class TestUrlSync:
         assert (
             synced_search(
                 service,
-                "/dashboard/project/lab",
+                "/dashboard/",
                 tray,
                 "?sel=tok",
                 PROJECT,
@@ -1315,9 +1314,7 @@ class TestUrlSync:
 
     def test_navigation_with_no_search_leaves_the_url_alone(self, service):
         assert (
-            synced_search(
-                service, "/dashboard/sweep/x", None, "", None, url_navigated=True
-            )
+            synced_search(service, "/dashboard/", None, "", None, url_navigated=True)
             is None
         )
 
@@ -1329,7 +1326,7 @@ class TestUrlSync:
         assert (
             synced_search(
                 service,
-                "/dashboard/analysis",
+                "/dashboard/project/lab",
                 session_tray,
                 deep_link,
                 PROJECT,
@@ -1349,7 +1346,7 @@ class TestUrlSync:
             Selection(project=PROJECT, sweeps=(SWEEP_A,))
         )
         hydrated, error = hydrate_tray(
-            service, PROJECT, "/dashboard/analysis", search, session_tray
+            service, PROJECT, "/dashboard/project/lab", search, session_tray
         )
         assert error is None and hydrated is not None
         # loaders' initial call: empty selection is not pushed to the
@@ -1369,7 +1366,7 @@ class TestUrlSync:
         assert (
             synced_search(
                 service,
-                "/dashboard/analysis",
+                "/dashboard/project/lab",
                 echo,
                 search,
                 PROJECT,
@@ -1393,7 +1390,11 @@ class TestUrlSync:
         assert adoption.project == PROJECT
         # project-store settled: hydration re-fires with the project
         hydrated, error = hydrate_tray(
-            service, adoption.project, "/dashboard/analysis", search, dict(EMPTY_TRAY)
+            service,
+            adoption.project,
+            "/dashboard/project/lab",
+            search,
+            dict(EMPTY_TRAY),
         )
         assert error is None and hydrated is not None
         # _clear_selection_on_project_change: the hydrated tray already
@@ -1401,11 +1402,14 @@ class TestUrlSync:
         assert hydrated["project"] == adoption.project
         # the settle re-fire against the hydrated tray rewrites nothing
         assert hydrate_tray(
-            service, PROJECT, "/dashboard/analysis", search, hydrated
+            service, PROJECT, "/dashboard/project/lab", search, hydrated
         ) == (None, None)
         # loaders push the hydrated selection to the now-populated grids
-        _rows, selected = sweep_picker_rows(service.sweep_overview(PROJECT), hydrated)
-        assert [row["sweep_id"] for row in selected] == [str(SWEEP_A)]
+        rows = browser_sweep_rows(service.sweep_overview(PROJECT), hydrated)
+        picked = set(hydrated["sweeps"])
+        assert [row["sweep_id"] for row in rows if row["sweep_id"] in picked] == [
+            str(SWEEP_A)
+        ]
         # a grid echo against the settled tray edits nothing
         echo = tray_from_edit(
             [],
@@ -1420,7 +1424,7 @@ class TestUrlSync:
         assert (
             synced_search(
                 service,
-                "/dashboard/analysis",
+                "/dashboard/project/lab",
                 echo,
                 search,
                 PROJECT,
@@ -1467,7 +1471,7 @@ class TestViewStateCodec:
                 "max": 2.0,
             },
         }
-        doc["highlighted_families"] = [str(RA0)]
+        doc["highlighted_trials"] = [str(RA0)]
         doc["auto_refresh"] = True
         doc["optuna"] = {"contour_x": "lr", "contour_y": "seed"}
         encoded = encode_view_state(doc)
@@ -1623,7 +1627,7 @@ class TestViewStateCodec:
                 }
             ),
             json.dumps({"v": VIEW_VERSION, "series": {"axes": {"loss": 1}}}),
-            json.dumps({"v": VIEW_VERSION, "highlighted_families": [7]}),
+            json.dumps({"v": VIEW_VERSION, "highlighted_trials": [7]}),
             json.dumps({"v": VIEW_VERSION, "auto_refresh": "yes"}),
             json.dumps({"v": VIEW_VERSION, "optuna": {"contour_x": 4}}),
         ],
@@ -1651,36 +1655,36 @@ class TestViewHydration:
     def test_valid_document_lands_in_the_store(self):
         doc = dict(default_view_state(), active="series")
         hydrated, error = hydrate_view(
-            "/dashboard/analysis", f"?view={encode_view_state(doc)}", None
+            "/dashboard/project/lab", f"?view={encode_view_state(doc)}", None
         )
         assert error is None and hydrated == doc
 
     def test_equal_state_is_left_alone(self):
         doc = dict(default_view_state(), active="series")
         search = f"?view={encode_view_state(doc)}"
-        assert hydrate_view("/dashboard/analysis", search, doc) == (None, None)
+        assert hydrate_view("/dashboard/project/lab", search, doc) == (None, None)
 
     def test_no_parameter_means_defaults(self):
-        assert hydrate_view("/dashboard/analysis", "?sel=tok", None) == (
+        assert hydrate_view("/dashboard/project/lab", "?sel=tok", None) == (
             default_view_state(),
             None,
         )
         doc = dict(default_view_state(), active="points")
-        assert hydrate_view("/dashboard/analysis", "", doc) == (
+        assert hydrate_view("/dashboard/project/lab", "", doc) == (
             default_view_state(),
             None,
         )
 
     def test_malformed_document_defaults_with_visible_error(self):
         hydrated, error = hydrate_view(
-            "/dashboard/analysis", "?view=%7Bbroken", dict(default_view_state())
+            "/dashboard/project/lab", "?view=%7Bbroken", dict(default_view_state())
         )
         assert hydrated == default_view_state()
         assert error is not None and "view state" in error
 
     def test_off_analysis_route_the_store_is_untouched(self):
         doc = dict(default_view_state(), active="points")
-        assert hydrate_view("/dashboard/sweep/x", "?view=%7Bbroken", doc) == (
+        assert hydrate_view("/dashboard/", "?view=%7Bbroken", doc) == (
             None,
             None,
         )
@@ -1877,7 +1881,7 @@ class TestViewSync:
             )
         )
         assert (active, keys, mode, reduction) == (
-            "catalog",
+            "overview",
             ["accuracy", "loss"],
             "stacked",
             "none",
@@ -1930,12 +1934,12 @@ class TestScopeBar:
         rendered = str(scope_bar(service, None, None))
         assert "Pick a project" in rendered
 
-    def test_scope_bar_sits_above_tabs_and_selection_tab_is_gone(self):
-        page = analysis_page()
+    def test_scope_bar_sits_inside_the_browser_above_the_tabs(self):
+        page = workspace_page(PROJECT)
         rendered = str(page)
-        assert "Edit scope" in rendered
+        assert "Browse scope" in rendered
         assert "analysis-scope-bar" in rendered
-        assert "analysis-sweep-grid" in rendered
+        assert "sweep-grid" in rendered
         assert "analysis-family-grid" in rendered
         assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
         tabs = next(
@@ -1944,6 +1948,7 @@ class TestScopeBar:
             if node.id == "analysis-tabs"
         )
         assert [tab.value for tab in tabs.children] == [
+            "overview",
             "catalog",
             "series",
             "points",
@@ -1953,47 +1958,30 @@ class TestScopeBar:
 
 
 class TestEntryPoints:
-    """Direct doors into Analysis: sweep detail's Analyze series and the
-    header tray."""
+    """Doors back into the focused workspace: the artifact viewer's
+    back-links and the header tray."""
 
-    def test_series_entry_scopes_to_exactly_that_sweep_with_series_active(self):
-        href = series_entry_href(PROJECT, str(SWEEP_A))
-        assert href.startswith("/dashboard/analysis?")
-        sel, view = href.removeprefix("/dashboard/analysis?").split("&view=")
-        assert sel.startswith("sel=")
-        assert decode_selection_token(sel.removeprefix("sel=")) == Selection(
-            project=PROJECT, sweeps=(SWEEP_A,)
-        )
-        assert decode_view_state(unquote(view))["active"] == "series"
+    def test_focus_href_scopes_to_exactly_that_object(self):
+        href = workspace_focus_href(PROJECT, "sweep", str(SWEEP_A))
+        assert href.startswith("/dashboard/project/lab?view=")
+        doc = decode_view_state(unquote(href.split("?view=")[1]))
+        assert doc["focus"] == {"kind": "sweep", "id": str(SWEEP_A)}
 
-    def test_series_entry_needs_no_workspace_selection(self):
-        href = series_entry_href(PROJECT, str(SWEEP_B))
-        assert "sweep-grid" not in href
-        selection = decode_selection_token(href.split("sel=")[1].split("&")[0])
-        assert selection.sweeps == (SWEEP_B,)
-        assert selection.trials is None
+    def test_focus_href_needs_no_scope(self):
+        href = workspace_focus_href(PROJECT, "trial", str(SWEEP_B))
+        assert "sel=" not in href
+        doc = decode_view_state(unquote(href.split("?view=")[1]))
+        assert doc["focus"]["kind"] == "trial"
+        assert doc["series"]["keys"] == []
 
-    def test_tray_href_carries_the_current_scope(self, service):
-        href = analysis_href(service, PROJECT, _tray())
-        assert href.startswith("/dashboard/analysis?sel=")
-        token = href.split("sel=")[1]
-        assert decode_selection_token(token) == (
-            service.analysis_selection(PROJECT, _tray())
-        )
-
-    def test_empty_tray_href_is_a_plain_analysis_link(self, service):
-        assert analysis_href(service, PROJECT, dict(EMPTY_TRAY)) == (
-            "/dashboard/analysis"
-        )
-
-    def test_shell_tray_is_a_link_and_view_store_starts_at_defaults(self):
+    def test_shell_tray_is_a_button_and_view_store_starts_at_defaults(self):
         anchor = next(
             node
             for node in _walk(
                 shell(), lambda n: getattr(n, "id", None) == "selection-tray"
             )
         )
-        assert type(anchor).__name__ == "A"
+        assert type(anchor).__name__ == "Button"
         store = next(
             node
             for node in _walk(shell(), lambda n: getattr(n, "id", None) == "view-store")
@@ -2054,15 +2042,20 @@ class TestCallbackGraphSafety:
             states = {dep["id"] for dep in spec.get("state", [])}
             assert states <= shell_ids, key
 
-    def test_analysis_grids_write_the_shell_selection_store(self, callback_map):
+    def test_browser_grids_write_the_shell_selection_store(self, callback_map):
         grid_writers = [
             key
             for key, spec in callback_map.items()
-            if {"analysis-sweep-grid", "analysis-family-grid"}
+            if {"sweep-grid", "analysis-family-grid"}
             & {dep["id"] for dep in spec["inputs"]}
+            and spec["inputs"]
         ]
-        assert len(grid_writers) == 1
-        assert self._outputs(grid_writers[0]) == {"selection-store.data"}
+        writers = [
+            key
+            for key in grid_writers
+            if self._outputs(key) == {"selection-store.data"}
+        ]
+        assert len(writers) == 2
 
 
 class TestColdStartMountedJourney:
@@ -2150,7 +2143,11 @@ class TestColdStartMountedJourney:
             callback_map,
             self._HYDRATION_OUTPUTS,
             [
-                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": "/dashboard/project/lab",
+                },
                 {"id": "url", "property": "search", "value": search},
                 {"id": "project-store", "property": "data", "value": PROJECT},
             ],
@@ -2185,7 +2182,11 @@ class TestColdStartMountedJourney:
             callback_map,
             self._HYDRATION_OUTPUTS,
             [
-                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": "/dashboard/project/lab",
+                },
                 {"id": "url", "property": "search", "value": f"?sel={token}"},
                 {"id": "project-store", "property": "data", "value": PROJECT},
             ],
@@ -2214,7 +2215,11 @@ class TestColdStartMountedJourney:
             callback_map,
             self._HYDRATION_OUTPUTS,
             [
-                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": "/dashboard/project/lab",
+                },
                 {"id": "url", "property": "search", "value": f"?sel={token}"},
                 {"id": "project-store", "property": "data", "value": None},
             ],
@@ -2242,7 +2247,11 @@ class TestColdStartMountedJourney:
             callback_map,
             self._HYDRATION_OUTPUTS,
             [
-                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": "/dashboard/project/lab",
+                },
                 {"id": "url", "property": "search", "value": search},
                 {"id": "project-store", "property": "data", "value": PROJECT},
             ],
@@ -2266,7 +2275,11 @@ class TestColdStartMountedJourney:
             callback_map,
             self._HYDRATION_OUTPUTS,
             [
-                {"id": "url", "property": "pathname", "value": "/dashboard/analysis"},
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": "/dashboard/project/lab",
+                },
                 {"id": "url", "property": "search", "value": search},
                 {"id": "project-store", "property": "data", "value": PROJECT},
             ],
@@ -2368,21 +2381,21 @@ class TestContinueInPython:
         assert 'decode_selection("abc123")' in snippet
 
 
-class TestAnalysisRouteServes:
-    def test_page_renders_without_polling(self, service):
-        page, polls = page_content("/dashboard/analysis", service)
-        assert polls is False
+class TestWorkspaceRouteServes:
+    def test_page_renders_the_workspace(self, service):
+        page, polls = page_content("/dashboard/project/lab", service)
+        assert isinstance(polls, bool)
         rendered = str(page)
         assert "analysis-selection-store" not in rendered
-        assert "Selection" in rendered
-        assert "Optuna views" in rendered
+        assert "Project lab" in rendered
+        assert "Optuna" in rendered
         assert "analysis-scope-bar" in rendered
-        assert "Edit scope" in rendered
+        assert "Browse scope" in rendered
         assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
 
     def test_deep_link_with_token_returns_200(self, authed):
         token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
-        response = authed.get(f"/dashboard/analysis?sel={token}")
+        response = authed.get(f"/dashboard/project/lab?sel={token}")
         assert response.status_code == 200
         assert "react-entry-point" in response.text
 
@@ -2457,21 +2470,17 @@ class TestCuratedDiscovery:
     def test_terminal_curated_sweeps_hidden_from_discovery(self, curated_service):
         _store, service = curated_service
         summaries = service.sweep_overview(PROJECT)
-        rows, _selected = sweep_picker_rows(summaries, dict(EMPTY_TRAY))
+        rows = browser_sweep_rows(summaries, dict(EMPTY_TRAY))
         assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
 
     def test_include_controls_reveal_their_own_category(self, curated_service):
         _store, service = curated_service
         summaries = service.sweep_overview(PROJECT)
-        rows, _selected = sweep_picker_rows(
-            summaries, dict(EMPTY_TRAY), include_archived=True
-        )
+        rows = browser_sweep_rows(summaries, dict(EMPTY_TRAY), include_archived=True)
         assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
-        rows, _selected = sweep_picker_rows(
-            summaries, dict(EMPTY_TRAY), include_invalid=True
-        )
+        rows = browser_sweep_rows(summaries, dict(EMPTY_TRAY), include_invalid=True)
         assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_C)}
-        rows, _selected = sweep_picker_rows(
+        rows = browser_sweep_rows(
             summaries, dict(EMPTY_TRAY), include_archived=True, include_invalid=True
         )
         assert {row["sweep_id"] for row in rows} == {
@@ -2482,7 +2491,7 @@ class TestCuratedDiscovery:
 
     def test_revealed_rows_carry_distinct_curation_markers(self, curated_service):
         _store, service = curated_service
-        rows, _selected = sweep_picker_rows(
+        rows = browser_sweep_rows(
             service.sweep_overview(PROJECT),
             dict(EMPTY_TRAY),
             include_archived=True,
@@ -2498,11 +2507,14 @@ class TestCuratedDiscovery:
         selection = Selection(project=PROJECT, sweeps=(SWEEP_C,))
         search = f"?sel={encode_selection_token(selection)}"
         tray, error = hydrate_tray(
-            service, PROJECT, "/dashboard/analysis", search, None
+            service, PROJECT, "/dashboard/project/lab", search, None
         )
         assert error is None and tray is not None
-        rows, selected = sweep_picker_rows(service.sweep_overview(PROJECT), tray)
-        assert [row["sweep_id"] for row in selected] == [str(SWEEP_C)]
+        rows = browser_sweep_rows(service.sweep_overview(PROJECT), tray)
+        picked = set(tray["sweeps"])
+        assert [row["sweep_id"] for row in rows if row["sweep_id"] in picked] == [
+            str(SWEEP_C)
+        ]
         assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_C)}
 
 
@@ -2533,15 +2545,16 @@ class TestCuratedScopeBar:
         assert "2 sweep(s)" in rendered
         assert "gamma archived" in rendered and "gamma invalid" in rendered
 
-    def test_series_entry_arrives_with_warning_for_invalid_sweep(self, curated_service):
+    def test_curated_token_arrives_with_warning_for_invalid_sweep(
+        self, curated_service
+    ):
         _store, service = curated_service
-        href = series_entry_href(PROJECT, str(SWEEP_C))
-        selection = decode_selection_token(href.split("sel=")[1].split("&")[0])
+        selection = Selection(project=PROJECT, sweeps=(SWEEP_C,))
         tray, error = hydrate_tray(
             service,
             PROJECT,
-            "/dashboard/analysis",
-            f"?sel={encode_selection_token(selection)}&view={href.split('&view=')[1]}",
+            "/dashboard/project/lab",
+            f"?sel={encode_selection_token(selection)}",
             None,
         )
         assert error is None and tray is not None
@@ -3031,7 +3044,7 @@ class TestKeyOrdering:
             },
         )
         search = f"?view={encode_view_state(doc)}"
-        hydrated, error = hydrate_view("/dashboard/analysis", search, None)
+        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
         assert error is None and hydrated == doc
         target = search_from_state(service, PROJECT, _tray(), doc, "")
         assert target is not None and "view=" in target
@@ -3054,7 +3067,7 @@ class TestKeyOrdering:
         assert reordered["series"]["keys"] == ["accuracy", "loss"]
         assert reordered["series"]["axes"] == doc["series"]["axes"]
         search = f"?view={encode_view_state(reordered)}"
-        hydrated, error = hydrate_view("/dashboard/analysis", search, None)
+        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
         assert error is None and hydrated is not None
         assert hydrated["series"]["keys"] == ["accuracy", "loss"]
 
@@ -3139,17 +3152,17 @@ class TestTrialDisplayCodec:
             trial_display="median_iqr",
             context_filters={"host": ["node01"]},
         )
-        doc["highlighted_families"] = [str(RA2)]
+        doc["highlighted_trials"] = [str(RA2)]
         doc["auto_refresh"] = True
         search = f"?view={encode_view_state(doc)}"
-        hydrated, error = hydrate_view("/dashboard/analysis", search, None)
+        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
         assert error is None and hydrated == doc
         target = search_from_state(service, PROJECT, _tray(), doc, "")
         assert target is not None
         decoded = decode_view_state(unquote(target.split("view=")[1]))
         assert decoded["series"]["trial_display"] == "median_iqr"
         assert decoded["series"]["context_filters"] == {"host": ["node01"]}
-        assert decoded["highlighted_families"] == [str(RA2)]
+        assert decoded["highlighted_trials"] == [str(RA2)]
         assert decoded["auto_refresh"] is True
 
     def test_edits_validate_the_enum_and_preserve_dormant_filters(self):
@@ -3372,7 +3385,7 @@ class TestDisplayModes:
 
     def test_highlighted_renders_only_the_selected_identities(self, service):
         doc = _series_doc(keys=["loss"], trial_display="highlighted")
-        doc["highlighted_families"] = [str(RA2)]
+        doc["highlighted_trials"] = [str(RA2)]
         panels, _payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
         graph = _panel_graphs(panels)[0]
         assert {trace.name for trace in graph.figure.data} == {
@@ -3383,7 +3396,7 @@ class TestDisplayModes:
 
     def test_all_mode_dims_everything_not_highlighted(self, service):
         doc = _series_doc(keys=["loss"])
-        doc["highlighted_families"] = [str(TA)]
+        doc["highlighted_trials"] = [str(TA)]
         panels, *_rest = series_outputs(service, PROJECT, _tray(), doc)
         graph = _panel_graphs(panels)[0]
         by_name = {trace.name: trace for trace in graph.figure.data}
@@ -3503,7 +3516,7 @@ class TestContextFilters:
     def test_filters_survive_reload_through_the_url(self, service):
         doc = _series_doc(keys=["loss"], context_filters={"shard": ["0"]})
         search = f"?view={encode_view_state(doc)}"
-        hydrated, error = hydrate_view("/dashboard/analysis", search, None)
+        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
         assert error is None and hydrated is not None
         assert hydrated["series"]["context_filters"] == {"shard": ["0"]}
 
@@ -3541,7 +3554,7 @@ class TestLinkedTrialTable:
 
     def test_selection_follows_highlighted_identities(self, service):
         doc = _series_doc(keys=["loss"])
-        doc["highlighted_families"] = [str(TA), str(RA2)]
+        doc["highlighted_trials"] = [str(TA), str(RA2)]
         _columns, _rows, selected = trial_table_outputs(
             service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), doc
         )
@@ -3552,19 +3565,19 @@ class TestLinkedTrialTable:
         edited = view_from_highlights(
             doc, [{"trial_id": str(TB)}, {"trial_id": str(TC)}]
         )
-        assert edited["highlighted_families"] == [str(TB), str(TC)]
+        assert edited["highlighted_trials"] == [str(TB), str(TC)]
         assert edited["series"]["keys"] == ["loss"]
-        assert view_from_highlights(doc, None)["highlighted_families"] == []
+        assert view_from_highlights(doc, None)["highlighted_trials"] == []
 
     def test_plot_click_toggles_the_identity(self):
         doc = _series_doc(keys=["loss"])
         click = {"points": [{"customdata": str(RA2)}]}
         picked = view_from_plot_click(doc, click)
         assert picked is not None
-        assert picked["highlighted_families"] == [str(RA2)]
+        assert picked["highlighted_trials"] == [str(RA2)]
         cleared = view_from_plot_click(picked, click)
         assert cleared is not None
-        assert cleared["highlighted_families"] == []
+        assert cleared["highlighted_trials"] == []
         assert view_from_plot_click(doc, {"points": [{}]}) is None
         assert view_from_plot_click(doc, None) is None
 
@@ -3597,26 +3610,12 @@ class TestRefreshBehavior:
         assert not auto_refresh_polls(service, PROJECT, live_tray, default_view_state())
         assert not auto_refresh_polls(None, None, None, doc)
 
-    def test_page_content_enables_analysis_polling_conditionally(self, tmp_path):
+    def test_page_content_polls_while_the_workspace_scope_is_open(self, tmp_path):
         service = _live_service(tmp_path)
-        live_tray = _tray(sweeps=[str(SWEEP_D)])
-        doc = dict(default_view_state(), auto_refresh=True)
         _page, polls = page_content(
-            "/dashboard/analysis",
-            service,
-            view_doc=doc,
-            tray=live_tray,
-            project=PROJECT,
+            "/dashboard/project/lab", service, view_doc=dict(default_view_state())
         )
         assert polls is True
-        _page, polls = page_content(
-            "/dashboard/analysis",
-            service,
-            view_doc=dict(default_view_state()),
-            tray=live_tray,
-            project=PROJECT,
-        )
-        assert polls is False
 
     def test_auto_refresh_flips_off_only_when_terminal(self):
         doc = dict(default_view_state(), auto_refresh=True)

@@ -40,9 +40,6 @@ ANALYSIS_REDUCTIONS = ("none", "mean", "min", "max")
 """Explicit execution-reduction choices for the series overlay; "none"
 shows every (trial, execution) series as logged."""
 
-WORKSPACE_VIEWS = ("current", "archived", "all")
-"""Workspace review views over a project's sweeps."""
-
 
 class CurationUnavailableError(Exception):
     """A curation mutation was requested without an injected Store."""
@@ -251,32 +248,6 @@ def _parse_id(value: str) -> uuid.UUID | None:
         return uuid.UUID(value)
     except ValueError:
         return None
-
-
-def workspace_visible(
-    summaries: Sequence[SweepSummary], view: str
-) -> list[SweepSummary]:
-    """The sweeps one workspace view shows.
-
-    ``current`` keeps every incomplete sweep (curation never hides
-    active work) plus terminal unarchived/valid ones; ``archived``
-    shows terminal archived sweeps, invalid sweeps included; ``all``
-    shows everything. Unknown views fall back to ``current``.
-    """
-    if view == "all":
-        return list(summaries)
-    if view == "archived":
-        return [s for s in summaries if s.archived and not s.incomplete]
-    return [s for s in summaries if s.current]
-
-
-def view_counts(summaries: Sequence[SweepSummary]) -> dict[str, int]:
-    """Row counts the workspace view controls carry."""
-    return {
-        "current": sum(1 for s in summaries if s.current),
-        "archived": sum(1 for s in summaries if s.archived and not s.incomplete),
-        "all": len(summaries),
-    }
 
 
 @dataclass(frozen=True)

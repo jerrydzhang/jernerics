@@ -40,6 +40,7 @@ from jernerics.post_hook import PipelineResult, run_pipeline
 from jernerics.retry import RetryContext
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import ship_events_file
+from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.artifacts import raw_href, viewer_href
 from jernerics_server.dashboard.auth import COOKIE_NAME
@@ -359,18 +360,16 @@ class TestSeededWorld:
 
 
 class TestLinkGraphJourney:
-    def test_landing_walk_reaches_every_detail_page(self, scenario):
+    def test_landing_walk_stays_on_canonical_routes(self, scenario):
         pages = _walk_link_graph(scenario.service)
         kinds = {parse_route(url).kind for url in pages}
-        assert {
-            "project",
-            "workspace",
-            "sweep",
-            "trial",
-            "execution",
-            "artifact",
-        } <= kinds
+        assert {"project", "workspace"} <= kinds
+        assert kinds <= {"project", "workspace", "artifact"}
+        for page in pages.values():
+            for href in _page_hrefs(page):
+                assert parse_route(href).kind in {"project", "workspace", "artifact"}
 
+    def test_focused_inspector_reaches_every_object_kind(self, scenario):
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
         trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
         execution_id = _rows(scenario.db_path, "SELECT execution_id FROM executions")[
@@ -381,24 +380,35 @@ class TestLinkGraphJourney:
             "SELECT artifact_id FROM artifacts WHERE key = 'model'",
         )[0][0]
 
-        assert f"{ROUTES_BASE}/sweep/{sweep_id}" in pages
-        assert f"{ROUTES_BASE}/trial/{trial_id}" in pages
-        assert f"{ROUTES_BASE}/execution/{execution_id}" in pages
-        assert viewer_href(artifact_id) in pages
+        for kind, object_id in (
+            ("sweep", sweep_id),
+            ("trial", trial_id),
+            ("execution", execution_id),
+        ):
+            rendered = str(
+                workspace.inspector_content(
+                    scenario.service, {"kind": kind, "id": object_id}, 0
+                )
+            )
+            assert short_id(object_id) in rendered
 
-        text = {url: _page_text(tree) for url, tree in pages.items()}
-        assert short_id(sweep_id) in text[f"{ROUTES_BASE}/sweep/{sweep_id}"]
-        assert short_id(trial_id) in text[f"{ROUTES_BASE}/trial/{trial_id}"]
-        assert short_id(execution_id) in text[f"{ROUTES_BASE}/execution/{execution_id}"]
-        assert short_id(artifact_id) in text[viewer_href(artifact_id)]
+        viewer, _polls = page_content(viewer_href(artifact_id), scenario.service)
+        assert short_id(artifact_id) in _page_text(viewer)
+        back_links = [
+            href
+            for href in _page_hrefs(viewer)
+            if href.startswith(f"{ROUTES_BASE}/project/")
+        ]
+        assert back_links
+        for href in back_links:
+            assert parse_route(href).kind == "workspace"
 
     def test_artifact_view_download_serves_the_seeded_bytes(self, scenario):
-        pages = _walk_link_graph(scenario.service)
         artifact_id = _rows(
             scenario.db_path,
             "SELECT artifact_id FROM artifacts WHERE key = 'model'",
         )[0][0]
-        page = pages[viewer_href(artifact_id)]
+        page, _polls = page_content(viewer_href(artifact_id), scenario.service)
         downloads = [
             component.href
             for component in _components(page)
@@ -432,8 +442,8 @@ class TestLinkGraphJourney:
         ]
         assert {grid.id for _, grid in grids} >= {
             "sweep-grid",
-            "family-grid",
-            "artifact-grid",
+            "analysis-family-grid",
+            "analysis-trial-grid",
         }
         for url, grid in grids:
             options = grid.dashGridOptions or {}
@@ -443,8 +453,8 @@ class TestLinkGraphJourney:
         assert by_id["sweep-grid"].dashGridOptions["rowSelection"] == {
             "mode": "multiRow"
         }
-        assert by_id["family-grid"].dashGridOptions["rowSelection"] == {
-            "mode": "singleRow"
+        assert by_id["analysis-family-grid"].dashGridOptions["rowSelection"] == {
+            "mode": "multiRow"
         }
 
 
@@ -555,7 +565,9 @@ class TestArtifactRowClickNavigation:
 
     def test_row_id_expression_is_a_registered_asset_function(self, scenario):
         trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
-        page, _polls = page_content(f"{ROUTES_BASE}/trial/{trial_id}", scenario.service)
+        page = workspace.inspector_content(
+            scenario.service, {"kind": "trial", "id": trial_id}, 0
+        )
         grid = next(
             component
             for component in _components(page)
