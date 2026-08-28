@@ -251,10 +251,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("page-container", "children"),
         Output("poll", "disabled"),
         Output("view-store", "data", allow_duplicate=True),
+        Output("route-store", "data"),
         Input("url", "pathname"),
         Input("poll", "n_intervals"),
         State("workspace-store", "data"),
         State("view-store", "data"),
+        State("route-store", "data"),
         prevent_initial_call="initial_duplicate",
     )
     def _render_page(
@@ -262,12 +264,21 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         _tick: int | None,
         workspace_doc: dict | None,
         view_doc: dict | None,
+        rendered_route: str | None,
     ):
         kind = parse_route(pathname).kind
         project = parse_route(pathname).object_id
-        ticked = "poll.n_intervals" in {
-            str(prop) for prop in dash.callback_context.triggered_prop_ids
-        }
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        ticked = "poll.n_intervals" in triggered
+        # A url.search rewrite re-fires the pathname watcher with the
+        # route unchanged; re-rendering would remount the workspace and
+        # orphan every grid under it for nothing.
+        if (
+            not ticked
+            and set(triggered) == {"url.pathname"}
+            and (pathname == rendered_route)
+        ):
+            raise PreventUpdate
         # A tick never re-mounts anything: the workspace's own data
         # callbacks re-query on the same interval, so only the poll gate
         # and the auto-refresh flip re-evaluate here.
@@ -276,14 +287,19 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 summary.incomplete for summary in service.sweep_overview(project or "")
             ) or workspace.focus_incomplete(service, (view_doc or {}).get("focus"))
             flip = analysis.auto_refresh_flip(view_doc, polls)
-            return no_update, not polls, no_update if flip is None else flip
+            return (
+                no_update,
+                not polls,
+                no_update if flip is None else flip,
+                no_update,
+            )
         page, polls = page_content(
             pathname,
             service,
             workspace_state_doc=workspace_state(workspace_doc, project),
             view_doc=view_doc,
         )
-        return page, not polls, no_update
+        return page, not polls, no_update, pathname
 
     @app.callback(
         Output("poll", "disabled", allow_duplicate=True),
@@ -367,16 +383,18 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
     def _navigate_to_workspace(project: str | None):
-        if project:
-            return f"{ROUTES_BASE}/project/{project}"
-        return f"{ROUTES_BASE}/"
+        target = f"{ROUTES_BASE}/project/{project}" if project else f"{ROUTES_BASE}/"
+        return target
 
     @app.callback(
         Output("project-picker", "value"),
         Input("project-store", "data"),
         Input("url", "search"),
+        State("project-picker", "value"),
     )
-    def _show_current_project(project: str | None, search: str | None):
+    def _show_current_project(
+        project: str | None, search: str | None, picked: str | None
+    ):
         # The picker mirrors project-store; with nothing picked, a
         # shared ?sel= token names the project for a fresh session
         # (jernerics-xbx). Picking it here — a plain write through the
@@ -387,6 +405,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
         if project:
             if "project-store.data" in triggered:
+                # An identical mirror write re-fires the picker's own
+                # watchers and re-enters the store; skip it.
+                if project == picked:
+                    raise PreventUpdate
                 return project
             raise PreventUpdate
         selection, _error = analysis.cold_start(service, search)
@@ -395,34 +417,27 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("project-store", "data"),
         Input("project-picker", "value"),
+        State("project-store", "data"),
         prevent_initial_call=True,
     )
-    def _remember_project(project: str | None):
+    def _remember_project(project: str | None, current: str | None):
+        if project == current:
+            raise PreventUpdate
         return project
 
     @app.callback(
         Output("project-store", "data", allow_duplicate=True),
         Input("url", "pathname"),
+        State("project-store", "data"),
         prevent_initial_call=True,
     )
-    def _adopt_project_from_url(pathname: str | None):
+    def _adopt_project_from_url(pathname: str | None, current: str | None):
         spec = parse_route(pathname)
         if spec.kind == "workspace":
+            if spec.object_id == current:
+                raise PreventUpdate
             return spec.object_id
         raise PreventUpdate
-
-    @app.callback(
-        Output("selection-store", "data", allow_duplicate=True),
-        Input("project-store", "data"),
-        State("selection-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _clear_selection_on_project_change(project: str | None, current: dict | None):
-        # Session-store hydration replays the stored project on boot;
-        # only a genuine project switch invalidates the tray.
-        if (current or {}).get("project") == project:
-            raise PreventUpdate
-        return {**analysis.EMPTY_TRAY, "project": project}
 
     @app.callback(
         Output("selection-store", "data", allow_duplicate=True),
@@ -785,7 +800,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if fired.startswith("sweep-grid."):
             click, kind = sweep_click, "sweep"
         elif '"focus-family"' in fired:
-            click, kind = next((c for c in reversed(family_clicks) if c), "trial")
+            click = next((c for c in reversed(family_clicks) if c), None)
+            kind = "trial"
         elif fired.startswith("analysis-family-grid."):
             click, kind = browser_family_click, "trial"
         if click is not None and kind is not None:
@@ -843,11 +859,25 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         # Shell-only outputs: this fires on every navigation, and Dash
         # raises ReferenceError when a dispatched callback writes a
         # component the current page does not mount (jernerics-8c9).
+        # Sole selection-store owner for project changes too: a second
+        # writer racing the hydration on the same project-store event
+        # could land after it and wipe the hydrated tray.
         tray, tray_error = analysis.hydrate_tray(
             service, project, pathname, search, current
         )
         view, view_error = analysis.hydrate_view(pathname, search, current_view)
         message = tray_error or view_error
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        if (
+            tray is None
+            and message == ""
+            and "project-store.data" in triggered
+            and (current or {}).get("project") != project
+        ):
+            # A genuine project switch invalidates the tray — never a
+            # same-project replay, a cold start without a project, or a
+            # URL edit that only surfaces an error.
+            tray = {**analysis.EMPTY_TRAY, "project": project}
         return (
             no_update if tray is None else tray,
             message or "",
@@ -1063,7 +1093,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 figureOut = Object.assign({}, figure, {data});
             }
             let rowsOut = no;
-            if (Array.isArray(rows)) {
+            // An empty snapshot must never overwrite the loader's rows:
+            // this duplicate output races the server callback, and a
+            // stale empty State would empty the grid.
+            if (Array.isArray(rows) && rows.length) {
                 rowsOut = rows.map((row) => Object.assign({}, row, {
                     _hovered: trial !== null && row.trial_id === trial,
                 }));

@@ -1193,31 +1193,22 @@ def trial_config_text(trial: dict[str, Any], keys: Sequence[str]) -> str:
 def color_dropdown_options(
     dims: list[dict[str, Any]], trials: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """Grouped Color-by options: logged context dimensions and sampled
-    parameters (``param:<key>`` tokens)."""
-    groups = [
+    """Color-by options: logged context dimensions and sampled
+    parameters (``param:<key>`` tokens). Flat list — dash 4's dropdown
+    renders grouped options as valueless group labels only."""
+    return [
         {
-            "label": "Logged context",
-            "options": [
-                {
-                    "label": f"{entry['key']} · {entry['cardinality']}",
-                    "value": entry["key"],
-                }
-                for entry in dims
-            ],
-        },
+            "label": f"{entry['key']} · {entry['cardinality']}",
+            "value": entry["key"],
+        }
+        for entry in dims
+    ] + [
         {
-            "label": "Sampled parameters",
-            "options": [
-                {
-                    "label": f"{key} · {param_cardinality(trials, key)}",
-                    "value": f"param:{key}",
-                }
-                for key in varying_param_keys(trials)
-            ],
-        },
+            "label": f"param {key} · {param_cardinality(trials, key)}",
+            "value": f"param:{key}",
+        }
+        for key in varying_param_keys(trials)
     ]
-    return [group for group in groups if group["options"]]
 
 
 def _enrich_series(per_key: list[dict[str, Any]], trials: list[dict[str, Any]]) -> None:
@@ -1786,7 +1777,12 @@ def view_from_context_filter(
 _SWATCH_COLUMN: dict[str, Any] = {
     "headerName": "",
     "field": "swatch",
-    "cellRenderer": {"function": "jernericsColorSwatch(params)"},
+    # AG Grid 35 renders cellRenderer results through React, so a
+    # renderer returning a DOM node throws (React error #31) and the
+    # whole grid drops its rows; styling the cell itself is safe.
+    "cellClass": "trace-swatch-cell",
+    "cellStyle": {"function": "params.value ? {background: params.value} : null"},
+    "valueFormatter": {"function": "''"},
     "maxWidth": 48,
     "minWidth": 48,
     "sortable": False,

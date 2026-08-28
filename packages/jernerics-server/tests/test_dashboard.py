@@ -390,9 +390,7 @@ class TestRoutesAndPages:
         assert parse_route("/dashboard/").kind == "project"
         assert parse_route("/dashboard/project/ops").kind == "workspace"
         assert parse_route("/dashboard/project/ops").object_id == "ops"
-        spec = parse_route(
-            "/dashboard/artifact-view/0123456789abcdef0123456789abcdef"
-        )
+        spec = parse_route("/dashboard/artifact-view/0123456789abcdef0123456789abcdef")
         assert spec.kind == "artifact"
         assert spec.object_id == "0123456789abcdef0123456789abcdef"
         assert parse_route("/dashboard/whatever").kind == "not-found"

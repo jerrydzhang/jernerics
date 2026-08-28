@@ -31,8 +31,8 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "minWidth": 100,
 }
 
-_SWEEP_ROW_ID: Any = {"function": "jernericsSweepRowId(params)"}
-_TRIAL_ROW_ID: Any = {"function": "jernericsTrialRowId(params)"}
+_SWEEP_ROW_ID: Any = "params.data.sweep_id"
+_TRIAL_ROW_ID: Any = "params.data.root || params.data.trial_id"
 
 
 def focus_ref(kind: str, object_id: str) -> str:
@@ -774,7 +774,7 @@ def inspector_placeholder() -> html.Div:
             ),
             "Click a sweep, trial, or execution row to inspect it here.",
         ],
-        className="inspector-hint",
+        className="inspector-hint inspector-placeholder",
     )
 
 
@@ -966,7 +966,7 @@ def _series_tab() -> html.Div:
             ),
             html.Div(id="analysis-context-filters", className="context-filters"),
             html.Div(id="analysis-series-panels"),
-            dcc.Graph(id="analysis-series-figure"),
+            dcc.Graph(id="analysis-series-figure", clear_on_unhover=True),
             dcc.Store(id="analysis-series-figure-store"),
             dcc.Store(id="analysis-series-data"),
             dcc.Store(id="analysis-refresh-store"),
@@ -1075,7 +1075,9 @@ def workspace_page(
                                 dashGridOptions=components.grid_options(
                                     rowSelection={"mode": "multiRow"},
                                     rowClassRules={
-                                        "row-hover-emphasis": "data && data._hovered"
+                                        "row-hover-emphasis": (
+                                            "params.data && params.data._hovered"
+                                        )
                                     },
                                 ),
                                 getRowId=_TRIAL_ROW_ID,

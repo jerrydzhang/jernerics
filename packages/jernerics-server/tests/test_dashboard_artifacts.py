@@ -275,9 +275,7 @@ class TestVersionList:
         assert rows[0].sha256 != rows[1].sha256
 
     def test_trial_inspector_grid_lists_every_artifact_with_state(self, env):
-        page = inspector_content(
-            env.service, {"kind": "trial", "id": str(TRIAL)}, 0
-        )
+        page = inspector_content(env.service, {"kind": "trial", "id": str(TRIAL)}, 0)
         grid = _find(page, AgGrid, "artifact-grid")[0]
         by_key = {}
         for row in grid.rowData:
@@ -312,9 +310,7 @@ class TestCellTextSelection:
     sha256) stay copyable, without dropping existing options."""
 
     def test_listing_grid_carries_the_pair(self, env):
-        page = inspector_content(
-            env.service, {"kind": "trial", "id": str(TRIAL)}, 0
-        )
+        page = inspector_content(env.service, {"kind": "trial", "id": str(TRIAL)}, 0)
         options = _find(page, AgGrid, "artifact-grid")[0].dashGridOptions
         assert options["enableCellTextSelection"] is True
         assert options["ensureDomOrder"] is True

@@ -334,12 +334,12 @@ a.project-row:hover {
   }
 }
 
-.trace-swatch {
-  display: inline-block;
-  width: 1rem;
-  height: 1rem;
+.ag-cell.trace-swatch-cell {
   border-radius: 3px;
   border: 1px solid rgba(0, 0, 0, 0.25);
+  margin-top: 6px;
+  margin-bottom: 6px;
+  overflow: hidden;
 }
 
 .ag-row.row-hover-emphasis {
@@ -762,5 +762,18 @@ a.project-row:hover {
     box-shadow: -0.25rem 0 0.5rem rgba(0, 0, 0, 0.08);
     padding: 0.75rem;
     z-index: 20;
+  }
+
+  /* The unfocused placeholder must not become a drawer: nothing is
+     open, and a fixed empty panel would cover the canvas. */
+  .inspector:has(.inspector-placeholder) {
+    position: static;
+    width: auto;
+    bottom: auto;
+    overflow: visible;
+    background: none;
+    box-shadow: none;
+    border-left: none;
+    padding: 0;
   }
 }

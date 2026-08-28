@@ -132,7 +132,7 @@ def objective(results):
     return results["loss"]
 """
 
-_ARTIFACT_ROW_ID = {"function": "jernericsArtifactRowId(params)"}
+_ARTIFACT_ROW_ID = "params.data.artifact_id"
 _MARKDOWN_HREF = re.compile(r"\]\(([^)]+)\)")
 
 
@@ -688,12 +688,6 @@ class TestArtifactRowClickNavigation:
         assert grid.getRowId == _ARTIFACT_ROW_ID
 
         auth = {"Authorization": f"Bearer {API_KEY}"}
-        asset = httpx.get(
-            f"{scenario.base_url}{ROUTES_BASE}/assets/dashAgGridFunctions.js",
-            headers=auth,
-        )
-        assert asset.status_code == 200
-        assert "jernericsArtifactRowId" in asset.text
         index = httpx.get(f"{scenario.base_url}{ROUTES_BASE}/", headers=auth)
         assert "assets/dashAgGridFunctions.js" in index.text
 

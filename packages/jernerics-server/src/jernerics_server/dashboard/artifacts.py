@@ -33,12 +33,7 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "resizable": True,
     "minWidth": 100,
 }
-_ROW_ID_FUNCTION: Any = {"function": "jernericsArtifactRowId(params)"}
-"""getRowId in the registered-function form dash-ag-grid actually
-evaluates (an inline JS string needs dangerously_allow_code). The
-package's type stub narrows getRowId to str; the runtime contract is
-wider, hence Any. The function itself lives in assets/
-dashAgGridFunctions.js."""
+_ROW_ID_FUNCTION: Any = "params.data.artifact_id"
 
 _LISTING_COLUMNS: list[dict[str, Any]] = [
     {"headerName": "Version", "field": "version", "maxWidth": 100},

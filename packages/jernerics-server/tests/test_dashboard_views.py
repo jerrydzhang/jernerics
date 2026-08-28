@@ -531,7 +531,7 @@ def _walk(component: Component):
                 yield from _walk(child)
 
 
-def _grid(page: Any, grid_id: str) -> Any:
+def _grid(page: Any, grid_id: str | dict[str, str]) -> Any:
     found = [
         node for node in _walk(page) if isinstance(node, AgGrid) and node.id == grid_id
     ]
@@ -599,9 +599,9 @@ class TestWorkspaceLayout:
     def test_browser_grid_has_stable_row_ids(self, service):
         page, _ = page_content("/dashboard/project/ops", service)
         sweep_grid = _grid(page, "sweep-grid")
-        assert sweep_grid.getRowId == {"function": "jernericsSweepRowId(params)"}
+        assert sweep_grid.getRowId == "params.data.sweep_id"
         family_grid = _grid(page, "analysis-family-grid")
-        assert family_grid.getRowId == {"function": "jernericsTrialRowId(params)"}
+        assert family_grid.getRowId == "params.data.root || params.data.trial_id"
 
     def test_browser_rows_carry_operational_facts(self, service):
         rows = {
@@ -765,7 +765,7 @@ class TestTrialFamilies:
         grid = _grid(_inspector(service, "sweep", SWEEP_A), {"focus-family": "grid"})
         columns = {column["field"]: column for column in grid.columnDefs}
         assert columns["root_short"]["field"] == "root_short"
-        assert grid.getRowId == {"function": "jernericsTrialRowId(params)"}
+        assert grid.getRowId == "params.data.root || params.data.trial_id"
 
     def test_lineage_side_panel_chain_is_exact(self, service):
         detail = service.sweep_detail(str(SWEEP_A))

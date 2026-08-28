@@ -27,9 +27,9 @@ from jernerics_schema import (
     IngestRequest,
     Selection,
     SweepSnapshotEvent,
+    TrackingEvent,
     TrialSnapshotEvent,
     TrialState,
-    TrackingEvent,
     ValueEvent,
 )
 from jernerics_server.dashboard.analysis import (
@@ -988,15 +988,10 @@ class TestSeriesPanels:
         assert "steps 0-1" in labels["accuracy"]
         assert "delta" in labels
         assert "score" not in labels
-        groups = {group["label"]: group["options"] for group in color_options}
-        assert {option["value"] for option in groups["Logged context"]} == {
-            "host",
-            "shard",
-        }
-        assert {option["value"] for option in groups["Sampled parameters"]} == {
-            "param:lr",
-            "param:seed",
-        }
+        values = {option["value"] for option in color_options}
+        assert values >= {"host", "shard", "param:lr", "param:seed"}
+        labels = {option["value"]: option["label"] for option in color_options}
+        assert labels["param:lr"].startswith("param lr")
         assert {option["value"] for option in facet_options} == {"host", "shard"}
 
     def test_non_scalar_keys_stay_unselected_and_absent_keys_are_kept(
@@ -2156,6 +2151,9 @@ class TestColdStartMountedJourney:
                 {"id": "project-store", "property": "data", "value": None},
                 {"id": "url", "property": "search", "value": search},
             ],
+            state=[
+                {"id": "project-picker", "property": "value", "value": None},
+            ],
         )
         assert picker["project-picker"]["value"] == PROJECT
         # the remember callback settles project-store (the manual-pick path)
@@ -2164,6 +2162,7 @@ class TestColdStartMountedJourney:
             callback_map,
             {"project-store.data"},
             [{"id": "project-picker", "property": "value", "value": PROJECT}],
+            state=[{"id": "project-store", "property": "data", "value": None}],
         )
         assert store["project-store"]["data"] == PROJECT
         # hydration re-fires with the project: the tray lands
@@ -2204,6 +2203,9 @@ class TestColdStartMountedJourney:
                 {"id": "project-store", "property": "data", "value": PROJECT},
                 {"id": "url", "property": "search", "value": f"?sel={token}"},
             ],
+            state=[
+                {"id": "project-picker", "property": "value", "value": None},
+            ],
         )
         assert picker["project-picker"]["value"] == PROJECT
         message = self._dispatch(
@@ -2236,6 +2238,9 @@ class TestColdStartMountedJourney:
             [
                 {"id": "project-store", "property": "data", "value": None},
                 {"id": "url", "property": "search", "value": f"?sel={token}"},
+            ],
+            state=[
+                {"id": "project-picker", "property": "value", "value": None},
             ],
         )
         assert picker["project-picker"]["value"] is None
@@ -3580,8 +3585,9 @@ class TestTrialBrowser:
             "p_lr",
             "p_seed",
         ]
-        assert columns[0]["cellRenderer"] == {
-            "function": "jernericsColorSwatch(params)"
+        assert columns[0]["cellClass"] == "trace-swatch-cell"
+        assert columns[0]["cellStyle"] == {
+            "function": "params.value ? {background: params.value} : null"
         }
         by_trial = {row["trial_short"]: row for row in rows}
         assert by_trial["cc310200"]["objective"] == "0.12"
@@ -4224,6 +4230,7 @@ class TestWorkspaceChurnGates:
                 {"id": "project-store", "property": "data", "value": PROJECT},
                 {"id": "url", "property": "search", "value": view_url},
             ],
+            state=[{"id": "project-picker", "property": "value", "value": None}],
             changed=["url.search"],
         )
         assert cascade.status_code == 204
@@ -4235,6 +4242,7 @@ class TestWorkspaceChurnGates:
                 {"id": "project-store", "property": "data", "value": PROJECT},
                 {"id": "url", "property": "search", "value": view_url},
             ],
+            state=[{"id": "project-picker", "property": "value", "value": None}],
             changed=["project-store.data"],
         )
         assert settle.status_code == 200

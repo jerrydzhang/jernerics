@@ -64,6 +64,7 @@ def shell() -> html.Div:
             dcc.Store(id="poll-gate-facts-store"),
             dcc.Store(id="view-store", data=default_view_state()),
             dcc.Store(id="workspace-store", storage_type="session"),
+            dcc.Store(id="route-store"),
             dcc.Interval(id="poll", interval=POLL_INTERVAL_MS, disabled=True),
         ],
         className="shell",
