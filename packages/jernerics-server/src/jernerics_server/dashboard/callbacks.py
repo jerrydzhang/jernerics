@@ -474,13 +474,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("selection-tray", "children"),
+        Output("selection-tray", "style"),
         Input("selection-store", "data"),
         Input("project-store", "data"),
     )
     def _update_tray(tray: dict | None, _project: str | None):
         # The header summary is the one-click door into the scope
         # browser — it opens the browser, never a separate page.
-        return analysis.tray_summary(tray)
+        summary = analysis.tray_summary(tray)
+        if not summary:
+            return "", {"display": "none"}
+        return summary, {}
 
     @app.callback(
         Output("scope-browser", "open"),
@@ -650,6 +654,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("ws-invalid", "disabled"),
         Output("ws-restore-validity", "disabled"),
         Output("ws-restore", "disabled"),
+        Output("ws-reason", "style"),
+        Output("ws-curation-summary", "children"),
         Input("sweep-grid", "selectedRows"),
         prevent_initial_call=True,
     )
@@ -660,6 +666,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             not offered["invalid"],
             not offered["restore_validity"],
             not offered["restore"],
+            # The reason input exists only while Mark invalid is offered;
+            # otherwise it would sit permanently visible and empty.
+            {} if offered["invalid"] else {"display": "none"},
+            workspace.curation_summary(len(rows or [])),
         )
 
     WORKSPACE_ACTIONS = {
@@ -1479,14 +1489,20 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("analysis-python", "children"),
         Input("selection-store", "data"),
         Input("analysis-tabs", "value"),
+        Input("url", "href"),
         State("project-store", "data"),
     )
     def _render_analysis_python(
-        tray: dict | None, tab: str | None, project: str | None
+        tray: dict | None,
+        tab: str | None,
+        href: str | None,
+        project: str | None,
     ):
         if tab != "python":
             raise PreventUpdate
-        return analysis.python_tab(service, project, tray)
+        return analysis.python_tab(
+            service, project, tray, analysis.origin_from_href(href)
+        )
 
     # -- Scroll preservation across refreshes ----------------------------
 

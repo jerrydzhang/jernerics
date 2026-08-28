@@ -57,6 +57,19 @@ def time_cell(ns: int | None, now_ns: int) -> str:
     return f"{absolute_time(ns)} ({relative_time(ns, now_ns)})"
 
 
+def time_cell_compact(ns: int | None, now_ns: int) -> html.Td:
+    """Single-line timestamp cell: relative recency only, with the
+    absolute UTC time as the cell's title tooltip."""
+    return html.Td(relative_time(ns, now_ns), title=absolute_time(ns))
+
+
+def short_host(hostname: str | None) -> str:
+    """First DNS label of a host name; a missing host stays missing."""
+    if not hostname:
+        return MISSING
+    return hostname.split(".", 1)[0]
+
+
 def human_size(size: int | None) -> str:
     """Human byte size ("256 KiB"); exact multiples drop the decimal."""
     if size is None:
@@ -90,11 +103,17 @@ def DataTable(
     headers: Sequence[str],
     rows: Sequence[Sequence[str | int | float | Component | None]],
 ) -> html.Table:
-    """Plain string-matrix table; cells may be Dash components."""
+    """Plain string-matrix table; cells may be Dash components, and a
+    pre-built ``html.Td`` is placed as-is so its own attributes (a
+    timestamp tooltip, say) land on the cell itself."""
+
+    def cell(content: str | float | Component | None) -> html.Td:
+        return content if isinstance(content, html.Td) else html.Td(content)
+
     return html.Table(
         [
             html.Thead(html.Tr([html.Th(header) for header in headers])),
-            html.Tbody([html.Tr([html.Td(cell) for cell in row]) for row in rows]),
+            html.Tbody([html.Tr([cell(item) for item in row]) for row in rows]),
         ],
         className="data-table",
     )

@@ -45,7 +45,11 @@ def shell() -> html.Div:
                         clearable=True,
                         className="project-picker",
                     ),
-                    html.Button(id="selection-tray", className="tray"),
+                    html.Button(
+                        id="selection-tray",
+                        className="tray",
+                        style={"display": "none"},
+                    ),
                     html.Form(
                         [
                             html.Button("Log out", type="submit", className="logout"),

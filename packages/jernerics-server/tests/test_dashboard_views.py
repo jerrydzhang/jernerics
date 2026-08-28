@@ -7,6 +7,7 @@ on the pure helpers the Dash callbacks wrap plus TestClient page 200s.
 
 import re
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from jernerics_schema import (
     ExecutionEndEvent,
     ExecutionHeartbeatEvent,
     ExecutionProgressEvent,
+    ExecutionRecord,
     ExecutionStartEvent,
     FlatContext,
     IngestRequest,
@@ -32,6 +34,13 @@ from jernerics_schema import (
     TrialState,
     ValueEvent,
 )
+from jernerics_server.dashboard import layout
+from jernerics_server.dashboard.analysis import (
+    origin_from_href,
+    python_snippet,
+    python_tab,
+    tray_summary,
+)
 from jernerics_server.dashboard.callbacks import (
     apply_curation,
     lineage_panel,
@@ -41,19 +50,29 @@ from jernerics_server.dashboard.callbacks import (
     tray_from_grid,
     workspace_state,
 )
-from jernerics_server.dashboard.components import grid_options, short_id
+from jernerics_server.dashboard.components import (
+    absolute_time,
+    datetime_to_ns,
+    grid_options,
+    short_id,
+)
 from jernerics_server.dashboard.service import (
     CurationRejectedError,
     CurationUnavailableError,
     DashboardService,
 )
 from jernerics_server.dashboard.workspace import (
+    _MONITORING_ORDER,
+    _executions_table,
+    _monitoring_badges,
+    _monitoring_counts,
     browser_sweep_rows,
     curation_note,
     curation_transitions,
     detail_curation,
     family_grid_row,
     inspector_content,
+    overview_rollup,
     overview_tab,
     selection_transitions,
 )
@@ -598,6 +617,39 @@ class TestWorkspaceLayout:
         assert "id='workspace-curation-note'" in rendered
         assert polls is True  # alpha is incomplete
 
+    def test_curation_panel_collapsed_by_default_with_gated_reason(self, service):
+        page, _ = page_content("/dashboard/project/ops", service)
+        panel = next(
+            node
+            for node in _walk(page)
+            if getattr(node, "id", None) == "curation-panel"
+        )
+        assert panel.className == "curation-panel"
+        assert not getattr(panel, "open", False)  # collapsed until asked for
+        summary = next(
+            node
+            for node in _walk(panel)
+            if getattr(node, "id", None) == "ws-curation-summary"
+        )
+        assert summary.children == "Curation…"
+        reason = next(
+            node for node in _walk(panel) if getattr(node, "id", None) == "ws-reason"
+        )
+        assert reason.style == {"display": "none"}  # no permanently empty input
+        message = next(
+            node
+            for node in _walk(panel)
+            if getattr(node, "id", None) == "workspace-message"
+        )
+        assert getattr(message, "children", None) is None
+        panel_ids = {getattr(node, "id", None) for node in _walk(panel)}
+        # The active-work warning stays outside the collapsed panel.
+        assert "workspace-curation-note" not in panel_ids
+        assert any(
+            getattr(node, "id", None) == "workspace-curation-note"
+            for node in _walk(page)
+        )
+
     def test_browser_grid_has_stable_row_ids(self, service):
         page, _ = page_content("/dashboard/project/ops", service)
         sweep_grid = _grid(page, "sweep-grid")
@@ -702,6 +754,18 @@ class TestSweepInspector:
             assert f"{label} 1" in rendered
         assert "unknown 1" in rendered
 
+    def test_monitoring_row_hides_zero_labels_and_notes_all_quiet(self, service):
+        detail = service.sweep_detail(str(SWEEP_B))
+        assert detail is not None
+        row = _monitoring_counts(detail.overview)
+        assert row.children is not None
+        assert [badge.children for badge in row.children] == ["succeeded 1"]
+        zeros = {label: 0 for label in _MONITORING_ORDER}
+        quiet = _monitoring_badges(zeros)
+        assert len(quiet) == 1
+        assert quiet[0].children == "quiet"
+        assert str(getattr(quiet[0], "className", "")) == "quiet-note"
+
     def test_progress_list_shows_in_flight_with_current_total_unit(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
         assert detail is not None
@@ -716,6 +780,11 @@ class TestSweepInspector:
         rendered = str(_inspector(service, "sweep", SWEEP_A))
         assert "7/10 epoch" in rendered
         assert "3/10 epoch" in rendered
+
+        # jernerics-nqs: no empty-state boilerplate for terminal sweeps.
+        assert "No in-flight executions report progress." not in str(
+            _inspector(service, "sweep", SWEEP_B)
+        )
 
     def test_executions_section_focuses_every_execution(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
@@ -734,6 +803,25 @@ class TestSweepInspector:
         assert {str(record.execution_id) for record in finished.executions} == {str(E8)}
         assert _focus_ref("execution", E8) in str(_inspector(service, "sweep", SWEEP_B))
         assert "node07" in str(_inspector(service, "sweep", SWEEP_B))
+
+    def test_executions_table_shortens_hosts_and_keeps_times_single_line(self):
+        ended = datetime.now(UTC) - timedelta(seconds=30)
+        started = ended - timedelta(minutes=3)
+        record = ExecutionRecord(
+            execution_id=uuid.uuid4(),
+            trial_id=uuid.uuid4(),
+            hostname="node05.hpc.cluster.example.com",
+            started_at=started,
+            ended_at=ended,
+            monitoring="active",
+        )
+        rendered = str(_executions_table([record], datetime_to_ns(ended)))
+        assert "node05" in rendered  # first DNS label only
+        assert "hpc.cluster.example.com" not in rendered
+        assert "3m ago" in rendered  # relative-only cell text
+        started_ns = datetime_to_ns(started)
+        assert f"title='{absolute_time(started_ns)}'" in rendered
+        assert rendered.count(absolute_time(started_ns)) == 1  # tooltip only
 
     def test_sweep_inspector_offers_close_control(self, service):
         rendered = str(_inspector(service, "sweep", SWEEP_A))
@@ -1078,6 +1166,22 @@ class TestOverviewTab:
         assert "in-flight executions 4" in rendered
         assert "last activity " in rendered
         assert "ago" in rendered
+
+    def test_rollup_hides_zero_monitoring_and_notes_all_quiet(self, service):
+        beta = next(
+            row for row in service.sweep_overview("ops") if row.sweep_id == str(SWEEP_B)
+        )
+        rendered = str(overview_rollup([beta], 0))
+        assert "succeeded 1" in rendered
+        for label in ("active", "quiet", "stale", "failed", "unknown"):
+            assert f"badge-{label}" not in rendered
+        silent = replace(
+            beta, active=0, quiet=0, stale=0, failed=0, succeeded=0, unknown=0
+        )
+        rendered = str(overview_rollup([silent], 0))
+        assert "quiet" in rendered  # the single all-zero note
+        assert "badge-active" not in rendered
+        assert "succeeded" not in rendered
 
     def test_grid_rows_carry_operational_facts_and_stable_ids(self, service):
         overview = overview_tab(service, "ops", {"sweeps": []})
@@ -1473,6 +1577,45 @@ class TestMountedCurationJourney:
         "workspace-curation-note.children",
     }
 
+    _TRANSITIONS_OUTPUTS = {
+        "ws-archive.disabled",
+        "ws-invalid.disabled",
+        "ws-restore-validity.disabled",
+        "ws-restore.disabled",
+        "ws-reason.style",
+        "ws-curation-summary.children",
+    }
+
+    def test_selection_gates_reason_and_counts_picked_rows(self, mutable_client):
+        _store, client = mutable_client
+        callback_map = self._callback_map(client)
+
+        def transitions(rows):
+            return self._dispatch(
+                client,
+                callback_map,
+                self._TRANSITIONS_OUTPUTS,
+                [{"id": "sweep-grid", "property": "selectedRows", "value": rows}],
+            )
+
+        fresh = [{"sweep_id": str(SWEEP_B), "archived": False, "invalid": False}]
+        response = transitions(fresh)
+        assert response["ws-archive"]["disabled"] is False
+        assert response["ws-invalid"]["disabled"] is False
+        assert response["ws-reason"]["style"] == {}  # reason reveals with the action
+        assert response["ws-curation-summary"]["children"] == "Curation (1 picked)"
+
+        curated = [{"sweep_id": str(SWEEP_B), "archived": True, "invalid": True}]
+        response = transitions(curated)
+        assert response["ws-archive"]["disabled"] is True
+        assert response["ws-invalid"]["disabled"] is True
+        assert response["ws-reason"]["style"] == {"display": "none"}
+        assert response["ws-restore-validity"]["disabled"] is False
+
+        response = transitions([])
+        assert response["ws-curation-summary"]["children"] == "Curation…"
+        assert response["ws-reason"]["style"] == {"display": "none"}
+
     def test_workspace_archive_refreshes_grid_and_clears_selection(
         self, mutable_client
     ):
@@ -1597,3 +1740,235 @@ class TestMountedCurationJourney:
         assert row_ids == [str(SWEEP_A), str(SWEEP_B)]
         picked = [row["sweep_id"] for row in response["sweep-grid"]["selectedRows"]]
         assert picked == [str(SWEEP_B)]
+
+
+def _find_pres(node: Component) -> list[html.Pre]:
+    """Every Pre under ``node``, depth-first in render order."""
+    return [child for child in _walk(node) if isinstance(child, html.Pre)]
+
+
+class TestHeaderTraySummary:
+    """jernerics-0h6: the tray line hides when empty, pluralizes truly."""
+
+    def test_no_selection_yields_an_empty_placeholder(self):
+        assert tray_summary(None) == ""
+        assert tray_summary({}) == ""
+        empty = {"sweeps": [], "trials": [], "families": [], "executions": []}
+        assert tray_summary(empty) == ""
+
+    @pytest.mark.parametrize(
+        ("field", "one_line", "two_line"),
+        [
+            (
+                "sweeps",
+                "1 sweep · 0 trials · 0 families",
+                "2 sweeps · 0 trials · 0 families",
+            ),
+            (
+                "trials",
+                "0 sweeps · 1 trial · 0 families",
+                "0 sweeps · 2 trials · 0 families",
+            ),
+            (
+                "families",
+                "0 sweeps · 0 trials · 1 family",
+                "0 sweeps · 0 trials · 2 families",
+            ),
+        ],
+    )
+    def test_each_dimension_pluralizes_for_one_and_two(self, field, one_line, two_line):
+        for count, line in ((1, one_line), (2, two_line)):
+            tray = {field: [f"id{i}" for i in range(count)]}
+            assert tray_summary(tray) == line
+
+    def test_singular_and_plural_forms_mix(self):
+        tray = {"sweeps": ["a"], "trials": ["b"], "families": ["c"]}
+        assert tray_summary(tray) == "1 sweep · 1 trial · 1 family"
+        tray = {
+            "sweeps": ["a", "b"],
+            "trials": [f"t{i}" for i in range(14)],
+            "families": ["e", "f", "g"],
+        }
+        assert tray_summary(tray) == "2 sweeps · 14 trials · 3 families"
+
+    def test_executions_and_expand_append_their_segments(self):
+        assert tray_summary({"executions": ["e1"]}) == (
+            "0 sweeps · 0 trials · 0 families · 1 execution"
+        )
+        tray = {"sweeps": ["a"], "executions": ["e1", "e2"], "expand": True}
+        assert tray_summary(tray) == (
+            "1 sweep · 0 trials · 0 families · 2 executions · retry families expanded"
+        )
+
+
+class TestPythonHandoffSnippet:
+    """jernerics-ui9: origin-derived URL, one statement per line."""
+
+    def test_builder_emits_the_passed_base_url(self):
+        for base_url in (
+            "http://localhost:8000",
+            "https://track.internal.example:8443",
+            "http://10.0.0.7:9999",
+        ):
+            assert f'TrackingClient("{base_url}")' in python_snippet(
+                "abc123", "ops", base_url
+            )
+
+    def test_client_instantiation_stays_on_one_line(self):
+        token = "t" * 200
+        base_url = "https://track.internal.example:8443"
+        snippet = python_snippet(token, "ops", base_url)
+        client_lines = [
+            line for line in snippet.split("\n") if "TrackingClient(" in line
+        ]
+        assert client_lines == [f'client = TrackingClient("{base_url}")']
+
+    def test_tab_points_the_client_at_the_browser_origin(self, service):
+        tray = {"sweeps": [str(SWEEP_A)], "trials": [], "families": []}
+        page = python_tab(service, "ops", tray, "http://127.0.0.1:8899")
+        snippet = _find_pres(page)[1].children
+        assert snippet is not None
+        assert 'TrackingClient("http://127.0.0.1:8899")' in snippet
+
+    def test_tab_pres_keep_statements_on_one_copyable_line(self, service):
+        tray = {"sweeps": [str(SWEEP_A)], "trials": [], "families": []}
+        page = python_tab(service, "ops", tray, "http://127.0.0.1:8899")
+        pres = _find_pres(page)
+        assert len(pres) == 2
+        for pre in pres:
+            style = dict(getattr(pre, "style", None) or {})
+            assert style["whiteSpace"] == "pre"
+            assert style["overflowX"] == "auto"
+
+
+class TestOriginFromHref:
+    def test_derives_the_scheme_and_netloc(self):
+        href = "http://127.0.0.1:8899/dashboard/project/lab?view=x"
+        assert origin_from_href(href) == "http://127.0.0.1:8899"
+        assert origin_from_href("https://tracks.example.com/") == (
+            "https://tracks.example.com"
+        )
+
+    def test_blank_or_relative_hrefs_fall_back_to_local_host(self):
+        assert origin_from_href(None) == "http://localhost:8000"
+        assert origin_from_href("") == "http://localhost:8000"
+        assert origin_from_href("/dashboard/project/lab") == "http://localhost:8000"
+
+
+class TestMountedTrayAndPythonCallbacks:
+    """The registered shell/analysis callbacks, driven through Dash's
+    dispatch endpoint exactly as the browser would."""
+
+    _TRAY_OUTPUTS = {
+        "selection-tray.children",
+        "selection-tray.style",
+    }
+
+    def _callback_key(self, callback_map, wanted: set[str]) -> str:
+        def outputs_of(key):
+            stripped = key.removeprefix("..").removesuffix("..")
+            return {part.split("@")[0] for part in stripped.split("...") if part}
+
+        return next(key for key in callback_map if outputs_of(key) == wanted)
+
+    def _dispatch(self, client, callback_map, wanted, inputs, state=()):
+        key = self._callback_key(callback_map, wanted)
+        specs = [
+            part.split("@")[0]
+            for part in key.removeprefix("..").removesuffix("..").split("...")
+            if part
+        ]
+        outputs = [
+            {"id": spec.split(".")[0], "property": spec.split(".")[1]} for spec in specs
+        ]
+        response = client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": key,
+                "outputs": outputs[0] if len(outputs) == 1 else outputs,
+                "inputs": inputs,
+                "state": list(state),
+                "changedPropIds": [f"{i['id']}.{i['property']}" for i in inputs],
+            },
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["response"]
+
+    def _callback_map(self, client):
+        from jernerics_server.dashboard.app import build_dash_app
+
+        ctx = client.app.state.dashboard
+        return build_dash_app(ctx).callback_map
+
+    def test_shell_tray_button_starts_hidden(self):
+        button = next(
+            child
+            for child in _walk(layout.shell())
+            if getattr(child, "id", None) == "selection-tray"
+        )
+        assert button.style == {"display": "none"}
+
+    def test_empty_selection_hides_the_tray(self, mutable_client):
+        _store, client = mutable_client
+        response = self._dispatch(
+            client,
+            self._callback_map(client),
+            self._TRAY_OUTPUTS,
+            [
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": {"sweeps": [], "trials": [], "families": []},
+                },
+                {"id": "project-store", "property": "data", "value": "ops"},
+            ],
+        )
+        assert response["selection-tray"]["children"] == ""
+        assert response["selection-tray"]["style"] == {"display": "none"}
+
+    def test_selection_shows_plural_counts_and_restores_the_button(
+        self, mutable_client
+    ):
+        _store, client = mutable_client
+        response = self._dispatch(
+            client,
+            self._callback_map(client),
+            self._TRAY_OUTPUTS,
+            [
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": {"sweeps": [str(SWEEP_A), str(SWEEP_B)], "trials": []},
+                },
+                {"id": "project-store", "property": "data", "value": "ops"},
+            ],
+        )
+        assert response["selection-tray"]["children"] == (
+            "2 sweeps · 0 trials · 0 families"
+        )
+        assert response["selection-tray"]["style"] == {}
+
+    def test_python_tab_snippet_targets_the_browser_origin(self, mutable_client):
+        _store, client = mutable_client
+        response = self._dispatch(
+            client,
+            self._callback_map(client),
+            {"analysis-python.children"},
+            [
+                {
+                    "id": "selection-store",
+                    "property": "data",
+                    "value": {"sweeps": [str(SWEEP_A)], "trials": [], "families": []},
+                },
+                {"id": "analysis-tabs", "property": "value", "value": "python"},
+                {
+                    "id": "url",
+                    "property": "href",
+                    "value": "http://track.internal:9000/dashboard/project/ops",
+                },
+            ],
+            state=[{"id": "project-store", "property": "data", "value": "ops"}],
+        )
+        rendered = str(response)
+        assert 'TrackingClient("http://track.internal:9000")' in rendered
+        assert "localhost:8000" not in rendered

@@ -216,6 +216,11 @@ a.project-row:hover {
   font-size: 0.9rem;
 }
 
+.quiet-note {
+  color: #666;
+  font-size: 0.85rem;
+}
+
 .failure-summary {
   color: #b00020;
 }
@@ -646,6 +651,24 @@ a.project-row:hover {
 
 .action-message.err {
   color: #b00020;
+}
+
+/* Bulk curation hides behind a collapsed affordance (jernerics-9sl);
+   block flow keeps it below the sweep list at any width. */
+.curation-panel {
+  margin: 0.4rem 0;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 0.25rem 0.5rem;
+}
+
+.curation-panel > summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.curation-panel[open] {
+  padding-bottom: 0.5rem;
 }
 
 .curation-banner {

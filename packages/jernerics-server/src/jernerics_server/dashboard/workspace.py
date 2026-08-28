@@ -191,9 +191,29 @@ def workspace_actions() -> html.Div:
                 type="text",
                 placeholder="Reason (required for Mark invalid)",
                 className="reason-input",
+                style={"display": "none"},
             ),
         ],
         className="action-bar",
+    )
+
+
+def curation_summary(picked: int) -> str:
+    """Summary label naming how many rows the curation panel acts on."""
+    return f"Curation ({picked} picked)" if picked else "Curation…"
+
+
+def curation_panel() -> html.Details:
+    """Collapsed affordance around the bulk curation actions; the
+    active-work note stays outside it."""
+    return html.Details(
+        [
+            html.Summary("Curation…", id="ws-curation-summary"),
+            workspace_actions(),
+            html.Div(id="workspace-message"),
+        ],
+        id="curation-panel",
+        className="curation-panel",
     )
 
 
@@ -268,10 +288,14 @@ def _correlation_table(jobs: list[dict]) -> html.Table:
 
 
 def _monitoring_badges(counts: dict[str, int]) -> list[html.Span]:
-    """One pill per monitoring label, in the canonical order."""
-    return [
-        Badge(f"{label} {counts[label]}", kind=label) for label in _MONITORING_ORDER
+    """One pill per nonzero monitoring label, in the canonical order; an
+    all-zero scope renders a single quiet note."""
+    badges = [
+        Badge(f"{label} {counts[label]}", kind=label)
+        for label in _MONITORING_ORDER
+        if counts.get(label)
     ]
+    return badges or [html.Span("quiet", className="quiet-note")]
 
 
 def _monitoring_counts(summary: SweepSummary) -> html.Div:
@@ -285,7 +309,7 @@ def _monitoring_counts(summary: SweepSummary) -> html.Div:
 
 def _progress_list(progress: list[dict]) -> html.Div:
     if not progress:
-        return html.Div(html.P("No in-flight executions report progress."))
+        return html.Div()
     return html.Div(
         html.Ul(
             [
@@ -305,7 +329,8 @@ def _progress_list(progress: list[dict]) -> html.Div:
 
 
 def _executions_table(executions: Sequence[ExecutionRecord], now_ns: int) -> html.Table:
-    """One row per execution: monitoring badge, focus control, host, times."""
+    """One row per execution: monitoring badge, focus control, short
+    host, and single-line timestamps (absolute time in the tooltip)."""
     return components.DataTable(
         ("Monitoring", "Execution", "Host", "Started", "Ended"),
         [
@@ -316,12 +341,16 @@ def _executions_table(executions: Sequence[ExecutionRecord], now_ns: int) -> htm
                     "execution",
                     str(record.execution_id),
                 ),
-                record.hostname,
-                time_cell(components.datetime_to_ns(record.started_at), now_ns),
+                components.short_host(record.hostname),
+                components.time_cell_compact(
+                    components.datetime_to_ns(record.started_at), now_ns
+                ),
                 (
                     UNKNOWN
                     if record.ended_at is None
-                    else time_cell(components.datetime_to_ns(record.ended_at), now_ns)
+                    else components.time_cell_compact(
+                        components.datetime_to_ns(record.ended_at), now_ns
+                    )
                 ),
             )
             for record in executions
@@ -1185,8 +1214,7 @@ def workspace_page(
                             html.Div(
                                 "", id="workspace-curation-note", className="hint"
                             ),
-                            workspace_actions(),
-                            html.Div(id="workspace-message"),
+                            curation_panel(),
                             AgGrid(
                                 id="analysis-family-grid",
                                 rowData=[],

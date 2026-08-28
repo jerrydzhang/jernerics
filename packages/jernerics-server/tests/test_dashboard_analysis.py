@@ -664,7 +664,7 @@ class TestUnifiedSelectionStore:
         assert error is None and tray is not None
         assert tray["sweeps"] == [str(SWEEP_A), str(SWEEP_B)]
         assert tray["project"] == PROJECT
-        assert tray_summary(tray).startswith(f"{len(selection.sweeps or ())} sweep(s)")
+        assert tray_summary(tray).startswith(f"{len(selection.sweeps or ())} sweeps")
         # The same token against the hydrated store is a no-op, so the
         # ?sel= write-back stays stable instead of rewriting forever.
         again, error = hydrate_tray(
@@ -1936,8 +1936,8 @@ class TestScopeBar:
         bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_B)]))
         rendered = str(bar)
         assert "Scope: alpha, beta" in rendered
-        assert "2 sweep(s)" in rendered
-        assert "0 family/families" in rendered
+        assert "2 sweeps" in rendered
+        assert "0 families" in rendered
 
     def test_unknown_sweep_id_falls_back_to_short_id(self, service):
         bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_C)]))
@@ -1946,8 +1946,8 @@ class TestScopeBar:
     def test_expansion_and_executions_surface_in_counts(self, service):
         tray = _tray(families=[str(RA0)], executions=[str(EXA1)], expand=True)
         rendered = str(scope_bar(service, PROJECT, tray))
-        assert "1 family/families" in rendered
-        assert "1 execution(s)" in rendered
+        assert "1 family" in rendered
+        assert "1 execution" in rendered
         assert "retry families expanded" in rendered
 
     def test_projectless_bar_tells_the_user_to_pick(self, service):
@@ -2389,7 +2389,7 @@ class TestColdStartMountedJourney:
 
 class TestContinueInPython:
     def test_snippet_uses_real_client_api(self, service):
-        page = python_tab(service, PROJECT, _tray())
+        page = python_tab(service, PROJECT, _tray(), "http://localhost:8000")
         snippet = _pres(page)[1].children
         assert snippet.startswith("from jernerics.tracking import TrackingClient")
         assert "from jernerics.tracking.client import decode_selection" in snippet
@@ -2413,7 +2413,7 @@ class TestContinueInPython:
         assert decoded == service.analysis_selection(PROJECT, _tray())
 
     def test_python_snippet_shows_token(self):
-        snippet = python_snippet("abc123", PROJECT)
+        snippet = python_snippet("abc123", PROJECT, "http://localhost:8000")
         assert 'decode_selection("abc123")' in snippet
 
 
@@ -2578,7 +2578,7 @@ class TestCuratedScopeBar:
         bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_C)]))
         rendered = str(bar)
         assert "Scope: alpha, gamma" in rendered
-        assert "2 sweep(s)" in rendered
+        assert "2 sweeps" in rendered
         assert "gamma archived" in rendered and "gamma invalid" in rendered
 
     def test_curated_token_arrives_with_warning_for_invalid_sweep(

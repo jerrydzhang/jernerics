@@ -16,7 +16,7 @@ import json
 import math
 from collections.abc import Sequence
 from typing import Any
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, quote, urlparse
 
 from dash import dcc, html, no_update
 from dash_ag_grid import AgGrid
@@ -491,15 +491,27 @@ def family_picker_rows(
     return rows, [row for row in rows if row["root"] in picked]
 
 
+def _counted(count: int, singular: str, plural: str) -> str:
+    """``count`` with the noun form that matches it."""
+    return f"{count} {singular if count == 1 else plural}"
+
+
 def tray_summary(tray: dict[str, Any] | None) -> str:
+    """Header line for the selection tray; empty when nothing is selected."""
     tray = tray or EMPTY_TRAY
+    sweeps = len(tray.get("sweeps") or [])
+    trials = len(tray.get("trials") or [])
+    families = len(tray.get("families") or [])
+    executions = len(tray.get("executions") or [])
+    if not (sweeps or trials or families or executions):
+        return ""
     parts = [
-        f"{len(tray.get('sweeps') or [])} sweep(s)",
-        f"{len(tray.get('trials') or [])} trial(s)",
-        f"{len(tray.get('families') or [])} family/families",
+        _counted(sweeps, "sweep", "sweeps"),
+        _counted(trials, "trial", "trials"),
+        _counted(families, "family", "families"),
     ]
-    if tray.get("executions"):
-        parts.append(f"{len(tray['executions'])} execution(s)")
+    if executions:
+        parts.append(_counted(executions, "execution", "executions"))
     if tray.get("expand"):
         parts.append("retry families expanded")
     return " · ".join(parts)
@@ -1681,20 +1693,31 @@ def optuna_tab_content(
     return html.Div(sections), options, options
 
 
-def python_snippet(token: str, project: str) -> str:
+def origin_from_href(href: str | None) -> str:
+    """The browser origin (``scheme://netloc``) a snippet points at."""
+    parts = urlparse(href or "")
+    if not parts.netloc:
+        return "http://localhost:8000"
+    return f"{parts.scheme or 'http'}://{parts.netloc}"
+
+
+def python_snippet(token: str, project: str, base_url: str) -> str:
     """Literally runnable handoff snippet (real client API names)."""
     return (
         "from jernerics.tracking import TrackingClient\n"
         "from jernerics.tracking.client import decode_selection\n"
         "\n"
-        'client = TrackingClient("http://localhost:8000")\n'
+        f'client = TrackingClient("{base_url}")\n'
         f'selection = decode_selection("{token}")\n'
         f'records = client.project("{project}").values(selection)\n'
     )
 
 
 def python_tab(
-    service: DashboardService, project: str | None, tray: dict[str, Any] | None
+    service: DashboardService,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    base_url: str,
 ) -> html.Div:
     """The current selection as a URL token plus a copyable snippet — no
     embedded editor."""
@@ -1702,7 +1725,8 @@ def python_tab(
         return _pick_project_first()
     selection = service.analysis_selection(project, tray)
     token = encode_selection_token(selection)
-    snippet = python_snippet(token, project)
+    snippet = python_snippet(token, project, base_url)
+    pre_style = {"whiteSpace": "pre", "overflowX": "auto"}
     return html.Div(
         [
             html.Section(
@@ -1716,7 +1740,7 @@ def python_tab(
                     ),
                     html.Div(
                         [
-                            html.Pre(token, className="config-json"),
+                            html.Pre(token, className="config-json", style=pre_style),
                             dcc.Clipboard(content=token),
                         ],
                         className="snippet-row",
@@ -1734,7 +1758,7 @@ def python_tab(
                     ),
                     html.Div(
                         [
-                            html.Pre(snippet, className="config-json"),
+                            html.Pre(snippet, className="config-json", style=pre_style),
                             dcc.Clipboard(content=snippet),
                         ],
                         className="snippet-row",

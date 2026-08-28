@@ -431,11 +431,10 @@ class TestRoutesAndPages:
         assert spec.object_id == "ops"
 
     def test_tray_summary_counts_the_unified_selection(self):
-        empty = "0 sweep(s) · 0 trial(s) · 0 family/families"
-        assert tray_summary(None) == empty
-        assert tray_summary({"sweeps": []}) == empty
+        assert tray_summary(None) == ""
+        assert tray_summary({"sweeps": []}) == ""
         assert tray_summary({"sweeps": ["a", "b"]}) == (
-            "2 sweep(s) · 0 trial(s) · 0 family/families"
+            "2 sweeps · 0 trials · 0 families"
         )
 
 
