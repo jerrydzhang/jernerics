@@ -12,6 +12,12 @@ body {
   padding: 0 1rem;
 }
 
+/* The workspace earns a wider shell: its side columns are capped, so
+   a 72rem shell starves the canvas (jernerics-bo0/bt9). */
+.shell:has(.workspace) {
+  max-width: 96rem;
+}
+
 .nav {
   display: flex;
   align-items: center;
@@ -349,18 +355,27 @@ a.project-row:hover {
 
 .analysis-controls {
   display: flex;
-  gap: 1rem;
+  gap: 0.5rem 0.8rem;
   flex-wrap: wrap;
   align-items: center;
-  margin-bottom: 0.8rem;
+  margin-bottom: 0.4rem;
 }
 
+/* Controls size to their content so one row holds the pickers; only a
+   genuinely narrow canvas wraps (jernerics-bt9). This dash renders
+   dropdowns as .dash-dropdown-wrapper and radios as .dash-options-list. */
 .analysis-controls > * {
-  min-width: 12rem;
-  flex: 1;
+  min-width: 0;
+  flex: 0 1 auto;
 }
 
-.analysis-controls .dash-radiogroup {
+.analysis-controls .dash-dropdown-wrapper {
+  flex: 1 1 9rem;
+  min-width: 8rem;
+}
+
+.analysis-controls .dash-radiogroup,
+.analysis-controls .dash-options-list {
   min-width: 0;
   flex: none;
 }
@@ -369,12 +384,13 @@ a.project-row:hover {
   margin: 0.8rem 0;
 }
 
-
 /* Series panels (jernerics-cdf.4) */
-
 #analysis-series-figure {
   max-width: 75rem;
   margin-inline: auto;
+  /* Height floor: the graph never collapses to a thumbnail
+     (jernerics-bt9); figures carry their own larger layout height. */
+  min-height: 26rem;
 }
 
 @media (max-width: 78rem) {
@@ -412,15 +428,28 @@ a.project-row:hover {
   min-width: 6rem;
   flex: none;
 }
-
 .panel-header .dash-radiogroup,
+.panel-header .dash-options-list,
 .panel-header button,
 .panel-header input {
   flex: none;
 }
 
+/* dash sizes input wrappers to 100%: without this the min/max steppers
+   stretch each panel header to their own full rows (jernerics-bt9). */
+.panel-header .dash-input-container {
+  width: auto;
+  flex: none;
+}
+
 .panel-header input {
-  width: 6rem;
+  width: 4.5rem;
+}
+
+.panel-header .dash-options-list label,
+.analysis-controls .dash-options-list label,
+.series-toolbar .dash-options-list label {
+  margin-right: 0.4rem;
 }
 
 .panel-note {
@@ -449,14 +478,22 @@ a.project-row:hover {
   font-size: 0.9rem;
 }
 
+/* Optuna study figures pair up wherever the canvas allows and keep
+   their captions to one small line (jernerics-bt9). */
 .figure-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(26rem, 1fr));
-  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 0.75rem 1rem;
 }
 
 .figure-grid h4 {
-  margin: 0 0 0.4rem;
+  margin: 0 0 0.15rem;
+  font-size: 0.85rem;
+  color: #555;
+}
+
+.figure-grid .figure-wide {
+  grid-column: 1 / -1;
 }
 
 .snippet-row {
@@ -748,9 +785,20 @@ a.project-row:hover {
 
 .workspace-main {
   display: grid;
-  grid-template-columns: minmax(18rem, 22rem) minmax(0, 1fr) minmax(16rem, 22rem);
+  /* The canvas is the page: side columns cap lower so the tab strip,
+     controls, and charts keep room (jernerics-bo0). */
+  grid-template-columns: minmax(16rem, 19rem) minmax(0, 1fr) minmax(14rem, 17rem);
   gap: 1rem;
   align-items: start;
+}
+
+@media (max-width: 78rem) {
+  /* Mid widths tighten both side columns so the canvas keeps working
+     room below the wide-shell layout (jernerics-bo0). */
+  .workspace-main {
+    grid-template-columns:
+      minmax(14rem, 17rem) minmax(0, 1fr) minmax(13rem, 15rem);
+  }
 }
 
 /* Grid items default to min-width: auto, so a wide grid or table can
@@ -806,48 +854,45 @@ a.project-row:hover {
   text-decoration: underline;
 }
 
+/* Narrow viewports stack in DOM order — scope browser, canvas,
+   inspector — as ordinary flow; fixed drawers overlapped the canvas
+   (jernerics-bo0). */
 @media (max-width: 60rem) {
   .workspace-main {
     grid-template-columns: 1fr;
   }
 
-  .scope-browser[open] {
-    position: fixed;
-    top: 3.5rem;
-    left: 0;
-    bottom: 0;
-    width: min(24rem, 92vw);
-    overflow-y: auto;
-    background: #fff;
-    border-right: 1px solid #ddd;
-    box-shadow: 0.25rem 0 0.5rem rgba(0, 0, 0, 0.08);
-    z-index: 20;
-  }
-
   .inspector:not(:empty) {
-    position: fixed;
-    top: 3.5rem;
-    right: 0;
-    bottom: 0;
-    width: min(34rem, 92vw);
-    overflow-y: auto;
-    background: #fff;
-    border-left: 1px solid #ddd;
-    box-shadow: -0.25rem 0 0.5rem rgba(0, 0, 0, 0.08);
-    padding: 0.75rem;
-    z-index: 20;
+    border-left: none;
+    border-top: 1px solid #ddd;
+    padding-left: 0;
+    padding-top: 0.75rem;
+  }
+}
+
+/* dcc.Tabs gives every tab an equal flex share with min-width 0, which
+   clips labels once the canvas narrows (jernerics-2qp): tabs size to
+   their labels and the strip wraps whole tabs instead. The explicit
+   row direction also overrides dash's vertical mobile tabs. */
+#analysis-tabs {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+#analysis-tabs .tab {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+@media (max-width: 30rem) {
+  /* The nav's 14rem picker floor otherwise pushes the logout button
+     past a phone viewport (jernerics-bo0). */
+  .nav {
+    flex-wrap: wrap;
   }
 
-  /* The unfocused placeholder must not become a drawer: nothing is
-     open, and a fixed empty panel would cover the canvas. */
-  .inspector:has(.inspector-placeholder) {
-    position: static;
-    width: auto;
-    bottom: auto;
-    overflow: visible;
-    background: none;
-    box-shadow: none;
-    border-left: none;
-    padding: 0;
+  .nav .project-picker {
+    min-width: 7rem;
+    flex: 1 1 7rem;
   }
 }

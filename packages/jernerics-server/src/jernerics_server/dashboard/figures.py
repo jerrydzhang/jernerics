@@ -51,6 +51,31 @@ _MISSING_LABEL = "missing"
 _MISSING_COLOR = "#7f7f7f"
 _PARAM_COLOR_PREFIX = "param:"
 
+_LEGEND = {
+    "font": {"size": 10},
+    "itemsizing": "constant",
+    "itemwidth": 30,
+    "x": 1,
+    "y": 0.5,
+    "yanchor": "middle",
+    "bgcolor": "rgba(255, 255, 255, 0.6)",
+}
+"""On-chart legend style: compact, vertically centered at the right so
+the hover modebar never sits on the first entry (jernerics-bt9)."""
+
+_STUDY_FIG_HEIGHT = 240
+"""Height of one Optuna study figure — compact, the grid pairs them."""
+
+_STUDY_FIG_MARGIN = {"l": 48, "r": 16, "t": 30, "b": 36}
+"""Compact margins; plotly's 80px defaults would eat a 240px figure."""
+
+
+def _series_height(rows: int, legend_entries: int) -> int:
+    """Panel-row height plus a capped legend allowance: a legend taller
+    than the plot area grows the figure instead of clipping (jernerics-bt9)."""
+    plot_area = _PANEL_HEIGHT * rows - 120
+    return _PANEL_HEIGHT * rows + 90 + max(0, min(660, 30 * legend_entries - plot_area))
+
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, int | float) and not isinstance(value, bool)
@@ -490,10 +515,10 @@ def stacked_figure(
     share the step x domain (linked zoom) and keep independent y axes.
     ``display`` picks raw traces (all, dimmed to ``highlighted`` picks),
     highlighted-only traces, or per-group median + IQR summaries. A key
-    with no observations keeps its panel and says so. Legends name color
-    groups only; without a color choice trial identity lives in the
-    browser. ``grouping`` overrides the grouping derived from ``color``
-    (pre-filter, so filtering never reshuffles colors)."""
+    with no observations keeps its panel and says so. The on-chart
+    legend carries one entry per color group — or per trial when no
+    color choice was made. ``grouping`` overrides the grouping derived
+    from ``color`` (pre-filter, so filtering never reshuffles colors)."""
     pooled = [series for entry in per_key for series in entry["series"]]
     grouping = grouping or color_grouping(pooled, color)
     colors = grouping["colors"]
@@ -553,7 +578,7 @@ def stacked_figure(
                         color=colors.get(identity, _PALETTE[0]),
                         dash=dash_of(series["trial"], series.get("execution")),
                         legendgroup=identity,
-                        showlegend=semantic and identity not in legend_seen,
+                        showlegend=identity not in legend_seen,
                         opacity=0.25 if dimmed else None,
                     ),
                     row=row_index,
@@ -567,8 +592,10 @@ def stacked_figure(
     figure.update_xaxes(title="step", row=len(rows) or 1, col=1)
     figure.update_layout(
         hovermode="x unified",
-        height=_PANEL_HEIGHT * (len(rows) or 1) + 90,
+        height=_series_height(len(rows) or 1, len(legend_seen)),
         uirevision=_UIREVISION,
+        showlegend=True,
+        legend=_LEGEND,
     )
     return figure
 
@@ -586,8 +613,9 @@ def overlay_figure(
     """Every selected key on ONE shared, unnormalized y axis (never a
     second axis, never rescaled data); log is refused while any plotted
     observation anywhere is non-positive. ``display`` mirrors
-    :func:`stacked_figure`; legends name color groups only and
-    ``grouping`` overrides the one derived from ``color``."""
+    :func:`stacked_figure`; the legend carries one entry per color
+    group — or per trial across keys when no color choice was made —
+    and ``grouping`` overrides the one derived from ``color``."""
     pooled = [series for entry in per_key for series in entry["series"]]
     resolved = resolve_axis(axis, pooled)
     grouping = grouping or color_grouping(pooled, color)
@@ -638,6 +666,7 @@ def overlay_figure(
                 identity = identity_of(series, grouping)
                 dimmed = bool(picks) and series["trial"] not in picks
                 group_key = f"{identity} · {entry['key']}"
+                dedup_key = group_key if semantic else identity
                 figure.add_trace(
                     _scatter(
                         series,
@@ -649,13 +678,13 @@ def overlay_figure(
                         color=colors.get(identity, _PALETTE[0]),
                         dash=dash_of(series["trial"], series.get("execution")),
                         legendgroup=group_key,
-                        showlegend=semantic and group_key not in legend_seen,
+                        showlegend=dedup_key not in legend_seen,
                         opacity=0.25 if dimmed else None,
                     ),
                     row=row_index,
                     col=1,
                 )
-                legend_seen.add(group_key)
+                legend_seen.add(dedup_key)
         if not pooled:
             _annotate_empty(figure, row_index, "no observations under this scope")
         figure.update_yaxes(row=row_index, col=1, **_yaxis_kwargs(resolved))
@@ -663,8 +692,10 @@ def overlay_figure(
     figure.update_yaxes(title="value (shared, unnormalized)", row=1, col=1)
     figure.update_layout(
         hovermode="x unified",
-        height=_PANEL_HEIGHT * len(facet_values) + 90,
+        height=_series_height(len(facet_values), len(legend_seen)),
         uirevision=_UIREVISION,
+        showlegend=True,
+        legend=_LEGEND,
     )
     return figure
 
@@ -679,7 +710,12 @@ def optimization_history(trials: list[dict[str, Any]]) -> go.Figure:
             mode="lines+markers",
         )
     )
-    figure.update_layout(xaxis_title="trial number", yaxis_title="objective")
+    figure.update_layout(
+        xaxis_title="trial number",
+        yaxis_title="objective",
+        height=_STUDY_FIG_HEIGHT,
+        margin=_STUDY_FIG_MARGIN,
+    )
     return figure
 
 
@@ -739,6 +775,10 @@ def parallel_coordinates(trials: list[dict[str, Any]]) -> go.Figure:
         figure.update_traces(
             line={"color": objectives, "showscale": True, "colorbar_title": "objective"}
         )
+    figure.update_layout(
+        height=_STUDY_FIG_HEIGHT,
+        margin={**_STUDY_FIG_MARGIN, "l": 44, "r": 44},
+    )
     return figure
 
 
@@ -782,7 +822,7 @@ def slice_figure(trials: list[dict[str, Any]]) -> go.Figure:
             row=1,
             col=column,
         )
-    figure.update_layout(height=360)
+    figure.update_layout(height=_STUDY_FIG_HEIGHT, margin=_STUDY_FIG_MARGIN)
     return figure
 
 
@@ -809,10 +849,16 @@ def contour_figure(trials: list[dict[str, Any]], x_key: str, y_key: str) -> go.F
         and trial["objective"] is not None
     ]
     figure = go.Figure()
-    figure.update_layout(xaxis_title=x_key, yaxis_title=y_key)
+    figure.update_layout(
+        xaxis_title=x_key,
+        yaxis_title=y_key,
+        height=_STUDY_FIG_HEIGHT,
+        margin={**_STUDY_FIG_MARGIN, "r": 70},
+    )
     if not points:
         figure.update_layout(
-            title=f"no trials with both {x_key} and {y_key} and an objective"
+            title=f"no trials with both {x_key} and {y_key} and an objective",
+            margin=_STUDY_FIG_MARGIN,
         )
         return figure
     xs = [point[0] for point in points]
@@ -882,4 +928,12 @@ def trial_timeline(trials: list[dict[str, Any]]) -> go.Figure:
     figure = go.Figure(go.Bar(y=labels, base=starts, x=durations_ms, orientation="h"))
     figure.update_xaxes(type="date", title="time (UTC)")
     figure.update_yaxes(autorange="reversed")
+    figure.update_layout(
+        # One bar per trial, capped: big sweeps grow toward, never past,
+        # two compact figures (jernerics-bt9).
+        height=max(
+            _STUDY_FIG_HEIGHT, min(_STUDY_FIG_HEIGHT * 2, 90 + 22 * len(ordered))
+        ),
+        margin={**_STUDY_FIG_MARGIN, "l": 110},
+    )
     return figure

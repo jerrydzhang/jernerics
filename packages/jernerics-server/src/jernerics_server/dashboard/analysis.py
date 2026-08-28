@@ -1665,7 +1665,8 @@ def optuna_tab_content(
                                     dcc.Graph(
                                         figure=figures.parallel_coordinates(sweep_rows)
                                     ),
-                                ]
+                                ],
+                                className="figure-wide",
                             ),
                             html.Div(
                                 [
@@ -1680,7 +1681,8 @@ def optuna_tab_content(
                                     dcc.Graph(
                                         figure=figures.trial_timeline(sweep_rows)
                                     ),
-                                ]
+                                ],
+                                className="figure-wide",
                             ),
                         ],
                         className="figure-grid",

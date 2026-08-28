@@ -1050,8 +1050,8 @@ def _series_tab() -> html.Div:
                     dcc.RadioItems(
                         id="analysis-mode",
                         options=[
-                            {"label": " Stacked panels", "value": "stacked"},
-                            {"label": " Shared-axis overlay", "value": "overlay"},
+                            {"label": " Stacked", "value": "stacked"},
+                            {"label": " Overlay", "value": "overlay"},
                         ],
                         value="stacked",
                         inline=True,

@@ -1136,6 +1136,11 @@ class TestOptunaFigures:
         assert timeline.data[0].type == "bar"
         assert len(timeline.data[0].y) == 4
 
+    def test_figure_set_is_compact(self, service):
+        content, _x, _y = optuna_tab_content(service, PROJECT, _tray(), None, None)
+        heights = [graph.figure.layout.height for graph in _graphs(content)]
+        assert all(200 <= height <= 480 for height in heights)
+
     def test_param_less_sweep_degrades_to_empty_contour(self, service):
         content, x_options, _y = optuna_tab_content(
             service, PROJECT, _tray(sweeps=[str(SWEEP_C)]), None, None
@@ -3741,12 +3746,17 @@ class TestTraceHoverAndLegend:
         trace = _panel_graphs(panels)[0].figure.data[0]
         assert "aa3" in trace.hovertemplate
 
-    def test_no_per_trial_legend_without_a_color_choice(self, service):
+    def test_per_trial_legend_without_a_color_choice(self, service):
         doc = _series_doc(keys=["loss"])
         panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
-        assert not any(
-            trace.showlegend for trace in _panel_graphs(panels)[0].figure.data
-        )
+        figure = _panel_graphs(panels)[0].figure
+        names = {trace.name for trace in figure.data if trace.showlegend}
+        assert names == {
+            "cc310000/dd310000",
+            "cc310200/dd310100",
+            "cc310300/dd310300",
+        }
+        assert figure.layout.showlegend is True
 
     def test_one_row_stacked_height_is_450_px(self, service):
         doc = _series_doc(keys=["loss"])
