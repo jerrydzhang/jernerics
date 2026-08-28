@@ -279,6 +279,15 @@ a.project-row:hover {
   font-size: 0.85rem;
 }
 
+/* "?" affordance inside a hint: the full explanation rides its title
+   tooltip (jernerics-5m0). */
+.hint .help {
+  cursor: help;
+  font-weight: 600;
+  margin-left: 0.25rem;
+  text-decoration: underline dotted;
+}
+
 /* Badge-style state/health cells in the overview sweep grid
    (jernerics-7bd): color-only, matching the artifact listing's state
    cells. */

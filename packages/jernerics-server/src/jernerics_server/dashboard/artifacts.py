@@ -348,11 +348,46 @@ def _content_body(service: DashboardService, view: ArtifactView) -> Any:
     return _fallback_card(view)
 
 
+def _breadcrumbs(view: ArtifactView) -> html.Nav:
+    """Project > Sweep > Trial > Execution trail back into the focused
+    workspace; the artifact itself is the unlinked leaf."""
+    hops: list[tuple[str, str]] = [
+        (view.project, f"{ROUTES_BASE}/project/{view.project}"),
+        (
+            view.sweep_name,
+            analysis.workspace_focus_href(view.project, "sweep", view.sweep_id),
+        ),
+        (
+            short_id(view.trial_id),
+            analysis.workspace_focus_href(view.project, "trial", view.trial_id),
+        ),
+    ]
+    if view.execution_id:
+        hops.append(
+            (
+                short_id(view.execution_id),
+                analysis.workspace_focus_href(
+                    view.project, "execution", view.execution_id
+                ),
+            )
+        )
+    children: list[Any] = []
+    for label, href in hops:
+        children += [html.A(label, href=href), html.Span("/")]
+    children.append(html.Span(view.filename))
+    return html.Nav(children, className="crumbs")
+
+
 def viewer_page(service: DashboardService, view: ArtifactView, now_ns: int) -> html.Div:
-    """The artifact viewer: factual header plus one dispatched renderer."""
+    """The artifact viewer: breadcrumbs, factual header, one renderer."""
     return html.Div(
         [
-            html.H2(f"Artifact {short_id(view.artifact_id)}"),
+            _breadcrumbs(view),
+            html.H2(view.filename),
+            html.P(
+                f"{view.key} · {short_id(view.artifact_id)}",
+                className="artifact-note",
+            ),
             _viewer_header(view, now_ns),
             html.Section(
                 [html.H3("Content"), _content_body(service, view)],

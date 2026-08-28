@@ -1043,7 +1043,7 @@ def _series_tab() -> html.Div:
                 [
                     dcc.Dropdown(
                         id="analysis-key",
-                        placeholder="Value keys… (order = panel order)",
+                        placeholder="Value keys…",
                         multi=True,
                         searchable=True,
                     ),
@@ -1059,7 +1059,7 @@ def _series_tab() -> html.Div:
                     dcc.Dropdown(id="analysis-color", placeholder="Color by…"),
                     dcc.Dropdown(
                         id="analysis-facet",
-                        placeholder="Facet rows by context…",
+                        placeholder="Facet rows…",
                     ),
                     dcc.RadioItems(
                         id="analysis-reduction",
@@ -1103,14 +1103,25 @@ def _series_tab() -> html.Div:
                 className="series-toolbar",
             ),
             html.P(
-                "Display mode says how trials compare: All raw renders every "
-                "series (line density warns above 100), Highlighted only "
-                "renders the highlighted trials — a trace click highlights "
-                "and focuses that trial — and Median + IQR aggregates per "
-                "color/facet group at each observed step. Execution reduction "
-                "stays separate: “none” shows every (trial, execution) series "
-                "as logged; mean/min/max fold executions within each trial — "
-                "never an implicit latest value.",
+                [
+                    "Display mode sets how trials compare; reduction "
+                    "folds executions within each trial.",
+                    html.Span(
+                        "?",
+                        title=(
+                            "All raw renders every series (line density "
+                            "warns above 100). Highlighted only renders "
+                            "the highlighted trials — a trace click "
+                            "highlights and focuses that trial. Median + "
+                            "IQR aggregates per color/facet group at each "
+                            "observed step. Reduction “none” shows every "
+                            "(trial, execution) series as logged; "
+                            "mean/min/max fold executions within each "
+                            "trial."
+                        ),
+                        className="help",
+                    ),
+                ],
                 className="hint",
             ),
             html.Div(id="analysis-context-filters", className="context-filters"),
@@ -1127,20 +1138,13 @@ def _optuna_tab() -> html.Div:
     return html.Div(
         [
             html.P(
-                "Study-style views rebuilt from canonical trial snapshots "
-                "with plain plotly — this server does not depend on optuna. "
-                "One figure set per selected sweep; contour additionally "
-                "needs two numeric params.",
+                "One figure set per selected sweep; contour needs two numeric params.",
                 className="hint",
             ),
             html.Div(
                 [
-                    dcc.Dropdown(
-                        id="analysis-contour-x", placeholder="Contour x param…"
-                    ),
-                    dcc.Dropdown(
-                        id="analysis-contour-y", placeholder="Contour y param…"
-                    ),
+                    dcc.Dropdown(id="analysis-contour-x", placeholder="Contour x…"),
+                    dcc.Dropdown(id="analysis-contour-y", placeholder="Contour y…"),
                 ],
                 className="analysis-controls",
             ),

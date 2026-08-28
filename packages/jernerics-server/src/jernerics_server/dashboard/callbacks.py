@@ -7,6 +7,7 @@ the view document's ``focus`` field.
 """
 
 import ast
+import hashlib
 import json
 import time
 from typing import Any, Literal
@@ -18,12 +19,26 @@ from dash.exceptions import PreventUpdate
 
 from . import analysis, artifacts, components, layout, workspace
 from .components import Error
-from .routes import ROUTES_BASE, parse_route
+from .routes import _ARTIFACT_VIEW_PREFIX, ROUTES_BASE, parse_route
 from .service import (
     CurationRejectedError,
     CurationUnavailableError,
     DashboardService,
 )
+
+
+def _json_default(value: Any) -> Any:
+    """JSON stand-in for otherwise unserializable values; Dash component
+    trees serialize through their plotly JSON, everything else by str."""
+    if hasattr(value, "to_plotly_json"):
+        return value.to_plotly_json()
+    return str(value)
+
+
+def _content_digest(*parts: Any) -> str:
+    """Stable digest of callback outputs, for skip-when-unchanged guards."""
+    payload = json.dumps(parts, sort_keys=True, default=_json_default)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def pattern_trigger(context: Any) -> tuple[str | None, str]:
@@ -129,6 +144,14 @@ def tray_from_grid(rows: list[dict] | None, current: dict | None) -> dict:
         **(current or {}),
         "sweeps": sorted({str(row["sweep_id"]) for row in rows or []}),
     }
+
+
+def overview_content(
+    service: DashboardService, project: str | None, tray: dict | None
+) -> tuple[Any, str]:
+    """(children, digest) of the workspace overview region."""
+    children = workspace.overview_tab(service, project, tray)
+    return children, _content_digest(children)
 
 
 def lineage_panel(rows: list[dict] | None, data: dict | None) -> list[object]:
@@ -273,6 +296,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("poll", "disabled"),
         Output("view-store", "data", allow_duplicate=True),
         Output("route-store", "data"),
+        Output("overview-digest-store", "data"),
         Input("url", "pathname"),
         Input("poll", "n_intervals"),
         State("workspace-store", "data"),
@@ -313,6 +337,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 not polls,
                 no_update if flip is None else flip,
                 no_update,
+                no_update,
             )
         page, polls = page_content(
             pathname,
@@ -320,7 +345,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             workspace_state_doc=workspace_state(workspace_doc, project),
             view_doc=view_doc,
         )
-        return page, not polls, no_update, pathname
+        # A rendered page remounts workspace-overview empty, so its
+        # content digest from the previous mount is void.
+        return page, not polls, no_update, pathname, None
 
     @app.callback(
         Output("poll", "disabled", allow_duplicate=True),
@@ -399,12 +426,22 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return project_options(service.projects())
 
     @app.callback(
-        Output("url", "pathname"),
+        Output("url", "pathname", allow_duplicate=True),
         Input("project-picker", "value"),
+        State("route-store", "data"),
         prevent_initial_call=True,
     )
-    def _navigate_to_workspace(project: str | None):
+    def _navigate_to_workspace(project: str | None, rendered_route: str | None):
         target = f"{ROUTES_BASE}/project/{project}" if project else f"{ROUTES_BASE}/"
+        # The picker's value is mirrored from project-store on load and
+        # hydration; a target the rendered route already shows would only
+        # re-fire every pathname-driven callback for a second lap.
+        if target == rendered_route:
+            raise PreventUpdate
+        # On the artifact viewer the picker mirrors the artifact's
+        # project; that adoption must not hijack the viewer route.
+        if (rendered_route or "").startswith(_ARTIFACT_VIEW_PREFIX):
+            raise PreventUpdate
         return target
 
     @app.callback(
@@ -581,15 +618,15 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             include_invalid=desired["include_invalid"],
         )
         picked = set(desired["sweeps"])
-        return (
-            rows,
-            analysis.mounted_selection(
-                [row for row in rows if row["sweep_id"] in picked],
-                initial=is_initial(),
-            ),
-            workspace.curation_note(rows),
-            desired,
+        selected = analysis.mounted_selection(
+            [row for row in rows if row["sweep_id"] in picked],
+            initial=is_initial(),
         )
+        note = workspace.curation_note(rows)
+        digest = _content_digest(rows, selected, note)
+        if digest == (facts or {}).get("digest"):
+            raise PreventUpdate
+        return rows, selected, note, {**desired, "digest": digest}
 
     @app.callback(
         Output("analysis-family-grid", "columnDefs"),
@@ -618,26 +655,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             "color": (view_doc or analysis.default_view_state())["series"]["color"],
         }
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
-        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
-        if "view-store.data" in triggered and desired == facts:
+        stored = {k: v for k, v in (facts or {}).items() if k != "digest"}
+        if "view-store.data" in triggered and desired == stored:
             raise PreventUpdate
         columns, rows, selected = analysis.browser_trial_outputs(
             service, project, tray, view_doc, series_data
         )
-        return (
-            columns,
-            rows,
-            analysis.mounted_selection(selected, initial=is_initial()),
-            desired,
-        )
-
-    @app.callback(
-        Output("analysis-scope-bar", "children"),
-        Input("selection-store", "data"),
-        Input("project-store", "data"),
-    )
-    def _render_scope_bar(tray: dict | None, project: str | None):
-        return workspace.scope_bar(service, project, tray)
+        selected = analysis.mounted_selection(selected, initial=is_initial())
+        digest = _content_digest(columns, rows, selected)
+        if digest == (facts or {}).get("digest"):
+            raise PreventUpdate
+        return columns, rows, selected, {**desired, "digest": digest}
 
     @app.callback(
         Output("sweep-grid", "dashGridOptions"),
@@ -792,8 +820,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         _project: str,
         rendered: dict | None,
     ):
-        # The inspector runs when the focus changes or the focused
-        # object's live facts poll — never on unrelated view edits.
+        # Unrelated view edits with the same focus render nothing; a
+        # re-render would also rebuild the focus controls, re-firing
+        # the focus editor on every poll tick for nothing.
         focus = (view_doc or {}).get("focus")
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
         if (
@@ -801,10 +830,11 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             and (rendered or {}).get("focus") == focus
         ):
             raise PreventUpdate
-        return (
-            workspace.inspector_content(service, focus, time.time_ns()),
-            {"focus": focus},
-        )
+        children = workspace.inspector_content(service, focus, time.time_ns())
+        digest = _content_digest(children)
+        if digest == (rendered or {}).get("digest"):
+            raise PreventUpdate
+        return children, {"focus": focus, "digest": digest}
 
     @app.callback(
         Output("view-store", "data", allow_duplicate=True),
@@ -857,21 +887,51 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return doc
 
     @app.callback(
+        Output("overview-digest-store", "data"),
+        Input("selection-store", "data"),
+        Input("poll", "n_intervals"),
+        Input("analysis-tabs", "value"),
+        State("project-store", "data"),
+        State("overview-digest-store", "data"),
+    )
+    def _track_overview_digest(
+        tray: dict | None,
+        _tick: int | None,
+        tab: str | None,
+        project: str | None,
+        digest_doc: dict | None,
+    ):
+        # Shell-only twin of the overview renderer: jernerics-8c9 bans
+        # mixing shell and page outputs on one shell-firable callback,
+        # so the digest lives here and the region renders separately.
+        if tab != "overview":
+            raise PreventUpdate
+        _children, digest = overview_content(service, project, tray)
+        if digest == (digest_doc or {}).get("digest"):
+            raise PreventUpdate
+        return {"digest": digest}
+
+    @app.callback(
         Output("workspace-overview", "children"),
         Input("selection-store", "data"),
         Input("poll", "n_intervals"),
         Input("analysis-tabs", "value"),
         State("project-store", "data"),
+        State("overview-digest-store", "data"),
     )
     def _render_overview(
         tray: dict | None,
         _tick: int | None,
         tab: str | None,
         project: str | None,
+        digest_doc: dict | None,
     ):
         if tab != "overview":
             raise PreventUpdate
-        return workspace.overview_tab(service, project, tray)
+        children, digest = overview_content(service, project, tray)
+        if digest == (digest_doc or {}).get("digest"):
+            raise PreventUpdate
+        return children
 
     # -- Analysis tabs inside the workspace ------------------------------
 
@@ -983,13 +1043,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return tray
 
     @app.callback(
-        Output("analysis-expand", "value"),
-        Input("selection-store", "data"),
-    )
-    def _sync_expand_toggle(tray: dict | None):
-        return analysis.expand_values(tray)
-
-    @app.callback(
         Output("view-store", "data", allow_duplicate=True),
         Input("analysis-include", "value"),
         State("view-store", "data"),
@@ -1000,13 +1053,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if doc == (current or {}):
             raise PreventUpdate
         return doc
-
-    @app.callback(
-        Output("analysis-include", "value"),
-        Input("view-store", "data"),
-    )
-    def _sync_include_controls(doc: dict | None):
-        return analysis.include_values(doc)
 
     @app.callback(
         Output("analysis-error", "children"),
@@ -1159,7 +1205,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("analysis-contour-y", "value"),
         Output("analysis-display", "value"),
         Output("analysis-auto-refresh", "value"),
+        Output("analysis-include", "value"),
+        Output("analysis-expand", "value"),
         Input("view-store", "data"),
+        Input("selection-store", "data"),
         Input("analysis-key", "options"),
         Input("analysis-color", "options"),
         Input("analysis-facet", "options"),
@@ -1168,6 +1217,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _sync_view_controls(
         doc: dict | None,
+        tray: dict | None,
         key_options: list | None,
         color_options: list | None,
         facet_options: list | None,
@@ -1176,16 +1226,21 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     ):
         # Dropdown values ride along with their options: a value written
         # before its options exist is dropped by the component and fires
-        # back as a spurious clear.
-        return analysis.control_values(
-            doc,
-            {
-                "keys": analysis.loaded_option_values(key_options),
-                "color": analysis.loaded_option_values(color_options),
-                "facet": analysis.loaded_option_values(facet_options),
-                "contour_x": analysis.loaded_option_values(contour_x_options),
-                "contour_y": analysis.loaded_option_values(contour_y_options),
-            },
+        # back as a spurious clear. Include and expand ride along with
+        # the other control values so one store write is one sync POST.
+        return (
+            *analysis.control_values(
+                doc,
+                {
+                    "keys": analysis.loaded_option_values(key_options),
+                    "color": analysis.loaded_option_values(color_options),
+                    "facet": analysis.loaded_option_values(facet_options),
+                    "contour_x": analysis.loaded_option_values(contour_x_options),
+                    "contour_y": analysis.loaded_option_values(contour_y_options),
+                },
+            ),
+            analysis.include_values(doc),
+            analysis.expand_values(tray),
         )
 
     @app.callback(

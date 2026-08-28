@@ -312,12 +312,12 @@ def hydrate_view(
         try:
             decoded = decode_view_state(raw)
         except ViewStateError as error:
-            return edited_view(current, changes), str(error)
+            return canonical_view(edited_view(current, changes)), str(error)
         changes = {key: value for key, value in decoded.items() if key != "focus"}
         if decoded["focus"] is not None:
             changes["focus"] = decoded["focus"]
     doc = edited_view(current, changes)
-    return (None if current == doc else doc), None
+    return (None if current == doc else canonical_view(doc)), None
 
 
 def loaded_option_values(options: Any) -> set[str] | None:
@@ -568,6 +568,11 @@ def mounted_selection(selected: list[Any], *, initial: bool) -> Any:
     return no_update if initial and not selected else selected
 
 
+def _canonical_ids(values: Any) -> list[str]:
+    """Id strings in the sorted-unique form the browser grids echo back."""
+    return sorted({str(value) for value in values or ()})
+
+
 def tray_from_selection(selection: Any) -> dict[str, Any]:
     """Unified selection store matching a decoded token selection.
 
@@ -577,9 +582,9 @@ def tray_from_selection(selection: Any) -> dict[str, Any]:
     """
     return {
         "project": selection.project,
-        "sweeps": [str(value) for value in selection.sweeps or ()],
+        "sweeps": _canonical_ids(selection.sweeps),
         "trials": [str(value) for value in selection.trials or ()],
-        "families": [str(value) for value in selection.retry_roots or ()],
+        "families": _canonical_ids(selection.retry_roots),
         "executions": [str(value) for value in selection.executions or ()],
         "expand": bool(selection.retry_roots),
     }
@@ -615,9 +620,12 @@ def hydrate_tray(
         selection = decode_selection_token(token, project=project)
     except SelectionTokenError as error:
         return None, str(error)
-    if current and service.analysis_selection(project, current) == selection:
+    token_tray = tray_from_selection(selection)
+    if current and service.analysis_selection(
+        project, current
+    ) == service.analysis_selection(project, token_tray):
         return None, None
-    return tray_from_selection(selection), None
+    return token_tray, None
 
 
 def cold_start(
@@ -673,6 +681,12 @@ def view_from_include(
             "include_invalid": "invalid" in picked,
         },
     )
+
+
+def canonical_view(doc: dict[str, Any]) -> dict[str, Any]:
+    """The doc exactly as the include-control echo would rewrite it, so
+    a hydrated view store leaves the echo nothing to change."""
+    return view_from_include(doc, include_values(doc))
 
 
 def synced_search(
@@ -876,14 +890,20 @@ def catalog_tab(
     )
 
 
-def _coverage_label(entry: dict[str, Any]) -> str:
+def _coverage_option(entry: dict[str, Any]) -> dict[str, str]:
+    """Picker option for one value key: key, points, and trials in the
+    label; the full coverage facts in the option's title tooltip."""
     low, high = entry["extent"]
     extent = f"steps {low}-{high}" if entry["steps"] else "no steps beyond 0"
-    return (
-        f"{entry['key']} · {entry['kind']} · {entry['points']} pts · "
-        f"{entry['trials']} trial(s) · {entry['families']} family/families · "
-        f"{extent}"
-    )
+    trials = _counted(entry["trials"], "trial", "trials")
+    return {
+        "label": f"{entry['key']} · {entry['points']} pts · {trials}",
+        "value": entry["key"],
+        "title": (
+            f"{entry['kind']} · {entry['points']} points · {trials} · "
+            f"{_counted(entry['families'], 'family', 'families')} · {extent}"
+        ),
+    }
 
 
 def scope_fingerprint(project: str | None, tray: dict[str, Any] | None) -> str:
@@ -925,7 +945,7 @@ def series_snapshot(
     fingerprint = scope_fingerprint(project, tray)
     coverage = service.analysis_value_keys(project, tray)
     offered = {
-        entry["key"]: _coverage_label(entry)
+        entry["key"]: _coverage_option(entry)
         for entry in coverage
         if entry["kind"] == "scalar" and entry["steps"]
     }
@@ -943,10 +963,14 @@ def series_snapshot(
         "trials": trials,
         "varying": varying_param_keys(trials),
         "key_options": [
-            {
-                "label": offered.get(key, f"{key} · absent under this scope"),
-                "value": key,
-            }
+            offered.get(
+                key,
+                {
+                    "label": f"{key} · absent under this scope",
+                    "value": key,
+                    "title": "picked, but not offered under the current scope",
+                },
+            )
             for key in sorted({*offered, *keys})
         ],
         "dims": service.analysis_context_catalog(project, tray),

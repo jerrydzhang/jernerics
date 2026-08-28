@@ -981,13 +981,14 @@ class TestSeriesPanels:
         _panels, _payload, key_options, color_options, facet_options = series_outputs(
             service, PROJECT, _all_sweeps(), doc
         )
-        labels = {option["value"]: option["label"] for option in key_options}
-        assert labels["loss"] == (
-            "loss · scalar · 12 pts · 4 trial(s) · 3 family/families · steps 0-3"
+        by_value = {option["value"]: option for option in key_options}
+        assert by_value["loss"]["label"] == "loss · 12 pts · 4 trials"
+        assert by_value["loss"]["title"] == (
+            "scalar · 12 points · 4 trials · 3 families · steps 0-3"
         )
-        assert "steps 0-1" in labels["accuracy"]
-        assert "delta" in labels
-        assert "score" not in labels
+        assert "steps 0-1" in by_value["accuracy"]["title"]
+        assert "delta" in by_value
+        assert "score" not in by_value
         values = {option["value"] for option in color_options}
         assert values >= {"host", "shard", "param:lr", "param:seed"}
         labels = {option["value"]: option["label"] for option in color_options}
@@ -2346,6 +2347,8 @@ class TestColdStartMountedJourney:
         "analysis-contour-y.value",
         "analysis-display.value",
         "analysis-auto-refresh.value",
+        "analysis-include.value",
+        "analysis-expand.value",
     }
 
     def test_control_sync_lands_each_value_on_its_component(self, authed, callback_map):
@@ -2373,11 +2376,20 @@ class TestColdStartMountedJourney:
             self._SYNC_OUTPUTS,
             [
                 {"id": "view-store", "property": "data", "value": doc},
+                {"id": "selection-store", "property": "data", "value": None},
                 {"id": "analysis-key", "property": "options", "value": options},
                 {"id": "analysis-color", "property": "options", "value": options},
                 {"id": "analysis-facet", "property": "options", "value": options},
-                {"id": "analysis-contour-x", "property": "options", "value": options},
-                {"id": "analysis-contour-y", "property": "options", "value": options},
+                {
+                    "id": "analysis-contour-x",
+                    "property": "options",
+                    "value": options,
+                },
+                {
+                    "id": "analysis-contour-y",
+                    "property": "options",
+                    "value": options,
+                },
             ],
         )
         assert result["analysis-tabs"]["value"] == "series"
@@ -2390,6 +2402,8 @@ class TestColdStartMountedJourney:
         assert result["analysis-contour-y"]["value"] == "seed"
         assert result["analysis-display"]["value"] == "median_iqr"
         assert result["analysis-auto-refresh"]["value"] == ["auto"]
+        assert result["analysis-include"]["value"] == []
+        assert result["analysis-expand"]["value"] == []
 
 
 class TestContinueInPython:

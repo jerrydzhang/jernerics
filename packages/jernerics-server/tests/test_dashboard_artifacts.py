@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, unquote
 
 import pytest
 from dash import dcc, html
@@ -43,6 +43,7 @@ from jernerics_server.dashboard.artifacts import (
     viewer_href,
 )
 from jernerics_server.dashboard.callbacks import page_content
+from jernerics_server.dashboard.components import short_id
 from jernerics_server.dashboard.routes import parse_route
 from jernerics_server.dashboard.workspace import inspector_content
 from jernerics_server.http import create_app
@@ -564,7 +565,40 @@ class TestViewerFacts:
         assert str(EXECUTION) in rendered
         assert str(SWEEP) in rendered
         assert "section-artifact-facts" in rendered
-        assert "section-artifact-content" in rendered
+
+
+class TestViewerTitleAndCrumbs:
+    def test_title_is_filename_with_key_not_raw_hex(self, env):
+        page, _ = page_content(f"/dashboard/artifact-view/{MODEL_V2.hex}", env.service)
+        h2s = _find(page, html.H2)
+        assert [h.children for h in h2s] == ["model-v2.bin"]
+        headings = [str(h.children) for h in h2s + _find(page, html.H3)]
+        assert all(MODEL_V2.hex not in text for text in headings)
+        assert "model" in str(page)
+
+    def test_breadcrumbs_link_workspace_sweep_trial_execution(self, env):
+        page, _ = page_content(f"/dashboard/artifact-view/{CUSTOM.hex}", env.service)
+        nav = _find(page, html.Nav)[0]
+        links = [(a.children, a.href) for a in _find(nav, html.A)]
+        assert [label for label, _ in links] == [
+            "lab",
+            "alpha",
+            short_id(str(TRIAL)),
+            short_id(str(EXECUTION)),
+        ]
+        assert links[0][1] == "/dashboard/project/lab"
+        for (_, href), kind, object_id in zip(
+            links[1:],
+            ("sweep", "trial", "execution"),
+            (SWEEP, TRIAL, EXECUTION),
+            strict=True,
+        ):
+            path, _, query = href.partition("?")
+            assert path == "/dashboard/project/lab"
+            doc = json.loads(unquote(parse_qs(query)["view"][0]))
+            assert doc["focus"] == {"kind": kind, "id": str(object_id)}
+        leaves = _find(nav, html.Span)
+        assert leaves[-1].children == "custom.bin"
 
 
 class TestNoNewSqlOutsideQueries:
