@@ -85,11 +85,13 @@ class TestFocusSurvivesViewEdits:
         assert flipped is not None and flipped["auto_refresh"] is False
         assert flipped["focus"] == doc["focus"]
 
-    def test_include_edit_keeps_focus(self):
+    def test_include_edit_keeps_focus_and_picks(self):
         doc = _focused()
+        doc["scope"]["sweeps"] = [str(SWEEP_A)]
         included = view_from_include(doc, ["archived", "invalid"])
-        assert included["include_archived"] is True
-        assert included["include_invalid"] is True
+        assert included["scope"]["include_archived"] is True
+        assert included["scope"]["include_invalid"] is True
+        assert included["scope"]["sweeps"] == [str(SWEEP_A)]
         assert included["focus"] == doc["focus"]
 
     def test_context_filter_edit_keeps_focus(self):

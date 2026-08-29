@@ -16,6 +16,7 @@ from jernerics_schema import (
     ValueEvent,
 )
 from jernerics_server.dashboard.analysis import (
+    default_scope_state,
     default_view_state,
     encode_view_state,
     expand_values,
@@ -198,7 +199,7 @@ def _dispatch(
     return response, payload
 
 
-_TRAY_INPUT = {"id": "selection-store", "property": "data", "value": None}
+_VIEW_INPUT = {"id": "view-store", "property": "data", "value": None}
 _TICK_INPUT = {"id": "poll", "property": "n_intervals", "value": 1}
 _TAB_INPUT = {"id": "analysis-tabs", "property": "value", "value": "overview"}
 _PROJECT_STATE = {"id": "project-store", "property": "data", "value": PROJECT}
@@ -221,7 +222,7 @@ class TestOverviewPollCascade:
             client,
             cmap,
             outputs,
-            inputs=[_TRAY_INPUT, _TICK_INPUT, _TAB_INPUT],
+            inputs=[_VIEW_INPUT, _TICK_INPUT, _TAB_INPUT],
             state=[_PROJECT_STATE, _digest_state(digest_doc)],
             changed=changed,
         )
@@ -229,12 +230,12 @@ class TestOverviewPollCascade:
     def test_unchanged_tick_ships_nothing(self, authed, callback_map):
         client, _store = authed
         response, tracked = self._fire(
-            client, callback_map, _TRACKER_OUTPUTS, None, ["selection-store.data"]
+            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
         )
         assert response.status_code == 200
         digest = tracked["overview-digest-store"]["data"]["digest"]
         response, rendered = self._fire(
-            client, callback_map, _OVERVIEW_OUTPUTS, None, ["selection-store.data"]
+            client, callback_map, _OVERVIEW_OUTPUTS, None, ["view-store.data"]
         )
         assert response.status_code == 200
         assert rendered["workspace-overview"]["children"]
@@ -248,7 +249,7 @@ class TestOverviewPollCascade:
     def test_changed_data_advances_digest_and_re_renders(self, authed, callback_map):
         client, store = authed
         _response, tracked = self._fire(
-            client, callback_map, _TRACKER_OUTPUTS, None, ["selection-store.data"]
+            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
         )
         stale = tracked["overview-digest-store"]["data"]
         _ingest_sweep(store, SWEEP_B, "beta")
@@ -316,13 +317,15 @@ class TestOverviewPollCascade:
 class TestPickerNavigationMirrorGuard:
     """The picker's mirror write on load must not rewrite the pathname
     the router already rendered — that rewrite re-fires every
-    pathname-driven callback for a second hydration lap."""
+    pathname-driven callback for a second hydration lap. A genuine
+    project switch also clears the stale ``?view=`` so the previous
+    project's scope cannot ride along (jernerics-2se)."""
 
     def _navigate(self, client, callback_map, picked, rendered_route):
         return _dispatch(
             client,
             callback_map,
-            {"url.pathname"},
+            {"url.pathname", "url.search"},
             inputs=[{"id": "project-picker", "property": "value", "value": picked}],
             state=[{"id": "route-store", "property": "data", "value": rendered_route}],
         )
@@ -332,11 +335,20 @@ class TestPickerNavigationMirrorGuard:
         response, _payload = self._navigate(client, callback_map, PROJECT, WORKSPACE)
         assert response.status_code == 204
 
-    def test_new_project_still_navigates(self, authed, callback_map):
+    def test_new_project_still_navigates_and_clears_the_scope_url(
+        self, authed, callback_map
+    ):
         client, _store = authed
         response, payload = self._navigate(client, callback_map, PROJECT, "/dashboard/")
         assert response.status_code == 200
         assert payload["url"]["pathname"] == WORKSPACE
+
+    def test_project_switch_clears_a_stale_view_parameter(self, authed, callback_map):
+        client, _store = authed
+        rendered = f"{WORKSPACE}?view=%7B%22v%22%3A2%7D"
+        response, payload = self._navigate(client, callback_map, "other", rendered)
+        assert response.status_code == 200
+        assert payload["url"]["search"] == ""
 
     def test_cleared_picker_returns_to_catalog(self, authed, callback_map):
         client, _store = authed
@@ -347,54 +359,70 @@ class TestPickerNavigationMirrorGuard:
 
 class TestSweepsBrowserTickGuard:
     """The sweeps loader's digest guard (unchanged rows on a poll tick
-    ship nothing) pinned so it cannot regress silently."""
+    ship nothing) pinned so it cannot regress silently. jernerics-2se:
+    the scope now lives in the view doc — an unchanged scope on a tick
+    must ship nothing, and an unrelated view edit (focus) must not
+    re-ship the grid either."""
+
+    _WANTED = {
+        "sweep-grid.rowData",
+        "sweep-grid.selectedRows",
+        "workspace-curation-note.children",
+        "sweep-browser-facts-store.data",
+    }
+
+    def _fire(self, client, callback_map, view_doc, facts, changed):
+        return _dispatch(
+            client,
+            callback_map,
+            self._WANTED,
+            inputs=[
+                _PROJECT_STATE,
+                {"id": "view-store", "property": "data", "value": view_doc},
+                _TICK_INPUT,
+            ],
+            state=[
+                {"id": "sweep-browser-facts-store", "property": "data", "value": facts}
+            ],
+            changed=changed,
+        )
 
     def test_unchanged_rows_tick_is_skipped(self, authed, callback_map):
         client, _store = authed
-        inputs = [
-            _PROJECT_STATE,
-            _TRAY_INPUT,
-            {"id": "view-store", "property": "data", "value": None},
-            _TICK_INPUT,
-        ]
-        wanted = {
-            "sweep-grid.rowData",
-            "sweep-grid.selectedRows",
-            "workspace-curation-note.children",
-            "sweep-browser-facts-store.data",
-        }
-        response, loaded = _dispatch(
-            client,
-            callback_map,
-            wanted,
-            inputs=inputs,
-            state=[
-                {"id": "sweep-browser-facts-store", "property": "data", "value": None}
-            ],
-        )
+        response, loaded = self._fire(client, callback_map, None, None, None)
         assert response.status_code == 200
         facts = loaded["sweep-browser-facts-store"]["data"]
         assert facts["digest"]
-        tick = _dispatch(
+        tick = self._fire(
             client,
             callback_map,
-            wanted,
-            inputs=[
-                _PROJECT_STATE,
-                _TRAY_INPUT,
-                {"id": "view-store", "property": "data", "value": None},
-                {"id": "poll", "property": "n_intervals", "value": 2},
-            ],
-            state=[
-                {
-                    "id": "sweep-browser-facts-store",
-                    "property": "data",
-                    "value": facts,
-                }
-            ],
-            changed=["poll.n_intervals"],
+            None,
+            facts,
+            ["poll.n_intervals"],
         )
         assert tick[0].status_code == 204
+
+    def test_unchanged_scope_on_a_tick_ships_nothing(self, authed, callback_map):
+        """jernerics-2se regression: the sweep picks hydrate into the
+        view doc; a poll tick carrying the same scope ships nothing."""
+        client, _store = authed
+        sweep_id = str(SWEEP_A)
+        doc = default_view_state()
+        doc["scope"]["sweeps"] = [sweep_id]
+        response, loaded = self._fire(
+            client, callback_map, doc, None, ["view-store.data"]
+        )
+        assert response.status_code == 200
+        facts = loaded["sweep-browser-facts-store"]["data"]
+        assert facts["sweeps"] == [sweep_id]
+        picked = [row["sweep_id"] for row in loaded["sweep-grid"]["selectedRows"]]
+        assert picked == [sweep_id]
+        # a tick re-fires with the identical doc: the digest guard skips
+        tick = self._fire(client, callback_map, doc, facts, ["poll.n_intervals"])
+        assert tick[0].status_code == 204
+        # an identical scope re-write through the store is skipped too
+        again = self._fire(client, callback_map, doc, facts, ["view-store.data"])
+        assert again[0].status_code == 204
 
 
 class TestInspectorPollCascade:
@@ -438,11 +466,10 @@ class TestInspectorPollCascade:
 
 
 _HYDRATION_OUTPUTS = {
-    "selection-store.data",
     "analysis-message-store.data",
     "view-store.data",
 }
-_TRAY_EDIT_OUTPUTS = {"selection-store.data"}
+_TRAY_EDIT_OUTPUTS = {"view-store.data"}
 _INCLUDE_EDIT_OUTPUTS = {"view-store.data"}
 _MERGED_SYNC_OUTPUTS = {
     "analysis-tabs.value",
@@ -461,12 +488,12 @@ _MERGED_SYNC_OUTPUTS = {
 
 
 class TestHydrationCanonicalEcho:
-    """jernerics-haj: hydration writes the canonical tray and view doc,
-    so the control-sync -> edit-callback echo finds the stores already
-    in the form it would compute and ships nothing — the load cascade's
-    lap-2 store writes and the region re-renders they drag along."""
+    """jernerics-haj: hydration writes the canonical view doc, so the
+    control-sync -> edit-callback echo finds the store already in the
+    form it would compute and ships nothing — the load cascade's lap-2
+    store writes and the region re-renders they drag along."""
 
-    def _hydrate(self, client, cmap, search, tray, view):
+    def _hydrate(self, client, cmap, search, view):
         return _dispatch(
             client,
             cmap,
@@ -476,10 +503,7 @@ class TestHydrationCanonicalEcho:
                 {"id": "url", "property": "search", "value": search},
                 _PROJECT_STATE,
             ],
-            state=[
-                {"id": "selection-store", "property": "data", "value": tray},
-                {"id": "view-store", "property": "data", "value": view},
-            ],
+            state=[{"id": "view-store", "property": "data", "value": view}],
             changed=["url.search"],
         )
 
@@ -493,12 +517,12 @@ class TestHydrationCanonicalEcho:
             )
         )
         response, payload = self._hydrate(
-            client, callback_map, f"?sel={token}", None, default_view_state()
+            client, callback_map, f"?sel={token}", default_view_state()
         )
         assert response.status_code == 200
-        tray = payload["selection-store"]["data"]
-        assert tray["sweeps"] == sorted({str(SWEEP_A), str(SWEEP_B)})
-        assert tray["families"] == sorted({str(ROOT_A), str(ROOT_B)})
+        doc = payload["view-store"]["data"]
+        assert doc["scope"]["sweeps"] == sorted({str(SWEEP_A), str(SWEEP_B)})
+        assert doc["scope"]["families"] == sorted({str(ROOT_A), str(ROOT_B)})
         echo = _dispatch(
             client,
             callback_map,
@@ -512,10 +536,10 @@ class TestHydrationCanonicalEcho:
                 {
                     "id": "analysis-expand",
                     "property": "value",
-                    "value": expand_values(tray),
+                    "value": expand_values(doc),
                 },
             ],
-            state=[{"id": "selection-store", "property": "data", "value": tray}],
+            state=[{"id": "view-store", "property": "data", "value": doc}],
             changed=["analysis-family-grid.selectedRows", "analysis-expand.value"],
             key=_callback_key(
                 callback_map,
@@ -527,12 +551,11 @@ class TestHydrationCanonicalEcho:
 
     def test_include_echo_after_hydration_ships_nothing(self, authed, callback_map):
         client, _store = authed
-        doc = default_view_state() | {
-            "include_archived": True,
-            "include_invalid": True,
-        }
+        doc = default_view_state()
+        doc["scope"]["include_archived"] = True
+        doc["scope"]["include_invalid"] = True
         response, payload = self._hydrate(
-            client, callback_map, f"?view={encode_view_state(doc)}", None, None
+            client, callback_map, f"?view={encode_view_state(doc)}", None
         )
         assert response.status_code == 200
         assert payload["view-store"]["data"] == doc
@@ -555,20 +578,18 @@ class TestHydrationCanonicalEcho:
         )
         assert echo[0].status_code == 204
 
-    def test_rehydrating_the_hydrated_tray_rewrites_nothing(self, authed, callback_map):
+    def test_rehydrating_the_hydrated_scope_rewrites_nothing(
+        self, authed, callback_map
+    ):
         client, _store = authed
         token = encode_selection_token(
             Selection(project=PROJECT, retry_roots=(ROOT_A, ROOT_B))
         )
-        _response, payload = self._hydrate(
-            client, callback_map, f"?sel={token}", None, default_view_state()
-        )
-        tray = payload["selection-store"]["data"]
-        again, payload = self._hydrate(
-            client, callback_map, f"?sel={token}", tray, default_view_state()
-        )
+        _response, payload = self._hydrate(client, callback_map, f"?sel={token}", None)
+        doc = payload["view-store"]["data"]
+        again, payload = self._hydrate(client, callback_map, f"?sel={token}", doc)
         assert again.status_code == 200
-        assert "selection-store" not in payload
+        assert "view-store" not in payload
 
 
 class TestMergedControlSync:
@@ -576,26 +597,25 @@ class TestMergedControlSync:
     store change, producing the include/expand/tab values the separate
     syncs wrote for the same store states."""
 
-    def _sync(self, client, cmap, doc, tray, key_options=None):
+    def _sync(self, client, cmap, doc, key_options=None):
         return _dispatch(
             client,
             cmap,
             _MERGED_SYNC_OUTPUTS,
             inputs=[
                 {"id": "view-store", "property": "data", "value": doc},
-                {"id": "selection-store", "property": "data", "value": tray},
                 {"id": "analysis-key", "property": "options", "value": key_options},
                 {"id": "analysis-color", "property": "options", "value": None},
                 {"id": "analysis-facet", "property": "options", "value": None},
                 {"id": "analysis-contour-x", "property": "options", "value": None},
                 {"id": "analysis-contour-y", "property": "options", "value": None},
             ],
-            changed=["view-store.data", "selection-store.data"],
+            changed=["view-store.data"],
         )
 
     def test_defaults_match_the_separate_syncs(self, authed, callback_map):
         client, _store = authed
-        response, payload = self._sync(client, callback_map, None, None)
+        response, payload = self._sync(client, callback_map, None)
         assert response.status_code == 200
         assert payload["analysis-tabs"]["value"] == "overview"
         assert payload["analysis-key"]["value"] == []
@@ -610,12 +630,11 @@ class TestMergedControlSync:
         client, _store = authed
         doc = default_view_state() | {
             "active": "series",
-            "include_archived": True,
             "series": default_view_state()["series"] | {"keys": ["k1"]},
+            "scope": default_scope_state() | {"include_archived": True, "expand": True},
         }
-        tray = {"project": PROJECT, "expand": True}
         response, payload = self._sync(
-            client, callback_map, doc, tray, key_options=[{"value": "k1"}]
+            client, callback_map, doc, key_options=[{"value": "k1"}]
         )
         assert response.status_code == 200
         assert payload["analysis-tabs"]["value"] == "series"
@@ -627,7 +646,7 @@ class TestMergedControlSync:
         client, _store = authed
         doc = default_view_state()
         doc["series"]["keys"] = ["k1"]
-        response, payload = self._sync(client, callback_map, doc, None)
+        response, payload = self._sync(client, callback_map, doc)
         assert response.status_code == 200
         assert "analysis-key" not in payload
 
@@ -640,4 +659,4 @@ class TestMergedControlSync:
         assert len(writers) == 1
         assert _outputs_of(writers[0]) == _MERGED_SYNC_OUTPUTS
         inputs = {spec["id"] for spec in callback_map[writers[0]]["inputs"]}
-        assert {"view-store", "selection-store"} <= inputs
+        assert "view-store" in inputs

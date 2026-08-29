@@ -873,26 +873,31 @@ class TestTrialFamilies:
             assert f"Td('{trial}')" in rendered
             assert f"Td('{parent}')" in rendered
 
-    def test_tray_from_grid_keeps_project_and_analysis_picks(self):
-        tray = tray_from_grid(
+    def test_tray_from_grid_keeps_analysis_picks_and_flags(self):
+        scope = tray_from_grid(
             [{"sweep_id": str(SWEEP_B)}, {"sweep_id": str(SWEEP_A)}],
             {
-                "project": "ops",
                 "sweeps": [],
                 "trials": [str(T4)],
                 "families": [str(F0)],
                 "executions": [],
                 "expand": True,
+                "include_archived": True,
+                "include_invalid": False,
             },
         )
-        assert tray == {
-            "project": "ops",
+        assert scope == {
             "sweeps": [str(SWEEP_A), str(SWEEP_B)],
             "trials": [str(T4)],
             "families": [str(F0)],
             "executions": [],
             "expand": True,
+            "include_archived": True,
+            "include_invalid": False,
         }
+        assert tray_from_grid([{"sweep_id": str(SWEEP_A)}], None)["sweeps"] == [
+            str(SWEEP_A)
+        ]
 
 
 class TestTrialInspector:
@@ -1717,18 +1722,14 @@ class TestMountedCurationJourney:
     def test_tick_refreshes_grid_data_and_keeps_selection(self, mutable_client):
         _store, client = mutable_client
         callback_map = self._callback_map(client)
+        doc = {"scope": {"sweeps": [str(SWEEP_B)], "trials": [], "families": []}}
         response = self._dispatch(
             client,
             callback_map,
             self._TICK_OUTPUTS,
             [
                 {"id": "project-store", "property": "data", "value": "ops"},
-                {
-                    "id": "selection-store",
-                    "property": "data",
-                    "value": {"sweeps": [str(SWEEP_B)], "trials": [], "families": []},
-                },
-                {"id": "view-store", "property": "data", "value": None},
+                {"id": "view-store", "property": "data", "value": doc},
                 {"id": "poll", "property": "n_intervals", "value": 3},
             ],
             state=[
@@ -1916,9 +1917,9 @@ class TestMountedTrayAndPythonCallbacks:
             self._TRAY_OUTPUTS,
             [
                 {
-                    "id": "selection-store",
+                    "id": "view-store",
                     "property": "data",
-                    "value": {"sweeps": [], "trials": [], "families": []},
+                    "value": {"scope": {"sweeps": [], "trials": [], "families": []}},
                 },
                 {"id": "project-store", "property": "data", "value": "ops"},
             ],
@@ -1936,9 +1937,9 @@ class TestMountedTrayAndPythonCallbacks:
             self._TRAY_OUTPUTS,
             [
                 {
-                    "id": "selection-store",
+                    "id": "view-store",
                     "property": "data",
-                    "value": {"sweeps": [str(SWEEP_A), str(SWEEP_B)], "trials": []},
+                    "value": {"scope": {"sweeps": [str(SWEEP_A), str(SWEEP_B)]}},
                 },
                 {"id": "project-store", "property": "data", "value": "ops"},
             ],
@@ -1956,9 +1957,9 @@ class TestMountedTrayAndPythonCallbacks:
             {"analysis-python.children"},
             [
                 {
-                    "id": "selection-store",
+                    "id": "view-store",
                     "property": "data",
-                    "value": {"sweeps": [str(SWEEP_A)], "trials": [], "families": []},
+                    "value": {"scope": {"sweeps": [str(SWEEP_A)], "trials": []}},
                 },
                 {"id": "analysis-tabs", "property": "value", "value": "python"},
                 {

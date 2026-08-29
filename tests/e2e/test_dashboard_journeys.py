@@ -43,8 +43,9 @@ from jernerics.tracking.batch_sync import ship_events_file
 from jernerics_schema import Selection
 from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
-    EMPTY_TRAY,
+    default_scope_state,
     default_view_state,
+    edited_view,
     encode_view_state,
     with_focus,
 )
@@ -503,8 +504,10 @@ class TestWorkspaceStateJourney:
 
     def test_scope_then_series_streams_the_scoped_trials(self, scenario):
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
-        tray = {**EMPTY_TRAY, "project": PROJECT, "sweeps": [sweep_id]}
-        doc = default_view_state()
+        doc = edited_view(
+            default_view_state(),
+            {"scope": {**default_scope_state(), "sweeps": [sweep_id]}},
+        )
         doc["active"] = "series"
         doc["series"]["keys"] = ["loss"]
         response = self._post(
@@ -515,14 +518,13 @@ class TestWorkspaceStateJourney:
                 "analysis-refresh-store.data",
             },
             [
-                {"id": "selection-store", "property": "data", "value": tray},
+                {"id": "view-store", "property": "data", "value": doc},
                 {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
                 {"id": "poll", "property": "n_intervals", "value": 1},
                 {"id": "analysis-tabs", "property": "value", "value": "series"},
             ],
             state=[
                 {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "view-store", "property": "data", "value": doc},
                 {"id": "analysis-series-data", "property": "data", "value": None},
             ],
             changed=["analysis-tabs.value"],
@@ -535,15 +537,15 @@ class TestWorkspaceStateJourney:
     def test_shared_workspace_url_restores_scope_view_and_focus(self, scenario):
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
         trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
-        token = encode_selection_token(Selection(project=PROJECT, sweeps=[sweep_id]))
         doc = with_focus(
-            {**default_view_state(), "active": "series"},
+            edited_view(default_view_state(), {"active": "series"}),
             {"kind": "trial", "id": trial_id},
         )
-        search = f"?sel={token}&view={encode_view_state(doc)}"
+        doc["scope"]["sweeps"] = [sweep_id]
+        search = f"?view={encode_view_state(doc)}"
         response = self._post(
             scenario,
-            {"selection-store.data", "analysis-message-store.data", "view-store.data"},
+            {"analysis-message-store.data", "view-store.data"},
             [
                 {
                     "id": "url",
@@ -553,21 +555,112 @@ class TestWorkspaceStateJourney:
                 {"id": "url", "property": "search", "value": search},
                 {"id": "project-store", "property": "data", "value": PROJECT},
             ],
-            state=[
-                {"id": "selection-store", "property": "data", "value": None},
-                {"id": "view-store", "property": "data", "value": None},
-            ],
+            state=[{"id": "view-store", "property": "data", "value": None}],
             changed=["url.search"],
         )
         assert response.status_code == 200
         restored = response.json()["response"]
-        assert restored["selection-store"]["data"]["sweeps"] == [sweep_id]
+        assert restored["view-store"]["data"]["scope"]["sweeps"] == [sweep_id]
         assert restored["view-store"]["data"]["active"] == "series"
         assert restored["view-store"]["data"]["focus"] == {
             "kind": "trial",
             "id": trial_id,
         }
         assert restored["analysis-message-store"]["data"] == ""
+
+    def test_legacy_sel_token_still_hydrates_the_scope(self, scenario):
+        """A legacy ``?sel=`` deep link (or a continue-in-Python URL
+        opened in a browser) hydrates into the view doc's scope."""
+        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
+        token = encode_selection_token(Selection(project=PROJECT, sweeps=[sweep_id]))
+        response = self._post(
+            scenario,
+            {"analysis-message-store.data", "view-store.data"},
+            [
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"{ROUTES_BASE}/project/{PROJECT}",
+                },
+                {"id": "url", "property": "search", "value": f"?sel={token}"},
+                {"id": "project-store", "property": "data", "value": PROJECT},
+            ],
+            state=[{"id": "view-store", "property": "data", "value": None}],
+            changed=["url.search"],
+        )
+        assert response.status_code == 200
+        restored = response.json()["response"]
+        assert restored["view-store"]["data"]["scope"]["sweeps"] == [sweep_id]
+        assert restored["analysis-message-store"]["data"] == ""
+
+    def test_sweep_picked_in_the_browser_rides_the_url_and_hydrates_back(
+        self, scenario
+    ):
+        """jernerics-2se user-visible win: picking a sweep in the browser
+        grid writes the view doc's scope; the URL mint carries it as a
+        defaults-diff; a fresh session hydrating that URL restores the
+        exact same scope."""
+        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
+        # 1. the browser grid checkPick writes the scope into the view doc
+        picked = self._post(
+            scenario,
+            {"view-store.data"},
+            [
+                {
+                    "id": "sweep-grid",
+                    "property": "selectedRows",
+                    "value": [
+                        {"sweep_id": sweep_id},
+                    ],
+                }
+            ],
+            state=[{"id": "view-store", "property": "data", "value": None}],
+            changed=["sweep-grid.selectedRows"],
+        )
+        assert picked.status_code == 200
+        doc = picked.json()["response"]["view-store"]["data"]
+        assert doc["scope"]["sweeps"] == [sweep_id]
+        # 2. the URL sync mints ?view= from that doc
+        synced = self._post(
+            scenario,
+            {"url.search"},
+            [
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"{ROUTES_BASE}/project/{PROJECT}",
+                },
+                {"id": "view-store", "property": "data", "value": doc},
+            ],
+            state=[{"id": "url", "property": "search", "value": ""}],
+            changed=["view-store.data"],
+        )
+        assert synced.status_code == 200
+        search = synced.json()["response"]["url"]["search"]
+        assert search.startswith("?view=")
+        assert sweep_id in search  # the pick rides the URL
+        # 3. a fresh session hydrating that URL restores the same scope
+        restored = self._post(
+            scenario,
+            {"analysis-message-store.data", "view-store.data"},
+            [
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"{ROUTES_BASE}/project/{PROJECT}",
+                },
+                {"id": "url", "property": "search", "value": search},
+                {"id": "project-store", "property": "data", "value": PROJECT},
+            ],
+            state=[{"id": "view-store", "property": "data", "value": None}],
+            changed=["url.search"],
+        )
+        assert restored.status_code == 200
+        body = restored.json()["response"]
+        fresh = body["view-store"]["data"]
+        assert fresh["scope"]["sweeps"] == [sweep_id]
+        assert fresh["active"] == "overview"
+        assert body["analysis-message-store"]["data"] == ""
 
 
 class TestMountedDashboardHttp:

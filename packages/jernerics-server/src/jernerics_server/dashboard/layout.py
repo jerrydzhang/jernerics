@@ -1,24 +1,18 @@
 """Top-level dashboard shell and the project catalog page.
 
 The shell owns all client-side state: ``dcc.Location`` carries the URL,
-``project-store`` the active project, ``selection-store`` the unified
-selection tray (sweeps picked in the workspace browser, retry families,
-and the expansion toggle — the typed ``Selection`` is built per query
-call in the service), ``view-store`` the workspace view state the
-``view=`` parameter round-trips (active tab, series controls, focus),
-``workspace-store`` the per-project browser controls (quick filter,
-column filters, sort), ``analysis-message-store`` the URL-hydration
-message, and ``poll`` is the conditional refresh interval pages enable
-or disable through the router callback.
-
-Every page function is pure: data in, Dash components out. Callbacks
-fetch through DashboardService and hand the results here.
+``project-store`` the active project, ``view-store`` the workspace view
+state the ``view=`` parameter round-trips (active tab, series controls,
+the selection scope, focus), ``workspace-store`` the per-project browser
+controls (quick filter, column filters, sort), ``analysis-message-store``
+the URL-hydration message, and ``poll`` is the conditional refresh
+interval pages enable or disable through the router callback.
 """
 
 from dash import dcc, html
 
 from . import components
-from .analysis import EMPTY_TRAY, default_view_state
+from .analysis import default_view_state
 from .routes import ROUTES_BASE
 from .service import ProjectSummary
 
@@ -61,9 +55,6 @@ def shell() -> html.Div:
             ),
             html.Main(id="page-container", children=[project_page([], 0)]),
             dcc.Store(id="project-store", storage_type="session"),
-            dcc.Store(
-                id="selection-store", storage_type="session", data=dict(EMPTY_TRAY)
-            ),
             dcc.Store(id="analysis-message-store"),
             dcc.Store(id="overview-digest-store"),
             dcc.Store(id="poll-gate-facts-store"),
