@@ -255,7 +255,8 @@ Programmatically, use the typed client — no SQL, no dataframe
 dependency:
 
 ```python
-from jernerics.tracking import TrackingClient, decode_selection, encode_selection
+from jernerics.tracking import TrackingClient
+from jernerics_schema import decode_selection, encode_selection
 
 with TrackingClient("http://host:8000", api_key="...") as client:
     proj = client.project("my-project")

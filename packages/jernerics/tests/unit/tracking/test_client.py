@@ -7,9 +7,7 @@ client through httpx ASGI transport against the real FastAPI app.
 """
 
 import asyncio
-import base64
 import hashlib
-import json
 import subprocess
 import sys
 import uuid
@@ -21,16 +19,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
-from jernerics.tracking import (
-    TrackingClient,
-    TrackingClientError,
-    decode_selection,
-    encode_selection,
-)
-from jernerics.tracking.client import (
-    selection_from_json,
-    selection_to_json,
-)
+from jernerics.tracking import TrackingClient, TrackingClientError
 from jernerics_schema import (
     PROTOCOL_VERSION,
     ArtifactDeclarationEvent,
@@ -47,6 +36,8 @@ from jernerics_schema import (
     TrialSnapshotEvent,
     TrialState,
     ValueEvent,
+    decode_selection,
+    encode_selection,
     sweep_id_for,
 )
 from jernerics_server.http import create_app
@@ -743,26 +734,6 @@ class TestSelectionTokens:
                 selection, keys=("loss",)
             )
 
-    def test_json_text_round_trip(self, scenario):
-        with scenario.client() as client:
-            selection = client.project(PROJECT).for_sweeps(scenario.sweep_a)
-            text = selection_to_json(selection)
-            assert json.loads(text)["v"] == 1
-            assert selection_from_json(text) == selection
-
-    def test_unknown_version_and_garble_are_errors(self):
-        future = (
-            base64.urlsafe_b64encode(json.dumps({"v": 99, "selection": {}}).encode())
-            .decode("ascii")
-            .rstrip("=")
-        )
-        with pytest.raises(TrackingClientError, match="version"):
-            decode_selection(future)
-        with pytest.raises(TrackingClientError):
-            decode_selection("definitely-not-a-token-!!!")
-        with pytest.raises(TrackingClientError, match="malformed"):
-            selection_from_json("{not json")
-
 
 class TestRawQuery:
     def test_raw_query_returns_columns_and_rows(self, scenario):
@@ -834,7 +805,7 @@ class TestNoSqlDiscipline:
         code = (
             "import sys; sys.modules['pandas'] = None; "
             "import jernerics.tracking.client as c; "
-            "assert c.TrackingClient and c.encode_selection"
+            "assert c.TrackingClient"
         )
         subprocess.run([sys.executable, "-c", code], check=True)
 

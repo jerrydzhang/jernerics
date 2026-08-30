@@ -78,11 +78,20 @@ from .selection import (
     decode_page_token,
     encode_page_token,
 )
+from .selection_tokens import (
+    SELECTION_TOKEN_VERSION,
+    SelectionTokenError,
+    decode_selection,
+    encode_selection,
+    selection_from_json,
+    selection_to_json,
+)
 
 __all__ = [
     "JERNERICS_NAMESPACE",
     "JSON_VALUE_MAX_BYTES",
     "PROTOCOL_VERSION",
+    "SELECTION_TOKEN_VERSION",
     "ArtifactDeclarationEvent",
     "ArtifactId",
     "ArtifactRecord",
@@ -121,6 +130,7 @@ __all__ = [
     "RetryLineage",
     "ScalarValue",
     "Selection",
+    "SelectionTokenError",
     "SubmissionId",
     "SubmissionRecord",
     "SubmissionSnapshotEvent",
@@ -145,6 +155,10 @@ __all__ = [
     "ValueRecord",
     "ValuesQuery",
     "decode_page_token",
+    "decode_selection",
     "encode_page_token",
+    "encode_selection",
+    "selection_from_json",
+    "selection_to_json",
     "sweep_id_for",
 ]
