@@ -66,7 +66,11 @@ Largely TBD — the project defines these as needs clarify. One is explicit:
 
 That discipline is the guardrail against the bloat that was just removed. Other
 non-goals get written down the first time saying "no" to something would
-otherwise be relitigated.
+otherwise be relitigated. Decided 2026-08-30, closing jernerics-jdu and
+jernerics-wgd: the container definition (`container.def`/`Dockerfile`) is
+user-owned. The starter template is a one-time scaffold — the harness never
+regenerates or augments it. Workspace package discovery and external dependency
+provisioning are the user's edits, not harness features.
 
 ## Direction
 

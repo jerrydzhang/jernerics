@@ -277,7 +277,7 @@ class Backend:
             from jernerics.container.templates import generate_container_def
 
             container_def_path.write_text(generate_container_def("python"))
-            print("Created: container.def")
+            print("Template generated: container.def")
 
         _check_path_dependencies(project_dir)
 
