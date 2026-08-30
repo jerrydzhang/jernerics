@@ -26,11 +26,14 @@ from jernerics_schema import (
     FlatContext,
     IngestRequest,
     Selection,
+    SelectionTokenError,
     SweepSnapshotEvent,
     TrackingEvent,
     TrialSnapshotEvent,
     TrialState,
     ValueEvent,
+    decode_selection,
+    encode_selection,
 )
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
@@ -107,11 +110,7 @@ from jernerics_server.dashboard.figures import (
     stacked_figure,
 )
 from jernerics_server.dashboard.layout import shell
-from jernerics_server.dashboard.selection_tokens import (
-    SelectionTokenError,
-    decode_selection_token,
-    encode_selection_token,
-)
+from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.dashboard.sessions import SessionSigner
 from jernerics_server.dashboard.workspace import (
@@ -629,14 +628,21 @@ def _selected_trial_ids(service: DashboardService, selection: Selection) -> list
 class TestSelectionTokens:
     def test_dashboard_round_trip_is_stable(self):
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A,), trials=(RA2, TA))
-        token = encode_selection_token(selection)
-        assert encode_selection_token(selection) == token
+        token = encode_selection(selection)
+        assert encode_selection(selection) == token
         assert decode_selection_token(token) == selection
 
     def test_client_format_token_parses_and_reencodes_identically(self):
         selection = decode_selection_token(CLIENT_FORMAT_TOKEN)
         assert selection == Selection(project=PROJECT, sweeps=(SWEEP_A,))
-        assert encode_selection_token(selection) == CLIENT_FORMAT_TOKEN
+        assert encode_selection(selection) == CLIENT_FORMAT_TOKEN
+
+    def test_schema_encoded_token_flows_through_both_sides(self):
+        selection = Selection(project=PROJECT, sweeps=(SWEEP_A,), trials=(RA2,))
+        token = encode_selection(selection)
+        assert decode_selection_token(token, project=PROJECT) == selection
+        assert decode_selection(token) == selection
+        assert encode_selection(decode_selection_token(token)) == token
 
     def test_malformed_token_is_an_error(self):
         with pytest.raises(SelectionTokenError, match="malformed"):
@@ -659,7 +665,7 @@ class TestSelectionTokens:
 class TestUnifiedSelectionStore:
     def test_token_hydration_feeds_scope_and_summary(self, service):
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A, SWEEP_B))
-        token = encode_selection_token(selection)
+        token = encode_selection(selection)
         scope, error = hydrate_tray(
             service, PROJECT, "/dashboard/project/lab", f"?sel={token}", None
         )
@@ -696,7 +702,7 @@ class TestUnifiedSelectionStore:
         assert scope["include_archived"] is True
 
     def test_browser_rows_reflect_the_unified_store(self, service):
-        token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        token = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         store, error = hydrate_tray(
             service, PROJECT, "/dashboard/project/lab", f"?sel={token}", None
         )
@@ -1161,7 +1167,7 @@ class TestOptunaFigures:
 class TestUrlReload:
     def test_token_hydrates_equal_tray_selection(self, service):
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A,), trials=(RA2,))
-        search = f"?sel={encode_selection_token(selection)}"
+        search = f"?sel={encode_selection(selection)}"
         scope, error = hydrate_tray(
             service, PROJECT, "/dashboard/project/lab", search, None
         )
@@ -1175,7 +1181,7 @@ class TestUrlReload:
             service,
             PROJECT,
             "/dashboard/project/lab",
-            f"?sel={encode_selection_token(selection)}",
+            f"?sel={encode_selection(selection)}",
             None,
         )
         assert error is None and scope is not None
@@ -1201,7 +1207,7 @@ class TestUrlReload:
             service,
             PROJECT,
             "/dashboard/",
-            f"?sel={encode_selection_token(Selection(project=PROJECT))}",
+            f"?sel={encode_selection(Selection(project=PROJECT))}",
             None,
         )
         assert tray is None and error is None
@@ -1217,13 +1223,11 @@ class TestColdStartAdoption:
 
     def test_known_project_token_offers_the_adoption(self, service):
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A, SWEEP_B))
-        adopted, error = cold_start(
-            service, f"?sel={encode_selection_token(selection)}"
-        )
+        adopted, error = cold_start(service, f"?sel={encode_selection(selection)}")
         assert error is None and adopted == selection
 
     def test_unknown_project_token_names_itself_in_the_hint(self, service):
-        token = encode_selection_token(Selection(project="ghost", trials=(RA0,)))
+        token = encode_selection(Selection(project="ghost", trials=(RA0,)))
         adopted, error = cold_start(service, f"?sel={token}")
         assert adopted is None
         assert error is not None and "project 'ghost'" in error
@@ -1238,7 +1242,7 @@ class TestColdStartAdoption:
         """No project picked: hydration leaves the tray alone; once the
         picker adoption settles project-store, the ordinary path
         hydrates, and its own settle re-fire is a no-op."""
-        token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        token = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = f"?sel={token}"
         tray, error = hydrate_tray(
             service, None, "/dashboard/project/lab", search, dict(EMPTY_TRAY)
@@ -1256,7 +1260,7 @@ class TestColdStartAdoption:
         ) == (None, None)
 
     def test_unknown_project_token_hints_on_the_analysis_page(self, service):
-        token = encode_selection_token(Selection(project="ghost", trials=(RA0,)))
+        token = encode_selection(Selection(project="ghost", trials=(RA0,)))
         tray, error = hydrate_tray(
             service, None, "/dashboard/project/lab", f"?sel={token}", dict(EMPTY_TRAY)
         )
@@ -1275,7 +1279,7 @@ class TestColdStartAdoption:
         assert error is not None and "malformed" in error
 
     def test_off_analysis_url_neither_adopts_nor_errors(self, service):
-        token = encode_selection_token(Selection(project=PROJECT))
+        token = encode_selection(Selection(project=PROJECT))
         assert hydrate_tray(
             service, None, "/dashboard/", f"?sel={token}", dict(EMPTY_TRAY)
         ) == (None, None)
@@ -1387,7 +1391,7 @@ class TestUrlSync:
         re-fires with a project and the scope lands — the settle re-fire
         is a no-op, the grid echo edits nothing, and the URL keeps the
         token until the view rewrite normalizes it."""
-        search = "?sel=" + encode_selection_token(
+        search = "?sel=" + encode_selection(
             Selection(project=PROJECT, sweeps=(SWEEP_A,))
         )
         adoption, error = cold_start(service, search)
@@ -2159,7 +2163,7 @@ class TestColdStartMountedJourney:
     }
 
     def test_cold_start_settles_picker_store_then_scope(self, authed, callback_map):
-        token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        token = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = f"?sel={token}"
         # the picker callback adopts the token's project
         picker = self._dispatch(
@@ -2206,7 +2210,7 @@ class TestColdStartMountedJourney:
     def test_picked_project_is_never_switched_by_a_foreign_token(
         self, authed, callback_map
     ):
-        token = encode_selection_token(Selection(project="other", trials=(RA0,)))
+        token = encode_selection(Selection(project="other", trials=(RA0,)))
         picker = self._dispatch(
             authed,
             callback_map,
@@ -2239,7 +2243,7 @@ class TestColdStartMountedJourney:
         assert message["view-store"]["data"]["scope"]["sweeps"] == []
 
     def test_unknown_project_neither_adopts_nor_populates(self, authed, callback_map):
-        token = encode_selection_token(Selection(project="ghost", trials=(RA0,)))
+        token = encode_selection(Selection(project="ghost", trials=(RA0,)))
         picker = self._dispatch(
             authed,
             callback_map,
@@ -2276,7 +2280,7 @@ class TestColdStartMountedJourney:
     ):
         doc: dict[str, Any] = dict(default_view_state(), active="series")
         doc["series"] = {**doc["series"], "keys": ["loss"], "reduction": "mean"}
-        sel = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        sel = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = f"?sel={sel}&view={encode_view_state(doc)}"
         result = self._dispatch(
             authed,
@@ -2298,7 +2302,7 @@ class TestColdStartMountedJourney:
         assert result["view-store"]["data"]["active"] == "series"
 
     def test_malformed_view_parameter_defaults_and_errors(self, authed, callback_map):
-        sel = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        sel = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = "?sel=" + sel + "&view=%zz{"
         result = self._dispatch(
             authed,
@@ -2396,7 +2400,7 @@ class TestContinueInPython:
         page = python_tab(service, PROJECT, _tray(), "http://localhost:8000")
         snippet = _pres(page)[1].children
         assert snippet.startswith("from jernerics.tracking import TrackingClient")
-        assert "from jernerics.tracking.client import decode_selection" in snippet
+        assert "from jernerics_schema import decode_selection" in snippet
         assert "TrackingClient(" in snippet
         assert 'decode_selection("' in snippet
         assert f'client.project("{PROJECT}")' in snippet
@@ -2406,14 +2410,11 @@ class TestContinueInPython:
             ProjectHandle,
             TrackingClient,
         )
-        from jernerics.tracking.client import (
-            decode_selection as client_decode,
-        )
 
         assert tracking_module.TrackingClient is TrackingClient
         assert callable(TrackingClient.project)
         assert callable(ProjectHandle.values)
-        decoded = client_decode(token)
+        decoded = decode_selection(token)
         assert decoded == service.analysis_selection(PROJECT, _tray())
 
     def test_python_snippet_shows_token(self):
@@ -2434,7 +2435,7 @@ class TestWorkspaceRouteServes:
         assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
 
     def test_deep_link_with_token_returns_200(self, authed):
-        token = encode_selection_token(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
+        token = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         response = authed.get(f"/dashboard/project/lab?sel={token}")
         assert response.status_code == 200
         assert "react-entry-point" in response.text
@@ -2548,7 +2549,7 @@ class TestCuratedDiscovery:
     def test_hydrated_curated_token_survives_with_include_off(self, curated_service):
         _store, service = curated_service
         selection = Selection(project=PROJECT, sweeps=(SWEEP_C,))
-        search = f"?sel={encode_selection_token(selection)}"
+        search = f"?sel={encode_selection(selection)}"
         tray, error = hydrate_tray(
             service, PROJECT, "/dashboard/project/lab", search, None
         )
@@ -2597,7 +2598,7 @@ class TestCuratedScopeBar:
             service,
             PROJECT,
             "/dashboard/project/lab",
-            f"?sel={encode_selection_token(selection)}",
+            f"?sel={encode_selection(selection)}",
             None,
         )
         assert error is None and tray is not None

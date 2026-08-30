@@ -24,16 +24,12 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from dash import dcc, html, no_update
 from dash_ag_grid import AgGrid
-from jernerics_schema import Selection
+from jernerics_schema import Selection, SelectionTokenError, encode_selection
 
 from . import components, figures
 from .components import MISSING, Empty, Error, relative_time, short_id
 from .routes import ROUTES_BASE, parse_route
-from .selection_tokens import (
-    SelectionTokenError,
-    decode_selection_token,
-    encode_selection_token,
-)
+from .selection_tokens import decode_selection_token
 from .service import ANALYSIS_REDUCTIONS, DashboardService
 
 EMPTY_TRAY: dict[str, Any] = {
@@ -1776,7 +1772,7 @@ def python_snippet(token: str, project: str, base_url: str) -> str:
     """Literally runnable handoff snippet (real client API names)."""
     return (
         "from jernerics.tracking import TrackingClient\n"
-        "from jernerics.tracking.client import decode_selection\n"
+        "from jernerics_schema import decode_selection\n"
         "\n"
         f'client = TrackingClient("{base_url}")\n'
         f'selection = decode_selection("{token}")\n'
@@ -1795,7 +1791,7 @@ def python_tab(
     if not project:
         return _pick_project_first()
     selection = service.analysis_selection(project, tray)
-    token = encode_selection_token(selection)
+    token = encode_selection(selection)
     snippet = python_snippet(token, project, base_url)
     pre_style = {"whiteSpace": "pre", "overflowX": "auto"}
     return html.Div(
@@ -1804,9 +1800,9 @@ def python_tab(
                 [
                     html.H3("Selection token"),
                     html.P(
-                        "The token the URL carries as ?sel=… — the same "
-                        "format the jernerics client encodes, so it parses "
-                        "on both sides.",
+                        "The token the URL carries as ?sel=… — minted by "
+                        "the shared jernerics-schema codec, so the client "
+                        "and dashboard parse the same token.",
                         className="hint",
                     ),
                     html.Div(

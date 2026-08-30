@@ -14,6 +14,7 @@ from jernerics_schema import (
     TrialSnapshotEvent,
     TrialState,
     ValueEvent,
+    encode_selection,
 )
 from jernerics_server.dashboard.analysis import (
     default_scope_state,
@@ -24,7 +25,6 @@ from jernerics_server.dashboard.analysis import (
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
-from jernerics_server.dashboard.selection_tokens import encode_selection_token
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.dashboard.sessions import SessionSigner
 from jernerics_server.http import create_app
@@ -509,7 +509,7 @@ class TestHydrationCanonicalEcho:
 
     def test_tray_echo_after_hydration_ships_nothing(self, authed, callback_map):
         client, _store = authed
-        token = encode_selection_token(
+        token = encode_selection(
             Selection(
                 project=PROJECT,
                 sweeps=(SWEEP_B, SWEEP_A, SWEEP_B),
@@ -582,7 +582,7 @@ class TestHydrationCanonicalEcho:
         self, authed, callback_map
     ):
         client, _store = authed
-        token = encode_selection_token(
+        token = encode_selection(
             Selection(project=PROJECT, retry_roots=(ROOT_A, ROOT_B))
         )
         _response, payload = self._hydrate(client, callback_map, f"?sel={token}", None)

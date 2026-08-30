@@ -40,7 +40,7 @@ from jernerics.post_hook import PipelineResult, run_pipeline
 from jernerics.retry import RetryContext
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import ship_events_file
-from jernerics_schema import Selection
+from jernerics_schema import Selection, encode_selection
 from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
     default_scope_state,
@@ -56,7 +56,6 @@ from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.components import short_id
 from jernerics_server.dashboard.layout import shell
 from jernerics_server.dashboard.routes import ROUTES_BASE, parse_route
-from jernerics_server.dashboard.selection_tokens import encode_selection_token
 from jernerics_server.http import create_app
 from jernerics_server.store import Store
 from optuna.storages.journal import JournalFileBackend, JournalStorage
@@ -572,7 +571,7 @@ class TestWorkspaceStateJourney:
         """A legacy ``?sel=`` deep link (or a continue-in-Python URL
         opened in a browser) hydrates into the view doc's scope."""
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
-        token = encode_selection_token(Selection(project=PROJECT, sweeps=[sweep_id]))
+        token = encode_selection(Selection(project=PROJECT, sweeps=[sweep_id]))
         response = self._post(
             scenario,
             {"analysis-message-store.data", "view-store.data"},

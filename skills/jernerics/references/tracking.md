@@ -111,8 +111,8 @@ safe.
 - **Typed client** — `TrackingClient` / `ProjectHandle`
   (`jernerics.tracking`): typed records, opaque pagination, no SQL.
   Selections can be encoded as opaque tokens
-  (`encode_selection`/`decode_selection`) to hand from the dashboard to
-  a notebook or script.
+  (`jernerics_schema.encode_selection`/`decode_selection`) to hand from
+  the dashboard to a notebook or script.
 - **CLI** — `jernerics tracking runs | summary | diff | trace | query`.
 - **Raw SQL** — `POST /query` (also `TrackingClient.raw_query`) for
   anything the domain reads do not cover.

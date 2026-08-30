@@ -31,13 +31,15 @@ from jernerics.post_hook import PipelineResult, run_pipeline
 from jernerics.retry import RetryContext, plan_retry, read_ledger, write_ledger
 from jernerics.retry_checker import _enqueue_retry
 from jernerics.runner import run_trial
-from jernerics.tracking import TrackingClient, decode_selection, encode_selection
+from jernerics.tracking import TrackingClient
 from jernerics.tracking.batch_sync import replay_tracking, ship_events_file
 from jernerics.tracking.jsonl_io import scan_events
 from jernerics_schema import (
     PROTOCOL_VERSION,
     IngestRequest,
     Selection,
+    decode_selection,
+    encode_selection,
     sweep_id_for,
 )
 from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
