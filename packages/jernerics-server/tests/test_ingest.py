@@ -19,6 +19,7 @@ from jernerics_schema import (
     FailureKind,
     FlatContext,
     IngestRequest,
+    JobResourceEvent,
     JobSnapshotEvent,
     ManualParamEvent,
     SubmissionSnapshotEvent,
@@ -52,6 +53,7 @@ ALL_TABLES = (
     "artifacts",
     "artifact_blobs",
     "reconciliation_conflicts",
+    "job_resources",
 )
 
 
@@ -1570,6 +1572,84 @@ class TestJobSnapshot:
         for table in ALL_TABLES:
             for row in rows(store, f"SELECT * FROM {table}"):
                 assert "stale" not in [str(value).lower() for value in row]
+
+
+class TestJobResource:
+    def _event(
+        self,
+        event_id,
+        *,
+        recorded_at=None,
+        study_name="study",
+        submission_id=None,
+        wall_time_s=3_723.0,
+        cpu_pct=4213.45,
+    ):
+        return JobResourceEvent(
+            event_id=event_id,
+            recorded_at=recorded_at if recorded_at is not None else at(2),
+            job_id="990001",
+            study_name=study_name,
+            submission_id=submission_id,
+            wall_time_s=wall_time_s,
+            cpu_pct=cpu_pct,
+        )
+
+    def test_applies_without_linked_entities(self, store, service):
+        result = service.apply(
+            request_of(
+                [self._event(eid(), study_name="never-seen", submission_id="nope")]
+            )
+        )
+
+        assert result.applied == 1
+        assert rows(
+            store,
+            "SELECT job_id, study_name, submission_id, wall_time_s, cpu_pct "
+            "FROM job_resources",
+        ) == [("990001", "never-seen", "nope", 3_723.0, 4213.45)]
+
+    def test_recapture_fills_nulls_but_never_overwrites(self, store, service):
+        event_id = eid()
+        first = service.apply(
+            request_of([self._event(event_id, study_name=None, wall_time_s=None)])
+        )
+        second = service.apply(
+            request_of(
+                [
+                    self._event(
+                        event_id,
+                        recorded_at=at(3),
+                        study_name="study",
+                        submission_id="sub-1",
+                        wall_time_s=9_999.0,
+                    )
+                ]
+            )
+        )
+        third = service.apply(
+            request_of([self._event(event_id, recorded_at=at(4), study_name="other")])
+        )
+
+        assert (first.applied, second.applied, third.applied) == (1, 1, 0)
+        assert third.duplicates == 1
+        assert rows(
+            store,
+            "SELECT study_name, submission_id, wall_time_s FROM job_resources",
+        ) == [("study", "sub-1", 9_999.0)]
+
+    def test_ships_over_http(self, store, client):
+        response = client.post(
+            "/ingest",
+            json={
+                "protocol_version": PROTOCOL_VERSION,
+                "events": [self._event(eid()).model_dump(mode="json")],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["accepted"] == 1
+        assert rows(store, "SELECT COUNT(*) FROM job_resources") == [(1,)]
 
 
 class TestDeterministicSweepIdentity:

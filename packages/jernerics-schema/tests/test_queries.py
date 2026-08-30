@@ -7,6 +7,7 @@ import pytest
 from jernerics_schema import (
     ArtifactsQuery,
     ExecutionsQuery,
+    JobResourcesQuery,
     LineageQuery,
     ProjectsQuery,
     ProvenanceQuery,
@@ -36,6 +37,7 @@ def test_wire_queries_default_shape_and_roundtrip() -> None:
         ValuesQuery(selection=_selection()),
         ArtifactsQuery(selection=_selection()),
         ProvenanceQuery(selection=_selection()),
+        JobResourcesQuery(selection=_selection()),
     ]
     for query in queries:
         assert type(query).model_validate_json(query.model_dump_json()) == query
@@ -88,3 +90,13 @@ def test_selection_serializes_uuids_in_queries() -> None:
     sweep_id = uuid.uuid4()
     query = SweepsQuery(selection=Selection(project="p", sweeps=(sweep_id,)))
     assert query.selection.sweeps == (sweep_id,)
+
+
+def test_job_resources_query_defaults_and_job_ids() -> None:
+    query = JobResourcesQuery(selection=_selection())
+
+    assert query.job_ids is None
+    assert query.page.limit == 100
+    assert query.page_token is None
+    named = JobResourcesQuery(selection=_selection(), job_ids=("123456",))
+    assert named.job_ids == ("123456",)

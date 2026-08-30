@@ -214,7 +214,7 @@ class TestCommandTree:
 
         expected = {
             "interactive": ["start", "stop"],
-            "job": ["list", "cancel", "logs", "wait"],
+            "job": ["list", "cancel", "logs", "wait", "resources"],
             "backend": ["build", "clean"],
             "tracking": ["replay", "runs", "summary", "diff", "trace", "query"],
         }

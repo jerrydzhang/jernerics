@@ -20,6 +20,7 @@ from jernerics_schema import (
     ExecutionRecord,
     FailureKind,
     FlatContext,
+    JobResourceRecord,
     Page,
     PageToken,
     ProvenanceRecord,
@@ -845,6 +846,66 @@ class QueryService:
             )
             for row in rows
         ]
+
+    def job_resources(
+        self,
+        selection: Selection,
+        *,
+        job_ids: tuple[str, ...] | None = None,
+        page: Page | None = None,
+        page_token: str | None = None,
+    ) -> tuple[list[JobResourceRecord], str | None]:
+        """Captured sacct facts; explicit job ids bypass study scoping."""
+        page = page or Page()
+        cols = (
+            "jr.job_id, jr.study_name, jr.submission_id, jr.wall_time_s, "
+            "jr.cpu_time_s, jr.cpu_pct, jr.max_rss_mb, jr.ave_rss_mb, "
+            "jr.alloc_cpus, jr.req_mem, jr.alloc_tres, jr.node_list, "
+            "jr.state, jr.exit_code, jr.recorded_ns"
+        )
+        params: list[Any] = []
+        if job_ids:
+            sql = f"SELECT {cols} FROM job_resources jr "
+            params.extend(job_ids)
+            sql += f"WHERE jr.job_id IN ({_placeholders(len(job_ids))})"
+        else:
+            sweep_ids = self._selected_sweep_ids(selection)
+            if sweep_ids == []:
+                return [], None
+            sql = f"SELECT {cols} FROM job_resources jr "
+            sql += "JOIN sweeps s ON s.name = jr.study_name WHERE s.project = ?"
+            params.append(selection.project)
+            if sweep_ids is not None:
+                params.extend(sweep_ids)
+                sql += f" AND s.sweep_id IN ({_placeholders(len(sweep_ids))})"
+        rows, next_token = self._fetch_paged(
+            sql=sql,
+            params=params,
+            order_columns=("jr.job_id",),
+            page=page,
+            page_token=page_token,
+            filters=_echo(selection, job_ids=job_ids),
+        )
+        return [
+            JobResourceRecord(
+                job_id=row[0],
+                study_name=row[1],
+                submission_id=row[2],
+                wall_time_s=row[3],
+                cpu_time_s=row[4],
+                cpu_pct=row[5],
+                max_rss_mb=row[6],
+                ave_rss_mb=row[7],
+                alloc_cpus=row[8],
+                req_mem=row[9],
+                alloc_tres=row[10],
+                node_list=row[11],
+                state=row[12],
+                exit_code=row[13],
+                recorded_at=_from_ns(row[14]),
+            )
+            for row in rows
+        ], next_token
 
     def _monitoring_case(self) -> tuple[str, list[int]]:
         """SQL CASE + params mirroring :func:`_monitoring` exactly."""

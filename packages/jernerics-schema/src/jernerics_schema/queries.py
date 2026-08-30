@@ -97,6 +97,17 @@ class ProvenanceQuery(BaseModel):
     selection: Selection
 
 
+class JobResourcesQuery(BaseModel):
+    """Scheduler job resource scan; ``job_ids`` names scheduler job ids."""
+
+    model_config = ConfigDict(frozen=True)
+
+    selection: Selection
+    job_ids: tuple[str, ...] | None = None
+    page: Page = Field(default_factory=Page)
+    page_token: str | None = None
+
+
 class QueryErrorBody(BaseModel):
     """Structured error body shared by every domain read endpoint."""
 

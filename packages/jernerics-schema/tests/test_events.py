@@ -16,6 +16,7 @@ from jernerics_schema import (
     ExecutionStartEvent,
     FailureKind,
     FlatContext,
+    JobResourceEvent,
     JobSnapshotEvent,
     ManualParamEvent,
     SubmissionSnapshotEvent,
@@ -42,6 +43,7 @@ VARIANT_CLASSES = (
     ManualParamEvent,
     ValueEvent,
     ArtifactDeclarationEvent,
+    JobResourceEvent,
 )
 
 _ADAPTER = TypeAdapter(TrackingEvent)
@@ -101,6 +103,24 @@ def _samples() -> list[Event]:
             hostname="node01",
             host_facts=FlatContext({"gpu": "a100"}),
             started_at=NOW,
+        ),
+        JobResourceEvent(
+            event_id=eid(),
+            recorded_at=NOW,
+            job_id="123456",
+            study_name="lr-sweep",
+            submission_id=str(uuid.uuid4()),
+            wall_time_s=3_723.5,
+            cpu_time_s=101_400.0,
+            cpu_pct=4213.45,
+            max_rss_mb=2_560.0,
+            ave_rss_mb=2_457.6,
+            alloc_cpus=8,
+            req_mem="16G",
+            alloc_tres="cpu=8,mem=16G,billing=8",
+            node_list="node[01-02]",
+            state="COMPLETED",
+            exit_code="0:0",
         ),
         ExecutionHeartbeatEvent(
             event_id=eid(),

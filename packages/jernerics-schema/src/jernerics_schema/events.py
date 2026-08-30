@@ -163,6 +163,26 @@ class ArtifactDeclarationEvent(Event):
     source: ArtifactSource = "user"
 
 
+class JobResourceEvent(Event):
+    """Post-hoc scheduler accounting facts for one job."""
+
+    tag: Literal["job_resource"] = "job_resource"
+    job_id: str
+    study_name: str | None = None
+    submission_id: str | None = None
+    wall_time_s: float | None = Field(default=None, ge=0)
+    cpu_time_s: float | None = Field(default=None, ge=0)
+    cpu_pct: float | None = Field(default=None, ge=0)
+    max_rss_mb: float | None = Field(default=None, ge=0)
+    ave_rss_mb: float | None = Field(default=None, ge=0)
+    alloc_cpus: int | None = Field(default=None, ge=0)
+    req_mem: str | None = None
+    alloc_tres: str | None = None
+    node_list: str | None = None
+    state: str | None = None
+    exit_code: str | None = None
+
+
 TrackingEvent = Annotated[
     SweepSnapshotEvent
     | SubmissionSnapshotEvent
@@ -174,7 +194,8 @@ TrackingEvent = Annotated[
     | ExecutionEndEvent
     | ManualParamEvent
     | ValueEvent
-    | ArtifactDeclarationEvent,
+    | ArtifactDeclarationEvent
+    | JobResourceEvent,
     Field(discriminator="tag"),
 ]
 """Discriminated union of every v3 tracking event, dispatched on ``tag``."""

@@ -148,3 +148,25 @@ class ProvenanceRecord(BaseModel):
     expected_trials: int | None = Field(default=None, ge=1)
     git_hash: str | None = None
     config_source: str | None = None
+
+
+class JobResourceRecord(BaseModel):
+    """Scheduler accounting facts for one job, captured post-hoc."""
+
+    model_config = ConfigDict(frozen=True)
+
+    job_id: str
+    study_name: str | None = None
+    submission_id: str | None = None
+    wall_time_s: float | None = None
+    cpu_time_s: float | None = None
+    cpu_pct: float | None = None
+    max_rss_mb: float | None = None
+    ave_rss_mb: float | None = None
+    alloc_cpus: int | None = None
+    req_mem: str | None = None
+    alloc_tres: str | None = None
+    node_list: str | None = None
+    state: str | None = None
+    exit_code: str | None = None
+    recorded_at: UtcDatetime

@@ -20,6 +20,7 @@ from jernerics_schema import (
     ExecutionStartEvent,
     FlatContext,
     IngestRequest,
+    JobResourceEvent,
     JobSnapshotEvent,
     ManualParamEvent,
     ScalarValue,
@@ -40,6 +41,23 @@ _TERMINAL_TRIAL_STATES = frozenset(
     {TrialState.COMPLETED, TrialState.FAILED, TrialState.PRUNED}
 )
 
+_RESOURCE_COLUMNS = (
+    "job_id",
+    "study_name",
+    "submission_id",
+    "wall_time_s",
+    "cpu_time_s",
+    "cpu_pct",
+    "max_rss_mb",
+    "ave_rss_mb",
+    "alloc_cpus",
+    "req_mem",
+    "alloc_tres",
+    "node_list",
+    "state",
+    "exit_code",
+)
+
 _TIER: dict[str, int] = {
     "sweep_snapshot": 0,
     "submission_snapshot": 1,
@@ -52,6 +70,7 @@ _TIER: dict[str, int] = {
     "value": 5,
     "execution_end": 6,
     "artifact_declaration": 7,
+    "job_resource": 8,
 }
 
 
@@ -235,6 +254,8 @@ class IngestService:
                 return self._apply_execution_end(con, index, event)
             case ArtifactDeclarationEvent():
                 return self._apply_artifact_declaration(con, index, event, conflicts)
+            case JobResourceEvent():
+                return self._apply_job_resource(con, index, event)
         raise IngestValidationError(
             f"unsupported event tag {event.tag!r}",
             event_index=index,
@@ -1138,6 +1159,73 @@ class IngestService:
             "AND received_ns IS NULL",
             [ns, artifact_id],
         )
+
+    def _apply_job_resource(
+        self, con: sqlite3.Connection, index: int, event: JobResourceEvent
+    ) -> bool:
+        """Append one sacct-derived facts row keyed by its event id.
+
+        Deliberately unlinked: rows may name studies or submissions the
+        server has never seen (the backfill CLI ships bare job ids), so
+        unlike every other event there is nothing to validate against.
+        The event id is deterministic per scheduler job id, so a re-capture
+        (post-hook rerun, backfill CLI) fills fields the first capture left
+        null; captured facts never change and never conflict.
+        """
+        ns = _to_ns(event.recorded_at)
+        incoming = {
+            "study_name": event.study_name,
+            "submission_id": event.submission_id,
+            "wall_time_s": event.wall_time_s,
+            "cpu_time_s": event.cpu_time_s,
+            "cpu_pct": event.cpu_pct,
+            "max_rss_mb": event.max_rss_mb,
+            "ave_rss_mb": event.ave_rss_mb,
+            "alloc_cpus": event.alloc_cpus,
+            "req_mem": event.req_mem,
+            "alloc_tres": event.alloc_tres,
+            "node_list": event.node_list,
+            "state": event.state,
+            "exit_code": event.exit_code,
+        }
+        row = con.execute(
+            f"SELECT {', '.join(_RESOURCE_COLUMNS)} FROM job_resources "
+            "WHERE event_id = ?",
+            [str(event.event_id)],
+        ).fetchone()
+        if row is None:
+            con.execute(
+                "INSERT INTO job_resources (event_id, job_id, study_name, "
+                "submission_id, wall_time_s, cpu_time_s, cpu_pct, max_rss_mb, "
+                "ave_rss_mb, alloc_cpus, req_mem, alloc_tres, node_list, "
+                "state, exit_code, recorded_ns) VALUES (?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    str(event.event_id),
+                    event.job_id,
+                    *incoming.values(),
+                    ns,
+                ],
+            )
+            return True
+        fills = {
+            column: value
+            for column, stored, value in zip(
+                _RESOURCE_COLUMNS[1:],
+                row[1:],
+                incoming.values(),
+                strict=True,
+            )
+            if stored is None and value is not None
+        }
+        if not fills:
+            return False
+        con.execute(
+            f"UPDATE job_resources SET {', '.join(f'{k} = ?' for k in fills)} "
+            "WHERE event_id = ?",
+            [*fills.values(), str(event.event_id)],
+        )
+        return True
 
 
 def _encode_payload(event: ValueEvent) -> tuple[str, float | None, str | None]:

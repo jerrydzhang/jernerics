@@ -13,6 +13,7 @@ from jernerics_schema import (
     IngestError,
     IngestRequest,
     IngestResponse,
+    JobResourcesQuery,
     LineageQuery,
     ProjectsQuery,
     ProvenanceQuery,
@@ -324,6 +325,19 @@ def create_app(
     @app.post("/provenance", response_model=None, dependencies=deps)
     def provenance(req: ProvenanceQuery) -> JSONResponse:
         return _records_response(queries.provenance(req.selection))
+
+    @app.post("/job-resources", response_model=None, dependencies=deps)
+    def job_resources(req: JobResourcesQuery) -> JSONResponse:
+        try:
+            records, next_token = queries.job_resources(
+                req.selection,
+                job_ids=req.job_ids,
+                page=req.page,
+                page_token=req.page_token,
+            )
+        except QueryServiceError as e:
+            return _query_error(e)
+        return _records_response(records, next_token)
 
     @app.post("/ingest", response_model=None, dependencies=deps)
     def ingest(req: IngestRequest) -> JSONResponse:
