@@ -437,6 +437,26 @@ class TestBuild:
         meta_file = cache_dir / "jobs" / "789.json"
         assert meta_file.exists()
 
+    def test_prints_backend_name_and_follow_hint(self, tmp_path, capsys):
+        adapter = MagicMock()
+        adapter.submit_job.return_value = "456"
+        container = MagicMock()
+        container.build_command.return_value = ["docker", "build", "-t", "img", "."]
+        backend = _make_backend(adapter=adapter, container=container)
+
+        (tmp_path / "uv.lock").write_text("")
+
+        backend.build(
+            tmp_path,
+            project_name="proj",
+            force=True,
+            backend_name="hpc",
+        )
+
+        out = capsys.readouterr().out
+        assert "jernerics job logs --backend hpc 456 --follow" in out
+        assert "<name>" not in out
+
 
 class TestPathDependencyCheck:
     def _write_pyproject(self, tmp_path, sources_body=""):

@@ -263,6 +263,7 @@ class Backend:
         project_name: str,
         force: bool = False,
         dry_run: bool = False,
+        backend_name: str = "",
         local_cache_dir: Path | None = None,
     ) -> None:
         lock_path = project_dir / "uv.lock"
@@ -357,7 +358,7 @@ class Backend:
 
         print(f"\nBuild job submitted: {job_id}")
         print("Monitor build with:")
-        print(f"  jernerics job logs --backend <name> {job_id}")
+        print(f"  jernerics job logs --backend {backend_name} {job_id} --follow")
 
     def clean(
         self,
