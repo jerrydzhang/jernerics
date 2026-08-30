@@ -15,20 +15,27 @@ import optuna
 from jernerics_schema import (
     JERNERICS_NAMESPACE,
     ConflictRecord,
+    JobSnapshotEvent,
     SweepSnapshotEvent,
     sweep_id_for,
 )
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 
+from jernerics.backend.job_meta import load_job_studies
+from jernerics.backend.slurm.sacct import (
+    build_job_resource_event,
+    fetch_job_resources,
+)
 from jernerics.optuna_mirror import frozen_trial_snapshot
 from jernerics.retry import RetryContext
 from jernerics.retry_checker import run_checker
-from jernerics.tracking.batch_sync import replay_tracking
+from jernerics.tracking.batch_sync import replay_tracking, ship_events_file
 from jernerics.tracking.blob_uploader import sweep_manifest_blobs
 from jernerics.tracking.infra import (
     TrackingServerSchemeError,
     resolve_tracking_ship,
 )
+from jernerics.tracking.jsonl_io import scan_events
 
 
 class PipelineResult(enum.Enum):
@@ -137,6 +144,74 @@ def _report_scheduler_task_logs(cache_dir: Path) -> None:
     )
 
 
+def _sweep_job_ids(tracking_dir: Path, study_name: str) -> dict[str, str | None]:
+    """Scheduler job ids of one study: submission events, else job metadata."""
+    jobs: dict[str, str | None] = {}
+    submission_dir = tracking_dir / "submission"
+    if submission_dir.is_dir():
+        for path in sorted(submission_dir.glob("*.jsonl")):
+            try:
+                events, _ = scan_events(path, 0)
+            except (OSError, ValueError):
+                continue
+            for event, _ in events:
+                if isinstance(event, JobSnapshotEvent):
+                    jobs.setdefault(event.scheduler_job_id, str(event.submission_id))
+    if jobs:
+        return jobs
+    studies = load_job_studies(tracking_dir.parent.parent)
+    return {job_id: None for job_id, study in studies.items() if study == study_name}
+
+
+def capture_job_resources(
+    tracking_dir: str, study_name: str, base_url: str, api_key: str | None
+) -> None:
+    """Best-effort sacct capture for the study's jobs; never raises.
+
+    Assumes sacct is reachable from where the post-hook runs; a cluster
+    that blocks compute-node slurmdbd access makes every fetch fail with
+    one stderr line each — the ``jernerics job resources`` backfill CLI
+    is the recovery path there (verify on first real deployment).
+    """
+    try:
+        job_ids = _sweep_job_ids(Path(tracking_dir), study_name)
+        if not job_ids:
+            print(
+                f"jernerics: no job ids found for study {study_name}; "
+                "resource capture skipped.",
+                file=sys.stderr,
+            )
+            return
+        events = []
+        for job_id, submission_id in sorted(job_ids.items()):
+            result = fetch_job_resources(job_id)
+            if result.error is not None or result.snapshot is None:
+                print(f"jernerics: {result.error}", file=sys.stderr)
+                continue
+            events.append(
+                build_job_resource_event(
+                    result.snapshot,
+                    study_name=study_name,
+                    submission_id=submission_id,
+                )
+            )
+        if not events:
+            return
+        submission_dir = Path(tracking_dir) / "submission"
+        submission_dir.mkdir(parents=True, exist_ok=True)
+        # A unique name keeps every capture's cursor independent; the
+        # next replay ships any capture this ship could not deliver and
+        # then deletes the file.
+        path = submission_dir / f"resources-{uuid.uuid4().hex[:8]}.jsonl"
+        path.write_text("".join(event.model_dump_json() + "\n" for event in events))
+        ship_events_file(path, base_url, api_key)
+    except Exception as error:
+        print(
+            f"jernerics: job resource capture failed: {error!r}",
+            file=sys.stderr,
+        )
+
+
 def run_pipeline(
     ctx_path: str,
     chain_depth: int,
@@ -172,6 +247,7 @@ def run_pipeline(
         if conflicts:
             raise ReconciliationConflictError(conflicts)
         sweep_manifest_blobs(tracking_dir, base_url, api_key)
+        capture_job_resources(tracking_dir, ctx.study_name, base_url, api_key)
         _report_scheduler_task_logs(Path(tracking_dir).parent.parent)
 
     return PipelineResult.SWEEP_COMPLETE

@@ -24,6 +24,7 @@ from jernerics_schema import (
     ExecutionStartEvent,
     FlatContext,
     IngestRequest,
+    JobResourceEvent,
     ManualParamEvent,
     Selection,
     SubmissionSnapshotEvent,
@@ -752,6 +753,119 @@ class TestProvenance:
             json={"selection": scenario.selection(sweeps=(scenario.sweep_b,))},
         ).json()
         assert [r["sweep_id"] for r in body["records"]] == [str(scenario.sweep_b)]
+
+
+class TestJobResources:
+    def _seed(self, scenario, *, event_id=None, job_id="771001", study_name="alpha"):
+        scenario.apply(
+            [
+                JobResourceEvent(
+                    event_id=event_id if event_id is not None else uuid.uuid4(),
+                    recorded_at=_at(-60),
+                    job_id=job_id,
+                    study_name=study_name,
+                    submission_id=None,
+                    wall_time_s=3_723.0,
+                    cpu_time_s=101_400.0,
+                    cpu_pct=4213.45,
+                    max_rss_mb=2_560.0,
+                    ave_rss_mb=2_457.6,
+                    alloc_cpus=8,
+                    req_mem="16G",
+                    alloc_tres="cpu=8,mem=16G,billing=8",
+                    node_list="node[01-02]",
+                    state="COMPLETED",
+                    exit_code="0:0",
+                )
+            ]
+        )
+
+    def test_scopes_by_study_name_through_the_sweep(self, scenario):
+        self._seed(scenario)
+        self._seed(
+            scenario,
+            event_id=uuid.uuid4(),
+            job_id="771002",
+            study_name="beta",
+        )
+        self._seed(
+            scenario,
+            event_id=uuid.uuid4(),
+            job_id="771003",
+            study_name="not-a-study-here",
+        )
+
+        body = scenario.client.post(
+            "/job-resources",
+            json={"selection": scenario.selection(sweeps=(scenario.sweep_a,))},
+        ).json()
+        assert [r["job_id"] for r in body["records"]] == ["771001"]
+        body = scenario.client.post(
+            "/job-resources", json={"selection": scenario.selection()}
+        ).json()
+        assert [r["job_id"] for r in body["records"]] == ["771001", "771002"]
+
+    def test_named_job_ids_bypass_study_scoping(self, scenario):
+        self._seed(
+            scenario,
+            event_id=uuid.uuid4(),
+            job_id="771003",
+            study_name="not-a-study-here",
+        )
+
+        body = scenario.client.post(
+            "/job-resources",
+            json={"selection": scenario.selection(), "job_ids": ["771003"]},
+        ).json()
+
+        assert [r["job_id"] for r in body["records"]] == ["771003"]
+
+    def test_record_carries_every_captured_field(self, scenario):
+        self._seed(scenario)
+
+        body = scenario.client.post(
+            "/job-resources", json={"selection": scenario.selection()}
+        ).json()
+
+        record = body["records"][0]
+        assert record["study_name"] == "alpha"
+        assert record["wall_time_s"] == pytest.approx(3_723.0)
+        assert record["cpu_time_s"] == pytest.approx(101_400.0)
+        assert record["cpu_pct"] == pytest.approx(4213.45)
+        assert record["max_rss_mb"] == pytest.approx(2_560.0)
+        assert record["ave_rss_mb"] == pytest.approx(2_457.6)
+        assert record["alloc_cpus"] == 8
+        assert record["req_mem"] == "16G"
+        assert record["alloc_tres"] == "cpu=8,mem=16G,billing=8"
+        assert record["node_list"] == "node[01-02]"
+        assert record["state"] == "COMPLETED"
+        assert record["exit_code"] == "0:0"
+        assert record["recorded_at"].endswith("Z")
+
+    def test_pages_by_job_id(self, scenario):
+        for number in (1, 2, 3):
+            self._seed(
+                scenario,
+                event_id=uuid.uuid4(),
+                job_id=f"77100{number}",
+            )
+
+        first = scenario.client.post(
+            "/job-resources",
+            json={"selection": scenario.selection(), "page": {"limit": 2}},
+        ).json()
+        second = scenario.client.post(
+            "/job-resources",
+            json={
+                "selection": scenario.selection(),
+                "page": {"limit": 2},
+                "page_token": first["next_token"],
+            },
+        ).json()
+
+        assert [r["job_id"] for r in first["records"]] == ["771001", "771002"]
+        assert [r["job_id"] for r in second["records"]] == ["771003"]
+        assert second["next_token"] is None
 
 
 class TestQueryHardening:

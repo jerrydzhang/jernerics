@@ -1,8 +1,10 @@
 import json
+from datetime import UTC, datetime
 from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
+from jernerics.backend.slurm.sacct import SacctResult
 from jernerics.post_hook import (
     PipelineResult,
     ReconciliationConflictError,
@@ -11,7 +13,15 @@ from jernerics.post_hook import (
 )
 from jernerics.retry import RetryContext
 from jernerics.tracking.batch_sync import ReplayResult
-from jernerics_schema import SweepSnapshotEvent, TrialSnapshotEvent, TrialState
+from jernerics.tracking.jsonl_io import scan_events
+from jernerics_schema import (
+    JobResourceEvent,
+    JobSnapshotEvent,
+    SubmissionState,
+    SweepSnapshotEvent,
+    TrialSnapshotEvent,
+    TrialState,
+)
 
 
 def _write_ctx(tmp_path, study_name="mystudy"):
@@ -357,6 +367,214 @@ class TestReconcileStudy:
         assert second == first
         assert second is not None
         assert second.read_bytes() == first_bytes
+
+
+class TestCaptureJobResources:
+    def _write_submission_events(self, tracking_dir, submission_id, scheduler_id):
+        from jernerics_schema import SubmissionSnapshotEvent, sweep_id_for
+
+        submission_dir = tracking_dir / "submission"
+        submission_dir.mkdir(parents=True)
+        now = datetime.now(UTC)
+        sweep_id = sweep_id_for("proj", "mystudy")
+        events = [
+            SweepSnapshotEvent(
+                event_id=uuid4(),
+                recorded_at=now,
+                project="proj",
+                sweep_id=sweep_id,
+                name="mystudy",
+                state="running",
+            ),
+            SubmissionSnapshotEvent(
+                event_id=uuid4(),
+                recorded_at=now,
+                submission_id=submission_id,
+                sweep_id=sweep_id,
+                backend="slurm",
+                state=SubmissionState.SUBMITTED,
+            ),
+            JobSnapshotEvent(
+                event_id=uuid4(),
+                recorded_at=now,
+                job_id=uuid4(),
+                submission_id=submission_id,
+                scheduler_job_id=scheduler_id,
+                role="trials",
+                state=SubmissionState.SUBMITTED,
+            ),
+        ]
+        (submission_dir / "deploy.jsonl").write_text(
+            "".join(event.model_dump_json() + "\n" for event in events)
+        )
+
+    def _snapshot(self, job_id):
+        from jernerics.backend.slurm.sacct import JobResourceSnapshot
+
+        return JobResourceSnapshot(
+            job_id=job_id,
+            state="COMPLETED",
+            exit_code="0:0",
+            wall_time_s=600.0,
+            cpu_time_s=2_400.0,
+            cpu_pct=400.0,
+            max_rss_mb=512.0,
+            ave_rss_mb=256.0,
+            alloc_cpus=4,
+            req_mem="16G",
+            alloc_tres="cpu=4,mem=16G",
+            node_list="node01",
+        )
+
+    def test_ships_one_event_per_job_with_submission_linkage(self, tmp_path):
+        from jernerics.post_hook import capture_job_resources
+        from jernerics.tracking.jsonl_io import scan_events
+
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+        submission_id = uuid4()
+        self._write_submission_events(tracking_dir, submission_id, "990001")
+        with (
+            patch("jernerics.post_hook.fetch_job_resources") as fetch,
+            patch("jernerics.post_hook.ship_events_file") as ship,
+        ):
+            fetch.return_value = SacctResult(self._snapshot("990001"), None)
+            capture_job_resources(str(tracking_dir), "mystudy", "http://srv", "key")
+
+        fetch.assert_called_once_with("990001")
+        ship.assert_called_once()
+        path, base_url = ship.call_args.args[:2]
+        assert base_url == "http://srv"
+        assert ship.call_args.args[2] == "key"
+        assert path.parent == tracking_dir / "submission"
+        assert path.name.startswith("resources-")
+        events, _ = scan_events(path, 0)
+        assert len(events) == 1
+        event = events[0][0]
+        assert isinstance(event, JobResourceEvent)
+        assert event.job_id == "990001"
+        assert event.study_name == "mystudy"
+        assert event.submission_id == str(submission_id)
+        assert event.wall_time_s == pytest.approx(600.0)
+
+    def test_falls_back_to_job_meta_without_submission_events(self, tmp_path):
+        from jernerics.post_hook import capture_job_resources
+
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+        tracking_dir.mkdir(parents=True)
+        jobs_dir = tmp_path / "jobs"
+        jobs_dir.mkdir()
+        (jobs_dir / "990002.json").write_text(
+            json.dumps({"job_id": "990002", "study_name": "mystudy"})
+        )
+        (jobs_dir / "880003.json").write_text(
+            json.dumps({"job_id": "880003", "study_name": "otherstudy"})
+        )
+        with (
+            patch("jernerics.post_hook.fetch_job_resources") as fetch,
+            patch("jernerics.post_hook.ship_events_file") as ship,
+        ):
+            fetch.return_value = SacctResult(self._snapshot("990002"), None)
+            capture_job_resources(str(tracking_dir), "mystudy", "http://srv", None)
+
+        fetch.assert_called_once_with("990002")
+        ship.assert_called_once()
+        events, _ = scan_events(ship.call_args.args[0], 0)
+        event = events[0][0]
+        assert isinstance(event, JobResourceEvent)
+        assert event.submission_id is None
+        assert event.study_name == "mystudy"
+
+    def test_failed_job_logs_one_line_and_ships_the_rest(self, tmp_path, capsys):
+        from jernerics.post_hook import capture_job_resources
+
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+        self._write_submission_events(tracking_dir, uuid4(), "990004")
+        (tracking_dir / "submission" / "retry.jsonl").write_text(
+            JobSnapshotEvent(
+                event_id=uuid4(),
+                recorded_at=datetime.now(UTC),
+                job_id=uuid4(),
+                submission_id=uuid4(),
+                scheduler_job_id="990005",
+                role="trials",
+                state=SubmissionState.SUBMITTED,
+            ).model_dump_json()
+            + "\n"
+        )
+        snapshots = {"990004": self._snapshot("990004"), "990005": None}
+
+        def fake_fetch(job_id):
+            if snapshots[job_id] is None:
+                return SacctResult(None, f"sacct for job {job_id} timed out")
+            return SacctResult(snapshots[job_id], None)
+
+        with (
+            patch("jernerics.post_hook.fetch_job_resources", side_effect=fake_fetch),
+            patch("jernerics.post_hook.ship_events_file") as ship,
+        ):
+            capture_job_resources(str(tracking_dir), "mystudy", "http://srv", None)
+
+        err = capsys.readouterr().err
+        assert "990005" in err and "timed out" in err
+        ship.assert_called_once()
+        resources = [
+            event
+            for event, _ in scan_events(ship.call_args.args[0], 0)[0]
+            if isinstance(event, JobResourceEvent)
+        ]
+        assert [event.job_id for event in resources] == ["990004"]
+
+    def test_no_job_ids_logs_and_skips(self, tmp_path, capsys):
+        from jernerics.post_hook import capture_job_resources
+
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+        tracking_dir.mkdir(parents=True)
+        with patch("jernerics.post_hook.ship_events_file") as ship:
+            capture_job_resources(str(tracking_dir), "mystudy", "http://srv", None)
+
+        assert "no job ids" in capsys.readouterr().err
+        ship.assert_not_called()
+
+    def test_capture_never_raises(self, tmp_path, capsys):
+        from jernerics.post_hook import capture_job_resources
+
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+        self._write_submission_events(tracking_dir, uuid4(), "990006")
+        with (
+            patch(
+                "jernerics.post_hook.fetch_job_resources",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch("jernerics.post_hook.ship_events_file") as ship,
+        ):
+            capture_job_resources(str(tracking_dir), "mystudy", "http://srv", None)
+
+        assert "resource capture failed" in capsys.readouterr().err
+        ship.assert_not_called()
+
+    @patch("jernerics.post_hook.capture_job_resources")
+    @patch("jernerics.tracking.blob_uploader.upload_pending_blobs")
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_pipeline_captures_after_replay_on_sweep_complete(
+        self, mock_run_checker, mock_replay, mock_upload, mock_capture, tmp_path
+    ):
+        mock_run_checker.return_value = None
+        mock_replay.return_value = ReplayResult()
+        ctx_path = _write_ctx(tmp_path)
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+
+        result = run_pipeline(
+            ctx_path=str(ctx_path),
+            chain_depth=0,
+            tracking_dir=str(tracking_dir),
+            base_url="http://localhost:8000",
+        )
+
+        assert result == PipelineResult.SWEEP_COMPLETE
+        mock_capture.assert_called_once_with(
+            str(tracking_dir), "mystudy", "http://localhost:8000", None
+        )
 
 
 class TestMainSchemeLessServerAddr:

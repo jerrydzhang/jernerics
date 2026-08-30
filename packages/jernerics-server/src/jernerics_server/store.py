@@ -28,7 +28,7 @@ from jernerics_schema import (
     TrialState,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 _V2_TABLES = ("sweep_meta", "trial_end", "params")
 
@@ -321,12 +321,39 @@ def _migrate_to_v7(con: sqlite3.Connection) -> None:
     )
 
 
+def _migrate_to_v8(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE job_resources (
+            event_id TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL,
+            study_name TEXT,
+            submission_id TEXT,
+            wall_time_s REAL,
+            cpu_time_s REAL,
+            cpu_pct REAL,
+            max_rss_mb REAL,
+            ave_rss_mb REAL,
+            alloc_cpus INTEGER,
+            req_mem TEXT,
+            alloc_tres TEXT,
+            node_list TEXT,
+            state TEXT,
+            exit_code TEXT,
+            recorded_ns INTEGER NOT NULL
+        ) STRICT
+        """
+    )
+    con.execute("CREATE INDEX idx_job_resources_job ON job_resources(job_id)")
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_to_v3,
     4: _migrate_to_v4,
     5: _migrate_to_v5,
     6: _migrate_to_v6,
     7: _migrate_to_v7,
+    8: _migrate_to_v8,
 }
 
 

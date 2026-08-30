@@ -31,6 +31,7 @@ TABLES = {
     "artifact_blobs",
     "reconciliation_conflicts",
     "sweep_curation",
+    "job_resources",
 }
 
 INDEXES = {
@@ -42,6 +43,7 @@ INDEXES = {
     "idx_artifacts_exec_key",
     "idx_executions_trial",
     "idx_submissions_sweep",
+    "idx_job_resources_job",
 }
 
 
@@ -115,7 +117,7 @@ class TestInit:
     def test_fresh_store_creates_current_schema(self, tmp_path):
         path = tmp_path / "store.sqlite"
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(7,)]
+            assert store.query("PRAGMA user_version")[1] == [(8,)]
             con = sqlite3.connect(path)
             assert _table_names(con) - {"sqlite_sequence"} == TABLES
             con.close()
@@ -127,7 +129,7 @@ class TestInit:
 
     def test_reopen_existing_store_is_noop_and_keeps_data(self, db_path):
         with Store(db_path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(7,)]
+            assert store.query("PRAGMA user_version")[1] == [(8,)]
             assert store.query("SELECT trial_id FROM trials")[1] == [("t1",)]
             assert store.query("SELECT COUNT(*) FROM tracked_values")[1] == [(1,)]
 
@@ -422,9 +424,9 @@ class TestFutureSchema:
     def test_user_version_beyond_supported_refused(self, tmp_path):
         path = tmp_path / "store.sqlite"
         con = sqlite3.connect(path)
-        con.execute("PRAGMA user_version=8")
+        con.execute("PRAGMA user_version=9")
         con.close()
-        with pytest.raises(FutureSchemaError, match="version 8"):
+        with pytest.raises(FutureSchemaError, match="version 9"):
             Store(path)
 
 
@@ -454,7 +456,7 @@ class TestMigrationV3ToV4:
         self._make_v3_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(7,)]
+            assert store.query("PRAGMA user_version")[1] == [(8,)]
             submission_cols = {
                 row[1] for row in store.query("PRAGMA table_info(submissions)")[1]
             }
@@ -527,7 +529,7 @@ class TestMigrationV4ToV5:
         self._make_v4_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(7,)]
+            assert store.query("PRAGMA user_version")[1] == [(8,)]
             trial_cols = {row[1] for row in store.query("PRAGMA table_info(trials)")[1]}
             assert {"objective", "distributions_json", "attrs_json"} <= trial_cols
             store.verify()
@@ -586,7 +588,7 @@ class TestMigrationV5ToV6:
         self._make_v5_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(7,)]
+            assert store.query("PRAGMA user_version")[1] == [(8,)]
             artifact_cols = {
                 row[1] for row in store.query("PRAGMA table_info(artifacts)")[1]
             }
@@ -633,7 +635,7 @@ class TestMigrationV6ToV7:
         self._make_v6_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(7,)]
+            assert store.query("PRAGMA user_version")[1] == [(8,)]
             assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(0,)]
             store.verify()
 
@@ -850,7 +852,7 @@ class TestMigrationAtomicity:
         monkeypatch.undo()
         with Store(path) as store:
             store.verify()
-            assert store.query("PRAGMA user_version")[1] == [(7,)]
+            assert store.query("PRAGMA user_version")[1] == [(8,)]
 
 
 def _make_v2_db(path: Path) -> None:

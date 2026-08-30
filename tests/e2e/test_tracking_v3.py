@@ -14,10 +14,12 @@ import json
 import socket
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import UUID
+from uuid import UUID, uuid5
 
+import httpx
 import optuna
 import pytest
 import uvicorn
@@ -35,9 +37,12 @@ from jernerics.tracking import TrackingClient, decode_selection, encode_selectio
 from jernerics.tracking.batch_sync import replay_tracking, ship_events_file
 from jernerics.tracking.jsonl_io import scan_events
 from jernerics_schema import (
+    JERNERICS_NAMESPACE,
     PROTOCOL_VERSION,
     IngestRequest,
+    JobResourceEvent,
     Selection,
+    SubmissionSnapshotEvent,
     sweep_id_for,
 )
 from jernerics_schema.ingest import MAX_EVENTS_PER_REQUEST
@@ -138,8 +143,8 @@ COUNT_TABLES = (
     "execution_progress",
     "tracked_values",
     "artifacts",
-    "artifact_blobs",
     "reconciliation_conflicts",
+    "job_resources",
 )
 
 
@@ -658,6 +663,100 @@ class TestDashboardServiceFacts:
                 (2, 0.5),
             ]
         assert len({series["execution"] for series in loss["series"]}) == 2
+
+
+class TestJobResources:
+    def _submission_id(self, scenario) -> str:
+        return str(
+            next(
+                event
+                for event in scenario.submission_events
+                if isinstance(event, SubmissionSnapshotEvent)
+            ).submission_id
+        )
+
+    def _ingest(self, scenario, event) -> dict:
+        response = httpx.post(
+            f"{scenario.base_url}/ingest",
+            json={
+                "protocol_version": PROTOCOL_VERSION,
+                "events": [event.model_dump(mode="json")],
+            },
+        )
+        assert response.status_code == 200
+        return response.json()
+
+    def test_ingest_and_query_back(self, scenario):
+        event = JobResourceEvent(
+            event_id=uuid5(JERNERICS_NAMESPACE, "job-resource:990001"),
+            recorded_at=datetime.now(UTC),
+            job_id="990001",
+            study_name=SWEEP,
+            submission_id=self._submission_id(scenario),
+            wall_time_s=3_723.0,
+            cpu_time_s=101_400.0,
+            cpu_pct=4213.45,
+            max_rss_mb=2_560.0,
+            ave_rss_mb=2_457.6,
+            alloc_cpus=8,
+            req_mem="16G",
+            alloc_tres="cpu=8,mem=16G,billing=8",
+            node_list=None,
+            state="COMPLETED",
+            exit_code="0:0",
+        )
+        assert self._ingest(scenario, event)["accepted"] == 1
+
+        body = httpx.post(
+            f"{scenario.base_url}/job-resources",
+            json={
+                "selection": {
+                    "project": PROJECT,
+                    "sweeps": [str(sweep_id_for(PROJECT, SWEEP))],
+                }
+            },
+        ).json()
+
+        assert len(body["records"]) == 1
+        record = body["records"][0]
+        assert record["job_id"] == "990001"
+        assert record["study_name"] == SWEEP
+        assert record["wall_time_s"] == pytest.approx(3_723.0)
+        assert record["max_rss_mb"] == pytest.approx(2_560.0)
+        assert record["req_mem"] == "16G"
+        assert record["node_list"] is None
+
+    def test_recapture_is_idempotent_and_fills_nulls(self, scenario):
+        event_id = uuid5(JERNERICS_NAMESPACE, "job-resource:990009")
+
+        def capture(**overrides):
+            fields = {
+                "event_id": event_id,
+                "recorded_at": datetime.now(UTC),
+                "job_id": "990009",
+                "study_name": SWEEP,
+            }
+            fields.update(overrides)
+            return self._ingest(scenario, JobResourceEvent(**fields))
+
+        assert capture()["accepted"] == 1
+        repeat = capture(wall_time_s=3_723.0, node_list="node[01-02]")
+        assert repeat["duplicates"] == 0
+        assert repeat["accepted"] == 1
+        again = capture(wall_time_s=3_723.0, node_list="node[01-02]")
+        assert again["accepted"] == 0
+        assert again["duplicates"] == 1
+
+        body = httpx.post(
+            f"{scenario.base_url}/job-resources",
+            json={
+                "selection": {"project": PROJECT},
+                "job_ids": ["990009"],
+            },
+        ).json()
+        record = body["records"][0]
+        assert record["wall_time_s"] == pytest.approx(3_723.0)
+        assert record["node_list"] == "node[01-02]"
 
 
 class TestIdempotence:
