@@ -40,6 +40,7 @@ def build(
             project_name=project_name,
             force=force,
             dry_run=dry_run,
+            backend_name=backend_name,
             local_cache_dir=cache_dir(),
         )
     except (RuntimeError, FileNotFoundError) as e:
