@@ -1,4 +1,5 @@
 from jernerics.backend.container import NoContainer
+from jernerics.paths import CACHE_MOUNT
 
 _PROJECT_NAME_TEMPLATE = "{project_name}"
 _PROJECT_NAME_HYPHEN_TEMPLATE = "{project-name}"
@@ -56,7 +57,7 @@ class PathResolver:
     def cache_prefix(self) -> str:
         if isinstance(self.container, NoContainer):
             return self.resolve_cache()
-        return "/cache"
+        return CACHE_MOUNT
 
     def storage_path(self, study_name: str) -> str:
         base = self.cache_prefix
@@ -91,8 +92,8 @@ class PathResolver:
     def bind_args(self, cache_host: str) -> list[str]:
         work_src = self._work_mount_source or self.remote_dir
         if self._quote_binds:
-            return [f'"{work_src}:/work"', f'"{cache_host}:/cache"']
-        return [f"{work_src}:/work", f"{cache_host}:/cache"]
+            return [f'"{work_src}:/work"', f'"{cache_host}:{CACHE_MOUNT}"']
+        return [f"{work_src}:/work", f"{cache_host}:{CACHE_MOUNT}"]
 
     def resolve_build_dir(self, project_name: str) -> str | None:
         if self._build_dir is None:

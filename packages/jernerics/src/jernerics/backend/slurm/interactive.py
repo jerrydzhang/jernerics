@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass
 
 from jernerics.backend.slurm.adapter import _validate_slurm_value
+from jernerics.paths import CACHE_MOUNT
 
 _TERMINAL_STATES = frozenset(
     {
@@ -235,7 +236,7 @@ class InteractiveSession:
         project source). No tmux wrapper — the user owns their own shell
         environment and process persistence (``tmux``, ``screen``, etc.).
         """
-        binds = f"{self.remote_dir}:/work --bind {self.cache_host}:/cache"
+        binds = f"{self.remote_dir}:/work --bind {self.cache_host}:{CACHE_MOUNT}"
         return (
             f"cd {self.remote_dir} &&"
             f" apptainer shell --nv --pwd /work --bind {binds}"

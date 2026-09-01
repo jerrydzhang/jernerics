@@ -5,6 +5,7 @@ from jernerics.backend.path_resolver import (
     strip_project_template,
     substitute_project_name,
 )
+from jernerics.paths import cache_dir
 
 
 def _resolver(**overrides):
@@ -180,3 +181,10 @@ class TestStripProjectTemplate:
 
     def test_no_template_passthrough(self):
         assert strip_project_template("/scratch/user/cache") == "/scratch/user/cache"
+
+
+class TestCacheMountContract:
+    def test_container_prefix_matches_api_cache_dir(self, monkeypatch):
+        monkeypatch.setenv("JERNERICS_HPC", "1")
+        r = _resolver()
+        assert r.cache_prefix == str(cache_dir())
