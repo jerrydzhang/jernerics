@@ -228,6 +228,8 @@ def run_pipeline(
     if base_url is not None:
         ctx = RetryContext.from_json(Path(ctx_path).read_text())
         reconcile_path = reconcile_study(ctx, tracking_dir)
+        # Before replay: replay ships-and-deletes the submission files capture reads.
+        capture_job_resources(tracking_dir, ctx.study_name, base_url, api_key)
         # Live trial event logs ship first (a running snapshot must land
         # before its terminal reconciliation); the reconcile snapshots ship
         # last so they close out or conflict with what already landed.
@@ -247,7 +249,6 @@ def run_pipeline(
         if conflicts:
             raise ReconciliationConflictError(conflicts)
         sweep_manifest_blobs(tracking_dir, base_url, api_key)
-        capture_job_resources(tracking_dir, ctx.study_name, base_url, api_key)
         _report_scheduler_task_logs(Path(tracking_dir).parent.parent)
 
     return PipelineResult.SWEEP_COMPLETE
