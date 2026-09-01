@@ -4414,8 +4414,13 @@ class TestWorkspaceChurnGates:
             {dep["id"] for dep in spec["inputs"]} == {"analysis-refresh", "poll"}
             for spec in capture
         )
-        assert any(
-            {dep["id"] for dep in spec["inputs"]} == {"analysis-refresh-store"}
-            and {dep["id"] for dep in spec.get("state", [])} == {"scroll-restore-store"}
+        restore = [
+            spec
             for spec in capture
-        )
+            if {dep["id"] for dep in spec["inputs"]}
+            == {"analysis-refresh-store", "workspace-overview"}
+        ]
+        assert len(restore) == 1
+        assert {dep["id"] for dep in restore[0].get("state", [])} == {
+            "scroll-restore-store"
+        }

@@ -795,17 +795,24 @@ class TestSweepInspector:
         assert {str(record.execution_id) for record in detail.executions} == {
             str(execution_id) for execution_id in (E1, E3, E4, E5, E6, E7)
         }
-        rendered = str(_inspector(service, "sweep", SWEEP_A))
-        assert "Executions" in rendered
-        for execution_id in (E1, E3, E4, E5, E6, E7):
-            assert _focus_ref("execution", execution_id) in rendered
-        assert _focus_ref("execution", E8) not in rendered
-        assert "node07" not in rendered
+        grid = _grid(
+            _inspector(service, "sweep", SWEEP_A), {"focus-executions": "grid"}
+        )
+        assert grid.id == {"focus-executions": "grid"}
+        assert grid.getRowId == "params.data.execution_id"
+        rows = {row["execution_id"]: row for row in grid.rowData}
+        assert set(rows) == {
+            str(execution_id) for execution_id in (E1, E3, E4, E5, E6, E7)
+        }
+        assert "node07" not in {row["host"] for row in rows.values()}
         finished = service.sweep_detail(str(SWEEP_B))
         assert finished is not None
         assert {str(record.execution_id) for record in finished.executions} == {str(E8)}
-        assert _focus_ref("execution", E8) in str(_inspector(service, "sweep", SWEEP_B))
-        assert "node07" in str(_inspector(service, "sweep", SWEEP_B))
+        finished_grid = _grid(
+            _inspector(service, "sweep", SWEEP_B), {"focus-executions": "grid"}
+        )
+        assert {row["execution_id"] for row in finished_grid.rowData} == {str(E8)}
+        assert "node07" in {row["host"] for row in finished_grid.rowData}
 
     def test_executions_table_shortens_hosts_and_keeps_times_single_line(self):
         ended = datetime.now(UTC) - timedelta(seconds=30)
