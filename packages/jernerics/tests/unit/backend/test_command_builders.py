@@ -218,6 +218,7 @@ class TestBuildSweepCommandsAlwaysPostHook:
         assert post_hook is not None
         assert "> /tmp/jernerics_mystudy_retry_d0.sh" in post_hook
         assert "bash /tmp/jernerics_mystudy_retry_d0.sh" in post_hook
+        assert "2>/dev/null" not in post_hook
 
 
 class TestBuildSweepCommandsWithPostHook:

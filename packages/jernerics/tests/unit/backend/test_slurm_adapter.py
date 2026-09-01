@@ -328,6 +328,7 @@ class TestSubmitSweep:
     def test_with_post_hook_returns_both_ids(self):
         host = MagicMock()
         host.run.return_value = MagicMock(returncode=0, stdout="10001 10002")
+        del host.emits_scripts
         adapter = _make_adapter(host=host)
         params = _make_params(post_hook_command="checker_cmd")
 
@@ -352,6 +353,7 @@ class TestSubmitSweep:
         host.run.return_value = MagicMock(
             returncode=0, stdout="", stderr="sbatch: error: invalid partition"
         )
+        del host.emits_scripts
         adapter = _make_adapter(host=host)
         params = _make_params(post_hook_command="checker_cmd")
 
@@ -374,6 +376,7 @@ class TestSubmitSweep:
     def test_chain_keeps_parsable_cluster_suffix(self):
         host = MagicMock()
         host.run.return_value = MagicMock(returncode=0, stdout="10001;hpc 10002;hpc")
+        del host.emits_scripts
         adapter = _make_adapter(host=host)
         params = _make_params(post_hook_command="checker_cmd")
 
@@ -381,6 +384,16 @@ class TestSubmitSweep:
 
         assert result.submissions[0].job_id == "10001;hpc"
         assert result.submissions[1].job_id == "10002;hpc"
+
+    def test_emission_host_returns_empty_id_submission(self):
+        adapter = _make_adapter(host=StdoutHost())
+        params = _make_params(post_hook_command="checker_cmd")
+
+        result = adapter.submit_sweep(params)
+
+        assert len(result.submissions) == 1
+        assert result.submissions[0].job_id == ""
+        assert result.submissions[0].n_trials == 10
 
 
 class TestSubmitJob:
