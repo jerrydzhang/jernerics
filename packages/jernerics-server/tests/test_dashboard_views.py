@@ -51,6 +51,7 @@ from jernerics_server.dashboard.callbacks import (
     workspace_state,
 )
 from jernerics_server.dashboard.components import (
+    TEXT_LIMIT,
     absolute_time,
     datetime_to_ns,
     grid_options,
@@ -1219,6 +1220,22 @@ class TestOverviewTab:
         assert beta["state"] == "completed"
         assert beta["expected_trials"] == 1
         assert beta["monitoring"] == "succeeded 1"
+
+    def test_monitoring_column_clamps_with_full_value_reachable(self, service):
+        """jernerics-l8f: the monitoring cell shares the clamped-cell
+        policy; the full summary stays in rowData for title/popover."""
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        grid = _grid(overview, "overview-sweep-grid")
+        monitoring = next(
+            column for column in grid.columnDefs if column["field"] == "monitoring"
+        )
+        assert monitoring["cellRenderer"] == "ClampedCell"
+        assert monitoring["clampLimit"] == TEXT_LIMIT
+        assert monitoring["maxWidth"] == 320
+        rows = {row["sweep_id"]: row for row in grid.rowData}
+        assert rows[str(SWEEP_A)]["monitoring"] == (
+            "active 1 · quiet 1 · stale 1 · failed 1 · succeeded 1 · unknown 1"
+        )
 
     def test_tray_scope_narrows_rollup_rows_and_keeps_curation(self, store_and_service):
         store, service = store_and_service

@@ -32,6 +32,19 @@ def clamp_tooltip(value: Any, limit: int = TEXT_LIMIT) -> html.Abbr:
     return html.Abbr(clamp_text(text, limit), title=text)
 
 
+def clamped_column() -> dict[str, Any]:
+    """Column-def fragment applying this policy inside AG Grid
+    surfaces: display clamps to ``TEXT_LIMIT`` with an ellipsis, the
+    full value rides the title, one click opens it (jernerics-7v6)."""
+    return {
+        "cellRenderer": "ClampedCell",
+        "clampLimit": TEXT_LIMIT,
+        "minWidth": 160,
+        "maxWidth": 480,
+    }
+
+
+
 def short_id(identifier: str | None) -> str:
     """Compact identity for grids and tables (first 8 hex chars)."""
     if not identifier:

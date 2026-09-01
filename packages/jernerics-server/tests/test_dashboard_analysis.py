@@ -1207,6 +1207,25 @@ class TestPointsTable:
         assert any(header.startswith("lr · 3/6") for header in headers), headers
         assert any(header.startswith("seed · 2/6") for header in headers), headers
 
+    def test_long_key_headers_clamp_and_keep_the_full_tooltip(self):
+        key = "k" * 300
+        service = _points_service(
+            values={"cc320000-0000-4000-8000-000000000000": {key: [1.5]}},
+            value_keys=[{"key": key, "kind": "scalar"}],
+            params={"cc320000-0000-4000-8000-000000000000": {"lr": 0.2}},
+            param_keys=["lr"],
+        )
+        page = points_tab(service, PROJECT, _tray())
+        values_grid, params_grid = _grids(page)
+        value_column = values_grid.columnDefs[1]
+        assert value_column["headerName"] == (
+            f"{components.clamp_text(key)} · scalar · 1/1"
+        )
+        assert value_column["headerTooltip"] == f"{key} · scalar · 1/1"
+        param_column = params_grid.columnDefs[1]
+        assert param_column["headerName"] == "lr · 1/1"
+        assert param_column["headerTooltip"] == "lr · 1/1"
+
 
 class TestOptunaFigures:
     def test_sweep_a_figure_set(self, service):

@@ -266,12 +266,34 @@ a.project-row:hover {
   overflow-x: auto;
 }
 
+.fact-row span {
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
 .grid {
   width: 100%;
   /* A grid wrapper must never stretch its track or column — AG Grid's
      own horizontal scroll engages instead (jernerics-jum). */
   min-width: 0;
   height: 26rem;
+}
+
+/* Truncation baseline (jernerics-l8f): single-line cells and headers
+   clip with an ellipsis instead of overflowing; wrap-enabled columns
+   opt out through AG Grid's own ag-cell-wrap-text class. Full values
+   stay one hover (title baseline in dashboard.js) or one click
+   (ClampedCell) away. */
+.grid .ag-cell:not(.ag-cell-wrap-text) {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.grid .ag-header-cell-text {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /* Clamped payload cells (jernerics-7v6): the ellipsis marks the cut

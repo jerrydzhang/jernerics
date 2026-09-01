@@ -883,7 +883,12 @@ _OVERVIEW_SWEEP_COLUMNS: list[dict[str, Any]] = [
     {"headerName": "Sweep", "field": "name"},
     {"headerName": "State", **_badge_cell("state")},
     {"headerName": "Health", **_badge_cell("health")},
-    {"headerName": "Monitoring", "field": "monitoring"},
+    {
+        "headerName": "Monitoring",
+        "field": "monitoring",
+        **components.clamped_column(),
+        "maxWidth": 320,
+    },
     {"headerName": "Curation", "field": "curation"},
     {"headerName": "Expected trials", "field": "expected_trials"},
     {"headerName": "Last activity", "field": "last_activity"},

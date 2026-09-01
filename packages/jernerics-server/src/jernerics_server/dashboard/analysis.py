@@ -27,7 +27,16 @@ from dash_ag_grid import AgGrid
 from jernerics_schema import Selection, SelectionTokenError, encode_selection
 
 from . import components, figures
-from .components import MISSING, TEXT_LIMIT, Empty, Error, relative_time, short_id
+from .components import (
+    MISSING,
+    TEXT_LIMIT,
+    Empty,
+    Error,
+    clamp_text,
+    clamped_column,
+    relative_time,
+    short_id,
+)
 from .routes import ROUTES_BASE, parse_route
 from .selection_tokens import decode_selection_token
 from .service import ANALYSIS_REDUCTIONS, DashboardService
@@ -1563,16 +1572,12 @@ def _format_payload(payload: Any) -> str:
     return str(payload)
 
 
-def _clamped_column() -> dict[str, Any]:
-    """Shared clamp/expand treatment for payload cells (jernerics-7v6):
-    the full text stays in rowData and stays copyable through cell text
-    selection, while the renderer clamps the display and opens the full
-    value with one click."""
+def _key_header(key: str, detail: str) -> dict[str, str]:
+    """Header text for one possibly long key: clamped label, full key
+    in the header tooltip (jernerics-l8f)."""
     return {
-        "cellRenderer": "ClampedCell",
-        "clampLimit": TEXT_LIMIT,
-        "minWidth": 160,
-        "maxWidth": 480,
+        "headerName": f"{clamp_text(key)} · {detail}",
+        "headerTooltip": f"{key} · {detail}",
     }
 
 
@@ -1608,11 +1613,11 @@ def points_tab(
         )
         value_columns.append(
             {
-                "headerName": (
-                    f"{entry['key']} · {entry['kind']} · {present}/{len(labels)}"
+                **_key_header(
+                    entry["key"], f"{entry['kind']} · {present}/{len(labels)}"
                 ),
                 "field": entry["key"],
-                **_clamped_column(),
+                **clamped_column(),
             }
         )
     value_rows = []
@@ -1634,9 +1639,9 @@ def points_tab(
         present = sum(1 for per_trial in data["params"].values() if key in per_trial)
         param_columns.append(
             {
-                "headerName": f"{key} · {present}/{len(labels)}",
+                **_key_header(key, f"{present}/{len(labels)}"),
                 "field": key,
-                **_clamped_column(),
+                **clamped_column(),
             }
         )
     param_rows = []
