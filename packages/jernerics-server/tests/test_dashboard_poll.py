@@ -19,6 +19,7 @@ from jernerics_schema import (
     ValueEvent,
     encode_selection,
 )
+from jernerics_server.dashboard import callbacks, workspace
 from jernerics_server.dashboard.analysis import (
     default_scope_state,
     default_view_state,
@@ -26,7 +27,6 @@ from jernerics_server.dashboard.analysis import (
     expand_values,
     include_values,
 )
-from jernerics_server.dashboard import callbacks, workspace
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
 from jernerics_server.dashboard.service import DashboardService
@@ -349,7 +349,11 @@ class TestOverviewPollCascade:
         with mock.patch("time.time_ns", return_value=later):
             for outputs in (_TRACKER_OUTPUTS, _OVERVIEW_OUTPUTS):
                 tick = self._fire(
-                    client, callback_map, outputs, {"digest": digest}, ["poll.n_intervals"]
+                    client,
+                    callback_map,
+                    outputs,
+                    {"digest": digest},
+                    ["poll.n_intervals"],
                 )
                 assert tick[0].status_code == 204
 
@@ -401,9 +405,8 @@ class TestOverviewFactsPure:
         service = DashboardService(QueryService(store))
         facts = callbacks.overview_facts(service, PROJECT, None)
         assert "ago" not in json.dumps(facts, default=str)
-        assert (
-            callbacks._content_digest(facts)
-            == callbacks._content_digest(callbacks.overview_facts(service, PROJECT, None))
+        assert callbacks._content_digest(facts) == callbacks._content_digest(
+            callbacks.overview_facts(service, PROJECT, None)
         )
 
 
@@ -587,11 +590,8 @@ class TestInspectorFactsGuard:
         service = DashboardService(QueryService(store))
         facts = callbacks.inspector_facts(service, self._focused()["focus"])
         assert "ago" not in json.dumps(facts, default=str)
-        assert (
-            callbacks._content_digest(facts)
-            == callbacks._content_digest(
-                callbacks.inspector_facts(service, self._focused()["focus"])
-            )
+        assert callbacks._content_digest(facts) == callbacks._content_digest(
+            callbacks.inspector_facts(service, self._focused()["focus"])
         )
 
     def test_unchanged_tick_builds_no_tree_and_ships_nothing(
@@ -733,9 +733,7 @@ class TestScrollRestoreWiring:
             specs
             for key, specs in callback_map.items()
             if "scroll-restore-store.data" in _outputs_of(key)
-            and any(
-                spec["id"] == "analysis-refresh-store" for spec in specs["inputs"]
-            )
+            and any(spec["id"] == "analysis-refresh-store" for spec in specs["inputs"])
         ]
         assert len(restores) == 1
         inputs = {spec["id"] for spec in restores[0]["inputs"]}

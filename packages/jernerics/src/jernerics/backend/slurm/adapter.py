@@ -678,9 +678,7 @@ class SlurmAdapter:
         base_job_id = job_id.split("_")[0] if "_" in job_id else job_id
         suffix_index = job_id.split("_")[1] if "_" in job_id else None
 
-        effective_array_index = (
-            array_index if array_index is not None else suffix_index
-        )
+        effective_array_index = array_index if array_index is not None else suffix_index
         if effective_array_index is None and n_trials == 1:
             effective_array_index = 1
 

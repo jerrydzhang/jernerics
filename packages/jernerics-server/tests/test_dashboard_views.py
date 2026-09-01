@@ -21,9 +21,11 @@ from jernerics_schema import (
     PROTOCOL_VERSION,
     ExecutionEndEvent,
     ExecutionHeartbeatEvent,
+    ExecutionOutcome,
     ExecutionProgressEvent,
     ExecutionRecord,
     ExecutionStartEvent,
+    FailureKind,
     FlatContext,
     IngestRequest,
     JobSnapshotEvent,
@@ -1842,6 +1844,7 @@ class TestFailureView:
     """jernerics-gcj: the roll-up's failed badge opens a scope-wide
     failure view; kind and summary read inline, trials focus in one
     click, and marking the sweep invalid acts from that context."""
+
     _dispatch = TestMountedCurationJourney._dispatch
     _callback_key = staticmethod(TestMountedCurationJourney._callback_key)
     _callback_map = TestMountedCurationJourney._callback_map
@@ -1878,9 +1881,9 @@ class TestFailureView:
                         recorded_at=now,
                         execution_id=failure,
                         ended_at=now,
-                        outcome="failure",
+                        outcome=ExecutionOutcome.FAILURE,
                         exit_code=1,
-                        failure_kind="timeout",
+                        failure_kind=FailureKind.TIMEOUT,
                         failure_summary="killed after 3600s",
                     ),
                 ],
@@ -1908,9 +1911,7 @@ class TestFailureView:
         assert "failed-trials-view" in rendered
         assert "failed-view-open" in rendered
         assert "failed 1" in rendered
-        beta = scoped_sweeps(
-            service.sweep_overview("ops"), {"sweeps": [str(SWEEP_B)]}
-        )
+        beta = scoped_sweeps(service.sweep_overview("ops"), {"sweeps": [str(SWEEP_B)]})
         panel = failed_view_panel(service, "ops", beta, 0)
         assert "No failed executions in scope." in str(panel)
 

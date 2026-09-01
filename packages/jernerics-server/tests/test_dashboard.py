@@ -542,6 +542,8 @@ class TestLineageStoreCap:
         assert [entry["root"] for entry in kept] == ["r2", "r2", "r2"]
 
     def test_single_oversized_family_drops_to_empty(self):
-        lineage = [{"trial_id": "t", "parent": "", "root": "r", "index": i} for i in range(3)]
+        lineage = [
+            {"trial_id": "t", "parent": "", "root": "r", "index": i} for i in range(3)
+        ]
         with mock.patch.object(workspace, "_LINEAGE_STORE_CAP", 2):
             assert workspace._lineage_store_rows(lineage) == []

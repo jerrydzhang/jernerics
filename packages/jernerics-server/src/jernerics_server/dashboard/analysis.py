@@ -29,7 +29,6 @@ from jernerics_schema import Selection, SelectionTokenError, encode_selection
 from . import components, figures
 from .components import (
     MISSING,
-    TEXT_LIMIT,
     Empty,
     Error,
     clamp_text,

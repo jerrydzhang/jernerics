@@ -522,9 +522,7 @@ def _execution_grid_rows(
 ) -> list[dict[str, Any]]:
     """One virtualized grid row per execution: monitoring label, focus
     target, host, and relative recency with absolute tooltips."""
-    started_ns = [
-        components.datetime_to_ns(record.started_at) for record in executions
-    ]
+    started_ns = [components.datetime_to_ns(record.started_at) for record in executions]
     ended_ns = [
         None if record.ended_at is None else components.datetime_to_ns(record.ended_at)
         for record in executions

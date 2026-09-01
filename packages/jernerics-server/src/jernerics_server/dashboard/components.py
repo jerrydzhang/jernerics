@@ -44,7 +44,6 @@ def clamped_column() -> dict[str, Any]:
     }
 
 
-
 def short_id(identifier: str | None) -> str:
     """Compact identity for grids and tables (first 8 hex chars)."""
     if not identifier:

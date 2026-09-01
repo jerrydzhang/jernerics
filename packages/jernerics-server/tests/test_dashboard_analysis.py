@@ -659,9 +659,11 @@ class TestClampPolicy:
     def test_tooltip_carries_the_full_value(self):
         full = '{"blob": "' + "x" * 500 + '"}'
         tip = components.clamp_tooltip(full)
-        assert tip.title == full
-        assert tip.children == components.clamp_text(full)
-        assert tip.children.endswith(components.ELLIPSIS)
+        assert getattr(tip, "title", None) == full
+        clamped = tip.children
+        assert clamped is not None
+        assert clamped == components.clamp_text(full)
+        assert clamped.endswith(components.ELLIPSIS)
 
 
 def _pres(page):
@@ -1174,7 +1176,7 @@ class TestPointsTable:
             param_keys=[],
         )
         page = points_tab(service, PROJECT, _tray())
-        values_grid, params_grid = _grids(page)
+        values_grid, _params_grid = _grids(page)
         column = values_grid.columnDefs[1]
         assert column["cellRenderer"] == "ClampedCell"
         assert column["clampLimit"] == components.TEXT_LIMIT

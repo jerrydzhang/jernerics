@@ -892,9 +892,7 @@ class TestGetLogsFollow:
         popen.assert_not_called()
         assert "purged log\n" in capsys.readouterr().out
 
-    def test_follow_wildcard_without_index_suggests_array_index(
-        self, tmp_path, capsys
-    ):
+    def test_follow_wildcard_without_index_suggests_array_index(self, tmp_path, capsys):
         _write_meta(tmp_path, "42", self._meta(n_trials=3))
 
         host = MagicMock()

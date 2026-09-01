@@ -1,6 +1,7 @@
 import uuid
 from unittest import mock
 
+from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
     auto_refresh_flip,
     axis_state_edit,
@@ -16,7 +17,6 @@ from jernerics_server.dashboard.analysis import (
     view_query,
     with_focus,
 )
-from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.callbacks import focus_from_trigger
 
 SWEEP_A = uuid.UUID("aa110000-0000-4000-8000-000000000000")

@@ -224,8 +224,7 @@ def _execution_fact_rows(records: Sequence[Any]) -> list[list[Any]]:
 def _artifact_fact_rows(rows: Sequence[Any]) -> list[list[Any]]:
     """Artifact identity and receipt stamps for the digest."""
     return [
-        [row.artifact_id, row.version, row.size_bytes, row.received_ns]
-        for row in rows
+        [row.artifact_id, row.version, row.size_bytes, row.received_ns] for row in rows
     ]
 
 
@@ -986,9 +985,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             service.sweep_overview(project or ""), (view_doc or {}).get("scope")
         )
         if name == "failed-invalid" and value:
-            ok, report = apply_curation(
-                service, "invalid", [str(value)], reason or ""
-            )
+            ok, report = apply_curation(service, "invalid", [str(value)], reason or "")
             return (
                 workspace.failed_view_panel(
                     service,
@@ -1000,9 +997,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 no_update,
             )
         return (
-            workspace.failed_view_panel(
-                service, project or "", scoped, time.time_ns()
-            ),
+            workspace.failed_view_panel(service, project or "", scoped, time.time_ns()),
             True,
         )
 
