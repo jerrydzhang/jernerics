@@ -5,6 +5,7 @@ import stat
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 from urllib.parse import quote
 
 import pytest
@@ -19,7 +20,7 @@ from jernerics_schema import (
     TrialSnapshotEvent,
     TrialState,
 )
-from jernerics_server.dashboard import DashboardContext
+from jernerics_server.dashboard import DashboardContext, workspace
 from jernerics_server.dashboard.analysis import tray_summary
 from jernerics_server.dashboard.auth import COOKIE_NAME
 from jernerics_server.dashboard.callbacks import page_content
@@ -515,3 +516,32 @@ def _declare_artifact(client: TestClient, artifact_id: uuid.UUID) -> None:
         headers={"Authorization": f"Bearer {API_KEY}"},
     )
     assert response.status_code == 200, response.text
+
+
+class TestLineageStoreCap:
+    """jernerics-g6t: the sweep inspector's lineage store stays bounded
+    by keeping the newest whole retry families."""
+
+    def test_under_cap_passes_through(self):
+        lineage = [{"trial_id": "t", "parent": "", "root": "r", "index": 0}]
+        assert workspace._lineage_store_rows(lineage) is lineage
+
+    def test_cap_keeps_whole_families_and_drops_the_oldest(self):
+        lineage = [
+            {
+                "trial_id": f"t{root}-{index}",
+                "parent": "",
+                "root": f"r{root}",
+                "index": index,
+            }
+            for root in range(3)
+            for index in range(root + 1)
+        ]
+        with mock.patch.object(workspace, "_LINEAGE_STORE_CAP", 4):
+            kept = workspace._lineage_store_rows(lineage)
+        assert [entry["root"] for entry in kept] == ["r2", "r2", "r2"]
+
+    def test_single_oversized_family_drops_to_empty(self):
+        lineage = [{"trial_id": "t", "parent": "", "root": "r", "index": i} for i in range(3)]
+        with mock.patch.object(workspace, "_LINEAGE_STORE_CAP", 2):
+            assert workspace._lineage_store_rows(lineage) == []

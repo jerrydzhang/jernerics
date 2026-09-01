@@ -1048,6 +1048,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input("overview-sweep-grid", "cellClicked"),
         Input({"focus-family": dash.ALL}, "cellClicked"),
         Input("analysis-family-grid", "cellClicked"),
+        Input({"focus-executions": dash.ALL}, "cellClicked"),
         State("view-store", "data"),
         prevent_initial_call=True,
     )
@@ -1058,6 +1059,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         overview_click: dict | None,
         family_clicks: list,
         browser_family_click: dict | None,
+        executions_click: dict | None,
         current: dict | None,
     ):
         triggered = dash.callback_context.triggered_prop_ids
@@ -1073,6 +1075,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             elif '"focus-family"' in text:
                 click = next((c for c in reversed(family_clicks) if c), None)
                 kind = "trial"
+            elif '"focus-executions"' in text:
+                click, kind = executions_click, "execution"
             if click is None or kind is None:
                 continue
             row_id = str((click or {}).get("rowId") or "")

@@ -646,6 +646,83 @@ class TestInspectorFactsGuard:
         assert "dd200000" in response.text
         assert payload["inspector-render-store"]["data"]["digest"] != rendered["digest"]
 
+    def test_sweep_inspector_renders_executions_through_the_grid(
+        self, authed, callback_map
+    ):
+        client, _store = authed
+        response, _payload = self._fire(client, callback_map, self._focused(), None)
+        assert response.status_code == 200
+        assert "focus-executions" in response.text
+
+
+class TestExecutionsGridFocus:
+    """The sweep inspector's executions grid focuses an execution on row
+    click, replacing the plain table's per-row focus buttons."""
+
+    _EDIT_INPUT_IDS = {
+        '{"focus-object":["ALL"]}',
+        "inspector-close",
+        "sweep-grid",
+        "overview-sweep-grid",
+        '{"focus-family":["ALL"]}',
+        "analysis-family-grid",
+        '{"focus-executions":["ALL"]}',
+    }
+
+    def _click(self, client, cmap, click):
+        key = _callback_key(cmap, {"view-store.data"}, self._EDIT_INPUT_IDS)
+        return _dispatch(
+            client,
+            cmap,
+            {"view-store.data"},
+            inputs=[
+                {
+                    "id": {"focus-object": "sweep:aaaaaaaa"},
+                    "property": "n_clicks",
+                    "value": None,
+                },
+                {"id": "inspector-close", "property": "n_clicks", "value": None},
+                {"id": "sweep-grid", "property": "cellClicked", "value": None},
+                {
+                    "id": "overview-sweep-grid",
+                    "property": "cellClicked",
+                    "value": None,
+                },
+                {
+                    "id": "analysis-family-grid",
+                    "property": "cellClicked",
+                    "value": None,
+                },
+                {
+                    "id": {"focus-family": "grid"},
+                    "property": "cellClicked",
+                    "value": None,
+                },
+                {
+                    "id": {"focus-executions": "grid"},
+                    "property": "cellClicked",
+                    "value": click,
+                },
+            ],
+            state=[{"id": "view-store", "property": "data", "value": None}],
+            changed=['{"focus-executions": "grid"}.cellClicked'],
+            key=key,
+        )
+
+    def test_row_click_focuses_the_execution(self, authed, callback_map):
+        client, _store = authed
+        response, payload = self._click(client, callback_map, {"rowId": str(EXEC_A)})
+        assert response.status_code == 200
+        assert payload["view-store"]["data"]["focus"] == {
+            "kind": "execution",
+            "id": str(EXEC_A),
+        }
+
+    def test_click_without_a_row_id_is_skipped(self, authed, callback_map):
+        client, _store = authed
+        response, _payload = self._click(client, callback_map, {"rowId": ""})
+        assert response.status_code == 204
+
 
 _HYDRATION_OUTPUTS = {
     "analysis-message-store.data",

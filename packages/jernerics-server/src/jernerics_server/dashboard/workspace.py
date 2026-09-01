@@ -498,6 +498,73 @@ def detail_curation(overview: SweepSummary) -> html.Div:
     return html.Div([*curation_banners(overview), actions])
 
 
+_PROGRESS_SHOWN = 10
+
+_LINEAGE_STORE_CAP = 1000
+
+_EXECUTION_ROW_ID: Any = "params.data.execution_id"
+
+_EXECUTION_GRID_COLUMNS: list[dict[str, Any]] = [
+    {
+        "headerName": "Monitoring",
+        "field": "monitoring",
+        "cellClass": {"function": "'cell-state state-' + (params.value || 'unknown')"},
+    },
+    {"headerName": "Execution", "field": "execution_short"},
+    {"headerName": "Host", "field": "host"},
+    {"headerName": "Started", "field": "started", "tooltipField": "started_at"},
+    {"headerName": "Ended", "field": "ended", "tooltipField": "ended_at"},
+]
+
+
+def _execution_grid_rows(
+    executions: Sequence[ExecutionRecord], now_ns: int
+) -> list[dict[str, Any]]:
+    """One virtualized grid row per execution: monitoring label, focus
+    target, host, and relative recency with absolute tooltips."""
+    started_ns = [
+        components.datetime_to_ns(record.started_at) for record in executions
+    ]
+    ended_ns = [
+        None if record.ended_at is None else components.datetime_to_ns(record.ended_at)
+        for record in executions
+    ]
+    return [
+        {
+            "execution_id": str(record.execution_id),
+            "monitoring": record.monitoring or UNKNOWN,
+            "execution_short": short_id(str(record.execution_id)),
+            "host": components.short_host(record.hostname),
+            "started": components.relative_time(row_started, now_ns),
+            "started_at": components.absolute_time(row_started),
+            "ended": (
+                UNKNOWN
+                if row_ended is None
+                else components.relative_time(row_ended, now_ns)
+            ),
+            "ended_at": (
+                UNKNOWN if row_ended is None else components.absolute_time(row_ended)
+            ),
+        }
+        for record, row_started, row_ended in zip(
+            executions, started_ns, ended_ns, strict=True
+        )
+    ]
+
+
+def _lineage_store_rows(lineage: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Newest whole retry families up to the store cap; trimmed roots
+    report no lineage facts in the side panel."""
+    if len(lineage) <= _LINEAGE_STORE_CAP:
+        return lineage
+    trimmed = lineage[-_LINEAGE_STORE_CAP:]
+    head = trimmed[0]["root"]
+    for index, entry in enumerate(trimmed):
+        if entry["root"] != head:
+            return trimmed[index:]
+    return []
+
+
 def _sweep_sections(detail: SweepDetail, now_ns: int) -> list[Any]:
     overview = detail.overview
     return [
@@ -523,11 +590,36 @@ def _sweep_sections(detail: SweepDetail, now_ns: int) -> list[Any]:
             className="section",
         ),
         html.Section(
-            [html.H3("Executions"), _executions_table(detail.executions, now_ns)],
+            [
+                html.H3("Executions"),
+                AgGrid(
+                    id={"focus-executions": "grid"},
+                    rowData=_execution_grid_rows(detail.executions, now_ns),
+                    columnDefs=_EXECUTION_GRID_COLUMNS,
+                    defaultColDef={**_GRID_DEFAULTS, "minWidth": 90},
+                    dashGridOptions=components.grid_options(),
+                    getRowId=_EXECUTION_ROW_ID,
+                    className="ag-theme-alpine grid",
+                ),
+            ],
             className="section",
         ),
         html.Section(
-            [html.H3("In-flight progress"), _progress_list(detail.progress)],
+            [
+                html.H3("In-flight progress"),
+                _progress_list(detail.progress[:_PROGRESS_SHOWN]),
+                *(
+                    [
+                        html.P(
+                            f"…and {len(detail.progress) - _PROGRESS_SHOWN} more "
+                            "in flight",
+                            className="hint",
+                        )
+                    ]
+                    if len(detail.progress) > _PROGRESS_SHOWN
+                    else []
+                ),
+            ],
             className="section",
         ),
         html.Section(
@@ -557,7 +649,10 @@ def _sweep_sections(detail: SweepDetail, now_ns: int) -> list[Any]:
             ],
             className="section",
         ),
-        dcc.Store(id="family-lineage-store", data={"lineage": detail.lineage}),
+        dcc.Store(
+            id="family-lineage-store",
+            data={"lineage": _lineage_store_rows(detail.lineage)},
+        ),
     ]
 
 
