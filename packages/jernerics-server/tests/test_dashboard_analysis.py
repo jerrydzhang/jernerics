@@ -35,6 +35,7 @@ from jernerics_schema import (
     decode_selection,
     encode_selection,
 )
+from jernerics_server.dashboard import components
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
     VIEW_VERSION,
@@ -617,6 +618,52 @@ def _grids(page):
     return _walk(page, lambda node: isinstance(node, AgGrid))
 
 
+def _points_service(
+    values: dict[str, dict[str, Any]],
+    value_keys: list[dict[str, Any]],
+    params: dict[str, dict[str, Any]],
+    param_keys: list[str],
+) -> Any:
+    """Duck-typed service returning one shaped analysis_points payload."""
+
+    class _PointsService:
+        def analysis_points(self, project: str | None, tray: dict | None) -> dict:
+            return {
+                "trials": [
+                    {"number": 1, "trial_id": "cc320000-0000-4000-8000-000000000000"}
+                ],
+                "value_keys": value_keys,
+                "values": values,
+                "param_keys": param_keys,
+                "params": params,
+            }
+
+    return _PointsService()
+
+
+class TestClampPolicy:
+    """jernerics-l8f: one truncation policy — single line, ellipsis,
+    full value preserved for the tooltip/affordance."""
+
+    def test_short_text_passes_through(self):
+        assert components.clamp_text("lr · 3/6") == "lr · 3/6"
+
+    def test_long_text_clamps_with_ellipsis(self):
+        clamped = components.clamp_text("x" * 500)
+        assert clamped == "x" * (components.TEXT_LIMIT - 1) + components.ELLIPSIS
+        assert len(clamped) == components.TEXT_LIMIT
+
+    def test_whitespace_folds_to_one_line(self):
+        assert components.clamp_text("a\nb\n---\nc") == "a b --- c"
+
+    def test_tooltip_carries_the_full_value(self):
+        full = '{"blob": "' + "x" * 500 + '"}'
+        tip = components.clamp_tooltip(full)
+        assert tip.title == full
+        assert tip.children == components.clamp_text(full)
+        assert tip.children.endswith(components.ELLIPSIS)
+
+
 def _pres(page):
     return _walk(page, lambda node: type(node).__name__ == "Pre")
 
@@ -1096,6 +1143,7 @@ class TestPointsTable:
         tb_row = next(
             row for label, row in value_rows.items() if label.startswith("#1 cc32")
         )
+
         assert tb_row["summary"] == json.dumps(
             {"acc": 0.91, "epochs": 2, "notes": "beta run"},
             indent=2,
@@ -1114,6 +1162,40 @@ class TestPointsTable:
         assert tc_row["lr"] == "—"
         assert tc_row["seed"] == "—"
         assert tc_row["lr"] != "0.2"
+
+    def test_large_json_payload_keeps_full_text_with_clamped_cell(self):
+        payload = {"blob": "x" * 4096, "ok": True}
+        text = json.dumps(payload, indent=2, sort_keys=True)
+        assert len(text) > components.TEXT_LIMIT
+        service = _points_service(
+            values={"cc320000-0000-4000-8000-000000000000": {"summary": [payload]}},
+            value_keys=[{"key": "summary", "kind": "json"}],
+            params={},
+            param_keys=[],
+        )
+        page = points_tab(service, PROJECT, _tray())
+        values_grid, params_grid = _grids(page)
+        column = values_grid.columnDefs[1]
+        assert column["cellRenderer"] == "ClampedCell"
+        assert column["clampLimit"] == components.TEXT_LIMIT
+        assert column["maxWidth"] == 480
+        row = values_grid.rowData[0]
+        assert row["summary"] == text
+
+    def test_large_param_value_gets_the_same_treatment(self):
+        value = "y" * 4096
+        service = _points_service(
+            values={},
+            value_keys=[],
+            params={"cc320000-0000-4000-8000-000000000000": {"config": value}},
+            param_keys=["config"],
+        )
+        page = points_tab(service, PROJECT, _tray())
+        _values_grid, params_grid = _grids(page)
+        column = params_grid.columnDefs[1]
+        assert column["cellRenderer"] == "ClampedCell"
+        assert column["clampLimit"] == components.TEXT_LIMIT
+        assert params_grid.rowData[0]["config"] == value
 
     def test_presence_counts_in_column_headers(self, service):
         page = points_tab(

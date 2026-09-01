@@ -27,7 +27,7 @@ from dash_ag_grid import AgGrid
 from jernerics_schema import Selection, SelectionTokenError, encode_selection
 
 from . import components, figures
-from .components import MISSING, Empty, Error, relative_time, short_id
+from .components import MISSING, TEXT_LIMIT, Empty, Error, relative_time, short_id
 from .routes import ROUTES_BASE, parse_route
 from .selection_tokens import decode_selection_token
 from .service import ANALYSIS_REDUCTIONS, DashboardService
@@ -1563,6 +1563,19 @@ def _format_payload(payload: Any) -> str:
     return str(payload)
 
 
+def _clamped_column() -> dict[str, Any]:
+    """Shared clamp/expand treatment for payload cells (jernerics-7v6):
+    the full text stays in rowData and stays copyable through cell text
+    selection, while the renderer clamps the display and opens the full
+    value with one click."""
+    return {
+        "cellRenderer": "ClampedCell",
+        "clampLimit": TEXT_LIMIT,
+        "minWidth": 160,
+        "maxWidth": 480,
+    }
+
+
 def _cell(payloads: list[Any] | None) -> str:
     """All logged payloads for one (trial, key); missing cells render as
     the em dash marker."""
@@ -1599,6 +1612,7 @@ def points_tab(
                     f"{entry['key']} · {entry['kind']} · {present}/{len(labels)}"
                 ),
                 "field": entry["key"],
+                **_clamped_column(),
             }
         )
     value_rows = []
@@ -1622,6 +1636,7 @@ def points_tab(
             {
                 "headerName": f"{key} · {present}/{len(labels)}",
                 "field": key,
+                **_clamped_column(),
             }
         )
     param_rows = []
@@ -1643,6 +1658,11 @@ def points_tab(
             html.Section(
                 [
                     html.H3("Point values (non-step keys)"),
+                    html.P(
+                        "Long values clamp; click a clamped cell to open the full "
+                        "payload.",
+                        className="hint",
+                    ),
                     AgGrid(
                         rowData=value_rows,
                         columnDefs=value_columns,
@@ -1656,6 +1676,11 @@ def points_tab(
             html.Section(
                 [
                     html.H3("Params"),
+                    html.P(
+                        "Long values clamp; click a clamped cell to open the full "
+                        "value.",
+                        className="hint",
+                    ),
                     AgGrid(
                         rowData=param_rows,
                         columnDefs=param_columns,

@@ -274,6 +274,37 @@ a.project-row:hover {
   height: 26rem;
 }
 
+/* Clamped payload cells (jernerics-7v6): the ellipsis marks the cut
+   and one click reopens the full value in a fixed overlay, so no
+   payload can stretch the grid or its section. */
+.grid .clamped-cell {
+  display: block;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: zoom-in;
+}
+
+.payload-popover {
+  position: fixed;
+  z-index: 2000;
+  max-width: min(56rem, calc(100vw - 1.5rem));
+  max-height: min(70vh, 40rem);
+  overflow: auto;
+  background: #fff;
+  border: 1px solid #c5c8d6;
+  border-radius: 6px;
+  box-shadow: 0 0.4rem 1.2rem rgba(20, 24, 46, 0.25);
+  padding: 0.6rem 0.75rem;
+}
+
+.payload-popover pre {
+  margin: 0;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .hint {
   color: #666;
   font-size: 0.85rem;

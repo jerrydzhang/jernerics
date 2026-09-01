@@ -11,6 +11,26 @@ from dash.development.base_component import Component
 UNKNOWN = "unknown"
 MISSING = "—"
 
+TEXT_LIMIT = 120
+ELLIPSIS = "…"
+
+
+def clamp_text(value: Any, limit: int = TEXT_LIMIT) -> str:
+    """Single-line bounded text — the shared truncation policy
+    (jernerics-l8f): whitespace folds so headers and summary strings
+    stay one line tall, long values end with an ellipsis."""
+    text = " ".join(str(value).split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + ELLIPSIS
+
+
+def clamp_tooltip(value: Any, limit: int = TEXT_LIMIT) -> html.Abbr:
+    """Clamped text carrying the full value in its title attribute —
+    the plain-HTML half of the shared policy (jernerics-l8f)."""
+    text = " ".join(str(value).split())
+    return html.Abbr(clamp_text(text, limit), title=text)
+
 
 def short_id(identifier: str | None) -> str:
     """Compact identity for grids and tables (first 8 hex chars)."""
