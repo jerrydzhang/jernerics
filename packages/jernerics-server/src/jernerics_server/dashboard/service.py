@@ -264,6 +264,32 @@ def _parse_id(value: str) -> uuid.UUID | None:
         return None
 
 
+def _summary_facts(summary: SweepSummary) -> tuple:
+    """Overview row as a digest-stable tuple of stored facts."""
+    return (
+        str(summary.sweep_id),
+        summary.name,
+        summary.state,
+        summary.backend,
+        summary.submitted_jobs,
+        summary.expected_trials,
+        summary.started,
+        summary.terminal,
+        summary.active,
+        summary.quiet,
+        summary.stale,
+        summary.unknown,
+        summary.succeeded,
+        summary.failed,
+        summary.latest_submitted_ns,
+        summary.waiting_trials,
+        summary.running_trials,
+        summary.archived_ns,
+        summary.invalid_ns,
+        summary.invalid_reason,
+    )
+
+
 @dataclass(frozen=True)
 class DashboardService:
     """The only data doorway callbacks are allowed to use."""
@@ -411,6 +437,57 @@ class DashboardService:
         except StoreError as error:
             raise CurationRejectedError(_curation_error(error)) from error
         return self.sweep_label(sweep_id)
+
+    def sweep_incomplete(self, sweep_id: str) -> bool:
+        """One sweep's liveness from its overview row; the cheap read the
+        poll gates use instead of the full detail."""
+        parsed = _parse_id(sweep_id)
+        if parsed is None:
+            return False
+        context = self.queries.sweep_context(parsed)
+        if context is None:
+            return False
+        rows = self.sweep_overview(str(context["project"]), [sweep_id])
+        return bool(rows) and rows[0].incomplete
+
+    def sweep_facts(self, sweep_id: str) -> dict[str, Any] | None:
+        """Digest-stable inspector facts for one sweep: the overview row
+        plus bounded job and in-flight progress identities — no rendered
+        tree, nothing wall-clock derived — so a tick without a fact
+        change skips the sweep-detail tree build entirely."""
+        parsed = _parse_id(sweep_id)
+        if parsed is None:
+            return None
+        context = self.queries.sweep_context(parsed)
+        if context is None:
+            return None
+        project = str(context["project"])
+        rows = self.sweep_overview(project, [sweep_id])
+        if not rows:
+            return None
+        selection = self.selection(project, [sweep_id])
+        return {
+            "overview": _summary_facts(rows[0]),
+            "jobs": [
+                (
+                    str(job["submission_id"]),
+                    str(job["submission_state"] or ""),
+                    str(job["job_id"] or ""),
+                    str(job["job_state"] or ""),
+                )
+                for job in self.queries.submission_jobs(selection)
+            ],
+            "progress": [
+                (
+                    str(row["execution_id"]),
+                    row["current"],
+                    row["total"],
+                    str(row["unit"] or ""),
+                )
+                for row in self.queries.execution_progress(selection)
+                if row["ended_ns"] is None
+            ],
+        }
 
     def sweep_detail(self, sweep_id: str) -> SweepDetail | None:
         """Sweep page data; ``None`` when the id matches no sweep."""

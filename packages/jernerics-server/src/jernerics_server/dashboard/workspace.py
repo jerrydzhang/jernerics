@@ -1466,8 +1466,7 @@ def focus_incomplete(service: DashboardService, focus: dict[str, Any] | None) ->
         return False
     kind, object_id = focus.get("kind"), str(focus.get("id") or "")
     if kind == "sweep":
-        detail = service.sweep_detail(object_id)
-        return detail is not None and detail.overview.incomplete
+        return service.sweep_incomplete(object_id)
     if kind == "trial":
         detail = service.trial_detail(object_id)
         return detail is not None and any(

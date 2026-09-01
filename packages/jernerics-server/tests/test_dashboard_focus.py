@@ -1,4 +1,5 @@
 import uuid
+from unittest import mock
 
 from jernerics_server.dashboard.analysis import (
     auto_refresh_flip,
@@ -15,6 +16,7 @@ from jernerics_server.dashboard.analysis import (
     view_query,
     with_focus,
 )
+from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.callbacks import focus_from_trigger
 
 SWEEP_A = uuid.UUID("aa110000-0000-4000-8000-000000000000")
@@ -254,3 +256,28 @@ class TestFocusFromTrigger:
     def test_nothing_focusable_fires(self):
         assert focus_from_trigger([]) == ""
         assert focus_from_trigger([{"prop_id": "url.pathname", "value": "/x"}]) == ""
+
+
+class TestFocusIncompleteCheapRead:
+    """jernerics-g6t: sweep liveness comes from the cheap overview-row
+    read; the full sweep detail fetch stays out of every poll gate."""
+
+    def test_sweep_focus_answers_from_the_cheap_read(self):
+        service = mock.Mock(spec=["sweep_incomplete", "sweep_detail"])
+        service.sweep_incomplete.return_value = True
+        focus = {"kind": "sweep", "id": str(SWEEP_A)}
+        assert workspace.focus_incomplete(service, focus) is True
+        service.sweep_incomplete.assert_called_once_with(str(SWEEP_A))
+        service.sweep_detail.assert_not_called()
+
+    def test_non_sweep_kinds_keep_their_detail_reads(self):
+        service = mock.Mock(spec=["trial_detail", "execution_detail"])
+        service.trial_detail.return_value = None
+        service.execution_detail.return_value = None
+        assert (
+            workspace.focus_incomplete(service, {"kind": "trial", "id": "t1"}) is False
+        )
+        assert (
+            workspace.focus_incomplete(service, {"kind": "execution", "id": "e1"})
+            is False
+        )
