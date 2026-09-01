@@ -13,6 +13,7 @@ from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
 from .service import (
     DashboardService,
     ExecutionDetail,
+    FailedExecutionRow,
     FamilyRow,
     SweepDetail,
     SweepSummary,
@@ -24,6 +25,8 @@ FOCUS_KINDS = ("sweep", "trial", "execution")
 
 _INCOMPLETE_TRIAL_STATES = ("waiting", "running")
 
+
+_FAILED_VIEW_LIMIT = 200
 _MONITORING_ORDER = ("active", "quiet", "stale", "failed", "succeeded", UNKNOWN)
 
 _GRID_DEFAULTS: dict[str, Any] = {
@@ -982,7 +985,7 @@ def overview_rollup(scoped: Sequence[SweepSummary], now_ns: int) -> html.Section
             ),
             html.P(
                 [
-                    *_monitoring_badges(monitoring),
+                    *_rollup_monitoring(monitoring),
                     html.Span(f"in-flight executions {in_flight}"),
                     html.Span(
                         "last activity "
@@ -998,6 +1001,26 @@ def overview_rollup(scoped: Sequence[SweepSummary], now_ns: int) -> html.Section
         ],
         className="section overview-rollup",
     )
+
+
+def _rollup_monitoring(counts: dict[str, int]) -> list[Any]:
+    """Roll-up monitoring pills; the failed pill opens the failure view."""
+    badges: list[Any] = []
+    for label in _MONITORING_ORDER:
+        count = counts.get(label)
+        if not count:
+            continue
+        if label == "failed":
+            badges.append(
+                html.Button(
+                    Badge(f"failed {count}", kind=label),
+                    id="failed-view-open",
+                    title="Show the scope's failed executions",
+                )
+            )
+        else:
+            badges.append(Badge(f"{label} {count}", kind=label))
+    return badges or [html.Span("quiet", className="quiet-note")]
 
 
 def scoped_sweeps(
@@ -1024,6 +1047,91 @@ def scoped_sweeps(
             )
         )
     ]
+
+
+def failed_view_section() -> html.Details:
+    """The collapsed failure view under the roll-up; the failed badge
+    opens it and a callback fills the panel on demand."""
+    return html.Details(
+        [
+            html.Summary("Failed executions"),
+            dcc.Input(
+                id="failed-reason",
+                type="text",
+                placeholder="Reason (required for Mark invalid)",
+                className="reason-input",
+            ),
+            html.Div(id="failed-trials-panel"),
+        ],
+        id="failed-trials-view",
+    )
+
+
+def failed_view_panel(
+    service: DashboardService,
+    project: str,
+    scoped: Sequence[SweepSummary],
+    now_ns: int,
+    message: html.Div | None = None,
+) -> list[Any]:
+    """Children of the failure view: per-sweep groups of failed
+    executions — kind and summary without opening each execution, a
+    focus link per trial, and one mark-invalid action per sweep."""
+    rows = service.failed_executions(
+        project, [s.sweep_id for s in scoped], limit=_FAILED_VIEW_LIMIT
+    )
+    children: list[Any] = []
+    if message is not None:
+        children.append(message)
+    names = {s.sweep_id: s.name for s in scoped}
+    by_sweep: dict[str, list[FailedExecutionRow]] = {}
+    for row in rows:
+        by_sweep.setdefault(row.sweep_id, []).append(row)
+    for sweep_id, group in by_sweep.items():
+        children.append(
+            html.Div(
+                [
+                    html.P(
+                        [
+                            focus_button(
+                                names.get(sweep_id, short_id(sweep_id)),
+                                "sweep",
+                                sweep_id,
+                            ),
+                            html.Button(
+                                "Mark sweep invalid",
+                                id={"failed-invalid": sweep_id},
+                                className="action",
+                            ),
+                        ],
+                        className="failed-sweep-head",
+                    ),
+                    components.DataTable(
+                        ("Trial", "#", "Kind", "Summary", "Last activity"),
+                        [
+                            (
+                                focus_button(
+                                    f"#{row.trial_number}", "trial", row.trial_id
+                                ),
+                                row.trial_number,
+                                row.failure_kind or UNKNOWN,
+                                row.failure_summary or MISSING,
+                                components.relative_time(row.updated_ns, now_ns),
+                            )
+                            for row in group
+                        ],
+                    ),
+                ],
+                className="failed-sweep",
+            )
+        )
+    if not rows:
+        children.append(components.Empty("No failed executions in scope."))
+    elif len(rows) >= _FAILED_VIEW_LIMIT:
+        children.append(
+            html.P("Showing the most recent; narrow the scope.", className="hint")
+        )
+    return children
 
 
 def overview_tab(
@@ -1058,6 +1166,7 @@ def overview_tab(
     return html.Div(
         [
             overview_rollup(scoped, now),
+            *([failed_view_section()] if any(s.failed for s in scoped) else []),
             html.Section(
                 [
                     html.H3("Sweeps in scope"),

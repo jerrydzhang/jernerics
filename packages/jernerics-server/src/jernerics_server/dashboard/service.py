@@ -134,6 +134,20 @@ class SweepSummary:
 
 
 @dataclass(frozen=True)
+class FailedExecutionRow:
+    """One failed execution in the scope-wide failure view."""
+
+    sweep_id: str
+    sweep_name: str
+    trial_id: str
+    trial_number: int
+    execution_id: str
+    failure_kind: str | None
+    failure_summary: str | None
+    updated_ns: int
+
+
+@dataclass(frozen=True)
 class FamilyRow:
     """One retry family (root trial) in the sweep page grid."""
 
@@ -322,6 +336,33 @@ class DashboardService:
                 invalid_reason=row["invalid_reason"],
             )
             for row in self.queries.sweep_overview(selection)
+        ]
+
+    def failed_executions(
+        self,
+        project: str,
+        sweep_ids: Sequence[str] = (),
+        *,
+        limit: int = 200,
+    ) -> list[FailedExecutionRow]:
+        """Failed executions under the project (optionally narrowed to
+        sweeps), curated terminal sweeps excluded, most recent first."""
+        selection = Selection(
+            project=project,
+            sweeps=tuple(uuid.UUID(s) for s in sweep_ids) or None,
+        )
+        return [
+            FailedExecutionRow(
+                sweep_id=row["sweep_id"],
+                sweep_name=row["sweep_name"],
+                trial_id=row["trial_id"],
+                trial_number=row["trial_number"],
+                execution_id=row["execution_id"],
+                failure_kind=row["failure_kind"],
+                failure_summary=row["failure_summary"],
+                updated_ns=row["updated_ns"],
+            )
+            for row in self.queries.failed_executions(selection, limit=limit)
         ]
 
     def _curation_store(self) -> Store:

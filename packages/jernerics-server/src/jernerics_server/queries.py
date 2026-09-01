@@ -1096,6 +1096,52 @@ class QueryService:
             for row in rows
         ]
 
+    def failed_executions(
+        self, selection: Selection, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        """Failed executions under the selection, most recent first;
+        sweeps hidden by curation stay out so the list matches the
+        overview roll-up's failed counts."""
+        sweep_ids = self._selected_sweep_ids(selection)
+        if sweep_ids == []:
+            return []
+        scope = "cur.project = ?"
+        params: list[Any] = [selection.project]
+        if sweep_ids is not None:
+            params.extend(sweep_ids)
+            scope += f" AND cur.sweep_id IN ({_placeholders(len(sweep_ids))})"
+        params.append(limit)
+        _, rows = self._store.query(
+            f"WITH {_CURRENT_SWEEPS_CTES} "
+            "SELECT cur.sweep_id, cur.name, t.trial_id, t.number, "
+            "e.execution_id, e.failure_kind, e.failure_summary, e.updated_ns "
+            "FROM executions e "
+            "JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN current_sweeps cur ON cur.sweep_id = t.sweep_id "
+            f"WHERE {scope} AND e.outcome = 'failure' "
+            "ORDER BY e.updated_ns DESC, e.execution_id LIMIT ?",
+            params,
+        )
+        return [
+            dict(
+                zip(
+                    (
+                        "sweep_id",
+                        "sweep_name",
+                        "trial_id",
+                        "trial_number",
+                        "execution_id",
+                        "failure_kind",
+                        "failure_summary",
+                        "updated_ns",
+                    ),
+                    row,
+                    strict=True,
+                )
+            )
+            for row in rows
+        ]
+
     def submission_jobs(self, selection: Selection) -> list[dict[str, Any]]:
         """Submission rows with their scheduler jobs attached (LEFT JOIN so
         job-less submissions stay visible); one dict per job-or-submission."""

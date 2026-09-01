@@ -812,6 +812,52 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         )
         return workspace.action_message(ok, report), banner
 
+    # -- Failure view: the roll-up's scope-wide failed executions --------
+
+    @app.callback(
+        Output("failed-trials-panel", "children"),
+        Output("failed-trials-view", "open"),
+        Input("failed-view-open", "n_clicks"),
+        Input({"failed-invalid": dash.ALL}, "n_clicks"),
+        State("failed-reason", "value"),
+        State("project-store", "data"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _drive_failed_view(
+        _open: int | None,
+        _invalid: list,
+        reason: str | None,
+        project: str | None,
+        view_doc: dict | None,
+    ):
+        # One entry point: the roll-up's failed badge opens and fills
+        # the view; a group's Mark invalid acts, then re-renders it.
+        value, name = pattern_trigger(dash.callback_context)
+        scoped = workspace.scoped_sweeps(
+            service.sweep_overview(project or ""), (view_doc or {}).get("scope")
+        )
+        if name == "failed-invalid" and value:
+            ok, report = apply_curation(
+                service, "invalid", [str(value)], reason or ""
+            )
+            return (
+                workspace.failed_view_panel(
+                    service,
+                    project or "",
+                    scoped,
+                    time.time_ns(),
+                    workspace.action_message(ok, report),
+                ),
+                no_update,
+            )
+        return (
+            workspace.failed_view_panel(
+                service, project or "", scoped, time.time_ns()
+            ),
+            True,
+        )
+
     # -- Focus: the inspector region --------------------------------------
 
     @app.callback(

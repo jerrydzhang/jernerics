@@ -71,10 +71,12 @@ from jernerics_server.dashboard.workspace import (
     curation_note,
     curation_transitions,
     detail_curation,
+    failed_view_panel,
     family_grid_row,
     inspector_content,
     overview_rollup,
     overview_tab,
+    scoped_sweeps,
     selection_transitions,
 )
 from jernerics_server.http import create_app
@@ -1827,6 +1829,154 @@ class TestMountedCurationJourney:
         assert row_ids == [str(SWEEP_A), str(SWEEP_B)]
         picked = [row["sweep_id"] for row in response["sweep-grid"]["selectedRows"]]
         assert picked == [str(SWEEP_B)]
+
+
+class TestFailureView:
+    """jernerics-gcj: the roll-up's failed badge opens a scope-wide
+    failure view; kind and summary read inline, trials focus in one
+    click, and marking the sweep invalid acts from that context."""
+    _dispatch = TestMountedCurationJourney._dispatch
+    _callback_key = staticmethod(TestMountedCurationJourney._callback_key)
+    _callback_map = TestMountedCurationJourney._callback_map
+
+    def test_service_lists_failed_executions_with_kind_and_summary(self, service):
+        rows = service.failed_executions("ops")
+        assert [(row.trial_number, row.failure_kind) for row in rows] == [
+            (1, "exception")
+        ]
+        row = rows[0]
+        assert row.sweep_id == str(SWEEP_A)
+        assert row.sweep_name == "alpha"
+        assert row.trial_id == str(F0)
+        assert row.failure_summary == "boom: divide by zero"
+
+    def test_hidden_curated_sweep_failures_stay_out(self, curated):
+        store, service = curated
+        now = datetime.now(UTC)
+        failure = uuid.uuid4()
+        result = IngestService(store).apply(
+            IngestRequest(
+                protocol_version=PROTOCOL_VERSION,
+                events=[
+                    ExecutionStartEvent(
+                        event_id=uuid.uuid4(),
+                        recorded_at=now,
+                        execution_id=failure,
+                        trial_id=CUR_T1,
+                        hostname="node01",
+                        started_at=now,
+                    ),
+                    ExecutionEndEvent(
+                        event_id=uuid.uuid4(),
+                        recorded_at=now,
+                        execution_id=failure,
+                        ended_at=now,
+                        outcome="failure",
+                        exit_code=1,
+                        failure_kind="timeout",
+                        failure_summary="killed after 3600s",
+                    ),
+                ],
+            )
+        )
+        assert not result.conflicts
+        assert [row.failure_kind for row in service.failed_executions("curate")] == [
+            "timeout"
+        ]
+        store.mark_sweep_invalid(str(CUR_SWEEP_OLD), "bad shard map")
+        assert service.failed_executions("curate") == []
+
+    def test_panel_groups_failures_with_focus_and_summary(self, service):
+        scoped = scoped_sweeps(service.sweep_overview("ops"), None)
+        rendered = str(failed_view_panel(service, "ops", scoped, 0))
+        assert "boom: divide by zero" in rendered
+        assert "exception" in rendered
+        assert _focus_ref("trial", F0) in rendered
+        assert _focus_ref("sweep", SWEEP_A) in rendered
+        assert "Mark sweep invalid" in rendered
+
+    def test_overview_embeds_failure_view_only_when_failing(self, service):
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        rendered = str(overview)
+        assert "failed-trials-view" in rendered
+        assert "failed-view-open" in rendered
+        assert "failed 1" in rendered
+        beta = scoped_sweeps(
+            service.sweep_overview("ops"), {"sweeps": [str(SWEEP_B)]}
+        )
+        panel = failed_view_panel(service, "ops", beta, 0)
+        assert "No failed executions in scope." in str(panel)
+
+    def test_failure_view_absent_without_failures(self, curated):
+        _store, service = curated
+        rendered = str(overview_tab(service, "curate", {"sweeps": []}))
+        assert "failed-trials-view" not in rendered
+
+    _FAILED_OUTPUTS = {"failed-trials-panel.children", "failed-trials-view.open"}
+
+    def _failed_state(self, reason: str) -> list[dict]:
+        return [
+            {"id": "failed-reason", "property": "value", "value": reason},
+            {"id": "project-store", "property": "data", "value": "ops"},
+            {"id": "view-store", "property": "data", "value": None},
+        ]
+
+    def _failed_inputs(self, sweep_id: uuid.UUID, clicks: int) -> list[dict]:
+        return [
+            {"id": "failed-view-open", "property": "n_clicks", "value": 1},
+            {
+                "id": {"failed-invalid": str(sweep_id)},
+                "property": "n_clicks",
+                "value": clicks,
+            },
+        ]
+
+    def test_badge_opens_panel_with_kind_and_summary(self, mutable_client):
+        _store, client = mutable_client
+        callback_map = self._callback_map(client)
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._FAILED_OUTPUTS,
+            self._failed_inputs(SWEEP_A, 0),
+            state=self._failed_state(""),
+            changed=["failed-view-open.n_clicks"],
+        )
+        assert response["failed-trials-view"]["open"] is True
+        children = str(response["failed-trials-panel"]["children"])
+        assert "boom: divide by zero" in children
+        assert "exception" in children
+
+    def test_mark_invalid_from_failure_view_persists_reason(self, mutable_client):
+        store, client = mutable_client
+        callback_map = self._callback_map(client)
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._FAILED_OUTPUTS,
+            self._failed_inputs(SWEEP_A, 1),
+            state=self._failed_state("bad shards"),
+            changed=[f'{{"failed-invalid": "{SWEEP_A}"}}.n_clicks'],
+        )
+        row = store._curation_row(str(SWEEP_A))
+        assert row[1] is not None and row[2] == "bad shards"
+        children = str(response["failed-trials-panel"]["children"])
+        assert "Marked invalid" in children
+
+    def test_mark_invalid_without_reason_is_rejected(self, mutable_client):
+        store, client = mutable_client
+        callback_map = self._callback_map(client)
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._FAILED_OUTPUTS,
+            self._failed_inputs(SWEEP_A, 1),
+            state=self._failed_state("   "),
+            changed=[f'{{"failed-invalid": "{SWEEP_A}"}}.n_clicks'],
+        )
+        children = str(response["failed-trials-panel"]["children"])
+        assert "requires a reason" in children
+        assert store._curation_row(str(SWEEP_A))[1] is None
 
 
 def _find_pres(node: Component) -> list[html.Pre]:
