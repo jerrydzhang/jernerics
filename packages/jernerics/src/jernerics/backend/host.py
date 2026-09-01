@@ -66,6 +66,7 @@ class StdoutHost:
     """
 
     is_local = False
+    emits_scripts = True
 
     def __init__(self, home: str = "") -> None:
         self.home = home
