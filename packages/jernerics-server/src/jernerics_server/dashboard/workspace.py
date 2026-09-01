@@ -57,6 +57,15 @@ def sweep_curation(summary: SweepSummary) -> str:
     return ""
 
 
+def hidden_curation(
+    summary: SweepSummary, *, include_archived: bool, include_invalid: bool
+) -> bool:
+    """True when the include controls keep this sweep out of discovery."""
+    return (summary.invalid and not include_invalid) or (
+        summary.archived and not summary.invalid and not include_archived
+    )
+
+
 def browser_sweep_rows(
     summaries: Sequence[SweepSummary],
     tray: dict[str, Any] | None,
@@ -71,16 +80,16 @@ def browser_sweep_rows(
     controls reveal them; sweeps already picked are never dropped, and
     incomplete sweeps always stay discoverable.
     """
-
     now = time.time_ns() if now_ns is None else now_ns
     picked = set((tray or {}).get("sweeps") or [])
     rows = []
     for summary in summaries:
-        hidden_curation = (summary.invalid and not include_invalid) or (
-            summary.archived and not summary.invalid and not include_archived
-        )
         if (
-            hidden_curation
+            hidden_curation(
+                summary,
+                include_archived=include_archived,
+                include_invalid=include_invalid,
+            )
             and not summary.incomplete
             and summary.sweep_id not in picked
         ):
@@ -991,12 +1000,39 @@ def overview_rollup(scoped: Sequence[SweepSummary], now_ns: int) -> html.Section
     )
 
 
+def scoped_sweeps(
+    summaries: Sequence[SweepSummary], tray: dict[str, Any] | None
+) -> list[SweepSummary]:
+    """The scope document's sweeps as the overview shows them: picks
+    narrow the project, the include flags reveal curated terminal sweeps,
+    and incomplete or picked sweeps never drop."""
+    scope = tray or {}
+    picked = set(scope.get("sweeps") or [])
+    include_archived = bool(scope.get("include_archived"))
+    include_invalid = bool(scope.get("include_invalid"))
+    return [
+        summary
+        for summary in summaries
+        if (not picked or summary.sweep_id in picked)
+        and (
+            summary.incomplete
+            or summary.sweep_id in picked
+            or not hidden_curation(
+                summary,
+                include_archived=include_archived,
+                include_invalid=include_invalid,
+            )
+        )
+    ]
+
+
 def overview_tab(
     service: DashboardService, project: str | None, tray: dict[str, Any] | None
 ) -> html.Div:
     """Bounded operational summary for the scope: an aggregate roll-up
     plus one virtualized grid row per sweep. Per-sweep depth lives in
-    the inspector; an empty scope means the whole project."""
+    the inspector; an empty scope means the whole project, curated by
+    the Browse include toggles (jernerics-mqw)."""
     if not project:
         return html.Div(
             components.Empty("Pick a project in the header to browse its sweeps.")
@@ -1006,11 +1042,17 @@ def overview_tab(
         return html.Div(
             components.Empty(f"No sweeps tracked for project {project} yet.")
         )
-    picked = set((tray or {}).get("sweeps") or [])
-    scoped = [s for s in summaries if not picked or s.sweep_id in picked]
+    scoped = scoped_sweeps(summaries, tray)
     if not scoped:
+        if (tray or {}).get("sweeps"):
+            return html.Div(
+                components.Empty(f"No picked sweeps remain in project {project}.")
+            )
         return html.Div(
-            components.Empty(f"No picked sweeps remain in project {project}.")
+            components.Empty(
+                f"No current sweeps in project {project}; archived or invalid "
+                "sweeps stay hidden until the scope includes them."
+            )
         )
     now = time.time_ns()
     return html.Div(

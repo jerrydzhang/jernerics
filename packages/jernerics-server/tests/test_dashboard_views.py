@@ -1249,6 +1249,75 @@ class TestOverviewTab:
         assert "completed 1" in rendered
 
 
+class TestOverviewCurationVisibility:
+    """jernerics-mqw: the overview region honors the Browse curation
+    semantics — curated terminal sweeps leave roll-up and grid until
+    included, while incomplete and picked sweeps never drop."""
+
+    def test_archived_terminal_sweep_leaves_rollup_and_grid(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        grid = _grid(overview, "overview-sweep-grid")
+        assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_A)]
+        rendered = str(overview)
+        assert "sweeps 1" in rendered
+        assert "completed" not in rendered
+
+    def test_include_archived_brings_the_sweep_back(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        overview = overview_tab(
+            service, "ops", {"sweeps": [], "include_archived": True}
+        )
+        grid = _grid(overview, "overview-sweep-grid")
+        assert {row["sweep_id"] for row in grid.rowData} == {
+            str(SWEEP_A),
+            str(SWEEP_B),
+        }
+        assert "sweeps 2" in str(overview)
+
+    def test_invalid_sweep_needs_its_own_include(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        grid = _grid(overview, "overview-sweep-grid")
+        assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_A)]
+        overview = overview_tab(service, "ops", {"sweeps": [], "include_invalid": True})
+        grid = _grid(overview, "overview-sweep-grid")
+        assert {row["sweep_id"] for row in grid.rowData} == {
+            str(SWEEP_A),
+            str(SWEEP_B),
+        }
+
+    def test_incomplete_curated_sweep_stays_visible(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_A))
+        store.mark_sweep_invalid(str(SWEEP_A), "still running")
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        grid = _grid(overview, "overview-sweep-grid")
+        assert [row["sweep_id"] for row in grid.rowData] == [
+            str(SWEEP_A),
+            str(SWEEP_B),
+        ]
+        assert grid.rowData[0]["curation"] == "invalid"
+
+    def test_picked_curated_sweep_never_disappears(self, store_and_service):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        overview = overview_tab(service, "ops", {"sweeps": [str(SWEEP_B)]})
+        grid = _grid(overview, "overview-sweep-grid")
+        assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
+        assert "sweeps 1" in str(overview)
+
+    def test_fully_curated_project_names_the_curation(self, curated):
+        store, service = curated
+        store.archive_sweep(str(CUR_SWEEP_OLD))
+        store.archive_sweep(str(CUR_SWEEP_NEW))
+        rendered = str(overview_tab(service, "curate", {"sweeps": []}))
+        assert "No current sweeps in project curate" in rendered
+
+
 class TestNoSqlInCallbacks:
     _FORBIDDEN_SQL = re.compile(r"SELECT")
     _FORBIDDEN_MODULES = re.compile(r"sqlite|httpx")
