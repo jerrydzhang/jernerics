@@ -674,25 +674,12 @@ class SlurmAdapter:
         retry_delay = 1.0
 
         if "*" in log_file:
-            is_array_pattern = "%a" in log_pattern and effective_array_index is None
-            if follow and is_array_pattern:
-                print("Error: --follow requires --array-index for array jobs")
-                raise SystemExit(ExitCode.GENERAL_ERROR)
-            for attempt in range(max_retries):
-                result = self.host.run(
-                    [f"cat {log_file}"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
+            if follow:
+                print(
+                    "Error: --follow requires --array-index to select a single log file"
                 )
-                if result.returncode == 0:
-                    print(result.stdout)
-                    return
-                if attempt == 0:
-                    print("Waiting for logs...")
-                time.sleep(retry_delay)
-            print(f"Error: Log files not found: {log_file}")
-            raise SystemExit(ExitCode.GENERAL_ERROR)
+                raise SystemExit(ExitCode.GENERAL_ERROR)
+            self._cat_log(log_file, "Log files not found")
         elif follow:
             for attempt in range(max_retries):
                 result = self.host.run([f"test -f {log_file}"], check=False)
