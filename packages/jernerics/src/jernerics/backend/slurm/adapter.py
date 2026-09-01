@@ -34,6 +34,22 @@ SBATCH_OVERRIDE_KEYS = frozenset(
 )
 
 
+SLURM_TERMINAL_STATES = frozenset(
+    {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "NODE_FAIL",
+        "OUT_OF_MEMORY",
+        "PREEMPTED",
+        "BOOT_FAIL",
+        "DEADLINE",
+        "LAUNCH_FAILED",
+    }
+)
+
+
 def unknown_sbatch_override_message(unknown: set[str]) -> str:
     keys = ", ".join(sorted(unknown))
     valid = ", ".join(sorted(SBATCH_OVERRIDE_KEYS))
@@ -572,18 +588,6 @@ class SlurmAdapter:
         self, job_id: str, poll_interval: float = 30, timeout: float | None = None
     ) -> bool:
         start_time = time.time()
-        terminal_states = {
-            "COMPLETED",
-            "FAILED",
-            "CANCELLED",
-            "TIMEOUT",
-            "NODE_FAIL",
-            "OUT_OF_MEMORY",
-            "PREEMPTED",
-            "BOOT_FAIL",
-            "DEADLINE",
-            "LAUNCH_FAILED",
-        }
         while True:
             if timeout is not None and (time.time() - start_time) >= timeout:
                 raise TimeoutError(
@@ -592,7 +596,7 @@ class SlurmAdapter:
             status = self.get_status(job_id)
             if status is None:
                 return True
-            if status in terminal_states:
+            if status in SLURM_TERMINAL_STATES:
                 return status == "COMPLETED"
             time.sleep(poll_interval)
 
