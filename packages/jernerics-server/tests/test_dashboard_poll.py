@@ -1,5 +1,8 @@
+import json
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from unittest import mock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,6 +26,7 @@ from jernerics_server.dashboard.analysis import (
     expand_values,
     include_values,
 )
+from jernerics_server.dashboard import callbacks, workspace
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
 from jernerics_server.dashboard.service import DashboardService
@@ -42,6 +46,7 @@ ROOT_A = uuid.UUID("cc200000-0000-4000-8000-000000000000")
 ROOT_B = uuid.UUID("cc210000-0000-4000-8000-000000000000")
 TRIAL_A = uuid.UUID("cc100000-0000-4000-8000-000000000000")
 EXEC_A = uuid.UUID("dd100000-0000-4000-8000-000000000000")
+EXEC_B = uuid.UUID("dd200000-0000-4000-8000-000000000000")
 
 _BASE = datetime(2025, 3, 1, 12, 0, 0, tzinfo=UTC)
 
@@ -116,6 +121,25 @@ def _ingest_sweep(store: Store, sweep_id: uuid.UUID, name: str) -> None:
                     sweep_id=sweep_id,
                     name=name,
                     state="completed",
+                )
+            ],
+        )
+    )
+    assert not result.conflicts
+
+
+def _start_execution(store: Store, execution_id: uuid.UUID, seconds_ago: int) -> None:
+    result = IngestService(store).apply(
+        IngestRequest(
+            protocol_version=PROTOCOL_VERSION,
+            events=[
+                _event(
+                    ExecutionStartEvent,
+                    seconds_ago,
+                    execution_id=execution_id,
+                    trial_id=TRIAL_A,
+                    hostname="node01",
+                    started_at=_BASE - timedelta(seconds=seconds_ago),
                 )
             ],
         )
@@ -313,6 +337,75 @@ class TestOverviewPollCascade:
         # a tick never touches the page, the digest, or the route
         assert set(tick) == {"poll"}
 
+    def test_wall_clock_advance_alone_keeps_the_digest(self, authed, callback_map):
+        """jernerics-l4k root cause: relative-time churn must not move
+        the digest — a tick two minutes later ships nothing."""
+        client, _store = authed
+        _response, tracked = self._fire(
+            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
+        )
+        digest = tracked["overview-digest-store"]["data"]["digest"]
+        later = time.time_ns() + 120_000_000_000
+        with mock.patch("time.time_ns", return_value=later):
+            for outputs in (_TRACKER_OUTPUTS, _OVERVIEW_OUTPUTS):
+                tick = self._fire(
+                    client, callback_map, outputs, {"digest": digest}, ["poll.n_intervals"]
+                )
+                assert tick[0].status_code == 204
+
+    def test_unchanged_tick_builds_no_tree(self, authed, callback_map, monkeypatch):
+        client, _store = authed
+        builds = []
+        real = workspace.overview_tab
+
+        def spy(*args, **kwargs):
+            builds.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(workspace, "overview_tab", spy)
+        _response, tracked = self._fire(
+            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
+        )
+        digest = tracked["overview-digest-store"]["data"]["digest"]
+        _response, rendered = self._fire(
+            client, callback_map, _OVERVIEW_OUTPUTS, None, ["view-store.data"]
+        )
+        assert rendered["workspace-overview"]["children"]
+        assert len(builds) == 1
+        for outputs in (_TRACKER_OUTPUTS, _OVERVIEW_OUTPUTS):
+            tick = self._fire(
+                client, callback_map, outputs, {"digest": digest}, ["poll.n_intervals"]
+            )
+            assert tick[0].status_code == 204
+        assert len(builds) == 1
+
+    def test_new_execution_advances_the_overview_digest(self, authed, callback_map):
+        client, store = authed
+        _response, tracked = self._fire(
+            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
+        )
+        stale = tracked["overview-digest-store"]["data"]
+        _start_execution(store, EXEC_B, 10)
+        response, _rendered = self._fire(
+            client, callback_map, _OVERVIEW_OUTPUTS, stale, ["poll.n_intervals"]
+        )
+        assert response.status_code == 200
+
+
+class TestOverviewFactsPure:
+    """The overview digest reads stored facts only: no rendered tree and
+    no wall-clock-derived string can reach it (jernerics-l4k)."""
+
+    def test_facts_carry_no_relative_time_and_digest_is_stable(self, authed):
+        _client, store = authed
+        service = DashboardService(QueryService(store))
+        facts = callbacks.overview_facts(service, PROJECT, None)
+        assert "ago" not in json.dumps(facts, default=str)
+        assert (
+            callbacks._content_digest(facts)
+            == callbacks._content_digest(callbacks.overview_facts(service, PROJECT, None))
+        )
+
 
 class TestPickerNavigationMirrorGuard:
     """The picker's mirror write on load must not rewrite the pathname
@@ -463,6 +556,95 @@ class TestInspectorPollCascade:
         rendered = payload["inspector-render-store"]["data"]
         tick = self._fire(client, callback_map, None, rendered)
         assert tick[0].status_code == 204
+
+
+class TestInspectorFactsGuard:
+    """jernerics-g6t: the inspector tick digest covers canonical facts
+    computed before any tree build, so an unchanged tick runs no sweep
+    detail, builds no tree, and ships nothing — while a real fact change
+    (a new execution) still re-renders."""
+
+    def _fire(self, client, cmap, view_doc, rendered):
+        return _dispatch(
+            client,
+            cmap,
+            {"inspector.children", "inspector-render-store.data"},
+            inputs=[
+                {"id": "view-store", "property": "data", "value": view_doc},
+                _TICK_INPUT,
+            ],
+            state=[
+                _PROJECT_STATE,
+                {"id": "inspector-render-store", "property": "data", "value": rendered},
+            ],
+        )
+
+    def _focused(self) -> dict:
+        return {"focus": {"kind": "sweep", "id": str(SWEEP_A)}}
+
+    def test_facts_carry_no_relative_time_and_digest_is_stable(self, authed):
+        _client, store = authed
+        service = DashboardService(QueryService(store))
+        facts = callbacks.inspector_facts(service, self._focused()["focus"])
+        assert "ago" not in json.dumps(facts, default=str)
+        assert (
+            callbacks._content_digest(facts)
+            == callbacks._content_digest(
+                callbacks.inspector_facts(service, self._focused()["focus"])
+            )
+        )
+
+    def test_unchanged_tick_builds_no_tree_and_ships_nothing(
+        self, authed, callback_map, monkeypatch
+    ):
+        client, _store = authed
+        builds = []
+        real = workspace.inspector_content
+
+        def spy(*args, **kwargs):
+            builds.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(workspace, "inspector_content", spy)
+        response, payload = self._fire(client, callback_map, self._focused(), None)
+        assert response.status_code == 200
+        rendered = payload["inspector-render-store"]["data"]
+        assert len(builds) == 1
+        tick = self._fire(client, callback_map, self._focused(), rendered)
+        assert tick[0].status_code == 204
+        assert len(builds) == 1
+
+    def test_wall_clock_advance_alone_keeps_the_digest(self, authed, callback_map):
+        client, _store = authed
+        focused = self._focused()
+        _response, payload = self._fire(client, callback_map, focused, None)
+        rendered = payload["inspector-render-store"]["data"]
+        later = time.time_ns() + 120_000_000_000
+        with mock.patch("time.time_ns", return_value=later):
+            tick = self._fire(client, callback_map, focused, rendered)
+        assert tick[0].status_code == 204
+
+    def test_sweep_tick_never_invokes_sweep_detail(self, authed, callback_map):
+        client, _store = authed
+        focused = self._focused()
+        _response, payload = self._fire(client, callback_map, focused, None)
+        assert payload["inspector-render-store"]["data"]
+        rendered = payload["inspector-render-store"]["data"]
+        with mock.patch.object(DashboardService, "sweep_detail") as spy:
+            tick = self._fire(client, callback_map, focused, rendered)
+            assert tick[0].status_code == 204
+            assert spy.call_count == 0
+
+    def test_new_execution_rebuilds_the_inspector(self, authed, callback_map):
+        client, store = authed
+        focused = self._focused()
+        _response, payload = self._fire(client, callback_map, focused, None)
+        rendered = payload["inspector-render-store"]["data"]
+        _start_execution(store, EXEC_B, 10)
+        response, payload = self._fire(client, callback_map, focused, rendered)
+        assert response.status_code == 200
+        assert "dd200000" in response.text
+        assert payload["inspector-render-store"]["data"]["digest"] != rendered["digest"]
 
 
 _HYDRATION_OUTPUTS = {

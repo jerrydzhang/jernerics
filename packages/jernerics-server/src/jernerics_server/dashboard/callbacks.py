@@ -10,6 +10,7 @@ import ast
 import hashlib
 import json
 import time
+from collections.abc import Sequence
 from typing import Any, Literal
 from uuid import UUID
 
@@ -145,12 +146,53 @@ def tray_from_grid(rows: list[dict] | None, current: dict | None) -> dict:
     }
 
 
+def overview_facts(
+    service: DashboardService, project: str | None, tray: dict | None
+) -> dict[str, Any]:
+    """Canonical overview facts: one stored-facts row per scoped sweep
+    plus the scope identity — never the rendered tree, so relative-time
+    strings cannot churn the digest (jernerics-l4k)."""
+    if not project:
+        return {"project": None}
+    picked = sorted(set((tray or {}).get("sweeps") or []))
+    return {
+        "project": project,
+        "picked": picked,
+        "sweeps": sorted(
+            [
+                (
+                    str(summary.sweep_id),
+                    summary.name,
+                    summary.state,
+                    summary.health,
+                    summary.started,
+                    summary.terminal,
+                    summary.active,
+                    summary.quiet,
+                    summary.stale,
+                    summary.unknown,
+                    summary.succeeded,
+                    summary.failed,
+                    summary.expected_trials,
+                    summary.latest_submitted_ns,
+                    summary.archived_ns,
+                    summary.invalid_ns,
+                    summary.invalid_reason,
+                )
+                for summary in service.sweep_overview(project)
+                if not picked or summary.sweep_id in picked
+            ]
+        ),
+    }
+
+
 def overview_content(
     service: DashboardService, project: str | None, tray: dict | None
-) -> tuple[Any, str]:
-    """(children, digest) of the workspace overview region."""
-    children = workspace.overview_tab(service, project, tray)
-    return children, _content_digest(children)
+) -> tuple[dict[str, Any], str]:
+    """(facts, digest) of the workspace overview region; the digest
+    covers stored facts only, never the rendered children."""
+    facts = overview_facts(service, project, tray)
+    return facts, _content_digest(facts)
 
 
 def lineage_panel(rows: list[dict] | None, data: dict | None) -> list[object]:
@@ -158,6 +200,112 @@ def lineage_panel(rows: list[dict] | None, data: dict | None) -> list[object]:
     lineage = (data or {}).get("lineage") or []
     root = str(rows[0]["root"]) if rows else None
     return workspace.lineage_chain(root, lineage)
+
+
+def _execution_fact_rows(records: Sequence[Any]) -> list[list[Any]]:
+    """Per-execution stored facts: identity, derived monitoring label,
+    outcome, and terminal stamps — nothing rendered."""
+    return [
+        [
+            str(record.execution_id),
+            record.monitoring or "",
+            record.outcome.value if record.outcome else "",
+            components.datetime_to_ns(record.started_at),
+            (
+                components.datetime_to_ns(record.ended_at)
+                if record.ended_at is not None
+                else None
+            ),
+        ]
+        for record in records
+    ]
+
+
+def _artifact_fact_rows(rows: Sequence[Any]) -> list[list[Any]]:
+    """Artifact identity and receipt stamps for the digest."""
+    return [
+        [row.artifact_id, row.version, row.size_bytes, row.received_ns]
+        for row in rows
+    ]
+
+
+def _param_fact_rows(records: Sequence[Any]) -> list[list[Any]]:
+    return [[record.kind, record.key, str(record.value)] for record in records]
+
+
+def _trial_facts(service: DashboardService, object_id: str) -> dict[str, Any]:
+    detail = service.trial_detail(object_id)
+    if detail is None:
+        return {"kind": "trial", "id": object_id}
+    return {
+        "kind": "trial",
+        "id": object_id,
+        "context": detail.context,
+        "params": _param_fact_rows(detail.params),
+        "catalog": [
+            [
+                record.key,
+                record.kind,
+                record.n_points,
+                record.latest_step,
+                record.n_trials,
+            ]
+            for record in detail.catalog
+        ],
+        "executions": _execution_fact_rows(detail.executions),
+        "lineage": [
+            [entry["trial_id"], entry["root"], entry["index"]]
+            for entry in detail.lineage
+        ],
+        "artifacts": _artifact_fact_rows(detail.artifacts),
+    }
+
+
+def _execution_facts(service: DashboardService, object_id: str) -> dict[str, Any]:
+    detail = service.execution_detail(object_id)
+    if detail is None:
+        return {"kind": "execution", "id": object_id}
+    return {
+        "kind": "execution",
+        "id": object_id,
+        "context": detail.context,
+        "params": _param_fact_rows(detail.params),
+        "provenance": [
+            [
+                str(record.submission_id),
+                record.backend,
+                record.submitted_at_ns,
+                record.expected_trials,
+                record.git_hash,
+                record.config_source,
+            ]
+            for record in detail.provenance
+        ],
+        "resolved_config": detail.resolved_config,
+        "artifacts": _artifact_fact_rows(detail.artifacts),
+    }
+
+
+def inspector_facts(
+    service: DashboardService, focus: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Digest-stable facts for the focused object — ids, counts, terminal
+    flags, stored nanosecond stamps — computed before any tree build so
+    an unchanged tick rebuilds and ships nothing, and relative-time
+    strings can never reach the digest (jernerics-l4k)."""
+    if not focus:
+        return {"kind": None}
+    kind, object_id = focus.get("kind"), str(focus.get("id") or "")
+    if kind == "sweep":
+        facts = service.sweep_facts(object_id)
+        if facts is None:
+            return {"kind": "sweep", "id": object_id}
+        return {"kind": "sweep", "id": object_id, **facts}
+    if kind == "trial":
+        return _trial_facts(service, object_id)
+    if kind == "execution":
+        return _execution_facts(service, object_id)
+    return {"kind": kind, "id": object_id}
 
 
 def workspace_state(store: dict | None, project: str | None) -> dict:
@@ -884,10 +1032,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             and (rendered or {}).get("focus") == focus
         ):
             raise PreventUpdate
-        children = workspace.inspector_content(service, focus, time.time_ns())
-        digest = _content_digest(children)
+        # Facts before trees: an unchanged tick pays a few cheap reads,
+        # never a rebuild, a re-digest, or a re-ship of the region.
+        digest = _content_digest(inspector_facts(service, focus))
         if digest == (rendered or {}).get("digest"):
             raise PreventUpdate
+        children = workspace.inspector_content(service, focus, time.time_ns())
         return children, {"focus": focus, "digest": digest}
 
     @app.callback(
@@ -958,9 +1108,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         # Shell-only twin of the overview renderer: jernerics-8c9 bans
         # mixing shell and page outputs on one shell-firable callback,
         # so the digest lives here and the region renders separately.
-        if tab != "overview":
-            raise PreventUpdate
-        _children, digest = overview_content(
+        _facts, digest = overview_content(
             service, project, (view_doc or {}).get("scope")
         )
         if digest == (digest_doc or {}).get("digest"):
@@ -982,14 +1130,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         project: str | None,
         digest_doc: dict | None,
     ):
-        if tab != "overview":
-            raise PreventUpdate
-        children, digest = overview_content(
+        _facts, digest = overview_content(
             service, project, (view_doc or {}).get("scope")
         )
         if digest == (digest_doc or {}).get("digest"):
             raise PreventUpdate
-        return children
+        return workspace.overview_tab(service, project, (view_doc or {}).get("scope"))
 
     # -- Analysis tabs inside the workspace ------------------------------
 
