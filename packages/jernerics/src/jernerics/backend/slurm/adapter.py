@@ -1,6 +1,9 @@
 import json
 import os
 import re
+import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -10,7 +13,7 @@ from jernerics.backend.path_resolver import (
     strip_project_template,
     substitute_project_name,
 )
-from jernerics.config import BackendConfig, SlurmConfig
+from jernerics.config import BackendConfig, ExitCode, SlurmConfig
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
 _SLURM_JOB_ID_PATTERN = re.compile(r"^(\d+)(;\S+)?$")
@@ -129,6 +132,28 @@ def _find_job_meta(meta: dict | None, job_id: str) -> Path | None:
         if candidate.exists():
             return candidate
     return None
+
+
+def _pump_tail_output(proc: subprocess.Popen[str]) -> None:
+    """Print the tail process's stdout lines as they arrive until EOF."""
+    stream = proc.stdout
+    if stream is None:
+        return
+    for line in iter(stream.readline, ""):
+        sys.stdout.write(line)
+        sys.stdout.flush()
+
+
+def _stop_tail(proc: subprocess.Popen[str], pump: threading.Thread) -> None:
+    """Terminate the tail process, drain its remaining output, and reap it."""
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    pump.join(timeout=2.0)
+    sys.stdout.flush()
 
 
 def _resolve_output_dir(output_path: str) -> str:
@@ -608,10 +633,6 @@ class SlurmAdapter:
         stderr: bool = False,
         meta: dict | None = None,
     ) -> None:
-        import subprocess as sp
-
-        from jernerics.config import ExitCode
-
         meta_file = _find_job_meta(meta, job_id)
         if meta_file is not None:
             meta_data = json.loads(meta_file.read_text())
@@ -684,35 +705,70 @@ class SlurmAdapter:
                 print(f"Error: Log file not found: {log_file}")
                 raise SystemExit(ExitCode.GENERAL_ERROR)
 
-            if effective_array_index is not None:
-                status_job_id = f"{base_job_id}_{effective_array_index}"
-            else:
-                status_job_id = base_job_id
+            resolved = self._resolve_status_job(base_job_id, effective_array_index)
+            if resolved is None or resolved[1] in SLURM_TERMINAL_STATES:
+                self._cat_log(log_file, "Log file not found")
+                return
+            status_job_id, _ = resolved
 
-            tail_proc = sp.Popen(["ssh", self.host.host, "tail", "-f", log_file])
+            tail_proc = subprocess.Popen(
+                ["ssh", self.host.host, "tail", "-n", "+1", "-f", log_file],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            pump = threading.Thread(
+                target=_pump_tail_output, args=(tail_proc,), daemon=True
+            )
+            pump.start()
             try:
                 self.wait_for_completion(status_job_id, poll_interval=10)
             except KeyboardInterrupt:
                 pass
             finally:
-                tail_proc.terminate()
-                tail_proc.wait()
+                _stop_tail(tail_proc, pump)
+                final_state = self.get_status(status_job_id) or "UNKNOWN"
+                print(f"--- job {status_job_id} {final_state}: follow ended ---")
         else:
-            for attempt in range(max_retries):
-                result = self.host.run(
-                    [f"cat {log_file}"],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode == 0:
-                    print(result.stdout)
-                    return
-                if attempt == 0:
-                    print("Waiting for logs...")
-                time.sleep(retry_delay)
-            print(f"Error: Log file not found: {log_file}")
-            raise SystemExit(ExitCode.GENERAL_ERROR)
+            self._cat_log(log_file, "Log file not found")
+
+    def _resolve_status_job(
+        self, base_job_id: str, array_index: str | int | None
+    ) -> tuple[str, str] | None:
+        """Return the first candidate job id that resolves, with its state.
+
+        Plain jobs are polled by their base id; array elements may only be
+        visible as "<base>_<index>".
+        """
+        candidates = [base_job_id]
+        if array_index is not None:
+            candidates.append(f"{base_job_id}_{array_index}")
+        for candidate in candidates:
+            status = self.get_status(candidate)
+            if status is not None:
+                return candidate, status
+        return None
+
+    def _cat_log(self, log_file: str, missing: str) -> None:
+        """Print a log file, retrying briefly while it appears."""
+        max_retries = 5
+        retry_delay = 1.0
+        for attempt in range(max_retries):
+            result = self.host.run(
+                [f"cat {log_file}"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                print(result.stdout)
+                return
+            if attempt == 0:
+                print("Waiting for logs...")
+            time.sleep(retry_delay)
+        print(f"Error: {missing}: {log_file}")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
 
     def cleanup(self) -> None:
         pass
