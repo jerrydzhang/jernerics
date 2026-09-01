@@ -1,13 +1,20 @@
 """Tests for SlurmAdapter."""
 
+import json
+import subprocess
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 from jernerics.backend.adapter import SchedulerAdapter
 from jernerics.backend.host import StdoutHost
-from jernerics.backend.slurm.adapter import SlurmAdapter, SlurmSubmitError
-from jernerics.config import BackendConfig, SharedConfig, SlurmConfig
+from jernerics.backend.slurm.adapter import (
+    SLURM_TERMINAL_STATES,
+    SlurmAdapter,
+    SlurmSubmitError,
+)
+from jernerics.config import BackendConfig, ExitCode, SharedConfig, SlurmConfig
 
 
 def _make_adapter(host=None, **overrides):
@@ -666,3 +673,154 @@ class TestGetLogs:
         adapter = _make_adapter()
         # Slurm has no cleanup — should not raise
         adapter.cleanup()
+
+
+def _write_meta(tmp_path: Path, job_id: str, meta: dict) -> None:
+    meta_dir = tmp_path / "jobs"
+    meta_dir.mkdir()
+    (meta_dir / f"{job_id}.json").write_text(json.dumps(meta))
+
+
+class TestGetLogsFollow:
+    @staticmethod
+    def _meta(**overrides: Any) -> dict:
+        meta = {
+            "output_pattern": "/cache/logs/%A_%a.out",
+            "error_pattern": "/cache/logs/%A_%a.err",
+            "remote_dir": "/scratch/proj",
+            "n_trials": 1,
+        }
+        meta.update(overrides)
+        return meta
+
+    @staticmethod
+    def _tail_proc(lines: list[str]) -> MagicMock:
+        proc = MagicMock()
+        proc.stdout.readline.side_effect = [*lines, ""]
+        return proc
+
+    @pytest.fixture(autouse=True)
+    def _no_sleep(self, monkeypatch):
+        monkeypatch.setattr(
+            "jernerics.backend.slurm.adapter.time.sleep", lambda _seconds: None
+        )
+
+    def test_follow_running_non_array_streams_from_start(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        _write_meta(tmp_path, "42", self._meta())
+
+        host = MagicMock()
+        host.run.side_effect = [
+            MagicMock(returncode=0),  # test -f
+            MagicMock(returncode=0, stdout="RUNNING"),  # status probe: base id
+            MagicMock(returncode=0, stdout="RUNNING"),  # wait poll
+            MagicMock(returncode=0, stdout="COMPLETED"),  # wait poll
+            MagicMock(returncode=0, stdout="COMPLETED"),  # end-marker state
+        ]
+        adapter = _make_adapter(host=host)
+
+        tail_proc = self._tail_proc(["first line\n", "second line\n"])
+        popen = MagicMock(return_value=tail_proc)
+        monkeypatch.setattr(subprocess, "Popen", popen)
+
+        adapter.get_logs(
+            "42", meta={"local_cache_dir": tmp_path, "host": host}, follow=True
+        )
+
+        popen.assert_called_once()
+        argv = popen.call_args.args[0]
+        assert argv[2:6] == ["tail", "-n", "+1", "-f"]
+        assert argv[6] == "/cache/logs/42_1.out"
+        assert popen.call_args.kwargs["stdout"] == subprocess.PIPE
+
+        squeue_calls = [
+            call.args[0][0]
+            for call in host.run.call_args_list
+            if call.args[0][0].startswith("squeue")
+        ]
+        assert squeue_calls == ["squeue -j 42 -o '%T' -h"] * 4
+
+        out = capsys.readouterr().out
+        assert "first line\n" in out
+        assert "second line\n" in out
+        assert "--- job 42 COMPLETED: follow ended ---" in out
+        tail_proc.terminate.assert_called_once()
+
+    @pytest.mark.parametrize("state", sorted(SLURM_TERMINAL_STATES))
+    def test_follow_already_terminal_cats_log_without_tail(
+        self, tmp_path, capsys, monkeypatch, state
+    ):
+        _write_meta(tmp_path, "42", self._meta())
+
+        host = MagicMock()
+        host.run.side_effect = [
+            MagicMock(returncode=0),  # test -f
+            MagicMock(returncode=0, stdout=state),  # status probe: terminal
+            MagicMock(returncode=0, stdout="full log\n"),  # cat
+        ]
+        adapter = _make_adapter(host=host)
+
+        popen = MagicMock()
+        monkeypatch.setattr(subprocess, "Popen", popen)
+
+        adapter.get_logs(
+            "42", meta={"local_cache_dir": tmp_path, "host": host}, follow=True
+        )
+
+        popen.assert_not_called()
+        host.run.assert_called_with(
+            ["cat /cache/logs/42_1.out"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert "full log\n" in capsys.readouterr().out
+
+    def test_follow_unknown_job_cats_log_without_tail(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        _write_meta(tmp_path, "42", self._meta())
+
+        host = MagicMock()
+        host.run.side_effect = [
+            MagicMock(returncode=0),  # test -f
+            MagicMock(returncode=0, stdout=""),  # squeue base: unknown
+            MagicMock(returncode=0, stdout=""),  # sacct base: unknown
+            MagicMock(returncode=0, stdout=""),  # squeue base_1: unknown
+            MagicMock(returncode=0, stdout=""),  # sacct base_1: unknown
+            MagicMock(returncode=0, stdout="purged log\n"),  # cat
+        ]
+        adapter = _make_adapter(host=host)
+
+        popen = MagicMock()
+        monkeypatch.setattr(subprocess, "Popen", popen)
+
+        adapter.get_logs(
+            "42", meta={"local_cache_dir": tmp_path, "host": host}, follow=True
+        )
+
+        popen.assert_not_called()
+        assert "purged log\n" in capsys.readouterr().out
+
+    def test_follow_wildcard_log_requires_array_index(self, tmp_path, capsys):
+        _write_meta(
+            tmp_path,
+            "42",
+            self._meta(
+                output_pattern="/cache/logs/%A_%a_%x.out",
+                error_pattern="/cache/logs/%A_%a_%x.err",
+            ),
+        )
+
+        host = MagicMock()
+        adapter = _make_adapter(host=host)
+
+        with pytest.raises(SystemExit) as excinfo:
+            adapter.get_logs(
+                "42", meta={"local_cache_dir": tmp_path, "host": host}, follow=True
+            )
+
+        assert excinfo.value.code == ExitCode.GENERAL_ERROR
+        assert "--array-index" in capsys.readouterr().out
+        host.run.assert_not_called()
