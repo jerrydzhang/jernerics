@@ -498,6 +498,18 @@ class TestAssembleInfrastructure:
 
         assert isinstance(infra.container, Apptainer)
         assert infra.paths.remote_dir == "/home/user/experiments/proj"
+
+    def test_remote_dir_project_template_substituted(self):
+        from jernerics.backend.submission import assemble_infrastructure
+
+        config = _slurm_apptainer_config()
+        config.shared.remote_dir = "~/experiments/{project_name}"
+        host = _mock_host()
+
+        infra = assemble_infrastructure(config, host=host, project_name="proj")
+
+        assert infra.paths.remote_dir == "/home/user/experiments/proj"
+        assert infra.adapter.remote_dir == "/home/user/experiments/proj"
         assert infra.paths.cache_dir == "/home/user/.cache/jernerics"
 
     def test_slurm_apptainer_build_dir_expanded(self):

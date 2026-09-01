@@ -3,6 +3,7 @@ import time
 
 from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.models import JobInfo, JobSubmission, SubmitResult
+from jernerics.backend.path_resolver import substitute_project_name
 from jernerics.config import BackendConfig, PueueConfig
 
 
@@ -92,12 +93,15 @@ class PueueAdapter:
         backend_config: BackendConfig,
         *,
         host,
+        project_name: str = "",
     ) -> "PueueAdapter":
         assert isinstance(backend_config.backend, PueueConfig)
         pueue = backend_config.backend
 
         shared = backend_config.shared
-        remote_dir = shared.remote_dir.replace("~", host.home)
+        remote_dir = substitute_project_name(
+            shared.remote_dir.replace("~", host.home), project_name
+        )
         cache_dir = (
             shared.cache_dir.replace("~", host.home)
             if shared.cache_dir

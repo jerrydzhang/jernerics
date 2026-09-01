@@ -6,7 +6,10 @@ from pathlib import Path
 
 from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.models import JobInfo, JobSubmission, SubmitResult
-from jernerics.backend.path_resolver import strip_project_template
+from jernerics.backend.path_resolver import (
+    strip_project_template,
+    substitute_project_name,
+)
 from jernerics.config import BackendConfig, SlurmConfig
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
@@ -271,13 +274,16 @@ class SlurmAdapter:
         backend_config: BackendConfig,
         *,
         host,
+        project_name: str = "",
     ) -> "SlurmAdapter":
         assert host is not None
         assert isinstance(backend_config.backend, SlurmConfig)
         slurm = backend_config.backend
 
         shared = backend_config.shared
-        remote_dir = shared.remote_dir.replace("~", host.home)
+        remote_dir = substitute_project_name(
+            shared.remote_dir.replace("~", host.home), project_name
+        )
         cache_dir = (
             shared.cache_dir.replace("~", host.home) if shared.cache_dir else None
         )
