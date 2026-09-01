@@ -671,6 +671,24 @@ class TestDelegatedMethods:
             "123",
             follow=False,
             stderr=False,
+            array_index=None,
+            meta={
+                "local_cache_dir": Path("/cache"),
+                "host": backend.host,
+                "cache_host": "/scratch/cache/proj",
+            },
+        )
+
+    def test_get_logs_forwards_array_index(self):
+        adapter = MagicMock()
+        backend = _make_backend(adapter=adapter)
+
+        backend.get_logs("123", array_index=2, local_cache_dir=Path("/cache"))
+        adapter.get_logs.assert_called_once_with(
+            "123",
+            follow=False,
+            stderr=False,
+            array_index=2,
             meta={
                 "local_cache_dir": Path("/cache"),
                 "host": backend.host,

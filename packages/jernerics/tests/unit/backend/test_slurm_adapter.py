@@ -346,6 +346,12 @@ class TestSubmitSweep:
         assert result.submissions[0].n_trials == 10
         assert result.submissions[1].job_id == "10002"
         assert result.submissions[1].n_trials == 0
+        assert result.submissions[1].output_pattern == (
+            "/home/user/.cache/jernerics/proj/logs/checker_%j.out"
+        )
+        assert result.submissions[1].error_pattern == (
+            "/home/user/.cache/jernerics/proj/logs/checker_%j.err"
+        )
 
     def test_raises_on_failure(self):
         host = MagicMock()
@@ -645,6 +651,89 @@ class TestGetLogs:
             text=True,
         )
 
+    def test_get_logs_explicit_index_overrides_id_suffix(self, tmp_path):
+        _write_meta(
+            tmp_path,
+            "100",
+            {
+                "output_pattern": "/cache/logs/%A_%a.out",
+                "error_pattern": "/cache/logs/%A_%a.err",
+                "remote_dir": "/scratch/proj",
+                "n_trials": 5,
+            },
+        )
+
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="log output")
+        adapter = _make_adapter(host=host)
+
+        adapter.get_logs(
+            "100_3",
+            array_index=7,
+            meta={"local_cache_dir": tmp_path, "host": host},
+        )
+
+        host.run.assert_called_with(
+            ["cat /cache/logs/100_7.out"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_get_logs_explicit_index_without_id_suffix(self, tmp_path):
+        _write_meta(
+            tmp_path,
+            "100",
+            {
+                "output_pattern": "/cache/logs/%A_%a.out",
+                "error_pattern": "/cache/logs/%A_%a.err",
+                "remote_dir": "/scratch/proj",
+                "n_trials": 5,
+            },
+        )
+
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="log output")
+        adapter = _make_adapter(host=host)
+
+        adapter.get_logs(
+            "100",
+            array_index=2,
+            meta={"local_cache_dir": tmp_path, "host": host},
+        )
+
+        host.run.assert_called_with(
+            ["cat /cache/logs/100_2.out"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_get_logs_checker_job_resolves_checker_pattern(self, tmp_path):
+        _write_meta(
+            tmp_path,
+            "10002",
+            {
+                "output_pattern": "/cache/logs/checker_%j.out",
+                "error_pattern": "/cache/logs/checker_%j.err",
+                "remote_dir": "/scratch/proj",
+                "n_trials": 0,
+            },
+        )
+
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="checker log")
+        adapter = _make_adapter(host=host)
+
+        adapter.get_logs("10002", meta={"local_cache_dir": tmp_path, "host": host})
+
+        host.run.assert_called_with(
+            ["cat /cache/logs/checker_10002.out"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
     def test_get_logs_without_meta_uses_cache_host_from_meta(self):
         host = MagicMock()
         host.run.return_value = MagicMock(returncode=0, stdout="log data")
@@ -803,7 +892,28 @@ class TestGetLogsFollow:
         popen.assert_not_called()
         assert "purged log\n" in capsys.readouterr().out
 
-    def test_follow_wildcard_log_requires_array_index(self, tmp_path, capsys):
+    def test_follow_wildcard_without_index_suggests_array_index(
+        self, tmp_path, capsys
+    ):
+        _write_meta(tmp_path, "42", self._meta(n_trials=3))
+
+        host = MagicMock()
+        adapter = _make_adapter(host=host)
+
+        with pytest.raises(SystemExit) as excinfo:
+            adapter.get_logs(
+                "42", meta={"local_cache_dir": tmp_path, "host": host}, follow=True
+            )
+
+        assert excinfo.value.code == ExitCode.GENERAL_ERROR
+        out = capsys.readouterr().out
+        assert "cannot select a single log file" in out
+        assert "--array-index" in out
+        host.run.assert_not_called()
+
+    def test_follow_wildcard_with_index_does_not_suggest_array_index(
+        self, tmp_path, capsys
+    ):
         _write_meta(
             tmp_path,
             "42",
@@ -818,9 +928,43 @@ class TestGetLogsFollow:
 
         with pytest.raises(SystemExit) as excinfo:
             adapter.get_logs(
-                "42", meta={"local_cache_dir": tmp_path, "host": host}, follow=True
+                "42",
+                array_index=1,
+                meta={"local_cache_dir": tmp_path, "host": host},
+                follow=True,
             )
 
         assert excinfo.value.code == ExitCode.GENERAL_ERROR
-        assert "--array-index" in capsys.readouterr().out
+        assert "--array-index" not in capsys.readouterr().out
         host.run.assert_not_called()
+
+    def test_follow_streams_explicit_array_index_file(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        _write_meta(tmp_path, "42", self._meta(n_trials=5))
+
+        host = MagicMock()
+        host.run.side_effect = [
+            MagicMock(returncode=0),  # test -f
+            MagicMock(returncode=0, stdout="RUNNING"),  # status probe: base id
+            MagicMock(returncode=0, stdout="RUNNING"),  # wait poll
+            MagicMock(returncode=0, stdout="COMPLETED"),  # wait poll
+            MagicMock(returncode=0, stdout="COMPLETED"),  # end-marker state
+        ]
+        adapter = _make_adapter(host=host)
+
+        tail_proc = self._tail_proc(["trial 1 stderr\n"])
+        popen = MagicMock(return_value=tail_proc)
+        monkeypatch.setattr(subprocess, "Popen", popen)
+
+        adapter.get_logs(
+            "42",
+            array_index=1,
+            meta={"local_cache_dir": tmp_path, "host": host},
+            follow=True,
+        )
+
+        argv = popen.call_args.args[0]
+        assert argv[2:6] == ["tail", "-n", "+1", "-f"]
+        assert argv[6] == "/cache/logs/42_1.out"
+        assert "trial 1 stderr\n" in capsys.readouterr().out

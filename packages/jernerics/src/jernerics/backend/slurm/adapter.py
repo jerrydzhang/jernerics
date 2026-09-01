@@ -221,6 +221,11 @@ def _format_array_script(
     return "\n".join(lines)
 
 
+def _checker_log_patterns(cache_host: str) -> tuple[str, str]:
+    cache_host = _expand_path(cache_host)
+    return f"{cache_host}/logs/checker_%j.out", f"{cache_host}/logs/checker_%j.err"
+
+
 def _format_checker_script(
     *,
     cache_host: str,
@@ -233,14 +238,15 @@ def _format_checker_script(
 ) -> str:
     cache_host = _expand_path(cache_host)
     remote_dir = _expand_path(remote_dir)
+    checker_output, checker_error = _checker_log_patterns(cache_host)
     lines = [
         "#!/usr/bin/env bash",
         "#SBATCH --parsable",
         f"#SBATCH --partition={partition}",
         f"#SBATCH --time={time}",
         f"#SBATCH --mem={mem}",
-        f"#SBATCH --output={cache_host}/logs/checker_%j.out",
-        f"#SBATCH --error={cache_host}/logs/checker_%j.err",
+        f"#SBATCH --output={checker_output}",
+        f"#SBATCH --error={checker_error}",
         "#SBATCH --kill-on-invalid-dep=yes",
     ]
     if dependency_job_id is not None:
@@ -446,7 +452,18 @@ class SlurmAdapter:
         subs = [JobSubmission(job_id=job_id, n_trials=params.n_trials)]
         if len(parts) > 1:
             checker_id = _validate_job_id(parts[1], stderr=result.stderr.strip())
-            subs.append(JobSubmission(job_id=checker_id, n_trials=0, role="checker"))
+            output_pattern, error_pattern = _checker_log_patterns(
+                params.cache_dir or self.cache_host
+            )
+            subs.append(
+                JobSubmission(
+                    job_id=checker_id,
+                    output_pattern=output_pattern,
+                    error_pattern=error_pattern,
+                    n_trials=0,
+                    role="checker",
+                )
+            )
         return SubmitResult(submissions=subs)
 
     def submit_job(
@@ -635,6 +652,7 @@ class SlurmAdapter:
         *,
         follow: bool = False,
         stderr: bool = False,
+        array_index: int | None = None,
         meta: dict | None = None,
     ) -> None:
         meta_file = _find_job_meta(meta, job_id)
@@ -658,9 +676,11 @@ class SlurmAdapter:
         log_pattern = error_pattern if stderr else output_pattern
 
         base_job_id = job_id.split("_")[0] if "_" in job_id else job_id
-        array_idx = job_id.split("_")[1] if "_" in job_id else None
+        suffix_index = job_id.split("_")[1] if "_" in job_id else None
 
-        effective_array_index = array_idx
+        effective_array_index = (
+            array_index if array_index is not None else suffix_index
+        )
         if effective_array_index is None and n_trials == 1:
             effective_array_index = 1
 
@@ -679,9 +699,16 @@ class SlurmAdapter:
 
         if "*" in log_file:
             if follow:
-                print(
-                    "Error: --follow requires --array-index to select a single log file"
-                )
+                if effective_array_index is None:
+                    print(
+                        "Error: cannot select a single log file for job "
+                        f"{job_id}; pass --array-index <n>"
+                    )
+                else:
+                    print(
+                        "Error: log pattern is ambiguous for job "
+                        f"{job_id}: {log_pattern}"
+                    )
                 raise SystemExit(ExitCode.GENERAL_ERROR)
             self._cat_log(log_file, "Log files not found")
         elif follow:

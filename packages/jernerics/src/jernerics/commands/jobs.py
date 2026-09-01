@@ -136,6 +136,7 @@ def logs(
             job_id,
             follow=follow,
             stderr=stderr,
+            array_index=array_index,
             local_cache_dir=cache_dir(),
         )
     except SystemExit:

@@ -292,6 +292,7 @@ class PueueAdapter:
         *,
         follow: bool = False,
         stderr: bool = False,
+        array_index: int | None = None,
         meta: dict | None = None,
     ) -> None:
         if not job_id.isdigit():

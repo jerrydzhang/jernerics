@@ -62,6 +62,7 @@ class SchedulerAdapter(Protocol):
         *,
         follow: bool = False,
         stderr: bool = False,
+        array_index: int | None = None,
         meta: dict | None = None,
     ) -> None: ...
 

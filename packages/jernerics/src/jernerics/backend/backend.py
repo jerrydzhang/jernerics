@@ -564,12 +564,14 @@ class Backend:
         *,
         follow: bool = False,
         stderr: bool = False,
+        array_index: int | None = None,
         local_cache_dir: Path | None = None,
     ) -> None:
         self.adapter.get_logs(
             job_id,
             follow=follow,
             stderr=stderr,
+            array_index=array_index,
             meta={
                 "local_cache_dir": local_cache_dir,
                 "host": self.host,

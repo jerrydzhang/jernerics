@@ -359,6 +359,18 @@ class TestGetLogs:
 
         assert "trial output" in capsys.readouterr().out
 
+    def test_get_logs_accepts_array_index(self, capsys):
+        host = MagicMock()
+        host.run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"5": {"output": "trial output"}}),
+        )
+        adapter = _make_adapter(host=host)
+
+        adapter.get_logs("5", array_index=1)
+
+        assert "trial output" in capsys.readouterr().out
+
     def test_get_logs_rejects_non_numeric(self):
         adapter = _make_adapter()
 

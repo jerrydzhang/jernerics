@@ -315,6 +315,58 @@ class TestWaitCommand:
         )
 
 
+class TestLogsCommand:
+    def test_logs_passes_array_index_to_backend(self):
+        from jernerics.commands.jobs import logs
+
+        mock_backend = MagicMock()
+
+        with (
+            patch(
+                "jernerics.commands.jobs._get_backend",
+                return_value=(mock_backend, "proj", Path("/tmp")),
+            ),
+            patch("jernerics.commands.jobs.cache_dir", return_value=Path("/tmp/c")),
+        ):
+            logs(
+                "28201616",
+                backend_name="hpc",
+                follow=True,
+                array_index=1,
+                stderr=False,
+            )
+
+        mock_backend.get_logs.assert_called_once_with(
+            "28201616",
+            follow=True,
+            stderr=False,
+            array_index=1,
+            local_cache_dir=Path("/tmp/c"),
+        )
+
+    def test_logs_defaults_to_no_array_index(self):
+        from jernerics.commands.jobs import logs
+
+        mock_backend = MagicMock()
+
+        with (
+            patch(
+                "jernerics.commands.jobs._get_backend",
+                return_value=(mock_backend, "proj", Path("/tmp")),
+            ),
+            patch("jernerics.commands.jobs.cache_dir", return_value=Path("/tmp/c")),
+        ):
+            logs("28201616", backend_name="hpc")
+
+        mock_backend.get_logs.assert_called_once_with(
+            "28201616",
+            follow=False,
+            stderr=False,
+            array_index=None,
+            local_cache_dir=Path("/tmp/c"),
+        )
+
+
 def _value_event(seq: int) -> ValueEvent:
     return ValueEvent(
         event_id=uuid4(),
