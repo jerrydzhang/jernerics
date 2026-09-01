@@ -17,6 +17,8 @@ The project uses **uv2nix** (not a local `.venv`). All Python packages live in t
 
 **Never use `uv run` or `uv sync` to execute code or install packages.** These commands create or pick up a stale local `.venv` that shadows the nix store packages, causing import errors and test failures. Use `python3`, `pytest`, or `just` recipes instead — the devShell already has everything installed.
 
+**Git worktrees silently test the wrong code.** The editable overlay pins `jernerics` to the main checkout (`$REPO_ROOT` at devShell build time). In a `git worktree` under `/tmp`, bare `python3`/`pytest` import the main repo's source, not the worktree's — tests pass or fail against stale code. In any worktree, `export PYTHONPATH=<worktree>/packages/jernerics/src` before running Python, and verify with `python3 -c 'import jernerics; print(jernerics.__file__)'`. `just lint`/`format-check` are static and unaffected.
+
 ## Commands
 
 All commands run from repo root inside the nix devShell (`nix develop`).
