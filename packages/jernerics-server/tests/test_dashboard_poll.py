@@ -724,6 +724,24 @@ class TestExecutionsGridFocus:
         assert response.status_code == 204
 
 
+class TestScrollRestoreWiring:
+    """jernerics-l4k: saved scroll restores after a genuine overview
+    re-render, not only after the manual refresh button."""
+
+    def test_overview_re_renders_trigger_the_restore(self, callback_map):
+        restores = [
+            specs
+            for key, specs in callback_map.items()
+            if "scroll-restore-store.data" in _outputs_of(key)
+            and any(
+                spec["id"] == "analysis-refresh-store" for spec in specs["inputs"]
+            )
+        ]
+        assert len(restores) == 1
+        inputs = {spec["id"] for spec in restores[0]["inputs"]}
+        assert "workspace-overview" in inputs
+
+
 _HYDRATION_OUTPUTS = {
     "analysis-message-store.data",
     "view-store.data",

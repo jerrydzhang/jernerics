@@ -1792,7 +1792,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     app.clientside_callback(
         """
-        function(state) {
+        function(refresh, overviewRendered, state) {
             if (!state || !state.grids) {
                 return window.dash_clientside.no_update;
             }
@@ -1813,6 +1813,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         """,
         Output("scroll-restore-store", "data", allow_duplicate=True),
         Input("analysis-refresh-store", "data"),
+        Input("workspace-overview", "children"),
         State("scroll-restore-store", "data"),
         prevent_initial_call=True,
     )
