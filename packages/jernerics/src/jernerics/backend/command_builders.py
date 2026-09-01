@@ -168,7 +168,7 @@ def build_sweep_commands(
     )
     retry_script = f"/tmp/jernerics_{spec.study_name}_retry_d{chain_depth}.sh"
     post_hook_command = container.wrap(
-        f"{checker_cmd} 2>/dev/null > {retry_script} && bash {retry_script}",
+        f"{checker_cmd} > {retry_script} && bash {retry_script}",
         bind_args,
         env_file=env_file,
     )

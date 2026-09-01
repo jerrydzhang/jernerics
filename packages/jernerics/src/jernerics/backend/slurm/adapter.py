@@ -396,6 +396,10 @@ class SlurmAdapter:
                 f"Failed to submit job chain: {result.stderr.strip()}"
             )
 
+        if getattr(self.host, "emits_scripts", False):
+            return SubmitResult(
+                submissions=[JobSubmission(job_id="", n_trials=params.n_trials)]
+            )
         parts = result.stdout.strip().split(" ", 1)
         job_id = _validate_job_id(parts[0], stderr=result.stderr.strip())
         subs = [JobSubmission(job_id=job_id, n_trials=params.n_trials)]
