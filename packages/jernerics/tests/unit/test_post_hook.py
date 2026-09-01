@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -101,6 +102,56 @@ class TestRunPipeline:
         assert kwargs["api_key"] == "secret"
         assert kwargs["study"] == "mystudy"
         assert kwargs["tracking_dir"] == tmp_path / "tracking"
+
+    @patch("jernerics.post_hook.capture_job_resources")
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_captures_resources_before_replay_ships_submission_files(
+        self, mock_run_checker, mock_replay, mock_capture, tmp_path
+    ):
+        from jernerics.post_hook import _sweep_job_ids
+
+        mock_run_checker.return_value = None
+        order = []
+        discovered = []
+        submission_dir = tmp_path / "tracking" / "mystudy" / "submission"
+        submission_dir.mkdir(parents=True)
+        submission_id = uuid4()
+        (submission_dir / "deploy.jsonl").write_text(
+            JobSnapshotEvent(
+                event_id=uuid4(),
+                recorded_at=datetime.now(UTC),
+                job_id=uuid4(),
+                submission_id=submission_id,
+                scheduler_job_id="990001",
+                role="trials",
+                state=SubmissionState.SUBMITTED,
+            ).model_dump_json()
+            + "\n"
+        )
+
+        def capture(tracking_dir, study_name, base_url, api_key):
+            order.append("capture")
+            discovered.append(_sweep_job_ids(Path(tracking_dir), study_name))
+
+        def replay(**kwargs):
+            order.append("replay")
+            return ReplayResult()
+
+        mock_capture.side_effect = capture
+        mock_replay.side_effect = replay
+
+        result = run_pipeline(
+            ctx_path=str(_write_ctx(tmp_path)),
+            chain_depth=0,
+            tracking_dir=str(tmp_path / "tracking" / "mystudy"),
+            base_url="http://localhost:8000",
+            api_key="secret",
+        )
+
+        assert result == PipelineResult.SWEEP_COMPLETE
+        assert order == ["capture", "replay"]
+        assert discovered == [{"990001": str(submission_id)}]
 
     @patch("jernerics.post_hook.replay_tracking")
     @patch("jernerics.post_hook.run_checker")
