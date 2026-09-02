@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 from jernerics_server import store as store_module
 from jernerics_server.store import (
+    CrossProjectSweepError,
     FutureSchemaError,
     InvalidCurationReasonError,
+    InvestigationConflictError,
+    InvestigationNotFoundError,
     LegacyStoreError,
     QueryNotAuthorizedError,
     Store,
@@ -32,6 +35,8 @@ TABLES = {
     "reconciliation_conflicts",
     "sweep_curation",
     "job_resources",
+    "investigations",
+    "investigation_sweeps",
 }
 
 INDEXES = {
@@ -44,6 +49,7 @@ INDEXES = {
     "idx_executions_trial",
     "idx_submissions_sweep",
     "idx_job_resources_job",
+    "idx_investigation_sweeps_sweep",
 }
 
 
@@ -117,7 +123,7 @@ class TestInit:
     def test_fresh_store_creates_current_schema(self, tmp_path):
         path = tmp_path / "store.sqlite"
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(8,)]
+            assert store.query("PRAGMA user_version")[1] == [(9,)]
             con = sqlite3.connect(path)
             assert _table_names(con) - {"sqlite_sequence"} == TABLES
             con.close()
@@ -129,7 +135,7 @@ class TestInit:
 
     def test_reopen_existing_store_is_noop_and_keeps_data(self, db_path):
         with Store(db_path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(8,)]
+            assert store.query("PRAGMA user_version")[1] == [(9,)]
             assert store.query("SELECT trial_id FROM trials")[1] == [("t1",)]
             assert store.query("SELECT COUNT(*) FROM tracked_values")[1] == [(1,)]
 
@@ -424,9 +430,9 @@ class TestFutureSchema:
     def test_user_version_beyond_supported_refused(self, tmp_path):
         path = tmp_path / "store.sqlite"
         con = sqlite3.connect(path)
-        con.execute("PRAGMA user_version=9")
+        con.execute("PRAGMA user_version=10")
         con.close()
-        with pytest.raises(FutureSchemaError, match="version 9"):
+        with pytest.raises(FutureSchemaError, match="version 10"):
             Store(path)
 
 
@@ -456,7 +462,7 @@ class TestMigrationV3ToV4:
         self._make_v3_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(8,)]
+            assert store.query("PRAGMA user_version")[1] == [(9,)]
             submission_cols = {
                 row[1] for row in store.query("PRAGMA table_info(submissions)")[1]
             }
@@ -529,7 +535,7 @@ class TestMigrationV4ToV5:
         self._make_v4_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(8,)]
+            assert store.query("PRAGMA user_version")[1] == [(9,)]
             trial_cols = {row[1] for row in store.query("PRAGMA table_info(trials)")[1]}
             assert {"objective", "distributions_json", "attrs_json"} <= trial_cols
             store.verify()
@@ -588,7 +594,7 @@ class TestMigrationV5ToV6:
         self._make_v5_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(8,)]
+            assert store.query("PRAGMA user_version")[1] == [(9,)]
             artifact_cols = {
                 row[1] for row in store.query("PRAGMA table_info(artifacts)")[1]
             }
@@ -635,7 +641,7 @@ class TestMigrationV6ToV7:
         self._make_v6_file(path)
 
         with Store(path) as store:
-            assert store.query("PRAGMA user_version")[1] == [(8,)]
+            assert store.query("PRAGMA user_version")[1] == [(9,)]
             assert store.query("SELECT COUNT(*) FROM sweep_curation")[1] == [(0,)]
             store.verify()
 
@@ -661,6 +667,61 @@ class TestMigrationV6ToV7:
                 "SELECT archived_ns IS NOT NULL, invalid_reason "
                 "FROM sweep_curation WHERE sweep_id = 'sw'"
             )[1] == [(1, "contaminated inputs")]
+
+
+class TestMigrationV8ToV9:
+    def _make_v8_file(self, path: Path) -> None:
+        con = sqlite3.connect(path)
+        for version in (3, 4, 5, 6, 7, 8):
+            store_module._MIGRATIONS[version](con)
+        con.execute("PRAGMA user_version=8")
+        con.execute("PRAGMA foreign_keys=ON")
+        con.executescript(
+            """
+            INSERT INTO sweeps (sweep_id, project, name, state, created_ns,
+            updated_ns) VALUES ('sw', 'p', 'n', 'running', 1, 2);
+            """
+        )
+        con.commit()
+        con.close()
+
+    def test_v8_file_upgrades_in_place(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v8_file(path)
+
+        with Store(path) as store:
+            assert store.query("PRAGMA user_version")[1] == [(9,)]
+            investigation_cols = {
+                row[1] for row in store.query("PRAGMA table_info(investigations)")[1]
+            }
+            assert {
+                "investigation_id",
+                "project",
+                "name",
+                "factor",
+                "outcome",
+                "replicate_factor",
+                "archived_ns",
+                "created_ns",
+                "updated_ns",
+            } <= investigation_cols
+            member_cols = {
+                row[1]
+                for row in store.query("PRAGMA table_info(investigation_sweeps)")[1]
+            }
+            assert {"investigation_id", "sweep_id", "added_ns"} <= member_cols
+            store.verify()
+
+    def test_v8_data_survives_upgrade_without_backfill(self, tmp_path):
+        path = tmp_path / "store.sqlite"
+        self._make_v8_file(path)
+
+        with Store(path) as store:
+            assert store.query("SELECT sweep_id, project FROM sweeps")[1] == [
+                ("sw", "p")
+            ]
+            assert store.query("SELECT COUNT(*) FROM investigations")[1] == [(0,)]
+            assert store.query("SELECT COUNT(*) FROM investigation_sweeps")[1] == [(0,)]
 
 
 class TestSweepCuration:
@@ -826,6 +887,191 @@ class TestSweepCuration:
             )
 
 
+class TestInvestigations:
+    def _add_sweep(self, db_path: Path, sweep_id: str, project: str) -> None:
+        _write(
+            db_path,
+            "INSERT INTO sweeps (sweep_id, project, name, state, created_ns,"
+            " updated_ns) VALUES (?, ?, ?, 'running', 1, 2)",
+            (sweep_id, project, f"{project}/{sweep_id}"),
+        )
+
+    def _member_rows(self, store: Store) -> dict[str, int]:
+        return dict(
+            store.query("SELECT sweep_id, added_ns FROM investigation_sweeps")[1]
+        )
+
+    def _get(self, store: Store, investigation_id: str) -> dict:
+        record = store.investigation(investigation_id)
+        assert record is not None
+        return record
+
+    def test_create_get_and_list_round_trip(self, db_path):
+        with Store(db_path) as store:
+            created = store.create_investigation(
+                "inv1", "p", "baseline", "lr", "loss", "seed", ["sw"]
+            )
+            assert created["investigation_id"] == "inv1"
+            assert created["project"] == "p"
+            assert created["factor"] == "lr"
+            assert created["outcome"] == "loss"
+            assert created["replicate_factor"] == "seed"
+            assert created["members"] == ("sw",)
+            assert created["archived_ns"] is None
+            assert created["created_ns"] == created["updated_ns"]
+            assert self._get(store, "inv1") == created
+            assert store.investigation_by_name("p", "baseline") == created
+            assert store.investigation("ghost") is None
+            assert store.investigation_by_name("p", "ghost") is None
+            assert store.investigations("p") == [created]
+            assert store.investigations("other") == []
+
+    def test_idempotent_create_same_body_returns_existing(self, db_path):
+        with Store(db_path) as store:
+            first = store.create_investigation("inv1", "p", "n", "f", "o", None, ["sw"])
+            second = store.create_investigation(
+                "inv2", "p", "n", "f", "o", None, ["sw"]
+            )
+            assert second["investigation_id"] == "inv1"
+            assert second == first
+            assert store.query("SELECT COUNT(*) FROM investigations")[1] == [(1,)]
+
+    def test_duplicate_name_with_different_body_conflicts(self, db_path):
+        with Store(db_path) as store:
+            store.create_investigation("inv1", "p", "n", "f", "o", None, ["sw"])
+            with pytest.raises(InvestigationConflictError, match="p/n"):
+                store.create_investigation("inv2", "p", "n", "other", "o", None, [])
+            with pytest.raises(InvestigationConflictError, match="p/n"):
+                store.create_investigation("inv2", "p", "n", "f", "o", "seed", [])
+            assert store.investigations("p")[0]["replicate_factor"] is None
+
+    def test_unknown_member_sweep_rejected(self, db_path):
+        with Store(db_path) as store:
+            with pytest.raises(SweepNotFoundError, match="ghost"):
+                store.create_investigation("inv1", "p", "n", "f", "o", None, ["ghost"])
+            store.create_investigation("inv1", "p", "n", "f", "o", None, ["sw"])
+            with pytest.raises(SweepNotFoundError, match="ghost"):
+                store.set_investigation_members("inv1", ["ghost"])
+            with pytest.raises(SweepNotFoundError, match="ghost"):
+                store.add_members("inv1", ["ghost"])
+            assert self._get(store, "inv1")["members"] == ("sw",)
+
+    def test_cross_project_member_sweep_rejected(self, db_path):
+        self._add_sweep(db_path, "sw2", "other")
+        with Store(db_path) as store:
+            with pytest.raises(CrossProjectSweepError, match="other"):
+                store.create_investigation("inv1", "p", "n", "f", "o", None, ["sw2"])
+            store.create_investigation("inv1", "p", "n", "f", "o", None, ["sw"])
+            with pytest.raises(CrossProjectSweepError, match="other"):
+                store.set_investigation_members("inv1", ["sw", "sw2"])
+            with pytest.raises(CrossProjectSweepError, match="other"):
+                store.add_members("inv1", ["sw2"])
+            assert self._get(store, "inv1")["members"] == ("sw",)
+
+    def test_failed_create_leaves_no_partial_rows(self, db_path):
+        self._add_sweep(db_path, "sw2", "other")
+        with Store(db_path) as store:
+            with pytest.raises(CrossProjectSweepError):
+                store.create_investigation(
+                    "inv1", "p", "n", "f", "o", None, ["sw", "sw2"]
+                )
+            assert store.investigations("p") == []
+            assert store.query("SELECT COUNT(*) FROM investigation_sweeps")[1] == [(0,)]
+
+    def test_set_members_replaces_set_and_is_idempotent(self, db_path):
+        self._add_sweep(db_path, "sw2", "p")
+        with Store(db_path) as store:
+            store.create_investigation("inv1", "p", "n", "f", "o", None, ["sw"])
+            added_first = self._member_rows(store)["sw"]
+            store.set_investigation_members("inv1", ["sw", "sw2"])
+            record = self._get(store, "inv1")
+            assert record["members"] == ("sw", "sw2")
+            assert self._member_rows(store)["sw"] == added_first
+            updated = record["updated_ns"]
+            assert updated > record["created_ns"]
+            store.set_investigation_members("inv1", ["sw2", "sw"])
+            record = self._get(store, "inv1")
+            assert record["members"] == ("sw", "sw2")
+            assert record["updated_ns"] == updated
+            assert self._member_rows(store)["sw"] == added_first
+            store.set_investigation_members("inv1", ["sw2"])
+            record = self._get(store, "inv1")
+            assert record["members"] == ("sw2",)
+            assert record["updated_ns"] > updated
+
+    def test_add_and_remove_members_are_idempotent(self, db_path):
+        self._add_sweep(db_path, "sw2", "p")
+        with Store(db_path) as store:
+            store.create_investigation("inv1", "p", "n", "f", "o", None, ["sw"])
+            updated = self._get(store, "inv1")["updated_ns"]
+            store.add_members("inv1", ["sw"])
+            assert self._get(store, "inv1")["updated_ns"] == updated
+            store.remove_members("inv1", ["sw2"])
+            assert self._get(store, "inv1")["updated_ns"] == updated
+            store.add_members("inv1", ["sw2"])
+            assert self._get(store, "inv1")["members"] == ("sw", "sw2")
+            updated = self._get(store, "inv1")["updated_ns"]
+            store.remove_members("inv1", ["sw", "sw2", "sw"])
+            assert self._get(store, "inv1")["members"] == ()
+            assert self._get(store, "inv1")["updated_ns"] > updated
+
+    def test_archive_and_restore_are_idempotent(self, db_path):
+        with Store(db_path) as store:
+            store.create_investigation("inv1", "p", "n", "f", "o", None, ["sw"])
+            store.archive_investigation("inv1", 42)
+            record = self._get(store, "inv1")
+            assert record["archived_ns"] == 42
+            assert record["updated_ns"] == 42
+            store.archive_investigation("inv1", 99)
+            record = self._get(store, "inv1")
+            assert record["archived_ns"] == 42
+            assert record["updated_ns"] == 42
+            assert store.investigations("p") == []
+            assert store.investigations("p", True) == [record]
+            store.restore_investigation("inv1")
+            record = self._get(store, "inv1")
+            assert record["archived_ns"] is None
+            assert record["updated_ns"] > 42
+            restored = record["updated_ns"]
+            store.restore_investigation("inv1")
+            assert self._get(store, "inv1")["updated_ns"] == restored
+
+    def test_unknown_investigation_rejected(self, db_path):
+        with Store(db_path) as store:
+            with pytest.raises(InvestigationNotFoundError, match="ghost"):
+                store.set_investigation_members("ghost", [])
+            with pytest.raises(InvestigationNotFoundError, match="ghost"):
+                store.add_members("ghost", ["sw"])
+            with pytest.raises(InvestigationNotFoundError, match="ghost"):
+                store.remove_members("ghost", [])
+            with pytest.raises(InvestigationNotFoundError, match="ghost"):
+                store.archive_investigation("ghost", 1)
+            with pytest.raises(InvestigationNotFoundError, match="ghost"):
+                store.restore_investigation("ghost")
+
+    def test_duplicate_project_name_rejected_by_schema(self, db_path):
+        with Store(db_path) as store:
+            store.create_investigation("inv1", "p", "n", "f", "o", None, [])
+        with pytest.raises(sqlite3.IntegrityError):
+            _write(
+                db_path,
+                "INSERT INTO investigations (investigation_id, project, name,"
+                " factor, outcome, replicate_factor, archived_ns, created_ns,"
+                " updated_ns) VALUES ('inv2', 'p', 'n', 'f', 'o', NULL, 1, 1, 1)",
+            )
+
+    def test_curation_writes_never_touch_investigation_rows(self, db_path):
+        with Store(db_path) as store:
+            created = store.create_investigation(
+                "inv1", "p", "n", "f", "o", None, ["sw"]
+            )
+            store.archive_sweep("sw")
+            store.mark_sweep_invalid("sw", "contaminated")
+            store.restore_sweep_validity("sw")
+            store.restore_sweep("sw")
+            assert self._get(store, "inv1") == created
+
+
 class TestMigrationAtomicity:
     def test_failing_migration_rolls_back_completely(self, tmp_path, monkeypatch):
         def failing(con: sqlite3.Connection) -> None:
@@ -852,7 +1098,7 @@ class TestMigrationAtomicity:
         monkeypatch.undo()
         with Store(path) as store:
             store.verify()
-            assert store.query("PRAGMA user_version")[1] == [(8,)]
+            assert store.query("PRAGMA user_version")[1] == [(9,)]
 
 
 def _make_v2_db(path: Path) -> None:

@@ -15,7 +15,7 @@ import sqlite3
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -28,7 +28,7 @@ from jernerics_schema import (
     TrialState,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 _V2_TABLES = ("sweep_meta", "trial_end", "params")
 
@@ -61,6 +61,31 @@ class SweepStillInvalidError(StoreError):
 
 class InvalidCurationReasonError(StoreError):
     """The invalid-marking reason is blank or longer than 500 characters."""
+
+
+class InvestigationNotFoundError(StoreError):
+    """An investigation lookup or mutation named an unknown investigation."""
+
+
+class InvestigationConflictError(StoreError):
+    """A create named an existing (project, name) with a different body."""
+
+
+class CrossProjectSweepError(StoreError):
+    """An investigation membership change named a sweep from another project."""
+
+
+_INVESTIGATION_COLUMNS = (
+    "investigation_id",
+    "project",
+    "name",
+    "factor",
+    "outcome",
+    "replicate_factor",
+    "archived_ns",
+    "created_ns",
+    "updated_ns",
+)
 
 
 class QueryNotAuthorizedError(StoreError):
@@ -347,6 +372,39 @@ def _migrate_to_v8(con: sqlite3.Connection) -> None:
     con.execute("CREATE INDEX idx_job_resources_job ON job_resources(job_id)")
 
 
+def _migrate_to_v9(con: sqlite3.Connection) -> None:
+    con.execute(
+        """
+        CREATE TABLE investigations (
+            investigation_id TEXT PRIMARY KEY,
+            project TEXT NOT NULL,
+            name TEXT NOT NULL,
+            factor TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            replicate_factor TEXT NULL,
+            archived_ns INTEGER NULL,
+            created_ns INTEGER NOT NULL,
+            updated_ns INTEGER NOT NULL,
+            UNIQUE(project, name)
+        ) STRICT
+        """
+    )
+    con.execute(
+        """
+        CREATE TABLE investigation_sweeps (
+            investigation_id TEXT NOT NULL
+                REFERENCES investigations(investigation_id),
+            sweep_id TEXT NOT NULL REFERENCES sweeps(sweep_id),
+            added_ns INTEGER NOT NULL,
+            PRIMARY KEY(investigation_id, sweep_id)
+        ) STRICT
+        """
+    )
+    con.execute(
+        "CREATE INDEX idx_investigation_sweeps_sweep ON investigation_sweeps(sweep_id)"
+    )
+
+
 _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_to_v3,
     4: _migrate_to_v4,
@@ -354,6 +412,7 @@ _MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     6: _migrate_to_v6,
     7: _migrate_to_v7,
     8: _migrate_to_v8,
+    9: _migrate_to_v9,
 }
 
 
@@ -653,6 +712,318 @@ class Store:
             except BaseException:
                 self._con.execute("ROLLBACK")
                 raise
+
+    def investigations(
+        self, project: str, include_archived: bool = False
+    ) -> list[dict]:
+        """List a project's investigations by name, each with its members."""
+        columns = ", ".join(_INVESTIGATION_COLUMNS)
+        with self._lock:
+            scope = "WHERE project = ?"
+            if not include_archived:
+                scope += " AND archived_ns IS NULL"
+            rows = self._con.execute(
+                f"SELECT {columns} FROM investigations {scope} ORDER BY name",
+                [project],
+            ).fetchall()
+            pairs = self._con.execute(
+                "SELECT investigation_id, sweep_id FROM investigation_sweeps "
+                "WHERE investigation_id IN "
+                "(SELECT investigation_id FROM investigations "
+                "WHERE project = ?) ORDER BY added_ns, sweep_id",
+                [project],
+            ).fetchall()
+        members: dict[str, list[str]] = {}
+        for investigation_id, sweep_id in pairs:
+            members.setdefault(investigation_id, []).append(sweep_id)
+        return [
+            self._investigation_record(row, tuple(members.get(row[0], ())))
+            for row in rows
+        ]
+
+    def investigation(self, investigation_id: str) -> dict | None:
+        """Return one investigation with its members, or None."""
+        with self._lock:
+            row = self._fetch_investigation(investigation_id)
+            if row is None:
+                return None
+            return self._investigation_record(
+                row, self._fetch_members(investigation_id)
+            )
+
+    def investigation_by_name(self, project: str, name: str) -> dict | None:
+        """Return the project's investigation ``name`` with members, or None."""
+        with self._lock:
+            row = self._con.execute(
+                f"SELECT {', '.join(_INVESTIGATION_COLUMNS)} FROM investigations "
+                "WHERE project = ? AND name = ?",
+                [project, name],
+            ).fetchone()
+            if row is None:
+                return None
+            return self._investigation_record(row, self._fetch_members(row[0]))
+
+    def create_investigation(
+        self,
+        investigation_id: str,
+        project: str,
+        name: str,
+        factor: str,
+        outcome: str,
+        replicate_factor: str | None,
+        member_sweep_ids: Sequence[str] = (),
+    ) -> dict:
+        """Create an investigation; an existing (project, name) with a
+        matching body returns the stored record unchanged."""
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._con.execute(
+                    f"SELECT {', '.join(_INVESTIGATION_COLUMNS)} "
+                    "FROM investigations WHERE project = ? AND name = ?",
+                    [project, name],
+                ).fetchone()
+                if row is not None:
+                    if (row[3], row[4], row[5]) != (
+                        factor,
+                        outcome,
+                        replicate_factor,
+                    ):
+                        raise InvestigationConflictError(
+                            f"investigation {project}/{name} already exists "
+                            "with a different factor/outcome body"
+                        )
+                    self._con.execute("COMMIT")
+                    return self._investigation_record(row, self._fetch_members(row[0]))
+                self._con.execute(
+                    "INSERT INTO investigations (investigation_id, project, "
+                    "name, factor, outcome, replicate_factor, archived_ns, "
+                    "created_ns, updated_ns) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)",
+                    [
+                        investigation_id,
+                        project,
+                        name,
+                        factor,
+                        outcome,
+                        replicate_factor,
+                        now_ns,
+                        now_ns,
+                    ],
+                )
+                for sweep_id in self._validated_members(project, member_sweep_ids):
+                    self._con.execute(
+                        "INSERT INTO investigation_sweeps (investigation_id, "
+                        "sweep_id, added_ns) VALUES (?, ?, ?)",
+                        [investigation_id, sweep_id, now_ns],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+            row = self._fetch_investigation(investigation_id)
+            if row is None:
+                raise StoreError(
+                    f"investigation {investigation_id} missing after insert"
+                )
+            return self._investigation_record(
+                row, self._fetch_members(investigation_id)
+            )
+
+    def set_investigation_members(
+        self, investigation_id: str, member_sweep_ids: Sequence[str]
+    ) -> None:
+        """Replace the member set; kept sweeps keep their added_ns."""
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._fetch_investigation(investigation_id)
+                if row is None:
+                    raise InvestigationNotFoundError(
+                        f"no investigation with id {investigation_id}"
+                    )
+                desired = self._validated_members(row[1], member_sweep_ids)
+                current = self._fetch_members(investigation_id)
+                current_set = set(current)
+                stale = [sid for sid in current if sid not in desired]
+                fresh = [sid for sid in desired if sid not in current_set]
+                if stale or fresh:
+                    self._remove_member_rows(investigation_id, stale)
+                    for sweep_id in fresh:
+                        self._con.execute(
+                            "INSERT INTO investigation_sweeps (investigation_id,"
+                            " sweep_id, added_ns) VALUES (?, ?, ?)",
+                            [investigation_id, sweep_id, now_ns],
+                        )
+                    self._con.execute(
+                        "UPDATE investigations SET updated_ns = ? "
+                        "WHERE investigation_id = ?",
+                        [now_ns, investigation_id],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def add_members(
+        self, investigation_id: str, member_sweep_ids: Sequence[str]
+    ) -> None:
+        """Add sweeps to the member set; existing members are a no-op."""
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._fetch_investigation(investigation_id)
+                if row is None:
+                    raise InvestigationNotFoundError(
+                        f"no investigation with id {investigation_id}"
+                    )
+                desired = self._validated_members(row[1], member_sweep_ids)
+                current = set(self._fetch_members(investigation_id))
+                fresh = [sid for sid in desired if sid not in current]
+                if fresh:
+                    for sweep_id in fresh:
+                        self._con.execute(
+                            "INSERT INTO investigation_sweeps (investigation_id,"
+                            " sweep_id, added_ns) VALUES (?, ?, ?)",
+                            [investigation_id, sweep_id, now_ns],
+                        )
+                    self._con.execute(
+                        "UPDATE investigations SET updated_ns = ? "
+                        "WHERE investigation_id = ?",
+                        [now_ns, investigation_id],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def remove_members(
+        self, investigation_id: str, member_sweep_ids: Sequence[str]
+    ) -> None:
+        """Drop sweeps from the member set; non-members are a no-op."""
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._fetch_investigation(investigation_id)
+                if row is None:
+                    raise InvestigationNotFoundError(
+                        f"no investigation with id {investigation_id}"
+                    )
+                current = set(self._fetch_members(investigation_id))
+                drop = [
+                    sid for sid in dict.fromkeys(member_sweep_ids) if sid in current
+                ]
+                if drop:
+                    self._remove_member_rows(investigation_id, drop)
+                    self._con.execute(
+                        "UPDATE investigations SET updated_ns = ? "
+                        "WHERE investigation_id = ?",
+                        [now_ns, investigation_id],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def archive_investigation(self, investigation_id: str, ns: int) -> None:
+        """Mark the investigation archived at ``ns``; retrying is a no-op."""
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._fetch_investigation(investigation_id)
+                if row is None:
+                    raise InvestigationNotFoundError(
+                        f"no investigation with id {investigation_id}"
+                    )
+                if row[6] is None:
+                    self._con.execute(
+                        "UPDATE investigations SET archived_ns = ?, "
+                        "updated_ns = ? WHERE investigation_id = ?",
+                        [ns, ns, investigation_id],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def restore_investigation(self, investigation_id: str) -> None:
+        """Clear the archived flag; already-active investigations are a no-op."""
+        now_ns = time.time_ns()
+        with self._lock:
+            self._con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._fetch_investigation(investigation_id)
+                if row is None:
+                    raise InvestigationNotFoundError(
+                        f"no investigation with id {investigation_id}"
+                    )
+                if row[6] is not None:
+                    self._con.execute(
+                        "UPDATE investigations SET archived_ns = NULL, "
+                        "updated_ns = ? WHERE investigation_id = ?",
+                        [now_ns, investigation_id],
+                    )
+                self._con.execute("COMMIT")
+            except BaseException:
+                self._con.execute("ROLLBACK")
+                raise
+
+    def _fetch_investigation(self, investigation_id: str) -> tuple | None:
+        return self._con.execute(
+            f"SELECT {', '.join(_INVESTIGATION_COLUMNS)} FROM investigations "
+            "WHERE investigation_id = ?",
+            [investigation_id],
+        ).fetchone()
+
+    def _fetch_members(self, investigation_id: str) -> tuple[str, ...]:
+        return tuple(
+            row[0]
+            for row in self._con.execute(
+                "SELECT sweep_id FROM investigation_sweeps "
+                "WHERE investigation_id = ? ORDER BY added_ns, sweep_id",
+                [investigation_id],
+            )
+        )
+
+    def _investigation_record(self, row: tuple, members: tuple[str, ...]) -> dict:
+        record = dict(zip(_INVESTIGATION_COLUMNS, row, strict=True))
+        record["members"] = members
+        return record
+
+    def _validated_members(self, project: str, sweep_ids: Sequence[str]) -> list[str]:
+        unique = list(dict.fromkeys(sweep_ids))
+        if not unique:
+            return []
+        placeholders = ", ".join("?" * len(unique))
+        found = {
+            row[0]: row[1]
+            for row in self._con.execute(
+                f"SELECT sweep_id, project FROM sweeps "
+                f"WHERE sweep_id IN ({placeholders})",
+                unique,
+            )
+        }
+        missing = sorted(sid for sid in unique if sid not in found)
+        if missing:
+            raise SweepNotFoundError(f"no sweep with id {missing[0]}")
+        foreign = sorted(sid for sid in unique if found[sid] != project)
+        if foreign:
+            raise CrossProjectSweepError(
+                f"sweep {foreign[0]} belongs to project "
+                f"{found[foreign[0]]!r}, not {project!r}"
+            )
+        return unique
+
+    def _remove_member_rows(self, investigation_id: str, sweep_ids: list[str]) -> None:
+        placeholders = ", ".join("?" * len(sweep_ids))
+        self._con.execute(
+            f"DELETE FROM investigation_sweeps WHERE investigation_id = ? "
+            f"AND sweep_id IN ({placeholders})",
+            [investigation_id, *sweep_ids],
+        )
 
     def backup_to(self, dest: str | Path) -> None:
         dest = Path(dest)
