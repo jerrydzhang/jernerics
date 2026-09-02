@@ -182,7 +182,10 @@ class TestLogJson:
         tracker = make_tracker(tmp_path)
         blob = {"pad": "x" * (JSON_VALUE_MAX_BYTES + 1)}
 
-        with pytest.raises(ValidationError, match="exceeding"):
+        with pytest.raises(
+            ValidationError,
+            match="limit; log bulky payloads as an artifact via log_artifact",
+        ):
             tracker.log_json("results", blob)
 
     def test_step_counter_shared_with_log_value(self, tmp_path) -> None:
@@ -318,7 +321,10 @@ class TestLogArtifact:
         artifact.write_bytes(payload)
 
         event = tracker.log_artifact("big", str(artifact))
+        artifact.unlink()
 
+        staged = tmp_path / "blobs" / f"{event.artifact_id.hex}.bin"
+        assert staged.read_bytes() == payload
         assert event.size_bytes == len(payload)
         assert event.sha256 == hashlib.sha256(payload).hexdigest()
 
@@ -329,12 +335,14 @@ class TestLogArtifact:
 
         event = tracker.log_artifact("model", str(artifact))
 
+        staged = tmp_path / "blobs" / f"{event.artifact_id.hex}.bin"
         manifest = tmp_path / "0.manifest"
         entry = json.loads(manifest.read_text().strip())
         assert entry == {
             "artifact_id": event.artifact_id.hex,
             "key": "model",
-            "path": str(artifact),
+            "path": str(staged),
+            "staged": True,
         }
 
     def test_system_source_and_content_type_override(self, tmp_path) -> None:
@@ -369,6 +377,72 @@ class TestLogArtifact:
 
         with pytest.raises(ValidationError):
             tracker.log_artifact("model", str(artifact), context={"a": {"b": 1}})
+
+    def test_stages_snapshot_of_path_input(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "model.json"
+        payload = b'{"weights": [1, 2, 3]}'
+        artifact.write_bytes(payload)
+
+        event = tracker.log_artifact("model", str(artifact))
+        artifact.unlink()
+
+        staged = tmp_path / "blobs" / f"{event.artifact_id.hex}.bin"
+        assert staged.read_bytes() == payload
+
+    def test_mutating_caller_file_leaves_staged_blob_intact(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "model.json"
+        artifact.write_bytes(b"before")
+
+        event = tracker.log_artifact("model", str(artifact))
+        artifact.write_bytes(b"corrupted after logging")
+
+        staged = tmp_path / "blobs" / f"{event.artifact_id.hex}.bin"
+        assert staged.read_bytes() == b"before"
+
+    def test_bytes_input_stages_blob_and_manifest(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        event = tracker.log_artifact("report", data=b"payload bytes")
+
+        staged = tmp_path / "blobs" / f"{event.artifact_id.hex}.bin"
+        assert staged.read_bytes() == b"payload bytes"
+        assert event.filename == "report.bin"
+        assert event.content_type == "application/octet-stream"
+        assert event.size_bytes == len(b"payload bytes")
+        assert event.sha256 == hashlib.sha256(b"payload bytes").hexdigest()
+        entry = json.loads((tmp_path / "0.manifest").read_text().strip())
+        assert entry == {
+            "artifact_id": event.artifact_id.hex,
+            "key": "report",
+            "path": str(staged),
+            "staged": True,
+        }
+
+    def test_rejects_both_path_and_data(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+        artifact = tmp_path / "model.json"
+        artifact.write_bytes(b"{}")
+
+        with pytest.raises(ValueError, match="exactly one"):
+            tracker.log_artifact("model", str(artifact), data=b"{}")
+
+    def test_rejects_neither_path_nor_data(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        with pytest.raises(ValueError, match="neither"):
+            tracker.log_artifact("model")
+
+    def test_failed_copy_leaves_no_staging_litter(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        with pytest.raises(OSError):
+            tracker.log_artifact("model", str(tmp_path / "missing.json"))
+
+        assert list((tmp_path / "blobs").iterdir()) == []
+        assert read_events(tmp_path / "0.jsonl") == []
+        assert not (tmp_path / "0.manifest").exists()
 
 
 class TestRoundTripThroughAdapter:

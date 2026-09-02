@@ -22,6 +22,20 @@ class TestAppend:
             "path": "/work/m.pt",
         }
 
+    def test_appends_staged_marker_when_requested(self, tmp_path: Path):
+        manifest_path = tmp_path / "0.manifest"
+        ArtifactManifest(manifest_path).append(
+            ARTIFACT_ID, "model.pt", "/cache/blobs/ab.bin", staged=True
+        )
+
+        entry = json.loads(manifest_path.read_text().strip())
+        assert entry == {
+            "artifact_id": ARTIFACT_ID,
+            "key": "model.pt",
+            "path": "/cache/blobs/ab.bin",
+            "staged": True,
+        }
+
 
 class TestReadFromCursor:
     def test_yields_typed_entries_with_end_offsets(self, tmp_path: Path):
@@ -42,6 +56,19 @@ class TestReadFromCursor:
         assert manifest_path.read_bytes()[: entries[1].end_offset] == (
             manifest_path.read_bytes()
         )
+
+    def test_staged_flag_round_trips(self, tmp_path: Path):
+        manifest_path = tmp_path / "0.manifest"
+        m = ArtifactManifest(manifest_path)
+        m.append(ARTIFACT_ID, "a.pt", "/cache/a.bin", staged=True)
+        m.append("b" * 32, "b.pt", "/host/b.pt")
+
+        entries = m.read_from_cursor()
+
+        assert [(e.staged, e.path) for e in entries] == [
+            (True, "/cache/a.bin"),
+            (False, "/host/b.pt"),
+        ]
 
     def test_resumes_from_saved_cursor(self, tmp_path: Path):
         manifest_path = tmp_path / "0.manifest"

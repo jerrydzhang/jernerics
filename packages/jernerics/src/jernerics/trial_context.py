@@ -7,7 +7,7 @@ from typing import Protocol
 from jernerics_schema import ArtifactSource
 
 from jernerics.tracking.artifact_manifest import ArtifactManifest
-from jernerics.tracking.tracker import JsonlTracker
+from jernerics.tracking.tracker import JsonlTracker, validate_artifact_input
 
 TRIAL_CONFIG_ENV = "JERNERICS_TRIAL_CONFIG"
 TRACKING_DIR_ENV = "JERNERICS_TRACKING_DIR"
@@ -37,8 +37,9 @@ class TrackerProtocol(Protocol):
     def log_artifact(
         self,
         key: str,
-        path: str,
+        path: str | None = None,
         *,
+        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> None: ...
@@ -69,12 +70,17 @@ class ConsoleTracker:
     def log_artifact(
         self,
         key: str,
-        path: str,
+        path: str | None = None,
         *,
+        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> None:
-        print(f"[artifact] {key}={path}")
+        validate_artifact_input(path, data)
+        if data is not None:
+            print(f"[artifact] {key}={len(data)} bytes")
+        else:
+            print(f"[artifact] {key}={path}")
 
     def set_progress(self, current: int, total: int, unit: str) -> None:
         print(f"[progress] {current}/{total} {unit}")
@@ -111,12 +117,15 @@ class _JobTracker:
     def log_artifact(
         self,
         key: str,
-        path: str,
+        path: str | None = None,
         *,
+        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> None:
-        self._tracker.log_artifact(key, path, source=source, content_type=content_type)
+        self._tracker.log_artifact(
+            key, path, data=data, source=source, content_type=content_type
+        )
 
     def set_progress(self, current: int, total: int, unit: str) -> None:
         self._tracker.set_progress(current, total, unit)

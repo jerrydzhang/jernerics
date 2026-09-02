@@ -5,7 +5,10 @@ The manifest cursor advances only after a terminal outcome per entry:
 different bytes for that artifact id) both count as done; anything
 else — network failure, other HTTP status, unreadable file — stops
 that manifest with the cursor left before the failing entry, so the
-next sweep re-uploads the same artifact ids.
+next sweep re-uploads the same artifact ids. Staged blobs (manifest
+lines marked ``"staged": true``, Jernerics-owned copies) are unlinked
+once their entry reaches a terminal outcome; caller-owned paths and
+failed entries are never touched.
 """
 
 import sys
@@ -96,6 +99,8 @@ def upload_pending_blobs(
                     )
                     break
                 manifest.advance_cursor(entry.end_offset)
+                if entry.staged:
+                    _unlink_staged(Path(entry.path))
         except (httpx.HTTPError, OSError) as exc:
             result.failed += 1
             print(
@@ -103,6 +108,16 @@ def upload_pending_blobs(
                 file=sys.stderr,
             )
     return result
+
+
+def _unlink_staged(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(
+            f"jernerics: could not remove staged blob {path}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def sweep_manifest_blobs(

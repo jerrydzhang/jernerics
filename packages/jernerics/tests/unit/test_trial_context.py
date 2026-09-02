@@ -13,6 +13,8 @@ from jernerics.trial_context import (
     trial_config,
     trial_tracker,
 )
+from jernerics_schema import JSON_VALUE_MAX_BYTES
+from pydantic import ValidationError
 
 
 def _read_events(tmp_path, trial_number=7):
@@ -159,15 +161,60 @@ class TestJobTracker:
         assert event.filename == "model.pt"
         assert event.size_bytes == 7
 
+        staged = (
+            tmp_path
+            / "tracking"
+            / "artifacts"
+            / "blobs"
+            / f"{event.artifact_id.hex}.bin"
+        )
+        assert staged.read_bytes() == b"weights"
         manifest = tmp_path / "tracking" / "artifacts" / "7.manifest"
         entries = [json.loads(line) for line in manifest.read_text().splitlines()]
         assert entries == [
             {
                 "artifact_id": event.artifact_id.hex,
                 "key": "model",
-                "path": str(artifact),
+                "path": str(staged),
+                "staged": True,
             }
         ]
+
+    def test_logs_artifact_from_bytes(self, job_tracker):
+        tracker, tmp_path = job_tracker
+
+        tracker.log_artifact("report", data=b"hello")
+
+        [event] = _read_events(tmp_path)
+        assert event.tag == "artifact_declaration"
+        assert event.filename == "report.bin"
+        staged = (
+            tmp_path
+            / "tracking"
+            / "artifacts"
+            / "blobs"
+            / f"{event.artifact_id.hex}.bin"
+        )
+        assert staged.read_bytes() == b"hello"
+
+    def test_artifact_input_requires_exactly_one_of(self, job_tracker):
+        tracker, tmp_path = job_tracker
+        artifact = tmp_path / "m.bin"
+        artifact.write_bytes(b"x")
+
+        with pytest.raises(ValueError, match="exactly one"):
+            tracker.log_artifact("m", str(artifact), data=b"x")
+        with pytest.raises(ValueError, match="neither"):
+            tracker.log_artifact("m")
+
+    def test_oversize_finish_names_artifact_remedy(self, job_tracker):
+        tracker, _ = job_tracker
+
+        with pytest.raises(
+            ValidationError,
+            match="limit; log bulky payloads as an artifact via log_artifact",
+        ):
+            tracker.finish({"pad": "x" * (JSON_VALUE_MAX_BYTES + 1)})
 
     def test_set_progress_emits_execution_progress_event(self, job_tracker):
         tracker, tmp_path = job_tracker
@@ -221,6 +268,17 @@ class TestConsoleTracker:
         ConsoleTracker().log_artifact("model", "/tmp/model.pt")
 
         assert capsys.readouterr().out == "[artifact] model=/tmp/model.pt\n"
+
+    def test_log_artifact_bytes_prints_size(self, capsys):
+        ConsoleTracker().log_artifact("model", data=b"abc")
+
+        assert capsys.readouterr().out == "[artifact] model=3 bytes\n"
+
+    def test_log_artifact_requires_exactly_one_input(self):
+        with pytest.raises(ValueError, match="exactly one"):
+            ConsoleTracker().log_artifact("model", "/tmp/model.pt", data=b"abc")
+        with pytest.raises(ValueError, match="neither"):
+            ConsoleTracker().log_artifact("model")
 
     def test_set_progress_prints_progress(self, capsys):
         ConsoleTracker().set_progress(3, 10, "epochs")

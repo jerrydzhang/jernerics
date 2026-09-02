@@ -1,11 +1,12 @@
 """Per-trial artifact manifest: pending blob uploads with a durable cursor.
 
-Each line is one JSON object naming an immutable artifact:
-``{"artifact_id": ..., "key": ..., "path": ...}``. The sidecar
-``<manifest>.cursor`` records the byte offset after the last uploaded
-entry, so a crashed uploader resumes exactly where it was acknowledged.
-Legacy v2 lines (no ``artifact_id``) are skipped: their artifacts belong
-to the archived era and are never re-uploaded.
+``{"artifact_id": ..., "key": ..., "path": ...}``. Entries written by
+the tracker carry ``"staged": true`` and name Jernerics-owned blob
+copies; unmarked paths belong to the caller and are never deleted. The
+sidecar ``<manifest>.cursor`` records the byte offset after the last
+uploaded entry, so a crashed uploader resumes exactly where it was
+acknowledged. Legacy v2 lines (no ``artifact_id``) are skipped: their
+artifacts belong to the archived era and are never re-uploaded.
 """
 
 import json
@@ -23,6 +24,7 @@ class ManifestEntry:
     key: str
     path: str
     end_offset: int
+    staged: bool = False
 
 
 class ArtifactManifest:
@@ -32,14 +34,19 @@ class ArtifactManifest:
             manifest_cursor_path(path) if cursor_path is None else cursor_path
         )
 
-    def append(self, artifact_id: str, key: str, local_path: str) -> None:
+    def append(
+        self, artifact_id: str, key: str, local_path: str, *, staged: bool = False
+    ) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        entry = json.dumps(
-            {"artifact_id": artifact_id, "key": key, "path": local_path},
-            separators=(",", ":"),
-        )
+        entry: dict[str, str | bool] = {
+            "artifact_id": artifact_id,
+            "key": key,
+            "path": local_path,
+        }
+        if staged:
+            entry["staged"] = True
         with open(self.path, "a") as f:
-            f.write(entry + "\n")
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
 
     def read_from_cursor(self) -> list[ManifestEntry]:
         if not self.path.exists():
@@ -68,6 +75,7 @@ class ArtifactManifest:
                         key=str(data.get("key", "")),
                         path=str(data.get("path", "")),
                         end_offset=pos,
+                        staged=bool(data.get("staged", False)),
                     )
                 )
         return entries

@@ -32,15 +32,21 @@ class RecordingTransport:
         return FakeResponse(self.responses.pop(0))
 
 
-def _append_entry(manifest_path: Path, key: str, payload: bytes) -> str:
+def _append_entry(
+    manifest_path: Path, key: str, payload: bytes, *, staged: bool = False
+) -> str:
     artifact_id = uuid4().hex
     blob = manifest_path.parent / f"{artifact_id}.bin"
     blob.write_bytes(payload)
+    entry: dict[str, object] = {
+        "artifact_id": artifact_id,
+        "key": key,
+        "path": str(blob),
+    }
+    if staged:
+        entry["staged"] = True
     with open(manifest_path, "a") as f:
-        f.write(
-            json.dumps({"artifact_id": artifact_id, "key": key, "path": str(blob)})
-            + "\n"
-        )
+        f.write(json.dumps(entry) + "\n")
     return artifact_id
 
 
@@ -189,6 +195,57 @@ class TestUploadPendingBlobs:
         )
 
         assert result.uploaded == 2
+
+    def test_staged_blob_unlinked_after_2xx(self, tmp_path):
+        manifest_path = tmp_path / "0.manifest"
+        _append_entry(manifest_path, "a", b"one", staged=True)
+        blob = next(tmp_path.glob("*.bin"))
+
+        upload_pending_blobs(
+            "http://srv", None, [manifest_path], transport=RecordingTransport([200])
+        )
+
+        assert not blob.exists()
+
+    def test_staged_blob_unlinked_after_409(self, tmp_path):
+        manifest_path = tmp_path / "0.manifest"
+        _append_entry(manifest_path, "a", b"one", staged=True)
+        blob = next(tmp_path.glob("*.bin"))
+
+        upload_pending_blobs(
+            "http://srv", None, [manifest_path], transport=RecordingTransport([409])
+        )
+
+        assert not blob.exists()
+        assert _cursor(manifest_path) == str(manifest_path.stat().st_size)
+
+    def test_unmarked_entry_is_never_unlinked(self, tmp_path):
+        manifest_path = tmp_path / "0.manifest"
+        _append_entry(manifest_path, "a", b"one")
+        blob = next(tmp_path.glob("*.bin"))
+
+        upload_pending_blobs(
+            "http://srv", None, [manifest_path], transport=RecordingTransport([200])
+        )
+
+        assert blob.exists()
+
+    def test_failed_upload_retains_staged_blob_for_retry(self, tmp_path):
+        manifest_path = tmp_path / "0.manifest"
+        artifact_id = _append_entry(manifest_path, "a", b"one", staged=True)
+        blob = manifest_path.parent / f"{artifact_id}.bin"
+
+        upload_pending_blobs(
+            "http://srv", None, [manifest_path], transport=RecordingTransport([503])
+        )
+
+        assert blob.exists()
+        assert not manifest_cursor_path(manifest_path).exists()
+
+        retry = RecordingTransport(responses=[200])
+        upload_pending_blobs("http://srv", None, [manifest_path], transport=retry)
+        assert retry.calls == [artifact_id]
+        assert not blob.exists()
 
 
 def test_bearer_header_sent_when_api_key_present(tmp_path):

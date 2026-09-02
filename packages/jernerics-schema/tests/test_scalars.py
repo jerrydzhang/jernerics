@@ -60,5 +60,8 @@ def test_observation_at_limit_passes() -> None:
 
 def test_observation_over_limit_rejected() -> None:
     observation = _observation_with_encoded_size(JSON_VALUE_MAX_BYTES + 1)
-    with pytest.raises(ValidationError, match="exceeding"):
+    with pytest.raises(
+        ValidationError,
+        match="limit; log bulky payloads as an artifact via log_artifact",
+    ):
         _value_event(observation=observation)

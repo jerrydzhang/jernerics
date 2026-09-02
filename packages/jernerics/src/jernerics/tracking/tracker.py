@@ -3,6 +3,7 @@
 import hashlib
 import math
 import mimetypes
+import os
 import socket
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,21 +94,59 @@ class Tracker(Protocol):
     def log_artifact(
         self,
         key: str,
-        local_path: str,
+        local_path: str | None = None,
         context: dict | None = None,
         *,
+        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> ArtifactDeclarationEvent | None: ...
     def close(self) -> None: ...
 
 
-def _sha256_file(path: Path) -> str:
+_CHUNK_BYTES = 1024 * 1024
+
+
+def _copy_and_hash(source: Path, destination: Path) -> tuple[int, str]:
     digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+    size = 0
+    with open(source, "rb") as src, open(destination, "wb") as dst:
+        for chunk in iter(lambda: src.read(_CHUNK_BYTES), b""):
+            dst.write(chunk)
             digest.update(chunk)
-    return digest.hexdigest()
+            size += len(chunk)
+    return size, digest.hexdigest()
+
+
+def _stage_blob(
+    blobs_dir: Path,
+    artifact_hex: str,
+    local_path: str | None,
+    data: bytes | None,
+) -> tuple[Path, int, str]:
+    final = blobs_dir / f"{artifact_hex}.bin"
+    tmp = final.with_name(final.name + ".tmp")
+    try:
+        if data is not None:
+            tmp.write_bytes(data)
+            size, sha256 = len(data), hashlib.sha256(data).hexdigest()
+        else:
+            size, sha256 = _copy_and_hash(Path(str(local_path)), tmp)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    os.replace(tmp, final)
+    return final, size, sha256
+
+
+def validate_artifact_input(path: str | None, data: bytes | None) -> None:
+    """Require exactly one of path= or data= on every artifact call."""
+    if path is not None and data is not None:
+        msg = "log_artifact accepts exactly one of path= or data=; both were provided"
+        raise ValueError(msg)
+    if path is None and data is None:
+        msg = "log_artifact requires path= or data=; neither was provided"
+        raise ValueError(msg)
 
 
 class JsonlTracker:
@@ -312,34 +351,47 @@ class JsonlTracker:
     def log_artifact(
         self,
         key: str,
-        local_path: str,
+        local_path: str | None = None,
         context: dict | None = None,
         *,
+        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> ArtifactDeclarationEvent:
-        local = Path(local_path)
+        validate_artifact_input(local_path, data)
+        if self._manifest is None:
+            msg = "log_artifact requires a manifest; construct the tracker with one"
+            raise RuntimeError(msg)
+        artifact_id = uuid4()
+        display_name = Path(local_path).name if local_path is not None else f"{key}.bin"
+        blobs_dir = self._manifest.path.parent / "blobs"
+        blobs_dir.mkdir(parents=True, exist_ok=True)
+        staged_path, size_bytes, sha256 = _stage_blob(
+            blobs_dir,
+            artifact_id.hex,
+            local_path,
+            data,
+        )
         event = ArtifactDeclarationEvent(
             event_id=uuid4(),
             recorded_at=_now(),
-            artifact_id=uuid4(),
+            artifact_id=artifact_id,
             trial_id=self.trial_id,
             execution_id=self.execution_id,
             key=key,
-            filename=local.name,
+            filename=display_name,
             content_type=(
                 content_type
                 if content_type is not None
-                else mimetypes.guess_type(local.name)[0] or _FALLBACK_CONTENT_TYPE
+                else mimetypes.guess_type(display_name)[0] or _FALLBACK_CONTENT_TYPE
             ),
-            size_bytes=local.stat().st_size,
-            sha256=_sha256_file(local),
+            size_bytes=size_bytes,
+            sha256=sha256,
             context=self._context(context),
             source=source,
         )
         self._emit(event)
-        if self._manifest is not None:
-            self._manifest.append(event.artifact_id.hex, key, str(local_path))
+        self._manifest.append(event.artifact_id.hex, key, str(staged_path), staged=True)
         return event
 
     def close(self) -> None:
@@ -416,9 +468,10 @@ class NullTracker:
     def log_artifact(
         self,
         key: str,
-        local_path: str,
+        local_path: str | None = None,
         context: dict | None = None,
         *,
+        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> None:

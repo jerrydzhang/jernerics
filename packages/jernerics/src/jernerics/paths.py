@@ -38,6 +38,8 @@ def cache_dir() -> Path:
 
         optuna/<study>.journal
         tracking/<study>/0.jsonl
+        tracking/<study>/artifacts/0.manifest
+        tracking/<study>/artifacts/blobs/<artifact_id>.bin
         jobs/<job_id>.json
     """
     if is_hpc():
