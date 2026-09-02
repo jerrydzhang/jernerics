@@ -2073,13 +2073,20 @@ class TestFailureView:
         rendered = str(overview_tab(service, "curate", {"sweeps": []}))
         assert "failed-trials-view" not in rendered
 
-    _FAILED_OUTPUTS = {"failed-trials-panel.children", "failed-trials-view.open"}
+    _FAILED_OUTPUTS = {
+        "failed-trials-panel.children",
+        "failed-trials-view.open",
+        "sweep-grid.rowData",
+        "sweep-grid.selectedRows",
+        "workspace-curation-note.children",
+    }
 
     def _failed_state(self, reason: str) -> list[dict]:
         return [
             {"id": "failed-reason", "property": "value", "value": reason},
             {"id": "project-store", "property": "data", "value": "ops"},
             {"id": "view-store", "property": "data", "value": None},
+            {"id": "sweep-grid", "property": "selectedRows", "value": None},
         ]
 
     def _failed_inputs(self, sweep_id: uuid.UUID, clicks: int) -> list[dict]:
@@ -2123,6 +2130,16 @@ class TestFailureView:
         assert row[1] is not None and row[2] == "bad shards"
         children = str(response["failed-trials-panel"]["children"])
         assert "Marked invalid" in children
+        row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
+        assert row_ids == [str(SWEEP_A), str(SWEEP_B)]
+        grid_row = next(
+            entry
+            for entry in response["sweep-grid"]["rowData"]
+            if entry["sweep_id"] == str(SWEEP_A)
+        )
+        assert grid_row["invalid"] is True
+        note = str(response["workspace-curation-note"]["children"])
+        assert "alpha is invalid" in note
 
     def test_mark_invalid_without_reason_is_rejected(self, mutable_client):
         store, client = mutable_client

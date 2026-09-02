@@ -1014,11 +1014,15 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("failed-trials-panel", "children"),
         Output("failed-trials-view", "open"),
+        Output("sweep-grid", "rowData", allow_duplicate=True),
+        Output("sweep-grid", "selectedRows", allow_duplicate=True),
+        Output("workspace-curation-note", "children", allow_duplicate=True),
         Input("failed-view-open", "n_clicks"),
         Input({"failed-invalid": dash.ALL}, "n_clicks"),
         State("failed-reason", "value"),
         State("project-store", "data"),
         State("view-store", "data"),
+        State("sweep-grid", "selectedRows"),
         prevent_initial_call=True,
     )
     def _drive_failed_view(
@@ -1027,6 +1031,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         reason: str | None,
         project: str | None,
         view_doc: dict | None,
+        grid_selection: list[dict] | None,
     ):
         # One entry point: the roll-up's failed badge opens and fills
         # the view; a group's Mark invalid acts, then re-renders it.
@@ -1036,6 +1041,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         )
         if name == "failed-invalid" and value:
             ok, report = apply_curation(service, "invalid", [str(value)], reason or "")
+            # The action refreshes the grid too — both surfaces move
+            # together, with the surviving selection and the note.
+            fresh, note = _post_action_grid(service, project, view_doc)
+            kept = {str(row["sweep_id"]) for row in grid_selection or []}
             return (
                 workspace.failed_view_panel(
                     service,
@@ -1045,10 +1054,16 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                     workspace.action_message(ok, report),
                 ),
                 no_update,
+                fresh,
+                [row for row in fresh if row["sweep_id"] in kept],
+                note,
             )
         return (
             workspace.failed_view_panel(service, project or "", scoped, time.time_ns()),
             True,
+            no_update,
+            no_update,
+            no_update,
         )
 
     # -- Focus: the inspector region --------------------------------------
