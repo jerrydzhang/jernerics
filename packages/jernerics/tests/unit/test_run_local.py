@@ -750,3 +750,103 @@ class TestRunRemoteCommand:
         assert backend.prepare_and_submit.call_args[1]["cli_overrides"] == {
             "partition": "debug"
         }
+
+
+class TestRunLocalGridSweep:
+    def test_grid_sweep_runs_every_combination_once(self, tmp_path):
+        import json
+
+        import optuna
+        from optuna.storages.journal import JournalFileBackend, JournalStorage
+
+        from jernerics.backend.local_backend import LocalBackend
+        from jernerics.backend.models import SweepSubmission
+        from jernerics.config import load_config
+
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(
+            "from jernerics import trial_config, trial_tracker\n"
+            "config = trial_config()\n"
+            "tracker = trial_tracker()\n"
+            "tracker.finish({'loss': config['lr']})\n"
+        )
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {'seed': 7}\n"
+            "grid = {'lr': [0.1, 0.2, 0.3], 'mode': ['a', 'b']}\n"
+            "def objective(results):\n    return results['loss']\n"
+        )
+        sweep = load_config(str(config_file))
+        assert sweep.n_trials == 6
+
+        spec = SweepSubmission(
+            trial_path=trial_file,
+            config_path=config_file,
+            study_name="gridtest",
+            storage_url=str(tmp_path / "gridtest.journal"),
+            n_trials=sweep.n_trials,
+            tracking_dir=tmp_path / "tracking" / "gridtest",
+            grid=sweep.grid,
+        )
+
+        LocalBackend().submit_sweep(spec, direction="minimize")
+
+        study = optuna.load_study(
+            study_name="gridtest",
+            storage=JournalStorage(
+                JournalFileBackend(str(tmp_path / "gridtest.journal"))
+            ),
+        )
+        assert len(study.trials) == 6
+        assert all(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials)
+        expected = {(lr, mode) for lr in (0.1, 0.2, 0.3) for mode in ("a", "b")}
+        assert {(t.params["lr"], t.params["mode"]) for t in study.trials} == expected
+
+        resolved_configs = [
+            json.loads((tmp_path / "configs" / f"trial_{i}.json").read_text())
+            for i in range(6)
+        ]
+        assert {(c["lr"], c["mode"]) for c in resolved_configs} == expected
+        assert all(c["seed"] == 7 for c in resolved_configs)
+
+
+class TestRunLocalGridConfigErrors:
+    def test_grid_with_search_space_exits_config_error(self, tmp_path):
+        from jernerics.commands.execution import run_local
+        from jernerics.config import ExitCode
+
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text("pass\n")
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "grid = {'lr': [0.1, 0.2]}\n"
+            "def search_space(trial):\n"
+            "    return {'wd': trial.suggest_float('wd', 0.0, 0.5)}\n"
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_local(str(trial_file), str(config_file))
+
+        assert exc_info.value.code == ExitCode.CONFIG_ERROR
+
+    def test_grid_n_trials_mismatch_exits_config_error(self, tmp_path, capsys):
+        from jernerics.commands.execution import run_local
+        from jernerics.config import ExitCode
+
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text("pass\n")
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "grid = {'lr': [0.1, 0.2]}\n"
+            "n_trials = 5\n"
+        )
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_local(str(trial_file), str(config_file))
+
+        assert exc_info.value.code == ExitCode.CONFIG_ERROR
+        output = capsys.readouterr().out
+        assert "n_trials=5" in output
+        assert "grid size 2" in output

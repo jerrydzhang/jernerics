@@ -16,6 +16,7 @@ from jernerics.backend.slurm.adapter import (
 )
 from jernerics.commands.common import _get_backend
 from jernerics.config import (
+    ConfigValidationError,
     ExitCode,
     find_pyproject_dir,
     get_project_name,
@@ -87,7 +88,7 @@ def run_local(
 
     try:
         sweep = load_config(str(config_path))
-    except (FileNotFoundError, RuntimeError) as e:
+    except (ConfigValidationError, FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
 
@@ -164,7 +165,7 @@ def run_remote(
 
     try:
         sweep = load_config(str(config_path))
-    except (FileNotFoundError, RuntimeError) as e:
+    except (ConfigValidationError, FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.CONFIG_ERROR) from None
 

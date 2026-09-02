@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -26,6 +27,7 @@ def _make_spec(
     config_relpath="config.py",
     n_trials=5,
     project_name="proj",
+    grid=None,
 ):
     return SweepSubmission(
         trial_path=Path("trial.py"),
@@ -36,6 +38,7 @@ def _make_spec(
         trial_relpath=trial_relpath,
         config_relpath=config_relpath,
         project_name=project_name,
+        grid=grid,
     )
 
 
@@ -428,3 +431,23 @@ class TestBuildPostHookTrackingServer:
         )
         assert post_hook is not None
         assert "--server-addr http://server:8080" in post_hook
+
+
+class TestBuildSweepCommandsGrid:
+    def test_grid_spec_embeds_grid_json_and_sentinel(self):
+        grid = {"lr": [0.001, 0.01], "mode": ["a", "b"]}
+        spec = _make_spec(study_name="gridstudy", grid=grid)
+        paths = _make_paths()
+        setup, _, _ = build_sweep_commands(
+            spec=spec,
+            container=NoContainer(),
+            paths=paths,
+            direction="minimize",
+        )
+
+        assert "grid_enqueued" in setup
+        assert "os.path.exists" in setup
+        assert "itertools.product" in setup
+        assert "enqueue_trial" in setup
+        encoded = re.search(r"base64\.b64decode\('([^']+)'\)", setup).group(1)
+        assert json.loads(base64.b64decode(encoded)) == grid

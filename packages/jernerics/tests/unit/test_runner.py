@@ -642,6 +642,75 @@ class TestExecutionLifecycleEvents:
         assert snapshot.attrs.root["retry_of"] == 3
 
 
+    def test_grid_config_carries_enqueued_values_into_trial_config(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + "tracker.finish({'loss': config['lr']})\n")
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {'seed': 1}\n"
+            "grid = {'lr': [0.1, 0.2], 'mode': ['a', 'b']}\n"
+            "def objective(results):\n    return results['loss']\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        study = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        study.enqueue_trial({"lr": 0.2, "mode": "b"})
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+        )
+
+        resolved = json.loads((tmp_path / "configs" / "trial_0.json").read_text())
+        assert resolved["lr"] == 0.2
+        assert resolved["mode"] == "b"
+        assert resolved["seed"] == 1
+        assert resolved["config_index"] == 0
+        study_after = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        assert study_after.trials[0].params == {"lr": 0.2, "mode": "b"}
+
+    def test_grid_duplicate_choices_are_deduplicated_for_suggestions(self, tmp_path):
+        trial_file = tmp_path / "trial.py"
+        trial_file.write_text(_HEADER + "tracker.finish({'loss': 0.0})\n")
+        config_file = tmp_path / "config.py"
+        config_file.write_text(
+            "base = {}\n"
+            "grid = {'mode': ['a', 'a', 'b']}\n"
+            "def objective(results):\n    return results['loss']\n"
+        )
+        storage_url = _make_study(tmp_path)
+        tracking_dir = self._tracking_dir(tmp_path)
+
+        study = optuna.load_study(
+            study_name="s",
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        study.enqueue_trial({"mode": "a"})
+
+        run_trial(
+            trial_file=str(trial_file),
+            config_file=str(config_file),
+            study_name="s",
+            storage_url=storage_url,
+            tracking_dir=str(tracking_dir),
+            project_name="proj",
+        )
+
+        resolved = json.loads((tmp_path / "configs" / "trial_0.json").read_text())
+        assert resolved["mode"] == "a"
+
+
 class TestRunIdRemoval:
     def test_no_run_id_identity_in_trial_context(self):
         from jernerics import trial_context

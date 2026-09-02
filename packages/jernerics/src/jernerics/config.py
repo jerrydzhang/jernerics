@@ -46,6 +46,9 @@ class SweepConfig:
 class ConfigNotFound(Exception):
     pass
 
+class ConfigValidationError(Exception):
+    pass
+
 
 def _normalize_time(value: str | None) -> str | None:
     if isinstance(value, str) and value.lower() == "none":
@@ -350,22 +353,38 @@ def load_config(config_file: str) -> SweepConfig:
             stacklevel=2,
         )
 
+    grid = module_ns.get("grid", None)
+    n_trials = module_ns.get("n_trials", None)
+
+    if grid is not None and module_ns.get("search_space", None) is not None:
+        raise ConfigValidationError(
+            f"Invalid config '{config_path}': 'grid' and 'search_space' are "
+            "mutually exclusive. Grid is a self-contained deterministic sweep "
+            "mode; delete 'search_space' from the config file."
+        )
+
     sweep = SweepConfig(
         base=module_ns.get("base", {}),
         search_space=module_ns.get("search_space", None),
-        n_trials=module_ns.get("n_trials", 1),
+        n_trials=1 if n_trials is None else n_trials,
         sampler=module_ns.get("sampler", None),
         objective=module_ns.get("objective", None),
         direction=module_ns.get("direction", "minimize"),
         backend_overrides=module_ns.get("backend_overrides", {}),
-        grid=module_ns.get("grid", None),
+        grid=grid,
     )
 
-    if sweep.grid is not None:
+    if grid is not None:
         n_combos = 1
-        for values in sweep.grid.values():
+        for values in grid.values():
             n_combos *= len(values)
-        if sweep.n_trials == 1:
+        if n_trials is None:
             sweep.n_trials = n_combos
+        elif sweep.n_trials != n_combos:
+            raise ConfigValidationError(
+                f"Invalid config '{config_path}': n_trials={sweep.n_trials} does "
+                f"not match the grid size {n_combos}. Set n_trials={n_combos} or "
+                "delete n_trials to default to the grid size."
+            )
 
     return sweep

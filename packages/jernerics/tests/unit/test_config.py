@@ -4,6 +4,7 @@ from jernerics.config import (
     ApptainerConfig,
     BackendConfig,
     ConfigNotFound,
+    ConfigValidationError,
     DockerConfig,
     ExitCode,
     InteractiveConfig,
@@ -649,6 +650,61 @@ sampler = optuna.samplers.GridSampler({"lr": [0.001, 0.01, 0.1]})
     def test_load_config_missing_file_raises(self):
         with pytest.raises(FileNotFoundError):
             load_config("/nonexistent/config.py")
+
+    def test_load_config_grid_defaults_n_trials_to_product(self, tmp_path):
+        config_content = """
+base = {"seed": 1}
+grid = {"lr": [0.001, 0.01], "batch_size": [16, 32, 64]}
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep.grid == {"lr": [0.001, 0.01], "batch_size": [16, 32, 64]}
+        assert sweep.search_space is None
+        assert sweep.n_trials == 6
+
+    def test_load_config_grid_explicit_matching_n_trials_passes(self, tmp_path):
+        config_content = """
+base = {}
+grid = {"lr": [0.001, 0.01]}
+n_trials = 2
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        sweep = load_config(str(config_file))
+
+        assert sweep.n_trials == 2
+
+    def test_load_config_grid_explicit_n_trials_mismatch_raises(self, tmp_path):
+        config_content = """
+base = {}
+grid = {"lr": [0.001, 0.01, 0.1]}
+n_trials = 5
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        with pytest.raises(ConfigValidationError, match=r"n_trials=5.*grid size 3"):
+            load_config(str(config_file))
+
+    def test_load_config_grid_with_search_space_raises(self, tmp_path):
+        config_content = """
+base = {}
+grid = {"lr": [0.001, 0.01]}
+
+def search_space(trial):
+    return {"wd": trial.suggest_float("wd", 0.0, 0.5)}
+"""
+        config_file = tmp_path / "config.py"
+        config_file.write_text(config_content)
+
+        with pytest.raises(
+            ConfigValidationError, match="'grid' and 'search_space' are mutually"
+        ):
+            load_config(str(config_file))
 
     def test_load_config_no_base_defaults_empty(self, tmp_path):
         config_content = """

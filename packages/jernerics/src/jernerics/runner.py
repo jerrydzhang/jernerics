@@ -82,7 +82,14 @@ def run_trial(
         if environment.trial_id is not None:
             trial.set_user_attr(TRIAL_ID_ATTR, str(environment.trial_id))
 
-        params: dict[str, Any] = sweep.search_space(trial) if sweep.search_space else {}
+        params: dict[str, Any] = {}
+        if sweep.grid is not None:
+            params = {
+                key: trial.suggest_categorical(key, list(dict.fromkeys(values)))
+                for key, values in sorted(sweep.grid.items())
+            }
+        elif sweep.search_space is not None:
+            params = sweep.search_space(trial)
 
         if params and set(sweep.base) & set(params):
             overlap = sorted(set(sweep.base) & set(params))
