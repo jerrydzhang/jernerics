@@ -3,6 +3,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import optuna
 from jernerics_schema import SweepId, sweep_id_for
@@ -67,6 +68,15 @@ def _mark_failed(
     )
 
 
+def _retry_lineage(study: optuna.study.Study, original: FrozenTrial) -> dict[str, Any]:
+    """Lineage attrs for a replacement of `original`, rooted at its family root."""
+    root_number = original.user_attrs.get("retry_root", original.number)
+    if not isinstance(root_number, int) or isinstance(root_number, bool):
+        root_number = original.number
+    root = study.trials[root_number] if root_number != original.number else original
+    return retry_lineage_attrs(original, root)
+
+
 def _enqueue_retry(
     study: optuna.study.Study,
     number: int,
@@ -77,12 +87,17 @@ def _enqueue_retry(
     """Fail the stale trial and enqueue a replacement carrying retry lineage."""
     original = study.trials[number]
     _mark_failed(study, number, sweep_id=sweep_id, submission_dir=submission_dir)
-    root_number = original.user_attrs.get("retry_root", number)
-    if not isinstance(root_number, int) or isinstance(root_number, bool):
-        root_number = number
-    root = study.trials[root_number] if root_number != number else original
-    lineage = retry_lineage_attrs(study.trials[number], root)
-    study.enqueue_trial(original.params, user_attrs=lineage)
+    study.enqueue_trial(original.params, user_attrs=_retry_lineage(study, original))
+
+
+def _enqueue_failed_retry(study: optuna.study.Study, number: int) -> None:
+    """Enqueue a same-params replacement for a trial that already failed in-runner.
+
+    The trial is FAIL already (the runner told it), so no tell and no
+    snapshot: the runner surfaced the failure live.
+    """
+    original = study.trials[number]
+    study.enqueue_trial(original.params, user_attrs=_retry_lineage(study, original))
 
 
 def run_checker(ctx_path: str, chain_depth: int) -> bool:
@@ -117,6 +132,7 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         now=time.time(),
         fast_fail_threshold_s=backend_config.shared.fast_fail_threshold_s,
         max_fast_failures=backend_config.shared.max_fast_failures,
+        deterministic=sweep.grid is not None,
     )
 
     if plan.is_complete:
@@ -132,6 +148,9 @@ def run_checker(ctx_path: str, chain_depth: int) -> bool:
         _enqueue_retry(
             study, trial_id, sweep_id=sweep_id, submission_dir=submission_dir
         )
+
+    for trial_id in plan.failed_retry_trial_ids:
+        _enqueue_failed_retry(study, trial_id)
 
     for trial_id in plan.exhausted_trial_ids:
         _mark_failed(study, trial_id, sweep_id=sweep_id, submission_dir=submission_dir)

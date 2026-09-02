@@ -168,7 +168,14 @@ def reconcile_study(ctx: RetryContext, tracking_dir: str | Path) -> list[Path]:
         state="running",
     )
     trial_events = [
-        frozen_trial_snapshot(trial, sweep_id=sweep_id) for trial in study.trials
+        frozen_trial_snapshot(trial, sweep_id=sweep_id)
+        for trial in study.trials
+        # A WAITING enqueue carries no reconcilable facts (params, start
+        # time, and objective all materialize when it runs) and no live
+        # identity. Snapshotting it under the fallback id would squat the
+        # (sweep, number) slot server-side and permanently conflict with
+        # the live identity the trial takes on when the runner asks it.
+        if trial.state is not TrialState.WAITING
     ]
     submission_dir = Path(tracking_dir) / "submission"
     submission_dir.mkdir(parents=True, exist_ok=True)

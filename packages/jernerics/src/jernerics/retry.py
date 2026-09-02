@@ -30,6 +30,8 @@ class RetryPlan:
     is_complete: bool
     retry_counts: dict[str, int] = field(default_factory=dict)
     fast_failed_trial_ids: list[int] = field(default_factory=list)
+    failed_retry_trial_ids: list[int] = field(default_factory=list)
+    failed_exhausted_trial_ids: list[int] = field(default_factory=list)
 
 
 @dataclass
@@ -78,6 +80,7 @@ def plan_retry(
     now: float,
     fast_fail_threshold_s: int = 30,
     max_fast_failures: int = 3,
+    deterministic: bool = False,
 ) -> RetryPlan:
     complete = 0
     fresh_running = 0
@@ -86,6 +89,20 @@ def plan_retry(
     stale_param_keys: list[str] = []
     exhausted_trial_ids: list[int] = []
     fast_failed_trial_ids: list[int] = []
+    failed_retry_trial_ids: list[int] = []
+    failed_param_keys: list[str] = []
+    failed_exhausted_trial_ids: list[int] = []
+
+    # Trial numbers whose replacement was already enqueued: some trial in
+    # the list carries a retry_of attr pointing at them. Without this, a
+    # FAIL trial would be re-planned every cycle until its ledger ran out,
+    # enqueuing one lineage retry per historical attempt instead of one
+    # per failure.
+    retried_numbers: set[int] = set()
+    for trial in trials:
+        retry_of = trial.user_attrs.get("retry_of")
+        if isinstance(retry_of, int) and not isinstance(retry_of, bool):
+            retried_numbers.add(retry_of)
 
     for trial in trials:
         if trial.state == TrialState.COMPLETE or trial.state == TrialState.PRUNED:
@@ -120,6 +137,19 @@ def plan_retry(
                         exhausted_trial_ids.append(trial.number)
             else:
                 fresh_running += 1
+        elif trial.state == TrialState.FAIL:
+            # Stochastic sweeps keep the old behavior: a FAIL refills its
+            # slot with a fresh sample. Deterministic (grid) sweeps retry
+            # the same params under the ledger; at/over max_retries the
+            # FAIL is terminal and its slot stays occupied.
+            if not deterministic or trial.number in retried_numbers:
+                continue
+            pkey = param_key(trial.params)
+            if ledger.get(pkey, 0) < max_retries:
+                failed_retry_trial_ids.append(trial.number)
+                failed_param_keys.append(pkey)
+            else:
+                failed_exhausted_trial_ids.append(trial.number)
 
     retries_enqueued = len(stale_trial_ids)
 
@@ -149,14 +179,30 @@ def plan_retry(
     for pkey in stale_param_keys:
         updated_ledger[pkey] = updated_ledger.get(pkey, 0) + 1
 
+    failed_retries_enqueued = len(failed_retry_trial_ids)
+    failed_exhausted = len(failed_exhausted_trial_ids)
+
+    for pkey in failed_param_keys:
+        updated_ledger[pkey] = updated_ledger.get(pkey, 0) + 1
+
     # Below the threshold, a fast failure is replaced with a fresh sample (let
     # optuna try different params). Once tripped, fast failures look permanent
     # (missing input file, bad config), so we stop spawning replacement trials
     # entirely -- otherwise the broken sweep churns through identical failures
-    # one n_trials batch at a time, forever.
-    remaining_needed = n_trials - complete - fresh_running - waiting - retries_enqueued
+    # one n_trials batch at a time, forever. Exhausted FAILs occupy their slot
+    # so nothing refills them; the retry sweep runs the enqueued retries first
+    # (runners ask(), popping the WAITING replacements).
+    remaining_needed = (
+        n_trials
+        - complete
+        - fresh_running
+        - waiting
+        - retries_enqueued
+        - failed_retries_enqueued
+        - failed_exhausted
+    )
     fresh_needed = 0 if tripped else max(0, remaining_needed)
-    total_array_size = retries_enqueued + fresh_needed
+    total_array_size = retries_enqueued + failed_retries_enqueued + fresh_needed
     is_complete = total_array_size == 0
 
     return RetryPlan(
@@ -167,6 +213,8 @@ def plan_retry(
         is_complete=is_complete,
         retry_counts=updated_ledger,
         fast_failed_trial_ids=fast_failed_trial_ids,
+        failed_retry_trial_ids=failed_retry_trial_ids,
+        failed_exhausted_trial_ids=failed_exhausted_trial_ids,
     )
 
 

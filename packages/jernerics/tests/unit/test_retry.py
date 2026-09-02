@@ -719,6 +719,222 @@ class TestPlanRetryFailTrials:
         assert plan.fresh_needed == 5
 
 
+class TestPlanRetryDeterministicFail:
+    """Grid sweeps route in-runner FAILs through the same-params ledger."""
+
+    def test_fail_under_budget_plans_same_params_lineage_retry(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        params = {"lr": 0.02}
+        pkey = param_key(params)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(1, TrialState.FAIL, params),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=1000.0,
+            deterministic=True,
+        )
+        assert plan.failed_retry_trial_ids == [1]
+        assert plan.failed_exhausted_trial_ids == []
+        assert plan.retry_counts[pkey] == 1
+        assert plan.fresh_needed == 4
+        assert plan.total_array_size == 5
+        assert not plan.is_complete
+
+    def test_fail_at_budget_is_exhausted_and_occupies_slot(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        params = {"lr": 0.02}
+        pkey = param_key(params)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(1, TrialState.FAIL, params),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={pkey: 3},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=1000.0,
+            deterministic=True,
+        )
+        assert plan.failed_retry_trial_ids == []
+        assert plan.failed_exhausted_trial_ids == [1]
+        assert plan.retry_counts[pkey] == 3
+        assert plan.fresh_needed == 4
+        assert plan.total_array_size == 4
+
+    def test_exhausted_fail_makes_single_combo_sweep_terminal(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        params = {"lr": 0.02}
+        pkey = param_key(params)
+
+        plan = plan_retry(
+            trials=[_make_trial(0, TrialState.FAIL, params)],
+            heartbeats_dir=hb_dir,
+            ledger={pkey: 2},
+            n_trials=1,
+            stale_after=120,
+            max_retries=2,
+            now=1000.0,
+            deterministic=True,
+        )
+        assert plan.failed_exhausted_trial_ids == [0]
+        assert plan.fresh_needed == 0
+        assert plan.total_array_size == 0
+        assert plan.is_complete
+
+    def test_fail_stochastic_default_refills_fresh_without_ledger(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        params = {"lr": 0.02}
+        pkey = param_key(params)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE),
+            _make_trial(1, TrialState.FAIL, params),
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=1000.0,
+        )
+        assert plan.failed_retry_trial_ids == []
+        assert plan.failed_exhausted_trial_ids == []
+        assert pkey not in plan.retry_counts
+        assert plan.fresh_needed == 5
+        assert plan.total_array_size == 5
+
+    def test_fail_with_existing_retry_is_not_replanned(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        params = {"lr": 0.02}
+        pkey = param_key(params)
+
+        settled = _make_trial(1, TrialState.FAIL, params)
+        settled.user_attrs = {"retry_of": 0, "retry_root": 0, "retry_index": 1}
+        replacement = _make_trial(2, TrialState.FAIL, params)
+        replacement.user_attrs = {"retry_of": 1, "retry_root": 0, "retry_index": 2}
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE, {"lr": 0.01}),
+            settled,
+            replacement,
+        ]
+        plan = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={pkey: 1},
+            n_trials=6,
+            stale_after=120,
+            max_retries=3,
+            now=1000.0,
+            deterministic=True,
+        )
+        assert plan.failed_retry_trial_ids == [2]
+        assert plan.retry_counts[pkey] == 2
+        assert plan.total_array_size == 5
+
+    def test_fail_under_budget_with_tripped_breaker_still_retries_same_params(
+        self, tmp_path
+    ):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        params = {"lr": 0.02}
+        pkey = param_key(params)
+
+        plan = plan_retry(
+            trials=[_make_trial(0, TrialState.FAIL, params)],
+            heartbeats_dir=hb_dir,
+            ledger={FAST_FAIL_LEDGER_KEY: 3, pkey: 0},
+            n_trials=2,
+            stale_after=120,
+            max_retries=3,
+            now=1000.0,
+            deterministic=True,
+        )
+        assert plan.failed_retry_trial_ids == [0]
+        assert plan.fresh_needed == 0
+        assert plan.total_array_size == 1
+
+    def test_permanent_fail_stops_after_max_retries_across_cycles(self, tmp_path):
+        hb_dir = tmp_path / "heartbeats"
+        hb_dir.mkdir()
+        params_a = {"lr": 0.01}
+        params_b = {"lr": 0.02}
+        pkey_b = param_key(params_b)
+
+        trials = [
+            _make_trial(0, TrialState.COMPLETE, params_a),
+            _make_trial(1, TrialState.FAIL, params_b),
+        ]
+        plan1 = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger={},
+            n_trials=2,
+            stale_after=120,
+            max_retries=2,
+            now=1000.0,
+            deterministic=True,
+        )
+        assert plan1.failed_retry_trial_ids == [1]
+        assert plan1.retry_counts[pkey_b] == 1
+        assert plan1.total_array_size == 1
+
+        first_retry = _make_trial(2, TrialState.FAIL, params_b)
+        first_retry.user_attrs = {"retry_of": 1, "retry_root": 1, "retry_index": 1}
+        trials = [trials[0], trials[1], first_retry]
+        plan2 = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger=plan1.retry_counts,
+            n_trials=2,
+            stale_after=120,
+            max_retries=2,
+            now=1000.0,
+            deterministic=True,
+        )
+        assert plan2.failed_retry_trial_ids == [2]
+        assert plan2.retry_counts[pkey_b] == 2
+        assert plan2.total_array_size == 1
+
+        second_retry = _make_trial(3, TrialState.FAIL, params_b)
+        second_retry.user_attrs = {"retry_of": 2, "retry_root": 1, "retry_index": 2}
+        trials = [*trials, second_retry]
+        plan3 = plan_retry(
+            trials=trials,
+            heartbeats_dir=hb_dir,
+            ledger=plan2.retry_counts,
+            n_trials=2,
+            stale_after=120,
+            max_retries=2,
+            now=1000.0,
+            deterministic=True,
+        )
+        assert plan3.failed_retry_trial_ids == []
+        assert plan3.failed_exhausted_trial_ids == [3]
+        assert plan3.retry_counts[pkey_b] == 2
+        assert plan3.total_array_size == 0
+        assert plan3.is_complete
+
+
 class TestPlanRetryLedgerDoubleEnqueue:
     def test_no_double_enqueue_across_iterations(self, tmp_path):
         hb_dir = tmp_path / "heartbeats"

@@ -120,6 +120,7 @@ def _setup_common_mocks(
     sweep.direction = "minimize"
     sweep.backend_overrides = backend_overrides or {}
     sweep.sampler = None
+    sweep.grid = None
     mock_load_config.return_value = sweep
 
     adapter = MagicMock()
@@ -580,8 +581,8 @@ class TestRetryCheckerFastFail:
         sweep = MagicMock()
         sweep.n_trials = 6
         sweep.direction = "minimize"
-        sweep.backend_overrides = {}
         sweep.sampler = None
+        sweep.grid = None
         mock_load_config.return_value = sweep
 
         adapter = MagicMock()
@@ -815,6 +816,7 @@ class TestRetryLineageJournal:
             sweep.n_trials = 1
             sweep.direction = "minimize"
             sweep.backend_overrides = {}
+            sweep.grid = None
             mock_config.return_value = sweep
             mock_asm.return_value = MagicMock()
             mock_submit.return_value = None
@@ -834,3 +836,230 @@ class TestRetryLineageJournal:
         assert retry.user_attrs["retry_of"] == 0
         assert retry.user_attrs["retry_index"] == 1
         assert retry.user_attrs["retry_of_trial_id"] == str(identity)
+
+    def test_enqueue_failed_retry_enqueues_without_tell(self, tmp_path):
+        """An in-runner FAIL is already terminal; only the replacement is enqueued."""
+        from jernerics.retry_checker import _enqueue_failed_retry
+
+        study, _ = self._study(tmp_path)
+        trial, identity = self._ask_with_identity(study, {"lr": 0.25})
+        study.tell(trial, state=TrialState.FAIL)
+
+        _enqueue_failed_retry(study, trial.number)
+
+        original = study.trials[0]
+        assert original.state == TrialState.FAIL
+        retry = study.trials[1]
+        assert retry.state == TrialState.WAITING
+        assert retry.user_attrs["retry_of"] == 0
+        assert retry.user_attrs["retry_root"] == 0
+        assert retry.user_attrs["retry_index"] == 1
+        assert retry.user_attrs["retry_of_trial_id"] == str(identity)
+        assert retry.user_attrs["retry_root_trial_id"] == str(identity)
+
+    def test_enqueue_failed_retry_of_retry_keeps_root(self, tmp_path):
+        from jernerics.retry_checker import _enqueue_failed_retry
+
+        study, _ = self._study(tmp_path)
+        root_trial, _ = self._ask_with_identity(study, {"lr": 0.25})
+        study.tell(root_trial, state=TrialState.FAIL)
+        _enqueue_failed_retry(study, 0)
+
+        first_retry = study.ask()
+        first_retry.suggest_float("lr", 0.25, 0.25)
+        study.tell(first_retry, state=TrialState.FAIL)
+        _enqueue_failed_retry(study, 1)
+
+        second_retry = study.trials[2]
+        assert second_retry.user_attrs["retry_of"] == 1
+        assert second_retry.user_attrs["retry_root"] == 0
+        assert second_retry.user_attrs["retry_index"] == 2
+
+
+class TestRetryCheckerDeterministic:
+    """Grid sweeps route in-runner FAILs through the same-params ledger."""
+
+    def _run(
+        self,
+        tmp_path,
+        *,
+        trials,
+        grid,
+        n_trials,
+        ledger=None,
+        max_retries=3,
+    ):
+        from jernerics.config import SharedConfig
+        from jernerics.retry_checker import run_checker
+
+        study = MagicMock()
+        study.trials = _make_trials_list(*trials)
+
+        tracking_dir = tmp_path / "tracking" / "mystudy"
+        storage_path = str(tmp_path / "optuna" / "mystudy.journal")
+        Path(storage_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(storage_path).touch()
+
+        ctx = RetryContext(
+            study_name="mystudy",
+            backend_name="hpc",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+            storage_path=storage_path,
+            tracking_dir=str(tracking_dir),
+            project_dir=str(tmp_path),
+            project_name="proj",
+            host_home="/home/user",
+        )
+        ctx_path = _write_ctx(tmp_path, ctx)
+
+        from jernerics.backend.container import NoContainer
+        from jernerics.backend.path_resolver import PathResolver
+        from jernerics.backend.submission import SweepInfrastructure
+
+        shared = SharedConfig(
+            name="hpc",
+            type="slurm",
+            remote_dir="/scratch/proj",
+            container_type="apptainer",
+            grace_period_s=0,
+            stale_after_s=120,
+            max_retries=max_retries,
+            chain_depth_cap=20,
+        )
+        backend_config = MagicMock()
+        backend_config.shared = shared
+        backend_config.backend = MagicMock()
+        backend_config.container = MagicMock()
+
+        sweep = MagicMock()
+        sweep.n_trials = n_trials
+        sweep.direction = "minimize"
+        sweep.backend_overrides = {}
+        sweep.sampler = None
+        sweep.grid = grid
+
+        infra = SweepInfrastructure(
+            adapter=MagicMock(),
+            container=NoContainer(),
+            paths=PathResolver(
+                remote_dir="/scratch/proj",
+                cache_dir="/scratch/cache",
+                container=NoContainer(),
+                project_name="proj",
+            ),
+        )
+
+        with (
+            patch(
+                "jernerics.retry_checker.load_backend_config",
+                return_value=backend_config,
+            ),
+            patch("jernerics.retry_checker.load_config", return_value=sweep),
+            patch(
+                "jernerics.retry_checker.assemble_infrastructure",
+                return_value=infra,
+            ),
+            patch("jernerics.retry_checker.submit_sweep") as mock_submit,
+            patch("jernerics.retry_checker.optuna") as mock_optuna,
+            patch("jernerics.retry_checker.time") as mock_time,
+            patch(
+                "jernerics.retry_checker.read_ledger",
+                return_value=dict(ledger or {}),
+            ),
+            patch("jernerics.retry_checker.write_ledger") as mock_write_ledger,
+            patch("jernerics.retry_checker.load_tracking_server", return_value=None),
+        ):
+            mock_time.time.return_value = 1000.0
+            mock_time.sleep = MagicMock()
+            mock_optuna.load_study.return_value = study
+            mock_optuna.trial.TrialState = TrialState
+            mock_optuna.storages.journal.JournalFileBackend.return_value = MagicMock()
+            mock_optuna.storages.journal.JournalStorage.return_value = MagicMock()
+
+            submitted = run_checker(ctx_path=ctx_path, chain_depth=0)
+
+        return {
+            "study": study,
+            "submitted": submitted,
+            "submit": mock_submit,
+            "write_ledger": mock_write_ledger,
+        }
+
+    def test_failed_grid_trial_enqueued_same_params_under_budget(self, tmp_path):
+        from jernerics.retry import param_key
+
+        params = {"lr": 0.02}
+        result = self._run(
+            tmp_path,
+            trials=[
+                _make_trial(0, TrialState.COMPLETE),
+                _make_trial(1, TrialState.FAIL, params),
+            ],
+            grid={"lr": [0.01, 0.02]},
+            n_trials=2,
+        )
+        study = result["study"]
+
+        assert result["submitted"] is True
+        study.enqueue_trial.assert_called_once()
+        args, kwargs = study.enqueue_trial.call_args
+        assert args[0] == params
+        assert kwargs["user_attrs"]["retry_of"] == 1
+        assert kwargs["user_attrs"]["retry_root"] == 1
+        assert kwargs["user_attrs"]["retry_index"] == 1
+        study.tell.assert_not_called()
+
+        written = result["write_ledger"].call_args[0][1]
+        assert written[param_key(params)] == 1
+
+        spec = result["submit"].call_args[0][0]
+        assert spec.n_trials == 1
+
+    def test_failed_grid_trial_at_budget_makes_sweep_terminal(self, tmp_path):
+        from jernerics.retry import param_key
+
+        params = {"lr": 0.02}
+        result = self._run(
+            tmp_path,
+            trials=[
+                _make_trial(0, TrialState.COMPLETE),
+                _make_trial(1, TrialState.FAIL, params),
+            ],
+            grid={"lr": [0.01, 0.02]},
+            n_trials=2,
+            ledger={param_key(params): 3},
+            max_retries=3,
+        )
+        study = result["study"]
+
+        assert result["submitted"] is False
+        study.enqueue_trial.assert_not_called()
+        study.tell.assert_not_called()
+        result["submit"].assert_not_called()
+        result["write_ledger"].assert_not_called()
+
+    def test_stochastic_fail_refills_fresh_without_lineage(self, tmp_path):
+        from jernerics.retry import param_key
+
+        failed_params = {"lr": 0.02}
+        result = self._run(
+            tmp_path,
+            trials=[
+                _make_trial(0, TrialState.COMPLETE),
+                _make_trial(1, TrialState.FAIL, failed_params),
+            ],
+            grid=None,
+            n_trials=2,
+        )
+        study = result["study"]
+
+        assert result["submitted"] is True
+        study.enqueue_trial.assert_not_called()
+        study.tell.assert_not_called()
+
+        written = result["write_ledger"].call_args[0][1]
+        assert param_key(failed_params) not in written
+
+        spec = result["submit"].call_args[0][0]
+        assert spec.n_trials == 1
