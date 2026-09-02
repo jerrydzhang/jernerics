@@ -105,6 +105,7 @@ def browser_sweep_rows(
                 "curation": sweep_curation(summary),
                 "archived": summary.archived,
                 "invalid": summary.invalid,
+                "incomplete": summary.incomplete,
                 "submitted_jobs": summary.submitted_jobs,
                 "expected_trials": (
                     MISSING
@@ -170,14 +171,25 @@ def selection_transitions(rows: list[dict] | None) -> dict[str, bool]:
 
 
 def curation_note(rows: list[dict[str, Any]] | None) -> str:
-    """The active-work note when incomplete sweeps carry curation."""
-    for row in rows or []:
-        if row.get("curation"):
-            return (
-                "Curation does not cancel or hide active work — incomplete "
-                "sweeps stay visible and selectable while they run."
-            )
-    return ""
+    """Why curated sweeps still appear: incomplete ones stay visible
+    while active, named by sweep and state so the marker cannot read
+    as a no-op."""
+    curated = [row for row in rows or [] if row.get("curation")]
+    if not curated:
+        return ""
+    active = [row for row in curated if row.get("incomplete")]
+    if active:
+        named = ", ".join(f"{row['name']} is {row['curation']}" for row in active)
+        return (
+            f"{named} but still active — curation does not cancel or hide "
+            "active work: incomplete sweeps stay visible and selectable "
+            "while they run."
+        )
+    return (
+        "Curated sweeps are listed only because they are picked or "
+        "included — curation changes review visibility only; tracked "
+        "facts are untouched."
+    )
 
 
 def action_message(ok: bool, text: str) -> html.Div:

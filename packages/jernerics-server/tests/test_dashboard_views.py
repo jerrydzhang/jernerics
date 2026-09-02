@@ -1445,7 +1445,23 @@ class TestBrowserDiscovery:
         store.mark_sweep_invalid(str(SWEEP_A), "still running")
         rows = browser_sweep_rows(service.sweep_overview("ops"), {"sweeps": []})
         assert [row["sweep_id"] for row in rows] == [str(SWEEP_A), str(SWEEP_B)]
-        assert "does not cancel or hide active work" in str(curation_note(rows))
+        note = str(curation_note(rows))
+        assert "alpha is invalid" in note
+        assert "does not cancel or hide active work" in note
+        assert rows[0]["incomplete"] is True and rows[0]["invalid"] is True
+
+    def test_picked_terminal_curated_note_states_why_it_is_listed(
+        self, store_and_service
+    ):
+        store, service = store_and_service
+        store.archive_sweep(str(SWEEP_B))
+        rows = browser_sweep_rows(
+            service.sweep_overview("ops"), {"sweeps": [str(SWEEP_B)]}
+        )
+        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A), str(SWEEP_B)]
+        note = str(curation_note(rows))
+        assert "picked or included" in note
+        assert "alpha" not in note
 
     def test_grid_rows_carry_distinct_curation_markers(self, store_and_service):
         store, service = store_and_service
