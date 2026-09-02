@@ -22,6 +22,7 @@ from jernerics_schema import (
     JobResourceEvent,
     JobSnapshotEvent,
     ManualParamEvent,
+    Selection,
     SubmissionSnapshotEvent,
     SubmissionState,
     SweepSnapshotEvent,
@@ -36,6 +37,7 @@ from jernerics_server.ingest import (
     IngestService,
     IngestValidationError,
 )
+from jernerics_server.queries import QueryService, _CURRENT_SWEEPS_CTES
 from jernerics_server.store import Store
 
 T0 = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
@@ -1949,3 +1951,136 @@ class TestArtifactDeclarationColumns:
         )
 
         assert (result.applied, result.duplicates) == (0, 3)
+
+
+def incomplete_flag(store: Store, sweep_id: uuid.UUID) -> bool:
+    _, data = store.query(
+        f"WITH {_CURRENT_SWEEPS_CTES} "
+        "SELECT incomplete FROM sweep_curated WHERE sweep_id = ?",
+        [str(sweep_id)],
+    )
+    return bool(data[0][0])
+
+
+class TestReconciledExecutionCompleteness:
+    """The post-hook's reconciled terminal facts close out a dead sweep."""
+
+    def _seed(self, store, service):
+        ids = Ids(sweep=eid(), trial=eid(), execution=eid())
+        service.apply(
+            request_of(
+                [
+                    SweepSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(1),
+                        project="proj",
+                        sweep_id=ids.sweep,
+                        name="s",
+                        state="running",
+                    ),
+                    TrialSnapshotEvent(
+                        event_id=eid(),
+                        recorded_at=at(2),
+                        trial_id=ids.trial,
+                        sweep_id=ids.sweep,
+                        number=0,
+                        state=TrialState.RUNNING,
+                        retry_root_trial_id=ids.trial,
+                    ),
+                    ExecutionStartEvent(
+                        event_id=eid(),
+                        recorded_at=at(3),
+                        execution_id=ids.execution,
+                        trial_id=ids.trial,
+                        hostname="node1",
+                        started_at=at(3),
+                    ),
+                ]
+            )
+        )
+        return ids
+
+    def _terminal_snapshot(self, ids):
+        return TrialSnapshotEvent(
+            event_id=eid(),
+            recorded_at=at(9),
+            trial_id=ids.trial,
+            sweep_id=ids.sweep,
+            number=0,
+            state=TrialState.FAILED,
+            retry_root_trial_id=ids.trial,
+        )
+
+    def _reconciled_end(self, ids):
+        return ExecutionEndEvent(
+            event_id=eid(),
+            recorded_at=at(9),
+            execution_id=ids.execution,
+            ended_at=at(9),
+            outcome=ExecutionOutcome.FAILURE,
+            exit_code=None,
+            failure_kind=FailureKind.STALE_HEARTBEAT,
+            failure_summary=(
+                "reconciled: execution outlived terminal trial; heartbeat stale"
+            ),
+        )
+
+    def test_terminal_trial_alone_keeps_sweep_incomplete(self, store, service):
+        ids = self._seed(store, service)
+        assert incomplete_flag(store, ids.sweep)
+
+        result = service.apply(request_of([self._terminal_snapshot(ids)]))
+
+        assert (result.applied, result.conflicts) == (1, ())
+        assert incomplete_flag(store, ids.sweep)
+
+    def test_reconciled_end_flips_sweep_complete(self, store, service):
+        ids = self._seed(store, service)
+        service.apply(request_of([self._terminal_snapshot(ids)]))
+        assert incomplete_flag(store, ids.sweep)
+
+        result = service.apply(
+            request_of([self._terminal_snapshot(ids), self._reconciled_end(ids)])
+        )
+
+        assert (result.applied, result.duplicates, result.conflicts) == (1, 1, ())
+        assert not incomplete_flag(store, ids.sweep)
+        overview = QueryService(store).sweep_overview(Selection(project="proj"))
+        assert overview[0]["started"] == 1
+        assert overview[0]["terminal"] == 1
+        assert overview[0]["waiting_trials"] == 0
+        assert overview[0]["running_trials"] == 0
+
+    def test_identical_reconcile_replay_is_all_duplicates(self, store, service):
+        ids = self._seed(store, service)
+        batch = [self._terminal_snapshot(ids), self._reconciled_end(ids)]
+        service.apply(request_of(batch))
+        before = snapshot(store)
+
+        second = service.apply(request_of(batch))
+
+        assert (second.applied, second.duplicates, second.conflicts) == (0, 2, ())
+        assert snapshot(store) == before
+        assert not incomplete_flag(store, ids.sweep)
+
+    def test_differing_reconciled_end_conflicts(self, store, service):
+        ids = self._seed(store, service)
+        service.apply(
+            request_of([self._terminal_snapshot(ids), self._reconciled_end(ids)])
+        )
+        before = snapshot(store)
+        divergent = ExecutionEndEvent(
+            event_id=eid(),
+            recorded_at=at(20),
+            execution_id=ids.execution,
+            ended_at=at(20),
+            outcome=ExecutionOutcome.FAILURE,
+            exit_code=1,
+            failure_kind=FailureKind.STALE_HEARTBEAT,
+            failure_summary="different",
+        )
+
+        with pytest.raises(IngestConflictError, match="terminal with immutable"):
+            service.apply(request_of([divergent]))
+
+        assert snapshot(store) == before
