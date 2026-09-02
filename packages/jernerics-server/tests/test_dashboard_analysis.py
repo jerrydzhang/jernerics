@@ -2083,6 +2083,39 @@ class TestScopeBar:
         rendered = str(scope_bar(service, None, None))
         assert "Pick a project" in rendered
 
+    def test_single_invalid_pick_keeps_the_full_sentence(self, tmp_path):
+        store = _seeded_store(tmp_path)
+        store.mark_sweep_invalid(str(SWEEP_C), "sensor drifted after epoch 1")
+        service = DashboardService(QueryService(store))
+        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_C)]))
+        rendered = str(bar)
+        assert (
+            "gamma is marked scientifically invalid — reason: "
+            "sensor drifted after epoch 1" in rendered
+        )
+        assert rendered.count("Continue only with that in mind") == 1
+        assert "scope-warning-summary" not in rendered
+
+    def test_multiple_invalid_picks_collapse_into_one_details(self, tmp_path):
+        store = _seeded_store(tmp_path)
+        store.mark_sweep_invalid(str(SWEEP_B), "contaminated training data")
+        store.mark_sweep_invalid(str(SWEEP_C), "sensor drifted after epoch 1")
+        service = DashboardService(QueryService(store))
+        bar = scope_bar(
+            service,
+            PROJECT,
+            _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
+        )
+        rendered = str(bar)
+        assert "2 of 3 picked sweeps marked invalid" in rendered
+        assert "scope-warning-summary" in rendered
+        assert "scope-warning-details" in rendered
+        assert "beta: contaminated training data" in rendered
+        assert "gamma: sensor drifted after epoch 1" in rendered
+        assert "beta invalid" in rendered and "gamma invalid" in rendered
+        assert rendered.count("is marked scientifically invalid") == 0
+        assert rendered.count("Continue only with that in mind") == 0
+
     def test_scope_bar_sits_inside_the_browser_above_the_tabs(self):
         page = workspace_page(PROJECT)
         rendered = str(page)
@@ -2682,7 +2715,7 @@ class TestCuratedScopeBar:
         assert "gamma invalid" in rendered
         assert "badge-invalid" in rendered
         assert "sensor drifted after epoch 1" in rendered
-        assert "marked scientifically invalid" in rendered
+        assert rendered.count("Continue only with that in mind") == 1
 
     def test_mixed_scope_keeps_names_and_both_badges(self, curated_service):
         _store, service = curated_service
@@ -2706,6 +2739,8 @@ class TestCuratedScopeBar:
         )
         assert error is None and tray is not None
         rendered = str(scope_bar(service, PROJECT, tray))
+        assert "gamma is marked scientifically invalid" in rendered
+        assert rendered.count("Continue only with that in mind") == 1
 
 
 def _fake_context(*prop_ids: str):

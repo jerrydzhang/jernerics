@@ -269,6 +269,7 @@ def scope_bar(
         html.Span(f"Scope: {label}", className="scope-sweeps"),
         html.Span(analysis.tray_summary(tray), className="scope-counts"),
     ]
+    invalid: list[tuple[str, str]] = []
     for sweep_id, name in zip(picked_ids, picked, strict=True):
         summary = summaries.get(sweep_id)
         if summary is None:
@@ -277,14 +278,33 @@ def scope_bar(
             children.append(Badge(f"{name} archived", kind="archived"))
         if summary.invalid:
             children.append(Badge(f"{name} invalid", kind="invalid"))
-            children.append(
-                html.Span(
-                    f"{name} is marked scientifically invalid — reason: "
-                    f"{summary.invalid_reason}. Continue only with that "
-                    "in mind, or remove it from the scope.",
-                    className="scope-warning",
-                )
+            invalid.append((name, summary.invalid_reason or "unrecorded"))
+    if len(invalid) == 1:
+        name, reason = invalid[0]
+        children.append(
+            html.Span(
+                f"{name} is marked scientifically invalid — reason: "
+                f"{reason}. Continue only with that in mind, or remove it "
+                "from the scope.",
+                className="scope-warning",
             )
+        )
+    elif invalid:
+        children.append(
+            html.Details(
+                [
+                    html.Summary(
+                        f"{len(invalid)} of {len(picked)} picked sweeps marked invalid",
+                        className="scope-warning-summary",
+                    ),
+                    html.Ul(
+                        [html.Li(f"{name}: {reason}") for name, reason in invalid],
+                        className="scope-warning-list",
+                    ),
+                ],
+                className="scope-warning-details",
+            )
+        )
     return html.Div(children, className="scope-bar")
 
 

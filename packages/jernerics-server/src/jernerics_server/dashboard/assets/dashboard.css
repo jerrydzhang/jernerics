@@ -793,6 +793,24 @@ a.project-row:hover {
   font-size: 0.9rem;
 }
 
+/* Several invalid picks collapse into one expandable note
+   (jernerics-j9s): the summary stays a single flex-bar line and the
+   body reads as a plain list. */
+.scope-warning-details {
+  color: #b00020;
+  font-size: 0.9rem;
+}
+
+.scope-warning-summary {
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.scope-warning-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+}
+
 .include-toggle {
   margin: 0.6rem 0 0.2rem;
 }
