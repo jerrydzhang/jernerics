@@ -423,6 +423,25 @@ def triggered_action(triggered: set[str], mapping: dict[str, str]) -> str | None
     return next((action for prop, action in mapping.items() if prop in triggered), None)
 
 
+def selected_failed_sweeps(values: list) -> list[str]:
+    """Checked sweep ids from the failure view's per-group checklists;
+    each checklist carries one option, so a non-empty value is one id."""
+    return [str(item) for group in values or [] for item in group]
+
+
+def mounted_failed_sweep_ids() -> list[str]:
+    """Mounted failure-view checklist ids from the request's ALL input —
+    the layout truth select-all writes must match, not a fresh read."""
+    return [
+        str(item["id"]["failed-sweep"])
+        for slot in dash.callback_context.inputs_list or []
+        for item in (slot if isinstance(slot, list) else [slot])
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), dict)
+        and "failed-sweep" in item["id"]
+    ]
+
+
 def _event_field(event: Any, name: str) -> Any:
     """One ``triggered`` entry field; Dash has shipped both dict and
     attribute event shapes."""
@@ -1017,8 +1036,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("sweep-grid", "rowData", allow_duplicate=True),
         Output("sweep-grid", "selectedRows", allow_duplicate=True),
         Output("workspace-curation-note", "children", allow_duplicate=True),
+        Output({"failed-sweep": dash.ALL}, "value"),
         Input("failed-view-open", "n_clicks"),
         Input({"failed-invalid": dash.ALL}, "n_clicks"),
+        Input("failed-invalid-batch", "n_clicks"),
+        Input({"failed-sweep": dash.ALL}, "value"),
+        Input("failed-select-all", "value"),
         State("failed-reason", "value"),
         State("project-store", "data"),
         State("view-store", "data"),
@@ -1028,17 +1051,38 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     def _drive_failed_view(
         _open: int | None,
         _invalid: list,
+        _batch: int | None,
+        checks: list,
+        select_all: list,
         reason: str | None,
         project: str | None,
         view_doc: dict | None,
         grid_selection: list[dict] | None,
     ):
         # One entry point: the roll-up's failed badge opens and fills
-        # the view; a group's Mark invalid acts, then re-renders it.
+        # the view; a group's Mark invalid or the batch button acts, then
+        # re-renders it; select-all mirrors onto the group checklists.
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
         value, name = pattern_trigger(dash.callback_context)
         scoped = workspace.scoped_sweeps(
             service.sweep_overview(project or ""), (view_doc or {}).get("scope")
         )
+        # ALL-input writes and re-render remounts re-fire this callback —
+        # only an explicit control acts, everything else stays put.
+        untouched = [no_update] * len(checks or [])
+        if "failed-select-all.value" in triggered:
+            checked = bool(select_all)
+            return (
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                [
+                    [sweep_id] if checked else []
+                    for sweep_id in mounted_failed_sweep_ids()
+                ],
+            )
         if name == "failed-invalid" and value:
             ok, report = apply_curation(service, "invalid", [str(value)], reason or "")
             # The action refreshes the grid too — both surfaces move
@@ -1057,14 +1101,58 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 fresh,
                 [row for row in fresh if row["sweep_id"] in kept],
                 note,
+                untouched,
             )
-        return (
-            workspace.failed_view_panel(service, project or "", scoped, time.time_ns()),
-            True,
-            no_update,
-            no_update,
-            no_update,
-        )
+        if "failed-invalid-batch.n_clicks" in triggered:
+            sweep_ids = selected_failed_sweeps(checks)
+            if not sweep_ids:
+                return (
+                    workspace.failed_view_panel(
+                        service,
+                        project or "",
+                        scoped,
+                        time.time_ns(),
+                        workspace.action_message(
+                            False,
+                            "Select sweeps first — "
+                            "actions apply to checked failed sweeps.",
+                        ),
+                    ),
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    untouched,
+                )
+            ok, report = apply_curation(service, "invalid", sweep_ids, reason or "")
+            fresh, note = _post_action_grid(service, project, view_doc)
+            kept = {str(row["sweep_id"]) for row in grid_selection or []}
+            return (
+                workspace.failed_view_panel(
+                    service,
+                    project or "",
+                    scoped,
+                    time.time_ns(),
+                    workspace.action_message(ok, report),
+                ),
+                no_update,
+                fresh,
+                [row for row in fresh if row["sweep_id"] in kept],
+                note,
+                untouched,
+            )
+        if "failed-view-open.n_clicks" in triggered:
+            return (
+                workspace.failed_view_panel(
+                    service, project or "", scoped, time.time_ns()
+                ),
+                True,
+                no_update,
+                no_update,
+                no_update,
+                untouched,
+            )
+        raise PreventUpdate
 
     # -- Focus: the inspector region --------------------------------------
 

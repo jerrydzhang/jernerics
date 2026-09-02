@@ -752,6 +752,23 @@ a.project-row:hover {
   color: #b00020;
 }
 
+/* Failure view batch controls: one row above the failed-sweep groups,
+   per-group checkboxes reading as row selectors next to the action. */
+.failed-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin: 0.3rem 0;
+}
+
+.failed-sweep-check {
+  margin: 0 0.6rem;
+}
+
+.failed-sweep-check label {
+  margin: 0;
+}
+
 /* Bulk curation hides behind a collapsed affordance (jernerics-9sl);
    block flow keeps it below the sweep list at any width. */
 .curation-panel {

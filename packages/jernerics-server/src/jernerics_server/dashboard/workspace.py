@@ -1203,7 +1203,8 @@ def failed_view_panel(
 ) -> list[Any]:
     """Children of the failure view: per-sweep groups of failed
     executions — kind and summary without opening each execution, a
-    focus link per trial, and one mark-invalid action per sweep."""
+    focus link per trial, one mark-invalid action per sweep, and
+    select-all/batch controls for invalidating many sweeps at once."""
     rows = service.failed_executions(
         project, [s.sweep_id for s in scoped], limit=_FAILED_VIEW_LIMIT
     )
@@ -1214,6 +1215,24 @@ def failed_view_panel(
     by_sweep: dict[str, list[FailedExecutionRow]] = {}
     for row in rows:
         by_sweep.setdefault(row.sweep_id, []).append(row)
+    if by_sweep:
+        children.append(
+            html.Div(
+                [
+                    dcc.Checklist(
+                        id="failed-select-all",
+                        options=[{"label": "Select all failed sweeps", "value": "all"}],
+                        value=[],
+                    ),
+                    html.Button(
+                        "Mark selected invalid",
+                        id="failed-invalid-batch",
+                        className="action",
+                    ),
+                ],
+                className="failed-controls",
+            )
+        )
     for sweep_id, group in by_sweep.items():
         children.append(
             html.Div(
@@ -1224,6 +1243,12 @@ def failed_view_panel(
                                 names.get(sweep_id, short_id(sweep_id)),
                                 "sweep",
                                 sweep_id,
+                            ),
+                            dcc.Checklist(
+                                id={"failed-sweep": sweep_id},
+                                options=[{"label": "", "value": sweep_id}],
+                                value=[],
+                                className="failed-sweep-check",
                             ),
                             html.Button(
                                 "Mark sweep invalid",
