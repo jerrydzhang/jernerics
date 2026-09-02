@@ -8,6 +8,7 @@ import enum
 import json
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,18 +16,29 @@ import optuna
 from jernerics_schema import (
     JERNERICS_NAMESPACE,
     ConflictRecord,
+    ExecutionEndEvent,
+    ExecutionId,
+    ExecutionOutcome,
+    ExecutionStartEvent,
+    FailureKind,
     JobSnapshotEvent,
     SweepSnapshotEvent,
+    TrialId,
     sweep_id_for,
 )
 from optuna.storages.journal import JournalFileBackend, JournalStorage
+from optuna.trial import FrozenTrial, TrialState
 
 from jernerics.backend.job_meta import load_job_studies
 from jernerics.backend.slurm.sacct import (
     build_job_resource_event,
     fetch_job_resources,
 )
-from jernerics.optuna_mirror import frozen_trial_snapshot
+from jernerics.optuna_mirror import (
+    _journal_timestamp,
+    frozen_trial_snapshot,
+    tracked_trial_id,
+)
 from jernerics.retry import RetryContext
 from jernerics.retry_checker import run_checker
 from jernerics.tracking.batch_sync import replay_tracking, ship_events_file
@@ -51,19 +63,98 @@ class ReconciliationConflictError(Exception):
         super().__init__(f"{len(self.conflicts)} terminal-state conflict(s)")
 
 
-def reconcile_study(ctx: RetryContext, tracking_dir: str | Path) -> Path | None:
-    """Snapshot every journal trial into the study's submission events dir.
+def _local_executions(
+    tracking_dir: Path,
+) -> tuple[dict[ExecutionId, TrialId], set[ExecutionId]]:
+    """Started executions (id -> owning trial) and ended ids in live logs."""
+    started: dict[ExecutionId, TrialId] = {}
+    ended: set[ExecutionId] = set()
+    events_dir = tracking_dir / "events"
+    if not events_dir.is_dir():
+        return started, ended
+    for path in sorted(events_dir.glob("*.jsonl")):
+        try:
+            events, _ = scan_events(path, 0)
+        except (OSError, ValueError):
+            continue
+        for event, _ in events:
+            if isinstance(event, ExecutionStartEvent):
+                started.setdefault(event.execution_id, event.trial_id)
+            elif isinstance(event, ExecutionEndEvent):
+                ended.add(event.execution_id)
+    return started, ended
 
-    Two files ship in the same replay: ``reconcile-sweep.jsonl`` carries the
-    sweep snapshot (so trial event logs never reference an unknown sweep),
-    and ``reconcile.jsonl`` carries one snapshot per FrozenTrial. Snapshot
-    identities and timestamps derive deterministically from the journal, so
-    repeated reconciliations emit byte-identical events and re-reconcile as
-    duplicates. A trial without a recorded live identity falls back to a
-    deterministic uuid5 of sweep id + trial number.
+
+@dataclass(frozen=True)
+class DeadExecution:
+    execution_id: ExecutionId
+    trial: FrozenTrial
+
+
+_TERMINAL_OPTUNA_STATES = frozenset(
+    {TrialState.COMPLETE, TrialState.FAIL, TrialState.PRUNED}
+)
+
+_DEAD_EXECUTION_SUMMARY = (
+    "reconciled: execution outlived terminal trial; heartbeat stale"
+)
+
+
+def find_dead_executions(
+    study: optuna.Study, *, sweep_id: uuid.UUID, tracking_dir: str | Path
+) -> list[DeadExecution]:
+    """Executions started locally but never ended whose trial is terminal.
+
+    Journal terminality is the only deadness proof: a RUNNING trial with a
+    quiet heartbeat may still resume, so it is never reconciled here.
+    """
+    started, ended = _local_executions(Path(tracking_dir))
+    dead: list[DeadExecution] = []
+    for trial in study.trials:
+        if trial.state not in _TERMINAL_OPTUNA_STATES:
+            continue
+        trial_id = tracked_trial_id(dict(trial.user_attrs), sweep_id, trial.number)
+        dead.extend(
+            DeadExecution(execution_id=execution_id, trial=trial)
+            for execution_id, owner in sorted(started.items())
+            if owner == trial_id and execution_id not in ended
+        )
+    return dead
+
+
+def _reconciled_execution_end(dead: DeadExecution) -> ExecutionEndEvent:
+    stamp = _journal_timestamp(dead.trial)
+    return ExecutionEndEvent(
+        event_id=uuid.uuid5(
+            JERNERICS_NAMESPACE, f"reconcile-end:{dead.execution_id}"
+        ),
+        recorded_at=stamp,
+        execution_id=dead.execution_id,
+        ended_at=stamp,
+        outcome=ExecutionOutcome.FAILURE,
+        exit_code=None,
+        failure_kind=FailureKind.STALE_HEARTBEAT,
+        failure_summary=_DEAD_EXECUTION_SUMMARY,
+    )
+
+
+def reconcile_study(ctx: RetryContext, tracking_dir: str | Path) -> list[Path]:
+    """Snapshot journal trials and dead executions into submission files.
+
+    Three files ship in the same replay: ``reconcile-sweep.jsonl`` carries
+    the sweep snapshot (so trial event logs never reference an unknown
+    sweep), ``reconcile.jsonl`` carries one snapshot per FrozenTrial, and
+    ``reconcile-executions.jsonl`` carries one terminal end per execution
+    that outlived its terminal trial. Identities and timestamps derive
+    deterministically from the journal, so repeated reconciliations emit
+    byte-identical events and re-reconcile as duplicates. A trial without
+    a recorded live identity falls back to a deterministic uuid5 of sweep
+    id + trial number. Returns the files that must ship after live event
+    logs; the executions file is only written when it has content so an
+    already-shipped end is never truncated away.
     """
     if not ctx.storage_path or not Path(ctx.storage_path).exists():
-        return None
+        return []
     study = optuna.load_study(
         study_name=ctx.study_name,
         storage=JournalStorage(JournalFileBackend(ctx.storage_path)),
@@ -87,7 +178,20 @@ def reconcile_study(ctx: RetryContext, tracking_dir: str | Path) -> Path | None:
     sweep_path.write_text(sweep_event.model_dump_json() + "\n")
     path = submission_dir / "reconcile.jsonl"
     path.write_text("".join(event.model_dump_json() + "\n" for event in trial_events))
-    return path
+    written = [path]
+    end_events = [
+        _reconciled_execution_end(dead)
+        for dead in find_dead_executions(
+            study, sweep_id=sweep_id, tracking_dir=tracking_dir
+        )
+    ]
+    if end_events:
+        executions_path = submission_dir / "reconcile-executions.jsonl"
+        executions_path.write_text(
+            "".join(event.model_dump_json() + "\n" for event in end_events)
+        )
+        written.append(executions_path)
+    return written
 
 
 def _scheduler_task_log_files(cache_dir: Path) -> list[Path]:
@@ -222,12 +326,19 @@ def run_pipeline(
 ) -> PipelineResult:
     submitted = run_checker(ctx_path=ctx_path, chain_depth=chain_depth)
 
-    if submitted:
-        return PipelineResult.RETRY_SUBMITTED
-
     if base_url is not None:
         ctx = RetryContext.from_json(Path(ctx_path).read_text())
-        reconcile_path = reconcile_study(ctx, tracking_dir)
+        # The checker's FAIL tells flush to the journal before this read,
+        # so reconciliation always sees the terminal trial state.
+        reconcile_paths = reconcile_study(ctx, tracking_dir)
+        if submitted:
+            # Dead executions of the finished batch stay factually dead
+            # even though replacements were just submitted; best-effort
+            # ship now, the retry's post-hook replay remains the
+            # delivery guarantee.
+            for path in reconcile_paths:
+                ship_events_file(path, base_url, api_key)
+            return PipelineResult.RETRY_SUBMITTED
         # Before replay: replay ships-and-deletes the submission files capture reads.
         capture_job_resources(tracking_dir, ctx.study_name, base_url, api_key)
         # Live trial event logs ship first (a running snapshot must land
@@ -235,7 +346,7 @@ def run_pipeline(
         # last so they close out or conflict with what already landed.
         conflicts: list[ConflictRecord] = []
         skips: list[set[Path] | None] = (
-            [{reconcile_path}, None] if reconcile_path is not None else [None]
+            [set(reconcile_paths), None] if reconcile_paths else [None]
         )
         for skip in skips:
             result = replay_tracking(
@@ -250,6 +361,9 @@ def run_pipeline(
             raise ReconciliationConflictError(conflicts)
         sweep_manifest_blobs(tracking_dir, base_url, api_key)
         _report_scheduler_task_logs(Path(tracking_dir).parent.parent)
+
+    if submitted:
+        return PipelineResult.RETRY_SUBMITTED
 
     return PipelineResult.SWEEP_COMPLETE
 

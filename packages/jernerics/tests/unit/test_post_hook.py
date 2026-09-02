@@ -2,7 +2,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
-from uuid import uuid4
+from uuid import uuid4, uuid5
 
 import pytest
 from jernerics.backend.slurm.sacct import SacctResult
@@ -16,6 +16,11 @@ from jernerics.retry import RetryContext
 from jernerics.tracking.batch_sync import ReplayResult
 from jernerics.tracking.jsonl_io import scan_events
 from jernerics_schema import (
+    ExecutionEndEvent,
+    ExecutionStartEvent,
+    ExecutionOutcome,
+    FailureKind,
+    JERNERICS_NAMESPACE,
     JobResourceEvent,
     JobSnapshotEvent,
     SubmissionState,
@@ -337,12 +342,12 @@ class TestReconcileStudy:
             project_name=project_name,
         )
 
-    def test_missing_journal_returns_none(self, tmp_path):
+    def test_missing_journal_returns_empty(self, tmp_path):
         from jernerics.post_hook import reconcile_study
 
         ctx = self._ctx(tmp_path, str(tmp_path / "absent.journal"))
 
-        assert reconcile_study(ctx, tmp_path / "tracking" / "s") is None
+        assert reconcile_study(ctx, tmp_path / "tracking" / "s") == []
 
     def test_reconciles_every_frozen_trial_with_deterministic_ids(self, tmp_path):
         from jernerics.optuna_mirror import fallback_trial_id
@@ -361,10 +366,10 @@ class TestReconcileStudy:
         study.tell(orphan, state=OptunaState.FAIL)
 
         tracking_dir = tmp_path / "tracking" / "s"
-        path = reconcile_study(self._ctx(tmp_path, storage_url), tracking_dir)
+        paths = reconcile_study(self._ctx(tmp_path, storage_url), tracking_dir)
 
-        assert path == tracking_dir / "submission" / "reconcile.jsonl"
-        assert path is not None
+        assert paths == [tracking_dir / "submission" / "reconcile.jsonl"]
+        path = paths[0]
         sweep_events = [
             event
             for event in TrackingReader(
@@ -410,14 +415,216 @@ class TestReconcileStudy:
         tracking_dir = tmp_path / "tracking" / "s"
         ctx = self._ctx(tmp_path, storage_url)
         first = reconcile_study(ctx, tracking_dir)
-        assert first is not None
-        first_bytes = first.read_bytes()
+        assert first
+        first_bytes = {path.name: path.read_bytes() for path in first}
 
         second = reconcile_study(ctx, tracking_dir)
 
-        assert second == first
-        assert second is not None
-        assert second.read_bytes() == first_bytes
+        assert [path.name for path in second] == list(first_bytes)
+        for path in second:
+            assert path.read_bytes() == first_bytes[path.name]
+
+
+RECONCILE_T0 = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)
+
+
+class TestReconcileDeadExecutions:
+    def _journal(self, tmp_path, name="s"):
+        import optuna
+        from optuna.storages.journal import JournalFileBackend, JournalStorage
+
+        storage_url = str(tmp_path / f"{name}.journal")
+        study = optuna.create_study(
+            study_name=name,
+            storage=JournalStorage(JournalFileBackend(storage_url)),
+        )
+        return study, storage_url
+
+    def _ctx(self, tmp_path, storage_url, study_name="s", project_name="proj"):
+        return RetryContext(
+            study_name=study_name,
+            backend_name="slurm",
+            trial_relpath="trial.py",
+            config_relpath="config.py",
+            storage_path=storage_url,
+            project_name=project_name,
+        )
+
+    def _ctx_file(self, tmp_path, storage_url):
+        ctx_path = tmp_path / "ctx.json"
+        ctx_path.write_text(self._ctx(tmp_path, storage_url).to_json())
+        return ctx_path
+
+    def _fail_trial(self, study, trial_id):
+        from optuna.trial import TrialState
+
+        trial = study.ask()
+        trial.set_user_attr("jernerics_trial_id", str(trial_id))
+        study.tell(trial, state=TrialState.FAIL)
+        return trial
+
+    def _write_start(self, tracking_dir, number, execution_id, trial_id):
+        events_dir = tracking_dir / "events"
+        events_dir.mkdir(parents=True, exist_ok=True)
+        with (events_dir / f"{number}.jsonl").open("a") as events:
+            events.write(
+                ExecutionStartEvent(
+                    event_id=uuid4(),
+                    recorded_at=RECONCILE_T0,
+                    execution_id=execution_id,
+                    trial_id=trial_id,
+                    hostname="node1",
+                    started_at=RECONCILE_T0,
+                ).model_dump_json()
+                + "\n"
+            )
+
+    def _write_end(self, tracking_dir, number, execution_id):
+        with (tracking_dir / "events" / f"{number}.jsonl").open("a") as events:
+            events.write(
+                ExecutionEndEvent(
+                    event_id=uuid4(),
+                    recorded_at=RECONCILE_T0,
+                    execution_id=execution_id,
+                    ended_at=RECONCILE_T0,
+                    outcome=ExecutionOutcome.SUCCESS,
+                    exit_code=0,
+                ).model_dump_json()
+                + "\n"
+            )
+
+    def _ends(self, tracking_dir):
+        from jernerics.tracking.jsonl_io import TrackingReader
+
+        path = tracking_dir / "submission" / "reconcile-executions.jsonl"
+        if not path.exists():
+            return []
+        return [
+            event
+            for event in TrackingReader(path)
+            if isinstance(event, ExecutionEndEvent)
+        ]
+
+    def test_dead_execution_emits_one_deterministic_end(self, tmp_path):
+        from jernerics.post_hook import reconcile_study
+
+        study, storage_url = self._journal(tmp_path)
+        self._fail_trial(study, _LIVE_ID)
+        tracking_dir = tmp_path / "tracking" / "s"
+        execution_id = uuid4()
+        self._write_start(tracking_dir, 0, execution_id, _LIVE_ID)
+
+        paths = reconcile_study(self._ctx(tmp_path, storage_url), tracking_dir)
+
+        assert paths == [
+            tracking_dir / "submission" / "reconcile.jsonl",
+            tracking_dir / "submission" / "reconcile-executions.jsonl",
+        ]
+        ends = self._ends(tracking_dir)
+        assert len(ends) == 1
+        end = ends[0]
+        assert end.event_id == uuid5(
+            JERNERICS_NAMESPACE, f"reconcile-end:{execution_id}"
+        )
+        assert end.execution_id == execution_id
+        assert end.outcome == ExecutionOutcome.FAILURE
+        assert end.exit_code is None
+        assert end.failure_kind == FailureKind.STALE_HEARTBEAT
+        assert end.failure_summary is not None
+        assert len(end.failure_summary) <= 2000
+        assert "reconciled" in end.failure_summary
+        assert end.ended_at.timestamp() == study.trials[0].datetime_complete.timestamp()
+
+    def test_repeated_reconcile_ends_are_byte_identical(self, tmp_path):
+        from jernerics.post_hook import reconcile_study
+
+        study, storage_url = self._journal(tmp_path)
+        self._fail_trial(study, _LIVE_ID)
+        tracking_dir = tmp_path / "tracking" / "s"
+        self._write_start(tracking_dir, 0, uuid4(), _LIVE_ID)
+        ctx = self._ctx(tmp_path, storage_url)
+
+        first = reconcile_study(ctx, tracking_dir)
+        first_bytes = {path.name: path.read_bytes() for path in first}
+        second = reconcile_study(ctx, tracking_dir)
+
+        assert [path.name for path in second] == list(first_bytes)
+        for path in second:
+            assert path.read_bytes() == first_bytes[path.name]
+
+    def test_running_trial_with_heartbeat_gets_no_end(self, tmp_path):
+        from jernerics.post_hook import reconcile_study
+
+        study, storage_url = self._journal(tmp_path)
+
+        trial = study.ask()
+        trial.set_user_attr("jernerics_trial_id", str(_LIVE_ID))
+        tracking_dir = tmp_path / "tracking" / "s"
+        heartbeats = tracking_dir / "heartbeats"
+        heartbeats.mkdir(parents=True)
+        (heartbeats / "0.heartbeat").touch()
+        self._write_start(tracking_dir, 0, uuid4(), _LIVE_ID)
+
+        paths = reconcile_study(self._ctx(tmp_path, storage_url), tracking_dir)
+
+        assert paths == [tracking_dir / "submission" / "reconcile.jsonl"]
+        assert self._ends(tracking_dir) == []
+
+    def test_locally_ended_execution_gets_no_end(self, tmp_path):
+        from jernerics.post_hook import reconcile_study
+        from optuna.trial import TrialState
+
+        study, storage_url = self._journal(tmp_path)
+        trial = study.ask()
+        trial.set_user_attr("jernerics_trial_id", str(_LIVE_ID))
+        study.tell(trial, 0.5)
+        assert study.trials[0].state == TrialState.COMPLETE
+        tracking_dir = tmp_path / "tracking" / "s"
+        execution_id = uuid4()
+        self._write_start(tracking_dir, 0, execution_id, _LIVE_ID)
+        self._write_end(tracking_dir, 0, execution_id)
+
+        paths = reconcile_study(self._ctx(tmp_path, storage_url), tracking_dir)
+
+        assert paths == [tracking_dir / "submission" / "reconcile.jsonl"]
+        assert self._ends(tracking_dir) == []
+
+    @patch("jernerics.post_hook.ship_events_file")
+    @patch("jernerics.post_hook.replay_tracking")
+    @patch("jernerics.post_hook.run_checker")
+    def test_retry_submitted_still_ships_dead_execution_ends(
+        self, mock_run_checker, mock_replay, mock_ship, tmp_path
+    ):
+        from jernerics.post_hook import run_pipeline
+
+        mock_run_checker.return_value = True
+        study, storage_url = self._journal(tmp_path)
+        self._fail_trial(study, _LIVE_ID)
+        tracking_dir = tmp_path / "tracking" / "s"
+        execution_id = uuid4()
+        self._write_start(tracking_dir, 0, execution_id, _LIVE_ID)
+        ctx_path = self._ctx_file(tmp_path, storage_url)
+
+        result = run_pipeline(
+            ctx_path=str(ctx_path),
+            chain_depth=0,
+            tracking_dir=str(tracking_dir),
+            base_url="http://localhost:8000",
+            api_key="secret",
+        )
+
+        assert result == PipelineResult.RETRY_SUBMITTED
+        mock_replay.assert_not_called()
+        shipped = [call.args[0] for call in mock_ship.call_args_list]
+        executions_path = tracking_dir / "submission" / "reconcile-executions.jsonl"
+        assert executions_path in shipped
+        ends = self._ends(tracking_dir)
+        assert len(ends) == 1
+        assert ends[0].event_id == uuid5(
+            JERNERICS_NAMESPACE, f"reconcile-end:{execution_id}"
+        )
+        assert ends[0].outcome == ExecutionOutcome.FAILURE
+        assert ends[0].failure_kind == FailureKind.STALE_HEARTBEAT
 
 
 class TestCaptureJobResources:
