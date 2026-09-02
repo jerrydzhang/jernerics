@@ -162,8 +162,8 @@ class TestPostHookRepair:
         assert not (tracking_dir / "submission").exists()
         ctx = RetryContext.from_json(ctx_path.read_text())
         first = reconcile_study(ctx, tracking_dir)
-        assert first is not None
-        first_bytes = first.read_bytes()
+        assert first
+        first_bytes = [(p.name, p.read_bytes()) for p in first]
 
         result = run_pipeline(
             ctx_path=str(ctx_path),
@@ -212,7 +212,7 @@ class TestPostHookRepair:
         assert fallback_trial_id(sweep_id, 0) not in {rows_[0]["trial_id"]}
 
         second = reconcile_study(ctx, tracking_dir)
-        assert second.read_bytes() == first_bytes
+        assert [(p.name, p.read_bytes()) for p in second] == first_bytes
         assert (
             run_pipeline(
                 ctx_path=str(ctx_path),

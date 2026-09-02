@@ -37,7 +37,7 @@ from jernerics_server.ingest import (
     IngestService,
     IngestValidationError,
 )
-from jernerics_server.queries import QueryService, _CURRENT_SWEEPS_CTES
+from jernerics_server.queries import _CURRENT_SWEEPS_CTES, QueryService
 from jernerics_server.store import Store
 
 T0 = datetime(2026, 8, 19, 12, 0, tzinfo=UTC)

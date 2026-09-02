@@ -449,5 +449,7 @@ class TestBuildSweepCommandsGrid:
         assert "os.path.exists" in setup
         assert "itertools.product" in setup
         assert "enqueue_trial" in setup
-        encoded = re.search(r"base64\.b64decode\('([^']+)'\)", setup).group(1)
+        match = re.search(r"base64\.b64decode\('([^']+)'\)", setup)
+        assert match is not None
+        encoded = match.group(1)
         assert json.loads(base64.b64decode(encoded)) == grid

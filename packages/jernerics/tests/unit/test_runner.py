@@ -641,7 +641,6 @@ class TestExecutionLifecycleEvents:
         assert snapshot.retry_index == 1
         assert snapshot.attrs.root["retry_of"] == 3
 
-
     def test_grid_config_carries_enqueued_values_into_trial_config(self, tmp_path):
         trial_file = tmp_path / "trial.py"
         trial_file.write_text(_HEADER + "tracker.finish({'loss': config['lr']})\n")
@@ -670,7 +669,7 @@ class TestExecutionLifecycleEvents:
         )
 
         resolved = json.loads((tmp_path / "configs" / "trial_0.json").read_text())
-        assert resolved["lr"] == 0.2
+        assert resolved["lr"] == pytest.approx(0.2)
         assert resolved["mode"] == "b"
         assert resolved["seed"] == 1
         assert resolved["config_index"] == 0

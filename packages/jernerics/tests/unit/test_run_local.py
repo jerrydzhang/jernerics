@@ -757,11 +757,10 @@ class TestRunLocalGridSweep:
         import json
 
         import optuna
-        from optuna.storages.journal import JournalFileBackend, JournalStorage
-
         from jernerics.backend.local_backend import LocalBackend
         from jernerics.backend.models import SweepSubmission
         from jernerics.config import load_config
+        from optuna.storages.journal import JournalFileBackend, JournalStorage
 
         trial_file = tmp_path / "trial.py"
         trial_file.write_text(
@@ -837,11 +836,7 @@ class TestRunLocalGridConfigErrors:
         trial_file = tmp_path / "trial.py"
         trial_file.write_text("pass\n")
         config_file = tmp_path / "config.py"
-        config_file.write_text(
-            "base = {}\n"
-            "grid = {'lr': [0.1, 0.2]}\n"
-            "n_trials = 5\n"
-        )
+        config_file.write_text("base = {}\ngrid = {'lr': [0.1, 0.2]}\nn_trials = 5\n")
 
         with pytest.raises(SystemExit) as exc_info:
             run_local(str(trial_file), str(config_file))

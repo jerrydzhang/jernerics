@@ -125,9 +125,7 @@ def find_dead_executions(
 def _reconciled_execution_end(dead: DeadExecution) -> ExecutionEndEvent:
     stamp = _journal_timestamp(dead.trial)
     return ExecutionEndEvent(
-        event_id=uuid.uuid5(
-            JERNERICS_NAMESPACE, f"reconcile-end:{dead.execution_id}"
-        ),
+        event_id=uuid.uuid5(JERNERICS_NAMESPACE, f"reconcile-end:{dead.execution_id}"),
         recorded_at=stamp,
         execution_id=dead.execution_id,
         ended_at=stamp,

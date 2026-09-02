@@ -46,6 +46,7 @@ class SweepConfig:
 class ConfigNotFound(Exception):
     pass
 
+
 class ConfigValidationError(Exception):
     pass
 
