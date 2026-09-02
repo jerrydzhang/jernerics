@@ -18,6 +18,9 @@ JobId = Annotated[uuid.UUID, Field(description="Identity of a scheduler job")]
 TrialId = Annotated[uuid.UUID, Field(description="Identity of a trial")]
 ExecutionId = Annotated[uuid.UUID, Field(description="Identity of a trial execution")]
 ArtifactId = Annotated[uuid.UUID, Field(description="Identity of a declared artifact")]
+InvestigationId = Annotated[
+    uuid.UUID, Field(description="Identity of an investigation")
+]
 
 JERNERICS_NAMESPACE = uuid.UUID("8f3a9c21-54e7-4b6a-8d2f-0c71e5a93b47")
 """Fixed namespace for deterministic v3 identities.

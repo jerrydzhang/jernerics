@@ -23,6 +23,7 @@ from .ids import (
     ArtifactId,
     EventId,
     ExecutionId,
+    InvestigationId,
     JobId,
     SubmissionId,
     SweepId,
@@ -36,6 +37,7 @@ from .ingest import (
     IngestRequest,
     IngestResponse,
 )
+from .investigations import InvestigationRecord, materialize_selection
 from .lifecycle import ExecutionOutcome, FailureKind, SubmissionState, TrialState
 from .lineage import RetryLineage
 from .queries import (
@@ -116,6 +118,8 @@ __all__ = [
     "IngestError",
     "IngestRequest",
     "IngestResponse",
+    "InvestigationId",
+    "InvestigationRecord",
     "JobId",
     "JobRecord",
     "JobResourceEvent",
@@ -164,6 +168,7 @@ __all__ = [
     "decode_selection",
     "encode_page_token",
     "encode_selection",
+    "materialize_selection",
     "selection_from_json",
     "selection_to_json",
     "sweep_id_for",
