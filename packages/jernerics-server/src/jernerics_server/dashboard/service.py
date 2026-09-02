@@ -438,17 +438,23 @@ class DashboardService:
             raise CurationRejectedError(_curation_error(error)) from error
         return self.sweep_label(sweep_id)
 
+    def sweep_curation_state(self, sweep_id: str) -> SweepSummary | None:
+        """One sweep's overview row — archived/invalid facts without the
+        full detail; None when the id names no sweep."""
+        parsed = _parse_id(sweep_id)
+        if parsed is None:
+            return None
+        context = self.queries.sweep_context(parsed)
+        if context is None:
+            return None
+        rows = self.sweep_overview(str(context["project"]), [sweep_id])
+        return rows[0] if rows else None
+
     def sweep_incomplete(self, sweep_id: str) -> bool:
         """One sweep's liveness from its overview row; the cheap read the
         poll gates use instead of the full detail."""
-        parsed = _parse_id(sweep_id)
-        if parsed is None:
-            return False
-        context = self.queries.sweep_context(parsed)
-        if context is None:
-            return False
-        rows = self.sweep_overview(str(context["project"]), [sweep_id])
-        return bool(rows) and rows[0].incomplete
+        summary = self.sweep_curation_state(sweep_id)
+        return summary is not None and summary.incomplete
 
     def sweep_facts(self, sweep_id: str) -> dict[str, Any] | None:
         """Digest-stable inspector facts for one sweep: the overview row

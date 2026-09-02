@@ -365,21 +365,37 @@ def apply_curation(
     service: DashboardService, action: str, sweep_ids: list[str], reason: str = ""
 ) -> tuple[bool, str]:
     """Run one curation action over ids deterministically; (all ok,
-    report) with per-sweep failures named, never a false all-succeeded."""
+    report) with per-sweep failures named, never a false all-succeeded.
+    Already-invalid sweeps are named in the report, never re-marked —
+    a silent rewrite of reason or timestamp would read as success."""
     if action == "invalid" and not reason.strip():
         return (
             False,
             "Mark invalid requires a reason (1..500 characters after trimming).",
         )
+    unchanged: list[str] = []
+    if action == "invalid":
+        pending = []
+        for sweep_id in sorted(set(sweep_ids)):
+            summary = service.sweep_curation_state(sweep_id)
+            if summary is not None and summary.invalid:
+                unchanged.append(service.sweep_label(sweep_id))
+            else:
+                pending.append(sweep_id)
+    else:
+        pending = sorted(set(sweep_ids))
     labels: list[str] = []
     failures: list[str] = []
-    for sweep_id in sorted(set(sweep_ids)):
+    for sweep_id in pending:
         try:
             labels.append(run_curation(service, action, sweep_id, reason))
         except (CurationUnavailableError, CurationRejectedError) as error:
             failures.append(f"{service.sweep_label(sweep_id)}: {error}")
     verb = _CURATION_VERBS[action]
-    report = f"{verb} {', '.join(labels)}." if labels else ""
+    parts = [f"{verb} {', '.join(labels)}"] if labels else []
+    if unchanged:
+        parts.append(f"already invalid, reason untouched: {', '.join(unchanged)}")
+    report = "; ".join(parts) + "." if parts else ""
     if failures:
         prefix = f"{report} " if report else ""
         report = f"{prefix}Failed — {'; '.join(failures)}."

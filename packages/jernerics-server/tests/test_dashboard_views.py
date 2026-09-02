@@ -1574,6 +1574,29 @@ class TestApplyCuration:
         assert "Archived beta" in report
         assert "Failed" in report and ghost.replace("-", "")[:8] in report
 
+    def test_remarking_an_already_invalid_sweep_is_reported_not_rewritten(
+        self, mutable
+    ):
+        store, service = mutable
+        store.mark_sweep_invalid(str(SWEEP_B), "first reason")
+        before = store._curation_row(str(SWEEP_B))
+        ok, report = apply_curation(service, "invalid", [str(SWEEP_B)], "second try")
+        assert ok is True
+        assert "beta" in report and "already invalid" in report
+        assert store._curation_row(str(SWEEP_B)) == before
+
+    def test_mixed_invalid_selection_marks_only_the_fresh_sweep(self, mutable):
+        store, service = mutable
+        store.mark_sweep_invalid(str(SWEEP_B), "kept reason")
+        ok, report = apply_curation(
+            service, "invalid", [str(SWEEP_A), str(SWEEP_B)], "fresh reason"
+        )
+        assert ok is True
+        assert "Marked invalid alpha" in report
+        assert "already invalid" in report and "beta" in report
+        assert store._curation_row(str(SWEEP_B))[2] == "kept reason"
+        assert store._curation_row(str(SWEEP_A))[1] is not None
+
 
 class TestSweepInspectorCuration:
     def test_archived_banner_and_disabled_transitions(self, store_and_service):
