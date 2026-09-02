@@ -477,7 +477,7 @@ def detail_curation(overview: SweepSummary) -> html.Div:
                 className="action",
             ),
             html.Button(
-                "Mark invalid",
+                "Mark this sweep invalid",
                 id="detail-invalid",
                 disabled=not offered["invalid"],
                 className="action",

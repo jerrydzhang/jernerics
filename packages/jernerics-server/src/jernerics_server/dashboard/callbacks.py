@@ -961,12 +961,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("detail-message", "children"),
         Output("detail-curation", "children"),
+        Output("sweep-grid", "rowData", allow_duplicate=True),
+        Output("sweep-grid", "selectedRows", allow_duplicate=True),
+        Output("workspace-curation-note", "children", allow_duplicate=True),
         Input("detail-archive", "n_clicks"),
         Input("detail-invalid", "n_clicks"),
         Input("detail-restore-validity", "n_clicks"),
         Input("detail-restore", "n_clicks"),
         State("view-store", "data"),
         State("detail-reason", "value"),
+        State("sweep-grid", "selectedRows"),
+        State("project-store", "data"),
         prevent_initial_call=True,
     )
     def _curate_from_detail(
@@ -976,6 +981,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         _restore: int,
         view_doc: dict | None,
         reason: str | None,
+        grid_selection: list[dict] | None,
+        project: str | None,
     ):
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
         action = triggered_action(triggered, DETAIL_ACTIONS)
@@ -990,7 +997,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             if detail is not None
             else no_update
         )
-        return workspace.action_message(ok, report), banner
+        # The grid mirrors the detail action immediately — same tray-driven
+        # recomputation as the workspace bar — with the surviving selection.
+        fresh, note = _post_action_grid(service, project, view_doc)
+        kept = {str(row["sweep_id"]) for row in grid_selection or []}
+        return (
+            workspace.action_message(ok, report),
+            banner,
+            fresh,
+            [row for row in fresh if row["sweep_id"] in kept],
+            note,
+        )
 
     # -- Failure view: the roll-up's scope-wide failed executions --------
 

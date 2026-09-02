@@ -1640,6 +1640,8 @@ class TestSweepInspectorCuration:
         rendered = str(detail_curation(detail.overview))
         assert "badge-invalid" in rendered
         assert "kept for audit" in rendered
+        assert "Mark this sweep invalid" in rendered
+        assert ">Mark invalid<" not in rendered
 
 
 class TestProjectPageCuration:
@@ -1822,7 +1824,13 @@ class TestMountedCurationJourney:
         assert "requires a reason" in message
         assert store._curation_row(str(SWEEP_B))[1] is None  # nothing dispatched
 
-    _DETAIL_OUTPUTS = {"detail-message.children", "detail-curation.children"}
+    _DETAIL_OUTPUTS = {
+        "detail-message.children",
+        "detail-curation.children",
+        "sweep-grid.rowData",
+        "sweep-grid.selectedRows",
+        "workspace-curation-note.children",
+    }
 
     def test_detail_mark_invalid_persists_reason_and_banner(self, mutable_client):
         store, client = mutable_client
@@ -1841,9 +1849,18 @@ class TestMountedCurationJourney:
                 {
                     "id": "view-store",
                     "property": "data",
-                    "value": {"focus": {"kind": "sweep", "id": str(SWEEP_B)}},
+                    "value": {
+                        "focus": {"kind": "sweep", "id": str(SWEEP_B)},
+                        "scope": {
+                            "sweeps": [str(SWEEP_B)],
+                            "trials": [],
+                            "families": [],
+                        },
+                    },
                 },
                 {"id": "detail-reason", "property": "value", "value": "bad shards"},
+                {"id": "sweep-grid", "property": "selectedRows", "value": None},
+                {"id": "project-store", "property": "data", "value": "ops"},
             ],
             changed=["detail-invalid.n_clicks"],
         )
@@ -1854,6 +1871,13 @@ class TestMountedCurationJourney:
         assert "bad shards" in rendered
         row = store._curation_row(str(SWEEP_B))
         assert row[1] is not None and row[2] == "bad shards"
+        row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
+        grid_row = next(
+            entry
+            for entry in response["sweep-grid"]["rowData"]
+            if entry["sweep_id"] == str(SWEEP_B)
+        )
+        assert grid_row["invalid"] is True and grid_row["curation"] == "invalid"
 
     _TICK_OUTPUTS = {
         "sweep-grid.rowData",
