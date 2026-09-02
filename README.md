@@ -39,7 +39,7 @@ def trial(config, tracker):
     return {"loss": 1.0 - accuracy}
 ```
 
-`config` holds the current hyperparameters (`base` merged with sampled `search_space`). Use `tracker.log_value` / `log_param` / `log_json` / `log_artifact` to record what matters. Return a dict; the `objective` lambda reads it.
+`config` holds the current hyperparameters (`base` merged with sampled `search_space`). Use `tracker.log_value` / `log_param` / `log_json` / `log_artifact` / `open_artifact` to record what matters. Return a dict; the `objective` lambda reads it.
 
 ### 3. Create a config
 
@@ -284,7 +284,9 @@ def trial(config, tracker):
         tracker.log_value("loss", loss(step), step=step, context={"phase": "train"})
     tracker.log_json("summary", {"accuracy": acc})        # JSON observation
     tracker.set_progress(step, 10, "epoch")               # explicit progress
-    tracker.log_artifact("model", "model.pt")             # immutable artifact
+    tracker.log_artifact("model", "model.pt")             # snapshot an existing file
+    with tracker.open_artifact("fronts", "wt") as f:      # stream a fresh artifact
+        json.dump(fronts, f)
     return {"loss": final_loss}
 ```
 

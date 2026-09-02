@@ -28,8 +28,9 @@ def validate_json_size(value: dict[str, Any] | None) -> dict[str, Any] | None:
     if len(encoded) > JSON_VALUE_MAX_BYTES:
         msg = (
             f"observation encodes to {len(encoded)} bytes of JSON, exceeding "
-            f"the {JSON_VALUE_MAX_BYTES}-byte limit; log bulky payloads as an "
-            "artifact via log_artifact"
+            f"the {JSON_VALUE_MAX_BYTES}-byte limit; write bulky payloads as an "
+            "artifact instead: with tracker.open_artifact(key, 'wt') as f: "
+            "json.dump(value, f)"
         )
         raise ValueError(msg)
     return value

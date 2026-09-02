@@ -1,13 +1,16 @@
+import io
 import json
 import os
 import uuid
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol, TextIO
 
 from jernerics_schema import ArtifactSource
 
 from jernerics.tracking.artifact_manifest import ArtifactManifest
-from jernerics.tracking.tracker import JsonlTracker, validate_artifact_input
+from jernerics.tracking.tracker import JsonlTracker, validate_writer_mode
 
 TRIAL_CONFIG_ENV = "JERNERICS_TRIAL_CONFIG"
 TRACKING_DIR_ENV = "JERNERICS_TRACKING_DIR"
@@ -37,12 +40,21 @@ class TrackerProtocol(Protocol):
     def log_artifact(
         self,
         key: str,
-        path: str | None = None,
+        path: str,
         *,
-        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> None: ...
+
+    def open_artifact(
+        self,
+        key: str,
+        mode: str = "wt",
+        *,
+        filename: str | None = None,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> AbstractContextManager[TextIO | BinaryIO]: ...
 
     def set_progress(self, current: int, total: int, unit: str) -> None: ...
 
@@ -70,17 +82,24 @@ class ConsoleTracker:
     def log_artifact(
         self,
         key: str,
-        path: str | None = None,
+        path: str,
         *,
-        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> None:
-        validate_artifact_input(path, data)
-        if data is not None:
-            print(f"[artifact] {key}={len(data)} bytes")
-        else:
-            print(f"[artifact] {key}={path}")
+        print(f"[artifact] {key}={path}")
+
+    def open_artifact(
+        self,
+        key: str,
+        mode: str = "wt",
+        *,
+        filename: str | None = None,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> AbstractContextManager[TextIO | BinaryIO]:
+        validate_writer_mode(mode)
+        return _console_artifact_sink(key, mode)
 
     def set_progress(self, current: int, total: int, unit: str) -> None:
         print(f"[progress] {current}/{total} {unit}")
@@ -89,6 +108,13 @@ class ConsoleTracker:
         print("results:")
         for key, value in results.items():
             print(f"  {key}={value}")
+
+
+@contextmanager
+def _console_artifact_sink(key: str, mode: str) -> Iterator[TextIO | BinaryIO]:
+    sink: TextIO | BinaryIO = io.StringIO() if mode == "wt" else io.BytesIO()
+    yield sink
+    print(f"[artifact] {key}={sink.tell()} bytes")
 
 
 class _JobTracker:
@@ -117,14 +143,24 @@ class _JobTracker:
     def log_artifact(
         self,
         key: str,
-        path: str | None = None,
+        path: str,
         *,
-        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> None:
-        self._tracker.log_artifact(
-            key, path, data=data, source=source, content_type=content_type
+        self._tracker.log_artifact(key, path, source=source, content_type=content_type)
+
+    def open_artifact(
+        self,
+        key: str,
+        mode: str = "wt",
+        *,
+        filename: str | None = None,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> AbstractContextManager[TextIO | BinaryIO]:
+        return self._tracker.open_artifact(
+            key, mode, filename=filename, source=source, content_type=content_type
         )
 
     def set_progress(self, current: int, total: int, unit: str) -> None:

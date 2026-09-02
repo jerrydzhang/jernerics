@@ -40,6 +40,7 @@ def cache_dir() -> Path:
         tracking/<study>/0.jsonl
         tracking/<study>/artifacts/0.manifest
         tracking/<study>/artifacts/blobs/<artifact_id>.bin
+        tracking/<study>/artifacts/blobs/<artifact_id>.part (open_artifact spool)
         jobs/<job_id>.json
     """
     if is_hpc():

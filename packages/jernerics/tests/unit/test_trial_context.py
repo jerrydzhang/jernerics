@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import uuid
@@ -13,7 +14,7 @@ from jernerics.trial_context import (
     trial_config,
     trial_tracker,
 )
-from jernerics_schema import JSON_VALUE_MAX_BYTES
+from jernerics_schema import JSON_VALUE_MAX_BYTES, ArtifactDeclarationEvent
 from pydantic import ValidationError
 
 
@@ -180,14 +181,18 @@ class TestJobTracker:
             }
         ]
 
-    def test_logs_artifact_from_bytes(self, job_tracker):
+    def test_open_artifact_streams_into_staged_blob(self, job_tracker):
         tracker, tmp_path = job_tracker
 
-        tracker.log_artifact("report", data=b"hello")
+        with tracker.open_artifact("report", "wt") as f:
+            assert isinstance(f, io.TextIOBase)
+            f.write("hello")
 
         [event] = _read_events(tmp_path)
-        assert event.tag == "artifact_declaration"
-        assert event.filename == "report.bin"
+        assert isinstance(event, ArtifactDeclarationEvent)
+        assert event.key == "report"
+        assert event.filename == "report"
+        assert event.size_bytes == 5
         staged = (
             tmp_path
             / "tracking"
@@ -196,23 +201,31 @@ class TestJobTracker:
             / f"{event.artifact_id.hex}.bin"
         )
         assert staged.read_bytes() == b"hello"
+        manifest = tmp_path / "tracking" / "artifacts" / "7.manifest"
+        entries = [json.loads(line) for line in manifest.read_text().splitlines()]
+        assert entries == [
+            {
+                "artifact_id": event.artifact_id.hex,
+                "key": "report",
+                "path": str(staged),
+                "staged": True,
+            }
+        ]
 
-    def test_artifact_input_requires_exactly_one_of(self, job_tracker):
+    def test_open_artifact_rejects_bad_mode_eagerly(self, job_tracker):
         tracker, tmp_path = job_tracker
-        artifact = tmp_path / "m.bin"
-        artifact.write_bytes(b"x")
 
-        with pytest.raises(ValueError, match="exactly one"):
-            tracker.log_artifact("m", str(artifact), data=b"x")
-        with pytest.raises(ValueError, match="neither"):
-            tracker.log_artifact("m")
+        with pytest.raises(ValueError, match=r"mode must be 'wt' or 'wb'"):
+            tracker.open_artifact("m", "bx")
+
+        assert not (tmp_path / "tracking" / "artifacts" / "blobs").exists()
 
     def test_oversize_finish_names_artifact_remedy(self, job_tracker):
         tracker, _ = job_tracker
 
         with pytest.raises(
             ValidationError,
-            match="limit; log bulky payloads as an artifact via log_artifact",
+            match=r"with tracker\.open_artifact\(key, 'wt'\)",
         ):
             tracker.finish({"pad": "x" * (JSON_VALUE_MAX_BYTES + 1)})
 
@@ -269,16 +282,26 @@ class TestConsoleTracker:
 
         assert capsys.readouterr().out == "[artifact] model=/tmp/model.pt\n"
 
-    def test_log_artifact_bytes_prints_size(self, capsys):
-        ConsoleTracker().log_artifact("model", data=b"abc")
+    def test_open_artifact_prints_size_after_clean_exit(self, capsys):
+        with ConsoleTracker().open_artifact("model", "wt") as f:
+            assert isinstance(f, io.TextIOBase)
+            f.write("abc")
 
         assert capsys.readouterr().out == "[artifact] model=3 bytes\n"
 
-    def test_log_artifact_requires_exactly_one_input(self):
-        with pytest.raises(ValueError, match="exactly one"):
-            ConsoleTracker().log_artifact("model", "/tmp/model.pt", data=b"abc")
-        with pytest.raises(ValueError, match="neither"):
-            ConsoleTracker().log_artifact("model")
+    def test_open_artifact_prints_nothing_on_exception(self, capsys):
+        with (
+            pytest.raises(RuntimeError, match="boom"),
+            ConsoleTracker().open_artifact("model", "wt") as f,
+        ):
+            assert isinstance(f, io.TextIOBase)
+            raise RuntimeError("boom")
+
+        assert capsys.readouterr().out == ""
+
+    def test_open_artifact_rejects_bad_mode(self):
+        with pytest.raises(ValueError, match=r"mode must be 'wt' or 'wb'"):
+            ConsoleTracker().open_artifact("model", "bx")
 
     def test_set_progress_prints_progress(self, capsys):
         ConsoleTracker().set_progress(3, 10, "epochs")

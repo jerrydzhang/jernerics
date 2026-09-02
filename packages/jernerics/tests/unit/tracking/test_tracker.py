@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import socket
 from datetime import datetime, timezone
@@ -11,6 +12,7 @@ from jernerics.tracking.jsonl_io import TrackingReader
 from jernerics.tracking.tracker import JsonlTracker, NullTracker
 from jernerics_schema import (
     JSON_VALUE_MAX_BYTES,
+    ArtifactDeclarationEvent,
     ExecutionOutcome,
     FlatContext,
     TrackingEvent,
@@ -184,7 +186,7 @@ class TestLogJson:
 
         with pytest.raises(
             ValidationError,
-            match="limit; log bulky payloads as an artifact via log_artifact",
+            match=r"with tracker\.open_artifact\(key, 'wt'\)",
         ):
             tracker.log_json("results", blob)
 
@@ -401,38 +403,74 @@ class TestLogArtifact:
         staged = tmp_path / "blobs" / f"{event.artifact_id.hex}.bin"
         assert staged.read_bytes() == b"before"
 
-    def test_bytes_input_stages_blob_and_manifest(self, tmp_path) -> None:
+    def test_open_artifact_text_writer_publishes_staged_blob(self, tmp_path) -> None:
         tracker = make_tracker(tmp_path)
 
-        event = tracker.log_artifact("report", data=b"payload bytes")
+        with tracker.open_artifact("fronts", "wt") as f:
+            assert isinstance(f, io.TextIOBase)
+            f.write('{"fronts": [1, 2]}')
 
+        [event] = read_events(tmp_path / "0.jsonl")
+        assert isinstance(event, ArtifactDeclarationEvent)
+        assert event.filename == "fronts"
+        assert event.size_bytes == len(b'{"fronts": [1, 2]}')
+        assert event.sha256 == hashlib.sha256(b'{"fronts": [1, 2]}').hexdigest()
         staged = tmp_path / "blobs" / f"{event.artifact_id.hex}.bin"
-        assert staged.read_bytes() == b"payload bytes"
-        assert event.filename == "report.bin"
-        assert event.content_type == "application/octet-stream"
-        assert event.size_bytes == len(b"payload bytes")
-        assert event.sha256 == hashlib.sha256(b"payload bytes").hexdigest()
+        assert staged.read_bytes() == b'{"fronts": [1, 2]}'
+        assert not list((tmp_path / "blobs").glob("*.part"))
         entry = json.loads((tmp_path / "0.manifest").read_text().strip())
         assert entry == {
             "artifact_id": event.artifact_id.hex,
-            "key": "report",
+            "key": "fronts",
             "path": str(staged),
             "staged": True,
         }
 
-    def test_rejects_both_path_and_data(self, tmp_path) -> None:
-        tracker = make_tracker(tmp_path)
-        artifact = tmp_path / "model.json"
-        artifact.write_bytes(b"{}")
-
-        with pytest.raises(ValueError, match="exactly one"):
-            tracker.log_artifact("model", str(artifact), data=b"{}")
-
-    def test_rejects_neither_path_nor_data(self, tmp_path) -> None:
+    def test_open_artifact_binary_writer_uses_filename(self, tmp_path) -> None:
         tracker = make_tracker(tmp_path)
 
-        with pytest.raises(ValueError, match="neither"):
-            tracker.log_artifact("model")
+        with tracker.open_artifact("plot", "wb", filename="plot.png") as f:
+            assert isinstance(f, io.BufferedIOBase)
+            f.write(b"\x89PNG\r\n\x1a\n")
+
+        [event] = read_events(tmp_path / "0.jsonl")
+        assert isinstance(event, ArtifactDeclarationEvent)
+        assert event.filename == "plot.png"
+        assert event.content_type == "image/png"
+        assert event.size_bytes == len(b"\x89PNG\r\n\x1a\n")
+        staged = tmp_path / "blobs" / f"{event.artifact_id.hex}.bin"
+        assert staged.read_bytes() == b"\x89PNG\r\n\x1a\n"
+
+    def test_open_artifact_exception_discards_blob(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        with (
+            pytest.raises(RuntimeError, match="boom"),
+            tracker.open_artifact("fronts", "wt") as f,
+        ):
+            assert isinstance(f, io.TextIOBase)
+            f.write("partial")
+            raise RuntimeError("boom")
+
+        assert list((tmp_path / "blobs").iterdir()) == []
+        assert read_events(tmp_path / "0.jsonl") == []
+        assert not (tmp_path / "0.manifest").exists()
+
+    def test_open_artifact_rejects_bad_mode_eagerly(self, tmp_path) -> None:
+        tracker = make_tracker(tmp_path)
+
+        with pytest.raises(ValueError, match=r"mode must be 'wt' or 'wb'"):
+            tracker.open_artifact("fronts", "bx")
+
+        assert not (tmp_path / "blobs").exists()
+
+    def test_open_artifact_requires_manifest_eagerly(self, tmp_path) -> None:
+        tracker = JsonlTracker(tmp_path / "0.jsonl", uuid4())
+
+        with pytest.raises(RuntimeError, match="requires a manifest"):
+            tracker.open_artifact("fronts")
+
+        assert not (tmp_path / "blobs").exists()
 
     def test_failed_copy_leaves_no_staging_litter(self, tmp_path) -> None:
         tracker = make_tracker(tmp_path)
@@ -514,3 +552,19 @@ class TestNullTracker:
             tracker.emit_execution_end(ExecutionOutcome.SUCCESS)
             tracker.log_artifact("m", str(tmp_path))
         tracker.close()
+
+    def test_open_artifact_buffers_in_memory(self) -> None:
+        tracker = NullTracker()
+
+        with tracker.open_artifact("fronts", "wt") as f:
+            assert isinstance(f, io.StringIO)
+            f.write("hello")
+            assert f.getvalue() == "hello"
+
+        with tracker.open_artifact("blob", "wb") as f:
+            assert isinstance(f, io.BufferedIOBase)
+            f.write(b"hello")
+
+    def test_open_artifact_rejects_bad_mode(self) -> None:
+        with pytest.raises(ValueError, match=r"mode must be 'wt' or 'wb'"):
+            NullTracker().open_artifact("fronts", "bx")

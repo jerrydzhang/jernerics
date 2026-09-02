@@ -1,14 +1,17 @@
 """Client-side v3 tracker: allocates identities and appends tagged events."""
 
 import hashlib
+import io
 import math
 import mimetypes
 import os
 import socket
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol, Self
-from uuid import uuid4
+from typing import BinaryIO, Protocol, Self, TextIO
+from uuid import UUID, uuid4
 
 from jernerics_schema import (
     ArtifactDeclarationEvent,
@@ -94,13 +97,22 @@ class Tracker(Protocol):
     def log_artifact(
         self,
         key: str,
-        local_path: str | None = None,
+        local_path: str,
         context: dict | None = None,
         *,
-        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> ArtifactDeclarationEvent | None: ...
+    def open_artifact(
+        self,
+        key: str,
+        mode: str = "wt",
+        context: dict | None = None,
+        *,
+        filename: str | None = None,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> AbstractContextManager[TextIO | BinaryIO]: ...
     def close(self) -> None: ...
 
 
@@ -121,17 +133,12 @@ def _copy_and_hash(source: Path, destination: Path) -> tuple[int, str]:
 def _stage_blob(
     blobs_dir: Path,
     artifact_hex: str,
-    local_path: str | None,
-    data: bytes | None,
+    local_path: str,
 ) -> tuple[Path, int, str]:
     final = blobs_dir / f"{artifact_hex}.bin"
     tmp = final.with_name(final.name + ".tmp")
     try:
-        if data is not None:
-            tmp.write_bytes(data)
-            size, sha256 = len(data), hashlib.sha256(data).hexdigest()
-        else:
-            size, sha256 = _copy_and_hash(Path(str(local_path)), tmp)
+        size, sha256 = _copy_and_hash(Path(local_path), tmp)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -139,13 +146,20 @@ def _stage_blob(
     return final, size, sha256
 
 
-def validate_artifact_input(path: str | None, data: bytes | None) -> None:
-    """Require exactly one of path= or data= on every artifact call."""
-    if path is not None and data is not None:
-        msg = "log_artifact accepts exactly one of path= or data=; both were provided"
-        raise ValueError(msg)
-    if path is None and data is None:
-        msg = "log_artifact requires path= or data=; neither was provided"
+def _hash_file(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as src:
+        for chunk in iter(lambda: src.read(_CHUNK_BYTES), b""):
+            digest.update(chunk)
+            size += len(chunk)
+    return size, digest.hexdigest()
+
+
+def validate_writer_mode(mode: str) -> None:
+    """Reject any open_artifact mode other than the two supported ones."""
+    if mode not in ("wt", "wb"):
+        msg = f"open_artifact mode must be 'wt' or 'wb'; got {mode!r}"
         raise ValueError(msg)
 
 
@@ -351,27 +365,74 @@ class JsonlTracker:
     def log_artifact(
         self,
         key: str,
-        local_path: str | None = None,
+        local_path: str,
         context: dict | None = None,
         *,
-        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> ArtifactDeclarationEvent:
-        validate_artifact_input(local_path, data)
-        if self._manifest is None:
-            msg = "log_artifact requires a manifest; construct the tracker with one"
-            raise RuntimeError(msg)
+        manifest = self._require_manifest()
         artifact_id = uuid4()
-        display_name = Path(local_path).name if local_path is not None else f"{key}.bin"
-        blobs_dir = self._manifest.path.parent / "blobs"
+        display_name = Path(local_path).name
+        blobs_dir = manifest.path.parent / "blobs"
         blobs_dir.mkdir(parents=True, exist_ok=True)
         staged_path, size_bytes, sha256 = _stage_blob(
             blobs_dir,
             artifact_id.hex,
             local_path,
-            data,
         )
+        return self._declare_artifact(
+            artifact_id,
+            key,
+            staged_path,
+            display_name,
+            size_bytes,
+            sha256,
+            context,
+            source,
+            content_type,
+        )
+
+    def open_artifact(
+        self,
+        key: str,
+        mode: str = "wt",
+        context: dict | None = None,
+        *,
+        filename: str | None = None,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> AbstractContextManager[TextIO | BinaryIO]:
+        validate_writer_mode(mode)
+        manifest = self._require_manifest()
+        return self._open_artifact_spool(
+            manifest,
+            key,
+            mode,
+            context,
+            filename if filename is not None else key,
+            source,
+            content_type,
+        )
+
+    def _require_manifest(self) -> ArtifactManifest:
+        if self._manifest is None:
+            msg = "log_artifact requires a manifest; construct the tracker with one"
+            raise RuntimeError(msg)
+        return self._manifest
+
+    def _declare_artifact(
+        self,
+        artifact_id: UUID,
+        key: str,
+        staged_path: Path,
+        filename: str,
+        size_bytes: int,
+        sha256: str,
+        context: dict | None,
+        source: ArtifactSource,
+        content_type: str | None,
+    ) -> ArtifactDeclarationEvent:
         event = ArtifactDeclarationEvent(
             event_id=uuid4(),
             recorded_at=_now(),
@@ -379,11 +440,11 @@ class JsonlTracker:
             trial_id=self.trial_id,
             execution_id=self.execution_id,
             key=key,
-            filename=display_name,
+            filename=filename,
             content_type=(
                 content_type
                 if content_type is not None
-                else mimetypes.guess_type(display_name)[0] or _FALLBACK_CONTENT_TYPE
+                else mimetypes.guess_type(filename)[0] or _FALLBACK_CONTENT_TYPE
             ),
             size_bytes=size_bytes,
             sha256=sha256,
@@ -391,8 +452,53 @@ class JsonlTracker:
             source=source,
         )
         self._emit(event)
-        self._manifest.append(event.artifact_id.hex, key, str(staged_path), staged=True)
+        self._require_manifest().append(
+            event.artifact_id.hex, key, str(staged_path), staged=True
+        )
         return event
+
+    @contextmanager
+    def _open_artifact_spool(
+        self,
+        manifest: ArtifactManifest,
+        key: str,
+        mode: str,
+        context: dict | None,
+        filename: str,
+        source: ArtifactSource,
+        content_type: str | None,
+    ) -> Iterator[TextIO | BinaryIO]:
+        artifact_id = uuid4()
+        blobs_dir = manifest.path.parent / "blobs"
+        blobs_dir.mkdir(parents=True, exist_ok=True)
+        spool = blobs_dir / f"{artifact_id.hex}.part"
+        # The spool stays open across the yield; every exit path closes it.
+        if mode == "wb":
+            writer = open(spool, "wb")  # noqa: SIM115
+        else:
+            writer = open(spool, "w", encoding="utf-8")  # noqa: SIM115
+        try:
+            yield writer
+        except BaseException:
+            with suppress(BaseException):
+                writer.close()
+            spool.unlink(missing_ok=True)
+            raise
+        writer.close()
+        size_bytes, sha256 = _hash_file(spool)
+        staged_path = blobs_dir / f"{artifact_id.hex}.bin"
+        os.replace(spool, staged_path)
+        self._declare_artifact(
+            artifact_id,
+            key,
+            staged_path,
+            filename,
+            size_bytes,
+            sha256,
+            context,
+            source,
+            content_type,
+        )
 
     def close(self) -> None:
         self.writer.close()
@@ -468,14 +574,32 @@ class NullTracker:
     def log_artifact(
         self,
         key: str,
-        local_path: str | None = None,
+        local_path: str,
         context: dict | None = None,
         *,
-        data: bytes | None = None,
         source: ArtifactSource = "user",
         content_type: str | None = None,
     ) -> None:
         pass
 
+    def open_artifact(
+        self,
+        key: str,
+        mode: str = "wt",
+        context: dict | None = None,
+        *,
+        filename: str | None = None,
+        source: ArtifactSource = "user",
+        content_type: str | None = None,
+    ) -> AbstractContextManager[TextIO | BinaryIO]:
+        validate_writer_mode(mode)
+        return _null_artifact_sink(mode)
+
     def close(self) -> None:
         pass
+
+
+@contextmanager
+def _null_artifact_sink(mode: str) -> Iterator[TextIO | BinaryIO]:
+    sink: TextIO | BinaryIO = io.StringIO() if mode == "wt" else io.BytesIO()
+    yield sink
