@@ -1481,19 +1481,31 @@ class TestWorkspaceActions:
             "restore": False,
         }
 
-    def test_mixed_selection_exposes_only_valid_transitions(self):
-        assert selection_transitions([]) == {
+    def test_selection_gates_from_real_grid_rows(self, store_and_service):
+        store, service = store_and_service
+        store.mark_sweep_invalid(str(SWEEP_A), "contaminated")
+        rows = browser_sweep_rows(service.sweep_overview("ops"), {"sweeps": []})
+        by_id = {row["sweep_id"]: row for row in rows}
+        none = {
             "archive": False,
             "invalid": False,
             "restore_validity": False,
             "restore": False,
         }
-        offered = selection_transitions(
-            [
-                {"sweep_id": "a", "archived": False, "invalid": False},
-                {"sweep_id": "b", "archived": True, "invalid": True},
-            ]
-        )
+        assert selection_transitions([]) == none
+        assert selection_transitions([by_id[str(SWEEP_A)]]) == {
+            "archive": False,
+            "invalid": False,
+            "restore_validity": True,
+            "restore": False,
+        }
+        assert selection_transitions([by_id[str(SWEEP_B)]]) == {
+            "archive": True,
+            "invalid": True,
+            "restore_validity": False,
+            "restore": False,
+        }
+        offered = selection_transitions([by_id[str(SWEEP_A)], by_id[str(SWEEP_B)]])
         assert offered == {
             "archive": True,
             "invalid": True,
@@ -1672,6 +1684,17 @@ class TestMountedCurationJourney:
         ctx = app.state.dashboard
         return build_dash_app(ctx).callback_map
 
+    @staticmethod
+    def _grid_row(store, sweep_id: uuid.UUID) -> dict:
+        service = DashboardService(QueryService(store))
+        return next(
+            row
+            for row in browser_sweep_rows(
+                service.sweep_overview("ops"), {"sweeps": [str(sweep_id)]}
+            )
+            if row["sweep_id"] == str(sweep_id)
+        )
+
     _WORKSPACE_OUTPUTS = {
         "workspace-message.children",
         "sweep-grid.rowData",
@@ -1689,7 +1712,7 @@ class TestMountedCurationJourney:
     }
 
     def test_selection_gates_reason_and_counts_picked_rows(self, mutable_client):
-        _store, client = mutable_client
+        store, client = mutable_client
         callback_map = self._callback_map(client)
 
         def transitions(rows):
@@ -1700,14 +1723,14 @@ class TestMountedCurationJourney:
                 [{"id": "sweep-grid", "property": "selectedRows", "value": rows}],
             )
 
-        fresh = [{"sweep_id": str(SWEEP_B), "archived": False, "invalid": False}]
-        response = transitions(fresh)
+        response = transitions([self._grid_row(store, SWEEP_B)])
         assert response["ws-archive"]["disabled"] is False
         assert response["ws-invalid"]["disabled"] is False
         assert response["ws-reason"]["style"] == {}  # reason reveals with the action
         assert response["ws-curation-summary"]["children"] == "Curation (1 picked)"
 
-        curated = [{"sweep_id": str(SWEEP_B), "archived": True, "invalid": True}]
+        store.mark_sweep_invalid(str(SWEEP_B), "bad science")
+        curated = [self._grid_row(store, SWEEP_B)]
         response = transitions(curated)
         assert response["ws-archive"]["disabled"] is True
         assert response["ws-invalid"]["disabled"] is True
@@ -1723,7 +1746,7 @@ class TestMountedCurationJourney:
     ):
         store, client = mutable_client
         callback_map = self._callback_map(client)
-        row = {"sweep_id": str(SWEEP_B), "archived": False, "invalid": False}
+        row = self._grid_row(store, SWEEP_B)
         response = self._dispatch(
             client,
             callback_map,
@@ -1753,7 +1776,7 @@ class TestMountedCurationJourney:
     def test_workspace_mark_invalid_requires_reason(self, mutable_client):
         store, client = mutable_client
         callback_map = self._callback_map(client)
-        row = {"sweep_id": str(SWEEP_B), "archived": False, "invalid": False}
+        row = self._grid_row(store, SWEEP_B)
         response = self._dispatch(
             client,
             callback_map,

@@ -103,6 +103,8 @@ def browser_sweep_rows(
                 "name": summary.name,
                 "state": summary.state,
                 "curation": sweep_curation(summary),
+                "archived": summary.archived,
+                "invalid": summary.invalid,
                 "submitted_jobs": summary.submitted_jobs,
                 "expected_trials": (
                     MISSING
