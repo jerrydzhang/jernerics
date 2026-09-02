@@ -1876,6 +1876,7 @@ class TestMountedCurationJourney:
                 {"id": "poll", "property": "n_intervals", "value": 3},
             ],
             state=[
+                {"id": "sweep-grid", "property": "selectedRows", "value": None},
                 {"id": "sweep-browser-facts-store", "property": "data", "value": None},
             ],
             changed=["poll.n_intervals"],
@@ -1883,6 +1884,72 @@ class TestMountedCurationJourney:
         row_ids = [row["sweep_id"] for row in response["sweep-grid"]["rowData"]]
         assert row_ids == [str(SWEEP_A), str(SWEEP_B)]
         picked = [row["sweep_id"] for row in response["sweep-grid"]["selectedRows"]]
+        assert picked == [str(SWEEP_B)]
+
+    def test_workspace_mark_invalid_keeps_picked_row_and_selection(
+        self, mutable_client
+    ):
+        """A picked terminal curated sweep must not vanish between the
+        action and the next poll: fresh rows recompute from the CURRENT
+        tray, and the selection keeps the surviving row."""
+        store, client = mutable_client
+        callback_map = self._callback_map(client)
+        row = self._grid_row(store, SWEEP_B)
+        doc = {"scope": {"sweeps": [str(SWEEP_B)], "trials": [], "families": []}}
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._WORKSPACE_OUTPUTS,
+            [
+                {"id": "ws-archive", "property": "n_clicks", "value": 0},
+                {"id": "ws-invalid", "property": "n_clicks", "value": 1},
+                {"id": "ws-restore-validity", "property": "n_clicks", "value": 0},
+                {"id": "ws-restore", "property": "n_clicks", "value": 0},
+            ],
+            state=[
+                {"id": "sweep-grid", "property": "selectedRows", "value": [row]},
+                {"id": "ws-reason", "property": "value", "value": "bad shards"},
+                {"id": "project-store", "property": "data", "value": "ops"},
+                {"id": "view-store", "property": "data", "value": doc},
+            ],
+            changed=["ws-invalid.n_clicks"],
+        )
+        row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
+        assert row_ids == [str(SWEEP_A), str(SWEEP_B)]
+        kept = response["sweep-grid"]["selectedRows"]
+        assert [entry["sweep_id"] for entry in kept] == [str(SWEEP_B)]
+        assert kept[0]["invalid"] is True and kept[0]["archived"] is True
+        message = response["workspace-message"]["children"]["props"]["children"]
+        assert message.startswith("Marked invalid beta")
+        assert store._curation_row(str(SWEEP_B))[1] is not None
+
+    def test_selection_survives_tick_before_it_lands_in_the_tray(self, mutable_client):
+        """A poll tick dispatching before the selection reaches the view
+        doc must not clear the grid selection."""
+        _store, client = mutable_client
+        callback_map = self._callback_map(client)
+        doc = {"scope": {"sweeps": [], "trials": [], "families": []}}
+        response = self._dispatch(
+            client,
+            callback_map,
+            self._TICK_OUTPUTS,
+            [
+                {"id": "project-store", "property": "data", "value": "ops"},
+                {"id": "view-store", "property": "data", "value": doc},
+                {"id": "poll", "property": "n_intervals", "value": 5},
+            ],
+            state=[
+                {
+                    "id": "sweep-grid",
+                    "property": "selectedRows",
+                    "value": [{"sweep_id": str(SWEEP_B)}],
+                },
+                {"id": "sweep-browser-facts-store", "property": "data", "value": None},
+            ],
+        )
+        row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
+        assert row_ids == [str(SWEEP_A), str(SWEEP_B)]
+        picked = [entry["sweep_id"] for entry in response["sweep-grid"]["selectedRows"]]
         assert picked == [str(SWEEP_B)]
 
 

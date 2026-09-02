@@ -478,7 +478,12 @@ class TestSweepsBrowserTickGuard:
                 _TICK_INPUT,
             ],
             state=[
-                {"id": "sweep-browser-facts-store", "property": "data", "value": facts}
+                {"id": "sweep-grid", "property": "selectedRows", "value": None},
+                {
+                    "id": "sweep-browser-facts-store",
+                    "property": "data",
+                    "value": facts,
+                },
             ],
             changed=changed,
         )

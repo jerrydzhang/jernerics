@@ -402,6 +402,22 @@ def apply_curation(
     return not failures, report
 
 
+def _post_action_grid(
+    service: DashboardService, project: str | None, view_doc: dict | None
+) -> tuple[list[dict], str]:
+    """Fresh browser rows plus the curation note, recomputed from the
+    CURRENT scope tray and include flags — never a bare snapshot, so
+    picked curated sweeps stay visible across a curation action."""
+    scope = (view_doc or {}).get("scope") or {}
+    rows = workspace.browser_sweep_rows(
+        service.sweep_overview(project or ""),
+        scope,
+        include_archived=bool(scope.get("include_archived")),
+        include_invalid=bool(scope.get("include_invalid")),
+    )
+    return rows, workspace.curation_note(rows)
+
+
 def triggered_action(triggered: set[str], mapping: dict[str, str]) -> str | None:
     """The action name for the one triggered control, if any."""
     return next((action for prop, action in mapping.items() if prop in triggered), None)
@@ -755,12 +771,14 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input("project-store", "data"),
         Input("view-store", "data"),
         Input("poll", "n_intervals"),
+        State("sweep-grid", "selectedRows"),
         State("sweep-browser-facts-store", "data"),
     )
     def _load_browser_sweeps(
         project: str | None,
         view_doc: dict | None,
         _tick: int | None,
+        grid_selection: list[dict] | None,
         facts: dict | None,
     ):
         # Scope data runs only for project/scope/refresh changes; every
@@ -785,7 +803,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             include_archived=desired["include_archived"],
             include_invalid=desired["include_invalid"],
         )
-        picked = set(desired["sweeps"])
+        # The grid's live selection joins the tray: a poll tick can
+        # dispatch before a just-made selection lands in the view doc,
+        # and re-deriving from the tray alone would clear it.
+        picked = set(desired["sweeps"]) | {
+            str(row["sweep_id"]) for row in grid_selection or []
+        }
         selected = analysis.mounted_selection(
             [row for row in rows if row["sweep_id"] in picked],
             initial=is_initial(),
@@ -914,24 +937,18 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 no_update,
             )
         ok, report = apply_curation(service, action, sweep_ids, reason or "")
-        fresh = workspace.browser_sweep_rows(
-            service.sweep_overview(project or ""),
-            None,
-            include_archived=bool(
-                ((view_doc or {}).get("scope") or {}).get("include_archived")
-            ),
-            include_invalid=bool(
-                ((view_doc or {}).get("scope") or {}).get("include_invalid")
-            ),
-        )
-        # Replacing rowData drops the grid's selection silently; writing
-        # [] makes the drop an event, so tray and action-bar callbacks
-        # re-fire against the post-action state.
+        fresh, note = _post_action_grid(service, project, view_doc)
+        # Rows recompute from the CURRENT tray, so picked curated sweeps
+        # never flicker out; the selection keeps every row that survived
+        # the action — rows that legitimately left discovery are gone.
+        # Writing the survivors (or []) keeps the write an event, so the
+        # tray and action-bar callbacks re-fire against the new state.
+        kept = {str(row["sweep_id"]) for row in rows or []}
         return (
             workspace.action_message(ok, report),
             fresh,
-            [],
-            workspace.curation_note(fresh),
+            [row for row in fresh if row["sweep_id"] in kept],
+            note,
         )
 
     DETAIL_ACTIONS = {
