@@ -25,8 +25,14 @@ from jernerics_schema import (
     TrialParamRecord,
     ValueCatalogRecord,
     ValueRecord,
+    materialize_selection,
 )
 
+from jernerics_server.investigations import (
+    InvestigationDetail,
+    InvestigationRecord,
+    InvestigationService,
+)
 from jernerics_server.queries import QueryService
 from jernerics_server.store import (
     InvalidCurationReasonError,
@@ -251,6 +257,21 @@ class ExecutionDetail:
     artifacts: tuple["ArtifactRow", ...] = ()
 
 
+@dataclass(frozen=True)
+class InvestigationRow:
+    """One investigation row on the project's Investigations index."""
+
+    investigation_id: str
+    name: str
+    factor: str
+    outcome: str
+    member_count: int
+    with_outcome: int
+    completed: int
+    invalid: int
+    last_activity_ns: int | None
+
+
 def _format_param(value: Any) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -437,6 +458,150 @@ class DashboardService:
         except StoreError as error:
             raise CurationRejectedError(_curation_error(error)) from error
         return self.sweep_label(sweep_id)
+
+    def _investigations(self) -> InvestigationService:
+        if self.store is None:
+            raise CurationUnavailableError(
+                "investigations are unavailable: this dashboard has no write store"
+            )
+        return InvestigationService(self.store)
+
+    def investigations_index(
+        self, project: str, *, include_archived: bool = False
+    ) -> list[InvestigationRow]:
+        """Index rows for every investigation of the project, with the
+        member coverage facts each row shows."""
+        service = self._investigations()
+        rows: list[InvestigationRow] = []
+        for record in service.list_for_project(
+            project, include_archived=include_archived
+        ):
+            coverage = service.detail(str(record.id)).coverage
+            rows.append(
+                InvestigationRow(
+                    investigation_id=str(record.id),
+                    name=record.name,
+                    factor=record.factor,
+                    outcome=record.outcome,
+                    member_count=coverage.members,
+                    with_outcome=coverage.with_outcome,
+                    completed=coverage.completed,
+                    invalid=coverage.invalid,
+                    last_activity_ns=coverage.last_activity_ns,
+                )
+            )
+        return rows
+
+    def unorganized(self, project: str) -> list[SweepSummary]:
+        """The project's sweeps in no investigation (archived
+        investigations still organize their members), as overview rows."""
+        organized = {
+            str(member)
+            for record in self._investigations().list_for_project(
+                project, include_archived=True
+            )
+            for member in record.members
+        }
+        return [
+            row
+            for row in self.sweep_overview(project)
+            if str(row.sweep_id) not in organized
+        ]
+
+    def investigation_detail(self, investigation_id: str) -> InvestigationDetail:
+        """One investigation with its coverage facts."""
+        try:
+            return self._investigations().detail(investigation_id)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+
+    def investigation_scope(
+        self, investigation_id: str, member_index: int | None = None
+    ) -> dict[str, Any]:
+        """Analysis scope group for the investigation's materialized
+        Selection; ``member_index`` narrows to a single member sweep.
+        The URL carries the same state via the existing ``?sel=`` token
+        over :data:`materialize_selection`'s Selection."""
+        from .analysis import default_scope_state, tray_from_selection
+
+        detail = self.investigation_detail(investigation_id)
+        selection = materialize_selection(detail.investigation)
+        if member_index is not None:
+            members = selection.sweeps or ()
+            if not 0 <= member_index < len(members):
+                raise IndexError(
+                    f"member index {member_index} out of range "
+                    f"for {len(members)} members"
+                )
+            selection = Selection(
+                project=selection.project, sweeps=(members[member_index],)
+            )
+        return {**default_scope_state(), **tray_from_selection(selection)}
+
+    def create_investigation(
+        self,
+        project: str,
+        name: str,
+        factor: str,
+        outcome: str,
+        *,
+        replicate_factor: str | None = None,
+        members: Sequence[str] = (),
+    ) -> InvestigationRecord:
+        """Create an investigation; a conflicting (project, name) is a
+        rejection, a matching one returns the stored record."""
+        try:
+            return self._investigations().create(
+                project,
+                name,
+                factor,
+                outcome,
+                replicate_factor=replicate_factor,
+                members=members,
+            )
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+
+    def set_investigation_members(
+        self, investigation_id: str, sweep_ids: Sequence[str]
+    ) -> InvestigationRecord:
+        """Replace the member set; returns the updated record."""
+        try:
+            return self._investigations().set_members(investigation_id, sweep_ids)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+
+    def add_investigation_members(
+        self, investigation_id: str, sweep_ids: Sequence[str]
+    ) -> InvestigationRecord:
+        """Add sweeps to the member set; returns the updated record."""
+        try:
+            return self._investigations().add_members(investigation_id, sweep_ids)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+
+    def remove_investigation_members(
+        self, investigation_id: str, sweep_ids: Sequence[str]
+    ) -> InvestigationRecord:
+        """Drop sweeps from the member set; returns the updated record."""
+        try:
+            return self._investigations().remove_members(investigation_id, sweep_ids)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+
+    def archive_investigation(self, investigation_id: str) -> InvestigationRecord:
+        """Archive the investigation; returns the updated record."""
+        try:
+            return self._investigations().archive(investigation_id)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
+
+    def restore_investigation(self, investigation_id: str) -> InvestigationRecord:
+        """Restore the investigation; returns the updated record."""
+        try:
+            return self._investigations().restore(investigation_id)
+        except StoreError as error:
+            raise CurationRejectedError(_curation_error(error)) from error
 
     def sweep_curation_state(self, sweep_id: str) -> SweepSummary | None:
         """One sweep's overview row — archived/invalid facts without the
