@@ -52,7 +52,6 @@ from jernerics_server.dashboard.artifacts import raw_href, viewer_href
 from jernerics_server.dashboard.auth import COOKIE_NAME
 from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.components import short_id
-from jernerics_server.dashboard.layout import shell
 from jernerics_server.dashboard.routes import ROUTES_BASE, parse_route
 from jernerics_server.http import create_app
 from jernerics_server.store import Store
@@ -433,11 +432,13 @@ class TestLinkGraphJourney:
         back_links = [
             href
             for href in _page_hrefs(viewer)
-            if href.startswith(f"{ROUTES_BASE}/project/")
+            if parse_route(href).kind in ("workspace", "sweep")
         ]
         assert back_links
+        # Every back hop lands on a rendered page: the project overview
+        # or the sweep page (trial/execution render as plain crumbs).
         for href in back_links:
-            assert parse_route(href).kind == "workspace"
+            assert parse_route(href).kind in ("workspace", "sweep")
 
     def test_artifact_view_download_serves_the_seeded_bytes(self, scenario):
         artifact_id = _rows(
@@ -659,27 +660,21 @@ class TestMountedDashboardHttp:
         assert landed.status_code == 200
         assert "jernerics dashboard" in landed.text
 
-    def test_mounted_callback_graph_keeps_url_search_shell_owned(self, scenario):
-        """jernerics-8c9: the mounted app registers exactly one owner of
-        ``url.search`` and it references only always-mounted shell ids,
-        so no navigation can dispatch a callback into unmounted page
-        components (the analysis-exit ReferenceError)."""
+    def test_mounted_callback_graph_keeps_url_search_paired_with_pathname(
+        self, scenario
+    ):
+        """The editor's save navigation is the only url.search writer and
+        it always rewrites pathname with it; no navigation can dispatch a
+        callback into unmounted page components (jernerics-8c9)."""
         dash_app = build_dash_app(scenario.app.state.dashboard)
 
         def output_specs(key: str) -> set[str]:
             stripped = key.removeprefix("..").removesuffix("..")
             return {part.split("@")[0] for part in stripped.split("...") if part}
 
-        owners = [
-            key for key in dash_app.callback_map if output_specs(key) == {"url.search"}
+        writers = [
+            key for key in dash_app.callback_map if "url.search" in output_specs(key)
         ]
-        assert owners == ["url.search"]
-        owner = dash_app.callback_map["url.search"]
-        shell_ids = {
-            node.id
-            for node in _components(shell())
-            if isinstance(getattr(node, "id", None), str)
-        }
-        referenced = {dep["id"] for dep in owner["inputs"]}
-        referenced |= {dep["id"] for dep in owner.get("state", [])}
-        assert referenced <= shell_ids
+        assert writers
+        for key in writers:
+            assert "url.pathname" in output_specs(key), key

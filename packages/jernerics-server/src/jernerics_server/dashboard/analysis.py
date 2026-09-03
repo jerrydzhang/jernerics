@@ -1,30 +1,21 @@
-"""Analysis page: cross-sweep exploration and comparison (jernerics-h5d.13).
+"""Session view state for the dashboard's analysis surfaces.
 
-One project's sweeps, trials, and retry families feed a shared selection
-scope. The scope lives in one canonical ``scope`` group of the view
-document — sweep picks, family/trial/execution picks, the expansion
-toggle, and the include flags — so the browser tray UI and the include
-controls read and write the same state. That document round-trips
-through the dashboard-only ``?view=<json>`` parameter as a defaults-diff
-(jernerics-2se): only non-default fields are encoded, while legacy full
-documents still decode. A ``?sel=<token>`` deep link — the same token
-format the jernerics client uses, still the continue-in-Python handoff —
-hydrates into the scope too. A persistent scope bar plus an Edit-scope
-disclosure sit above every view (jernerics-cdf.3). Tabs: data catalog,
-series overlay, points tables, study-style Optuna views (plain plotly —
-no optuna dependency), and the continue-in-Python handoff. All data
-flows through DashboardService.
+One canonical view document holds what a session keeps across renders:
+the investigation Series controls, the auto-refresh intent, the retry
+families picked on sweep pages, and the highlighted trials. Every write
+goes through :func:`edited_view`. All data flows through
+DashboardService; the investigation Series view keeps its fetched
+snapshot in a page store so view-only edits issue zero reads.
 """
 
 import json
 import math
 from collections.abc import Sequence
 from typing import Any
-from urllib.parse import parse_qs, parse_qsl, quote, urlencode
+from urllib.parse import parse_qs, quote
 
 from dash import dcc, html, no_update
 from dash_ag_grid import AgGrid
-from jernerics_schema import Selection, SelectionTokenError
 
 from . import components, figures
 from .components import (
@@ -32,11 +23,9 @@ from .components import (
     Empty,
     Error,
     relative_time,
-    short_id,
 )
 from .render import SortColumn, sortable_columns
-from .routes import ROUTES_BASE, parse_route
-from .selection_tokens import decode_selection_token
+from .routes import ROUTES_BASE
 from .service import ANALYSIS_REDUCTIONS, DashboardService
 
 EMPTY_TRAY: dict[str, Any] = {
@@ -46,19 +35,11 @@ EMPTY_TRAY: dict[str, Any] = {
     "executions": [],
     "expand": False,
 }
-"""Selection dimensions of the scope group: sweep ids, explicit trial
+"""Selection dimensions of an analysis tray: sweep ids, explicit trial
 ids, picked retry-family roots, explicit execution ids, and the
-per-family expansion toggle. The workspace sweep grid and the analysis
-pickers all read and write these keys inside ``view.scope``."""
-
-_TRAY_KEYS = tuple(EMPTY_TRAY)
-
-VIEW_VERSION = 2
-"""Wire version of the dashboard-only ``view=`` URL document."""
-
-_LEGACY_VIEW_VERSION = 1
-"""Version-1 documents carried the include flags at the top level and
-no scope group; they still decode to the same effective state."""
+per-family expansion toggle. The analysis reads resolve a tray to a
+typed Selection; the view document's ``scope`` keeps only what a
+session accumulates across pages (the picked families)."""
 
 _GRID_DEFAULTS: dict[str, Any] = {
     "sortable": True,
@@ -67,18 +48,13 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "minWidth": 100,
 }
 INVESTIGATION_VIEWS = ("compare", "series", "points", "search")
-"""The Investigation workspace's view row."""
+"""The investigation page's view row."""
 
 
 _SERIES_MODES = ("stacked", "overlay")
 _TRIAL_DISPLAYS = ("all", "highlighted", "median_iqr")
 _AXIS_SCALES = ("linear", "log")
 _AXIS_RANGES = ("auto", "custom")
-_FOCUS_KINDS = ("sweep", "trial", "execution")
-
-
-class ViewStateError(Exception):
-    """The ``view=`` URL parameter is malformed or unsupported."""
 
 
 def default_axis_state() -> dict[str, Any]:
@@ -87,20 +63,15 @@ def default_axis_state() -> dict[str, Any]:
 
 
 def default_scope_state() -> dict[str, Any]:
-    """The scope group with every dimension empty and both include
-    flags off."""
-    return {**EMPTY_TRAY, "include_archived": False, "include_invalid": False}
+    """The view document's scope group: the session-picked families."""
+    return {"families": []}
 
 
 def default_view_state() -> dict[str, Any]:
-    """The v2 view document with every control at its default."""
+    """The view document with every control at its default."""
     return {
-        "v": VIEW_VERSION,
         "auto_refresh": False,
-        "overview_filter": None,
         "scope": default_scope_state(),
-        "focus": None,
-        "via": None,
         "highlighted_trials": [],
         "series": {
             "keys": [],
@@ -116,301 +87,12 @@ def default_view_state() -> dict[str, Any]:
     }
 
 
-def _require(condition: bool, message: str) -> None:
-    if not condition:
-        raise ViewStateError(message)
-
-
-def _optional_key(value: Any, field: str) -> str | None:
-    """A string-or-null field; empty or non-string values are errors."""
-    if value is None:
-        return None
-    _require(
-        isinstance(value, str) and value != "",
-        f"{field} must be a non-empty string or null",
-    )
-    return value
-
-
-def _string_list(value: Any, field: str) -> list[str]:
-    _require(isinstance(value, list), f"{field} must be a list")
-    for item in value:
-        _require(
-            isinstance(item, str) and item != "",
-            f"{field} entries must be non-empty strings",
-        )
-    return list(value)
-
-
-def _finite_number(value: Any, field: str) -> float | None:
-    """A finite numeric field; ``None`` when absent, anything else is an
-    error."""
-    if value is None:
-        return None
-    _require(
-        isinstance(value, int | float) and not isinstance(value, bool),
-        f"{field} must be a finite number",
-    )
-    _require(math.isfinite(value), f"{field} must be a finite number")
-    return float(value)
-
-
-def decode_axis_state(value: Any, field: str) -> dict[str, Any]:
-    """A validated per-key axis object; unknown fields are dropped and
-    ``auto`` ranges ignore stored bounds."""
-    _require(isinstance(value, dict), f"{field} must be an object")
-    scale = value.get("scale", "linear")
-    _require(scale in _AXIS_SCALES, f"{field}.scale must be linear or log")
-    range_mode = value.get("range", "auto")
-    _require(range_mode in _AXIS_RANGES, f"{field}.range must be auto or custom")
-    axis = {"scale": scale, "range": range_mode, "min": None, "max": None}
-    if range_mode == "custom":
-        low = _finite_number(value.get("min"), f"{field}.min")
-        high = _finite_number(value.get("max"), f"{field}.max")
-        if low is None or high is None:
-            raise ViewStateError(f"{field} custom range requires finite min and max")
-        _require(low < high, f"{field} custom range requires min < max")
-        if scale == "log":
-            _require(low > 0, f"{field} log custom range requires min > 0")
-        axis["min"], axis["max"] = low, high
-    return axis
-
-
-def _decode_scope(value: Any) -> dict[str, Any]:
-    """A validated scope group; unknown fields are dropped and missing
-    fields take defaults."""
-    _require(isinstance(value, dict), "scope must be an object")
-    scope = default_scope_state()
-    for key in ("sweeps", "trials", "families", "executions"):
-        if key not in value:
-            continue
-        ids = _string_list(value[key], f"scope.{key}")
-        scope[key] = list(dict.fromkeys(ids)) if key == "sweeps" else ids
-    for key in ("expand", "include_archived", "include_invalid"):
-        if key not in value:
-            continue
-        flag = value[key]
-        _require(isinstance(flag, bool), f"scope.{key} must be a boolean")
-        scope[key] = flag
-    return scope
-
-
-def _legacy_view_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """A v1 full document rewritten into the v2 field layout: the
-    top-level include flags move into the scope group, which v1 tokens
-    never carried (selection lived in the session tray)."""
-    fields = {
-        key: value
-        for key, value in payload.items()
-        if key not in ("v", "include_archived", "include_invalid")
-    }
-    return {
-        **fields,
-        "v": VIEW_VERSION,
-        "scope": {
-            **default_scope_state(),
-            "include_archived": payload.get("include_archived", False),
-            "include_invalid": payload.get("include_invalid", False),
-        },
-    }
-
-
-def decode_view_state(raw: str) -> dict[str, Any]:
-    """The canonical view document from a ``view=`` value; unknown
-    fields are dropped, missing fields take defaults, wrong types or
-    enum values raise :class:`ViewStateError`. Version-2 tokens carry
-    only non-default fields; a legacy full document (version 1) decodes
-    to the same effective state."""
-    try:
-        payload = json.loads(raw)
-    except ValueError as error:
-        raise ViewStateError(f"view state is malformed: {error}") from error
-    _require(isinstance(payload, dict), "view state must be a JSON object")
-    version = payload.get("v")
-    _require(
-        isinstance(version, int) and not isinstance(version, bool),
-        f"unsupported view state: expected version {VIEW_VERSION}",
-    )
-    if version == _LEGACY_VIEW_VERSION:
-        payload = _legacy_view_payload(payload)
-    else:
-        _require(
-            version == VIEW_VERSION,
-            f"unsupported view state: expected version {VIEW_VERSION}",
-        )
-    doc = default_view_state()
-    series = payload.get("series", {})
-    _require(isinstance(series, dict), "series must be an object")
-    doc["series"]["keys"] = list(
-        dict.fromkeys(_string_list(series.get("keys", []), "series.keys"))
-    )
-    mode = series.get("mode", doc["series"]["mode"])
-    _require(mode in _SERIES_MODES, f"unsupported series mode {mode!r}")
-    doc["series"]["mode"] = mode
-    reduction = series.get("reduction", doc["series"]["reduction"])
-    _require(
-        reduction in ANALYSIS_REDUCTIONS,
-        f"unsupported execution reduction {reduction!r}",
-    )
-    doc["series"]["reduction"] = reduction
-    trial_display = series.get("trial_display")
-    if trial_display is None:
-        trial_display = "all"
-    _require(
-        trial_display in _TRIAL_DISPLAYS,
-        f"unsupported trial display {trial_display!r}",
-    )
-    doc["series"]["trial_display"] = trial_display
-    filters = series.get("context_filters", {})
-    _require(isinstance(filters, dict), "series.context_filters must be an object")
-    for name, values in filters.items():
-        _require(
-            isinstance(name, str) and name != "",
-            "series.context_filters keys must be non-empty strings",
-        )
-        doc["series"]["context_filters"][name] = _string_list(
-            values, f"series.context_filters[{name!r}]"
-        )
-    doc["series"]["color"] = _optional_key(series.get("color"), "series.color")
-    doc["series"]["facet"] = _optional_key(series.get("facet"), "series.facet")
-    axes = series.get("axes", {})
-    _require(isinstance(axes, dict), "series.axes must be an object")
-    for name, axis in axes.items():
-        _require(
-            isinstance(name, str) and name != "",
-            "series.axes keys must be non-empty strings",
-        )
-        doc["series"]["axes"][name] = decode_axis_state(axis, f"series.axes[{name!r}]")
-    doc["series"]["overlay_axis"] = decode_axis_state(
-        series.get("overlay_axis", default_axis_state()), "series.overlay_axis"
-    )
-    doc["highlighted_trials"] = _string_list(
-        payload.get("highlighted_trials", []), "highlighted_trials"
-    )
-    doc["focus"] = decode_focus(payload.get("focus"))
-    doc["via"] = _optional_key(payload.get("via"), "via")
-    auto_refresh = payload.get("auto_refresh", False)
-    _require(isinstance(auto_refresh, bool), "auto_refresh must be a boolean")
-    doc["auto_refresh"] = auto_refresh
-    doc["overview_filter"] = _overview_filter(payload.get("overview_filter"))
-    doc["scope"] = _decode_scope(payload.get("scope", {}))
-    return doc
-
-
-def encode_view_state(doc: dict[str, Any]) -> str:
-    """Percent-encoded compact JSON for the ``view=`` URL parameter —
-    a defaults-diff: the version marker plus only the fields that
-    differ from :func:`default_view_state` (jernerics-2se)."""
-    defaults = default_view_state()
-    payload: dict[str, Any] = {"v": VIEW_VERSION}
-    for key, value in doc.items():
-        if key != "v" and value != defaults.get(key):
-            payload[key] = value
-    return quote(json.dumps(payload, separators=(",", ":"), sort_keys=True), safe="")
-
-
-def _overview_filter(value: Any) -> str | None:
-    """A validated operational-tile filter: the execution-health keys
-    or a ``state:`` sweep-state key, else ``None``."""
-    if value is None:
-        return None
-    _require(
-        isinstance(value, str) and value != "",
-        "overview_filter must be a non-empty string or null",
-    )
-    if value in ("failed", "stale"):
-        return value
-    _require(
-        value.startswith("state:") and len(value) > len("state:"),
-        f"unsupported overview filter {value!r}",
-    )
-    return value
-
-
-def decode_focus(value: Any) -> dict[str, str] | None:
-    """A validated focus object ``{kind, id}``; ``None`` when absent."""
-    if value is None:
-        return None
-    _require(isinstance(value, dict), "focus must be an object")
-    kind = value.get("kind")
-    _require(kind in _FOCUS_KINDS, "focus.kind must be sweep, trial, or execution")
-    focus_id = _optional_key(value.get("id"), "focus.id")
-    _require(focus_id is not None, "focus.id must be a non-empty string")
-    return {"kind": str(kind), "id": str(focus_id)}
-
-
 def edited_view(
     current: dict[str, Any] | None, changes: dict[str, Any]
 ) -> dict[str, Any]:
     """The one door for view-doc writes: ``changes`` applied over
-    ``current`` (defaults when absent); the current ``focus`` and the
-    investigation ``via`` survive every edit except one that names them
-    (jernerics-gk6)."""
-    doc = {**(current or default_view_state()), **changes}
-    if "focus" not in changes:
-        doc["focus"] = (current or {}).get("focus")
-    if "via" not in changes:
-        doc["via"] = (current or {}).get("via")
-    return doc
-
-
-def with_focus(
-    current: dict[str, Any] | None, focus: dict[str, str] | None
-) -> dict[str, Any]:
-    """View doc after a focus edit; nothing but ``focus`` changes — focus
-    edits never narrow scope."""
-    return edited_view(current, {"focus": focus})
-
-
-def _view_param(search: str | None) -> str | None:
-    values = parse_qs((search or "").lstrip("?")).get("view")
-    return values[0] if values else None
-
-
-def hydrate_view(
-    pathname: str | None,
-    search: str | None,
-    current: dict[str, Any] | None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """(doc, error) for a URL carrying ``?view=``. ``None`` means leave
-    the view store alone (off a hydratable route, or already showing
-    this state). No parameter means defaults; a malformed or unsupported
-    document yields defaults plus a visible error. The inspector focus
-    survives both — only a parameter that names one, or an explicit
-    focus edit, moves it (jernerics-gk6). The scope survives a
-    parameter-less URL only while a ``?sel=`` token owns the hydration
-    (its dimensions land over the current scope); a plain navigation
-    resets it. The investigation ``via`` never survives a URL: only a
-    document that names one carries it."""
-    if parse_route(pathname).kind not in ("workspace", "investigation"):
-        return None, None
-    raw = _view_param(search)
-    if raw is not None:
-        try:
-            decoded = decode_view_state(raw)
-        except ViewStateError as error:
-            changes = {
-                key: value
-                for key, value in default_view_state().items()
-                if key != "focus"
-            }
-            return canonical_view(edited_view(current, changes)), str(error)
-        changes = {
-            key: value for key, value in decoded.items() if key not in ("focus", "via")
-        }
-        if decoded["focus"] is not None:
-            changes["focus"] = decoded["focus"]
-        changes["via"] = decoded["via"]
-    else:
-        changes = {
-            key: value
-            for key, value in default_view_state().items()
-            if key not in ("focus", "scope")
-        }
-        if _sel_param(search) is None:
-            changes["scope"] = default_scope_state()
-    doc = edited_view(current, changes)
-    return (None if current == doc else canonical_view(doc)), None
+    ``current`` (defaults when absent)."""
+    return {**(current or default_view_state()), **changes}
 
 
 def loaded_option_values(options: Any) -> set[str] | None:
@@ -553,129 +235,9 @@ def edited_fields(triggered: Any) -> set[str]:
     return fields
 
 
-def family_picker_rows(
-    families: list[dict[str, Any]], tray: dict[str, Any] | None
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Family-picker grid rows, selected rows matching the tray's roots."""
-    rows = [
-        {
-            "root": row["root"],
-            "root_short": short_id(row["root"]),
-            "current_short": short_id(row["current_trial"]),
-            "number": row["number"],
-            "state": row["state"],
-            "objective": components.objective_text(row["objective"]),
-            "generations": row["generations"],
-        }
-        for row in families
-    ]
-    picked = set((tray or {}).get("families") or [])
-    return rows, [row for row in rows if row["root"] in picked]
-
-
 def _counted(count: int, singular: str, plural: str) -> str:
     """``count`` with the noun form that matches it."""
     return f"{count} {singular if count == 1 else plural}"
-
-
-def tray_summary(tray: dict[str, Any] | None) -> str:
-    """Header line for the selection tray; empty when nothing is selected."""
-    tray = tray or EMPTY_TRAY
-    sweeps = len(tray.get("sweeps") or [])
-    trials = len(tray.get("trials") or [])
-    families = len(tray.get("families") or [])
-    executions = len(tray.get("executions") or [])
-    if not (sweeps or trials or families or executions):
-        return ""
-    parts = [
-        _counted(sweeps, "sweep", "sweeps"),
-        _counted(trials, "trial", "trials"),
-        _counted(families, "family", "families"),
-    ]
-    if executions:
-        parts.append(_counted(executions, "execution", "executions"))
-    if tray.get("expand"):
-        parts.append("retry families expanded")
-    return " · ".join(parts)
-
-
-def tray_from_edit(
-    sweep_rows: list[dict[str, Any]] | None,
-    family_rows: list[dict[str, Any]] | None,
-    expand_values: list[str] | None,
-    current: dict[str, Any] | None,
-    *,
-    sweep_edited: bool,
-    family_edited: bool,
-    expand_edited: bool,
-) -> dict[str, Any]:
-    """Merge grid/expand edits into the scope group; explicit
-    trials/executions (kept from a hydrated token) and the include
-    flags survive edits.
-
-    Only the control the event actually carried is authoritative for its
-    dimension — every other dimension keeps the current scope. A grid
-    event fires while the OTHER grid may still hold a stale selection
-    snapshot (AG Grid applies programmatic selectedRows per grid, not
-    atomically), and a mount echo of the pre-hydration state must not
-    erase the dimensions the user did not touch (jernerics-8c9)."""
-    current = current or default_scope_state()
-    return {
-        **current,
-        "sweeps": (
-            sorted({str(row["sweep_id"]) for row in sweep_rows or []})
-            if sweep_edited
-            else list(current.get("sweeps") or [])
-        ),
-        "trials": list(current.get("trials") or []),
-        "families": (
-            sorted({str(row["root"]) for row in family_rows or []})
-            if family_edited
-            else list(current.get("families") or [])
-        ),
-        "executions": list(current.get("executions") or []),
-        "expand": (
-            bool(expand_values) if expand_edited else bool(current.get("expand"))
-        ),
-    }
-
-
-def mounted_selection(selected: list[Any], *, initial: bool) -> Any:
-    """Selection to push to a freshly mounted grid. An empty selection
-    write on mount is redundant — the grid starts unselected — and its
-    echo fires as an edit against a tray hydration may have landed in
-    between, wiping it (jernerics-8c9). Non-empty selections and real
-    clears (post-mount, e.g. hydrating a token that drops a dimension)
-    pass through untouched."""
-    return no_update if initial and not selected else selected
-
-
-def _canonical_ids(values: Any) -> list[str]:
-    """Id strings in the sorted-unique form the browser grids echo back."""
-    return sorted({str(value) for value in values or ()})
-
-
-def tray_from_selection(selection: Any) -> dict[str, Any]:
-    """Scope selection dimensions matching a decoded token selection.
-
-    Retry roots hydrate as picked families with the expansion toggle on:
-    that is exactly what a retry-root selection means, and it keeps the
-    hydrated scope's effective selection equal to the decoded one. The
-    include flags are not token facts — the caller merges these
-    dimensions over the current scope group.
-    """
-    return {
-        "sweeps": _canonical_ids(selection.sweeps),
-        "trials": [str(value) for value in selection.trials or ()],
-        "families": _canonical_ids(selection.retry_roots),
-        "executions": [str(value) for value in selection.executions or ()],
-        "expand": bool(selection.retry_roots),
-    }
-
-
-def _sel_param(search: str | None) -> str | None:
-    values = parse_qs((search or "").lstrip("?")).get("sel")
-    return values[0] if values else None
 
 
 def seed_sweeps_from_search(search: str | None) -> list[str]:
@@ -687,147 +249,7 @@ def seed_sweeps_from_search(search: str | None) -> list[str]:
     return sorted({part for part in values[0].split(",") if part})
 
 
-def hydrate_tray(
-    service: DashboardService,
-    project: str | None,
-    pathname: str | None,
-    search: str | None,
-    current: dict[str, Any] | None,
-) -> tuple[dict[str, Any] | None, str | None]:
-    """(scope dimensions, error) for a URL carrying ``?sel=``. A
-    ``None`` scope means "leave the current scope alone" (no token, a
-    different page, or a token equal to what is already shown). A token
-    scoped to another project surfaces as an error instead of mixing.
-    With no project picked, the token only decides the cold start
-    (jernerics-xbx): the shell adopts the token's project through the
-    picker and hydration re-fires when project-store settles, while a
-    token the dashboard cannot act on surfaces its error instead of
-    silently empty grids."""
-    token = _sel_param(search)
-    if not token or parse_route(pathname).kind != "workspace":
-        return None, None
-    if not project:
-        _selection, error = cold_start(service, search)
-        return None, error
-    try:
-        selection = decode_selection_token(token, project=project)
-    except SelectionTokenError as error:
-        return None, str(error)
-    token_tray = tray_from_selection(selection)
-    if current and service.analysis_selection(
-        project, current
-    ) == service.analysis_selection(project, token_tray):
-        return None, None
-    return token_tray, None
-
-
-def cold_start(
-    service: DashboardService, search: str | None
-) -> tuple[Selection | None, str | None]:
-    """(selection, error) a shared token offers a session with no project
-    picked: the decoded selection when its project is known here — the
-    picker adopts it, running the same settle path as a manual pick —
-    an error naming a project this dashboard has no data for, or a
-    decode error. ``(None, None)`` when the URL carries no token."""
-    token = _sel_param(search)
-    if not token:
-        return None, None
-    try:
-        selection = decode_selection_token(token)
-    except SelectionTokenError as error:
-        return None, str(error)
-    if selection.project not in service.projects():
-        return (
-            None,
-            f"selection token targets project {selection.project!r}, which "
-            "this dashboard has no data for; pick a project to analyze.",
-        )
-    return selection, None
-
-
-def expand_values(doc: dict[str, Any] | None) -> list[str]:
-    """Expansion-toggle checklist values matching the view scope."""
-    scope = (doc or default_view_state()).get("scope") or default_scope_state()
-    return ["expand"] if scope.get("expand") else []
-
-
-def include_values(doc: dict[str, Any] | None) -> list[str]:
-    """Include-control checklist values matching the view scope."""
-    scope = (doc or default_view_state()).get("scope") or default_scope_state()
-    values = []
-    if scope.get("include_archived"):
-        values.append("archived")
-    if scope.get("include_invalid"):
-        values.append("invalid")
-    return values
-
-
-def view_from_include(
-    current: dict[str, Any] | None, values: list[str] | None
-) -> dict[str, Any]:
-    """View state after an include-control edit; only the two include
-    flags change — the picked dimensions survive."""
-    doc = current or default_view_state()
-    picked = set(values or [])
-    return edited_view(
-        current,
-        {
-            "scope": {
-                **doc.get("scope", default_scope_state()),
-                "include_archived": "archived" in picked,
-                "include_invalid": "invalid" in picked,
-            }
-        },
-    )
-
-
-def canonical_view(doc: dict[str, Any]) -> dict[str, Any]:
-    """The doc exactly as the include-control echo would rewrite it, so
-    a hydrated view store leaves the echo nothing to change."""
-    return view_from_include(doc, include_values(doc))
-
-
 _WORKSPACE_SEARCH_KEYS = {"view", "sel"}
-
-
-def _drop_workspace_params(search: str) -> str:
-    """The search string without the workspace-only ``view``/``sel``
-    parameters, re-encoded with the survivors in their original order."""
-    if not search:
-        return ""
-    parsed = parse_qsl(search.removeprefix("?"), keep_blank_values=True)
-    kept = [(key, value) for key, value in parsed if key not in _WORKSPACE_SEARCH_KEYS]
-    return ("?" + urlencode(kept)) if kept else ""
-
-
-def synced_search(
-    pathname: str | None,
-    view_doc: dict[str, Any] | None,
-    current_search: str | None,
-    *,
-    url_navigated: bool,
-) -> str | None:
-    """The URL search after a navigation or a view edit; ``None`` leaves
-    it alone. Navigations may only drop stale workspace-codec tokens
-    (``?view=``/``?sel=``) — minting on navigation would let a stale
-    document clobber a freshly opened deep link before hydration lands.
-    Every page owns its own query string now (workspace: scope/filter/
-    limit/page; investigation: view/member params; sweep: the view
-    sub-view and via; editor: sweeps seed); their state never mints,
-    and the workspace page owns its search parameters outright, so a
-    ``view=`` write there would clobber them."""
-    if url_navigated:
-        kind = parse_route(pathname).kind
-        # The investigation and sweep pages use ``view`` as their own
-        # parameter, so the codec-token drop must never touch their
-        # navigation.
-        if kind in ("investigation", "sweep"):
-            return None
-        remaining = _drop_workspace_params(current_search or "")
-        return remaining if remaining != (current_search or "") else None
-    if parse_route(pathname).kind != "investigation":
-        return None
-    return search_from_state(view_doc, current_search)
 
 
 def investigation_scope_state(
@@ -840,22 +262,7 @@ def investigation_scope_state(
     scoped = member if member in picked else None
     if scoped:
         picked = [scoped]
-    return {**default_scope_state(), "sweeps": picked}, scoped
-
-
-def view_query(view_doc: dict[str, Any] | None) -> str:
-    """The ``view=`` query fragment; empty when the state is absent or
-    default (a default state does not belong in the URL)."""
-    if not view_doc or view_doc == default_view_state():
-        return ""
-    return f"view={encode_view_state(view_doc)}"
-
-
-def workspace_focus_href(project: str, kind: str, object_id: str) -> str:
-    """Workspace URL whose view document focuses one object (the
-    artifact viewer's back-links)."""
-    doc = dict(default_view_state(), focus={"kind": kind, "id": object_id})
-    return f"{ROUTES_BASE}/project/{project}?view={encode_view_state(doc)}"
+    return {**EMPTY_TRAY, "sweeps": picked}, scoped
 
 
 def investigation_view_href(
@@ -877,139 +284,6 @@ def investigation_view_href(
     return f"{target}?{'&'.join(params)}" if params else target
 
 
-def decoded_view_param(search: str | None) -> tuple[dict[str, Any] | None, str | None]:
-    """(doc, error) decoded from the ``?view=`` parameter alone — the
-    page-render twin of :func:`hydrate_view`'s decode. A ``None`` doc
-    means no parameter was present or it was malformed."""
-    raw = _view_param(search)
-    if raw is None:
-        return None, None
-    try:
-        return decode_view_state(raw), None
-    except ViewStateError as error:
-        return None, str(error)
-
-
-def _query_search(fragments: list[str]) -> str:
-    joined = "&".join(fragment for fragment in fragments if fragment)
-    return f"?{joined}" if joined else ""
-
-
-def search_from_state(
-    view_doc: dict[str, Any] | None,
-    current_search: str | None,
-) -> str | None:
-    """URL search carrying the ``view=`` parameter; ``None`` when
-    unchanged. A current ``view=`` that does not decode is left in place
-    (the visible error stays until a real edit rewrites it)."""
-    target = _query_search([view_query(view_doc)])
-    if target == (current_search or ""):
-        return None
-    if "view=" not in target and _view_param(current_search) is not None:
-        try:
-            decode_view_state(_view_param(current_search) or "")
-        except ViewStateError:
-            return None
-    return target
-
-
-def _pick_project_first() -> html.Div:
-    return html.Div(Empty("Pick a project in the header to analyze its sweeps."))
-
-
-def catalog_tab(
-    service: DashboardService, project: str | None, tray: dict[str, Any] | None
-) -> html.Div:
-    """Discovered facts for the tray: value keys, context dimensions,
-    param coverage per sweep, artifact keys — no metric-name heuristics."""
-    if not project:
-        return _pick_project_first()
-    values = service.analysis_value_keys(project, tray)
-    context = service.analysis_context_catalog(project, tray)
-    coverage = service.analysis_param_coverage(project, tray)
-    artifacts = service.analysis_artifacts(project, tray)
-    sweep_names = [coverage["names"].get(sweep, sweep) for sweep in coverage["sweeps"]]
-    return html.Div(
-        [
-            html.Section(
-                [
-                    html.H3("Value keys"),
-                    components.DataTable(
-                        ("Key", "Kind", "Points", "Steps", "Trials", "Families"),
-                        [
-                            (
-                                entry["key"],
-                                entry["kind"],
-                                entry["points"],
-                                (
-                                    f"{entry['extent'][0]}-{entry['extent'][1]}"
-                                    if entry["steps"]
-                                    else "no"
-                                ),
-                                entry["trials"],
-                                entry["families"],
-                            )
-                            for entry in values
-                        ],
-                    ),
-                ],
-                className="section",
-            ),
-            html.Section(
-                [
-                    html.H3("Context dimensions"),
-                    components.DataTable(
-                        ("Dimension", "Distinct values", "Samples"),
-                        [
-                            (
-                                entry["key"],
-                                entry["cardinality"],
-                                ", ".join(map(str, entry["samples"])),
-                            )
-                            for entry in context
-                        ],
-                    ),
-                ],
-                className="section",
-            ),
-            html.Section(
-                [
-                    html.H3("Param coverage per sweep"),
-                    components.DataTable(
-                        ("Param", *sweep_names),
-                        [
-                            (
-                                entry["key"],
-                                *(
-                                    f"{cell['trials']} ({cell['kinds']})"
-                                    if cell
-                                    else MISSING
-                                    for cell in entry["cells"].values()
-                                ),
-                            )
-                            for entry in coverage["rows"]
-                        ],
-                    ),
-                ],
-                className="section",
-            ),
-            html.Section(
-                [
-                    html.H3("Artifact keys"),
-                    components.DataTable(
-                        ("Key", "Count", "Sources"),
-                        [
-                            (e["key"], e["count"], ", ".join(e["sources"]))
-                            for e in artifacts
-                        ],
-                    ),
-                ],
-                className="section",
-            ),
-        ],
-    )
-
-
 def _coverage_option(entry: dict[str, Any]) -> dict[str, str]:
     """Picker option for one value key: key, points, and trials in the
     label; the full coverage facts in the option's title tooltip."""
@@ -1026,18 +300,10 @@ def _coverage_option(entry: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def scope_dims(scope: dict[str, Any] | None) -> dict[str, Any]:
-    """The selection dimensions of a scope group, include flags
-    excluded — exactly what a typed Selection read consumes."""
-    scope = scope or {}
-    return {key: scope.get(key) for key in _TRAY_KEYS}
-
-
 def scope_fingerprint(project: str | None, tray: dict[str, Any] | None) -> str:
-    """Canonical identity of the (project, scope) a snapshot serves; the
-    include flags are discovery-only and never change analysis reads."""
+    """Canonical identity of the (project, scope) a snapshot serves."""
     return json.dumps(
-        {"project": project or "", "scope": scope_dims(tray)},
+        {"project": project or "", "scope": tray or {}},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -1513,24 +779,6 @@ def render_series_outputs(
     )
 
 
-def series_outputs(
-    service: DashboardService | None,
-    project: str | None,
-    tray: dict[str, Any] | None,
-    view_doc: dict[str, Any] | None,
-) -> tuple[
-    list[Any], dict, list[dict[str, str]], list[dict[str, Any]], list[dict[str, str]]
-]:
-    """One-shot composition: build the snapshot, then render it. The
-    callbacks keep the snapshot in the store and render from it; this
-    serves fresh one-shot renders."""
-    snapshot = series_snapshot(service, project, tray, view_doc, 0)
-    panels, _payload, key_options, color_options, facet_options, *_rest = (
-        render_series_outputs(view_doc, snapshot)
-    )
-    return panels, snapshot, key_options, color_options, facet_options
-
-
 def axis_state_edit(
     current: dict[str, Any] | None,
     *,
@@ -1774,8 +1022,6 @@ def points_tab(
     non-selected rows ("X of Y trials shown"), the parcoords keeps every
     line plotted — brushes fade natively, a selection recolors context
     gray — and axes never rescale."""
-    if not project:
-        return _pick_project_first()
     trials = service.analysis_trials(project, tray)
     if not trials:
         return html.Div(
@@ -1951,111 +1197,12 @@ _SWATCH_COLUMN: dict[str, Any] = {
 }
 
 
-def browser_trial_columns(
-    param_keys: Sequence[str], *, multi_sweep: bool
-) -> list[dict[str, Any]]:
-    """Persistent trial-browser columns: the trace color swatch, trial
-    identity, sweep when the scope spans several, and one column per
-    varying sampled parameter (horizontal scroll, never a truncation)."""
-    return [
-        dict(_SWATCH_COLUMN),
-        {"headerName": "#", "field": "number", "maxWidth": 80},
-        {"headerName": "Trial", "field": "trial_short"},
-        *([{"headerName": "Sweep", "field": "sweep"}] if multi_sweep else []),
-        {"headerName": "State", "field": "state"},
-        {"headerName": "Objective", "field": "objective"},
-        {"headerName": "Executions", "field": "executions"},
-        {"headerName": "Generations", "field": "generations", "maxWidth": 120},
-        *({"headerName": key, "field": f"p_{key}"} for key in param_keys),
-    ]
-
-
-def _browser_records(
-    trials: list[dict[str, Any]], color: str | None, series_data: dict[str, Any] | None
-) -> list[dict[str, Any]]:
-    """Records whose color grouping matches the chart's: the pooled
-    series for a context choice (context lives on values), the scoped
-    trials otherwise."""
-    if color is not None and figures.parse_color(color)[0] == "context":
-        return [
-            series
-            for entry in (series_data or {}).get("per_key", {}).values()
-            for series in entry.get("series", [])
-        ]
-    return [
-        {"trial": trial["trial_id"], "params": trial.get("params") or {}, "context": {}}
-        for trial in trials
-    ]
-
-
-def browser_trial_outputs(
-    service: DashboardService | None,
-    project: str | None,
-    tray: dict[str, Any] | None,
-    view_doc: dict[str, Any] | None,
-    series_data: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """(columns, rows, selected rows) for the persistent trial browser:
-    one row per retry family with its current trial, the trace color
-    swatch under the active color choice, execution short ids, and every
-    varying sampled parameter."""
-    if not project or service is None:
-        return [], [], []
-    trials = service.analysis_trials(project, tray)
-    meta = {trial["trial_id"]: trial for trial in trials}
-    param_keys = varying_param_keys(trials)
-    families = service.analysis_families(project, (tray or {}).get("sweeps") or [])
-    color = (view_doc or default_view_state())["series"]["color"]
-    grouping = figures.color_grouping(
-        _browser_records(trials, color, series_data), color
-    )
-    colors = grouping["colors"]
-    series_by_trial = {
-        series["trial"]: series
-        for entry in (series_data or {}).get("per_key", {}).values()
-        for series in entry.get("series", [])
-    }
-    rows = []
-    for family in families:
-        trial_id = family["current_trial"]
-        trial = meta.get(trial_id) or {}
-        record = series_by_trial.get(trial_id) or {
-            "trial": trial_id,
-            "params": trial.get("params") or {},
-            "context": {},
-        }
-        rows.append(
-            {
-                "root": family["root"],
-                "trial_id": trial_id,
-                "number": family["number"],
-                "trial_short": short_id(trial_id),
-                "sweep": trial.get("sweep_name", trial.get("sweep_id", "")),
-                "state": family["state"],
-                "objective": components.objective_text(family["objective"]),
-                "executions": family.get("executions") or "",
-                "generations": family["generations"],
-                "swatch": colors.get(figures.identity_of(record, grouping), "#7f7f7f"),
-                **{
-                    f"p_{key}": param_text((trial.get("params") or {}).get(key))
-                    for key in param_keys
-                },
-            }
-        )
-    picked = set((tray or {}).get("families") or [])
-    columns = browser_trial_columns(
-        param_keys,
-        multi_sweep=len({row["sweep"] for row in rows if row["sweep"]}) > 1,
-    )
-    return columns, rows, [row for row in rows if row["root"] in picked]
-
-
 def view_from_trace_click(
     current: dict[str, Any] | None, click: dict[str, Any] | None
 ) -> dict[str, Any] | None:
-    """View doc after a trace click: focus that trial (inspector opens,
-    scope untouched) and highlight it alone — or clear the highlight when
-    it was the only one. ``None`` when Plotly exposed no identity."""
+    """View doc after a trace click: highlight that trial alone — or
+    clear the highlight when it was the only one. ``None`` when Plotly
+    exposed no identity."""
     points = (click or {}).get("points") or []
     identity = points[0].get("customdata") if points else None
     if not identity:
@@ -2064,13 +1211,7 @@ def view_from_trace_click(
     picked = [str(identity)]
     if doc["highlighted_trials"] == picked:
         picked = []
-    return edited_view(
-        doc,
-        {
-            "highlighted_trials": picked,
-            "focus": {"kind": "trial", "id": str(identity)},
-        },
-    )
+    return edited_view(doc, {"highlighted_trials": picked})
 
 
 def series_status(
@@ -2096,20 +1237,6 @@ def series_status(
 def updated_ago(at_ns: int) -> str:
     """The refresh fact line; ages at render time like every page."""
     return f"Updated {relative_time(at_ns)}"
-
-
-def auto_refresh_polls(
-    service: DashboardService | None,
-    project: str | None,
-    view_doc: dict[str, Any] | None,
-) -> bool:
-    """The poll interval runs only while the persisted auto-refresh
-    intent is on AND the selected scope still has incomplete work."""
-    if not (view_doc or {}).get("auto_refresh"):
-        return False
-    if service is None or not project:
-        return False
-    return service.analysis_scope_incomplete(project, (view_doc or {}).get("scope"))
 
 
 def auto_refresh_flip(
@@ -2138,22 +1265,24 @@ def series_data_outputs(
     tray: dict[str, Any] | None,
     view_doc: dict[str, Any] | None,
     now_ns: int,
-) -> tuple[dict[str, Any], str, dict[str, Any]]:
-    """The data callback's outputs: the fresh canonical snapshot, the
-    updated-ago line, and the refresh state (no error)."""
+) -> tuple[dict[str, Any], str]:
+    """The data callback's outputs: the fresh canonical snapshot and the
+    updated-ago line."""
     return (
         series_snapshot(service, project, tray, view_doc, now_ns),
         updated_ago(now_ns),
-        {"error": "", "at_ns": now_ns},
     )
 
 
 def series_data_failure(error: Exception, now_ns: int) -> tuple[Any, ...]:
     """The data callback's no_update tuple for a failed refresh: the
-    last successful snapshot survives and the error surfaces in the
-    refresh-state store."""
-    message = f"refresh failed — keeping the last successful view: {error}"
-    return no_update, no_update, {"error": message, "at_ns": now_ns}
+    last successful snapshot and presentation survive, and the error
+    replaces the status line until a good refresh."""
+    return (
+        no_update,
+        no_update,
+        f"refresh failed — keeping the last successful view: {error}",
+    )
 
 
 def series_view_outputs(
@@ -2206,8 +1335,8 @@ def series_view_outputs(
 
 def series_view_failure(error: Exception) -> tuple[Any, ...]:
     """The view callback's no_update tuple for a failed render: the last
-    successful presentation survives and the error reaches the message
-    region through the refresh-state store."""
+    successful presentation survives and the error replaces the status
+    line."""
     message = f"refresh failed — keeping the last successful view: {error}"
     return (
         no_update,

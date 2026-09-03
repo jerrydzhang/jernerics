@@ -253,10 +253,6 @@
   color: var(--text-3);
 }
 
-.np td .strong {
-  font-weight: 500;
-}
-
 .np tr.lost td {
   color: var(--text-2);
 }
@@ -368,26 +364,6 @@
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
 }
 
-.np .toast {
-  position: fixed;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: #1c1c1e;
-  color: #fafafa;
-  padding: 8px 16px;
-  border-radius: 8px;
-  font-size: 13px;
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-}
-
-.np .toast a {
-  color: #93c5fd;
-}
-
 .np .tabs {
   display: flex;
   gap: 2px;
@@ -445,16 +421,6 @@
 .np .plot {
   height: 320px;
   margin: 8px 0 24px;
-}
-
-.np .kv {
-  color: var(--text-2);
-  font-size: 12px;
-}
-
-.np .kv b {
-  color: var(--text);
-  font-weight: 500;
 }
 
 .np .seg {
@@ -546,22 +512,6 @@
   text-overflow: ellipsis;
 }
 
-.np .trial-params summary {
-  cursor: pointer;
-  color: var(--accent);
-  font-size: 12px;
-  list-style: none;
-}
-
-.np .trial-params[open] summary {
-  color: var(--text-3);
-}
-
-.np .trial-params .kv {
-  margin-top: 4px;
-  max-width: 640px;
-}
-
 .np .plot-head {
   display: flex;
   align-items: baseline;
@@ -572,78 +522,7 @@
   display: flex;
   gap: 8px;
   margin-top: 24px;
-}
-
-.np .plot-and-legend {
-  display: flex;
-  gap: 16px;
-  align-items: stretch;
-}
-
-.np .plot-and-legend .plot {
-  flex: 1;
-  min-width: 0;
-  margin-bottom: 12px;
-}
-
-.np .legend-panel {
-  width: 200px;
-  flex: none;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px;
-  align-self: flex-start;
-}
-
-.np .legend-title {
-  font-size: 12px;
-  font-weight: 500;
-  margin-bottom: 6px;
-}
-
-.np .legend-search {
-  width: 100%;
-  min-width: 0;
-  margin-bottom: 6px;
-  font-size: 12px;
-  padding: 4px 8px;
-}
-
-.np .legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  padding: 3px 4px;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.np .legend-item:hover {
-  background: var(--neutral-bg);
-}
-
-.np .legend-item .swatch {
-  width: 10px;
-  height: 3px;
-  border-radius: 2px;
-  flex: none;
-}
-
-.np .legend-item .annotate {
-  margin-left: auto;
-}
-
-@media (max-width: 900px) {
-  .np .plot-and-legend {
-    flex-direction: column;
-  }
-
-  .np .legend-panel {
-    width: auto;
-  }
+}@media (max-width: 900px){
 
   .np .meta-grid {
     grid-template-columns: 1fr 1fr;
@@ -784,10 +663,6 @@
   cursor: default;
 }
 
-.np tr.row-off {
-  opacity: 0.35;
-}
-
 .np tr.row-sel td {
   background: #eef4ff;
 }
@@ -856,10 +731,6 @@
   font-size: 11px;
   cursor: pointer;
   padding: 2px 6px;
-}
-
-.np tr.row-flash td {
-  background: #eef4ff;
 }
 
 /* --- round 5: investigations --- */

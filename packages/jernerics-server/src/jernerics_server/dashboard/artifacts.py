@@ -17,7 +17,7 @@ from dash import dcc, html
 from dash.development.base_component import Component
 from dash_ag_grid import AgGrid
 
-from . import analysis, components, page
+from . import components, page, workspace
 from .components import MISSING, Badge, human_size, short_id
 from .routes import ROUTES_BASE
 from .service import ArtifactView, DashboardService
@@ -95,35 +95,16 @@ def _fact_rows(view: ArtifactView, now_ns: int) -> list[html.Tr]:
             "State",
             Badge("available", kind="ok") if view.available else Badge("pending"),
         ),
-        (
-            "Trial",
-            html.A(
-                short_id(view.trial_id),
-                href=analysis.workspace_focus_href(
-                    view.project, "trial", view.trial_id
-                ),
-            ),
-        ),
+        ("Trial", short_id(view.trial_id)),
         (
             "Execution",
-            (
-                html.A(
-                    short_id(view.execution_id),
-                    href=analysis.workspace_focus_href(
-                        view.project, "execution", view.execution_id
-                    ),
-                )
-                if view.execution_id
-                else MISSING
-            ),
+            short_id(view.execution_id) if view.execution_id else MISSING,
         ),
         (
             "Sweep",
             html.A(
                 view.sweep_name,
-                href=analysis.workspace_focus_href(
-                    view.project, "sweep", view.sweep_id
-                ),
+                href=workspace.sweep_page_url(view.project, view.sweep_id),
             ),
         ),
     ]
@@ -278,28 +259,19 @@ def _content_body(service: DashboardService, view: ArtifactView) -> Any:
 
 
 def _breadcrumbs(view: ArtifactView) -> html.Div:
-    """Project › Sweep › Trial › Execution trail back into the focused
-    workspace; the artifact itself is the unlinked leaf."""
+    """Project › Sweep › Trial › Execution trail back into the project;
+    trial and execution have no pages of their own, and the artifact is
+    the unlinked leaf."""
     hops: list[tuple[str, str] | str] = [
         (view.project, f"{ROUTES_BASE}/project/{view.project}"),
         (
             view.sweep_name,
-            analysis.workspace_focus_href(view.project, "sweep", view.sweep_id),
+            workspace.sweep_page_url(view.project, view.sweep_id),
         ),
-        (
-            short_id(view.trial_id),
-            analysis.workspace_focus_href(view.project, "trial", view.trial_id),
-        ),
+        short_id(view.trial_id),
     ]
     if view.execution_id:
-        hops.append(
-            (
-                short_id(view.execution_id),
-                analysis.workspace_focus_href(
-                    view.project, "execution", view.execution_id
-                ),
-            )
-        )
+        hops.append(short_id(view.execution_id))
     hops.append(view.filename)
     return page.breadcrumbs(hops)
 

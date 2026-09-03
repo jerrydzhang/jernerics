@@ -30,8 +30,7 @@ from . import (
     sweep_views,
     workspace,
 )
-from .components import Error
-from .routes import NEW_SHELL_KINDS, ROUTES_BASE, parse_route
+from .routes import ROUTES_BASE, parse_route
 from .service import (
     CurationRejectedError,
     CurationUnavailableError,
@@ -186,12 +185,6 @@ def page_content(
     return layout.not_found_page(pathname or ""), False
 
 
-def is_initial() -> bool:
-    """True inside a callback's initial call (nothing changed to fire
-    it) — ``callback_context.triggered`` is falsy exactly then."""
-    return not dash.callback_context.triggered
-
-
 def _event_field(event: Any, name: str) -> Any:
     """One ``triggered`` entry field; Dash has shipped both dict and
     attribute event shapes."""
@@ -209,10 +202,6 @@ def pressed_props(context: Any) -> set[str]:
         for event in context.triggered or ()
         if _event_field(event, "value")
     }
-
-
-def project_options(projects: list[str]) -> list[dict[str, str]]:
-    return [{"label": project, "value": project} for project in projects]
 
 
 def overview_facts(
@@ -259,17 +248,6 @@ def overview_content(
     stored facts only, never the rendered children."""
     facts = overview_facts(service, project, scope_all=scope_all)
     return facts, _content_digest(facts)
-
-
-def investigation_new_href(project: str, sweep_ids: list[str]) -> tuple[str, str]:
-    """The editor URL target seeding a new investigation with the
-    picked sweeps; jernerics-g5rw.8 consumes the ``?sweeps=`` token.
-    Sweep ids are hyphenated hex, so the CSV needs no quoting."""
-    unique = sorted(set(sweep_ids))
-    return (
-        f"{ROUTES_BASE}/project/{project}/investigation/new",
-        "?sweeps=" + ",".join(unique),
-    )
 
 
 _CURATION_VERBS = {
@@ -396,22 +374,21 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             # through the poll input inside their callbacks. The tick
             # still owns the auto-refresh flip: once the member scope
             # turned terminal, the persisted intent clears.
+            query = workspace.investigation_query(search)
             doc = view_doc or analysis.default_view_state()
-            polls = (
-                bool(doc.get("auto_refresh"))
-                and doc.get("inv", {}).get("view") == "series"
-            )
+            polls = bool(doc.get("auto_refresh")) and query["view"] == "series"
             if polls:
                 try:
-                    tray, _scoped = analysis.investigation_scope_state(
-                        service.investigation_detail(
-                            spec.sub_id or ""
-                        ).investigation.members,
-                        doc["inv"].get("member"),
-                    )
-                    polls = service.analysis_scope_incomplete(project or "", tray)
+                    record = service.investigation_detail(
+                        spec.sub_id or ""
+                    ).investigation
                 except CurationRejectedError:
                     polls = False
+                else:
+                    tray, _scoped = analysis.investigation_scope_state(
+                        record.members, query["member"]
+                    )
+                    polls = service.analysis_scope_incomplete(project or "", tray)
             flip = analysis.auto_refresh_flip(view_doc, polls)
             return (
                 no_update,
@@ -434,7 +411,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input("url", "pathname"),
         Input("url", "search"),
         Input("view-store", "data"),
-        State("project-store", "data"),
         State("poll-gate-facts-store", "data"),
         prevent_initial_call=True,
     )
@@ -442,19 +418,16 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         pathname: str | None,
         search: str | None,
         view_doc: dict | None,
-        project: str | None,
         facts: dict | None,
     ):
         # The router only fires on navigation and ticks; view edits must
         # re-evaluate the interval themselves — but only when a fact the
         # gate consumes actually changed, never on every view-store write.
-        doc = view_doc or analysis.default_view_state()
+        spec = parse_route(pathname)
         desired = {
-            "project": project,
+            "project": spec.object_id,
             "search": search or "",
-            "scope": analysis.scope_dims(doc.get("scope")),
-            "auto_refresh": doc.get("auto_refresh"),
-            "inv": doc.get("inv"),
+            "auto_refresh": (view_doc or {}).get("auto_refresh"),
         }
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
         if (
@@ -462,18 +435,16 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             and "url.search" not in triggered
             and (facts or {}).get("project") == desired["project"]
             and (facts or {}).get("search") == desired["search"]
-            and (facts or {}).get("scope") == desired["scope"]
             and (facts or {}).get("auto_refresh") == desired["auto_refresh"]
-            and (facts or {}).get("inv") == desired["inv"]
         ):
             raise PreventUpdate
-        spec = parse_route(pathname)
         kind = spec.kind
         if kind == "investigation":
             # The investigation Series view polls only while its own
             # auto-refresh intent is on and the member scope still has
             # incomplete work.
-            if not (project and doc.get("auto_refresh")):
+            query = workspace.investigation_query(search)
+            if not (spec.object_id and desired["auto_refresh"]):
                 return True, desired
             try:
                 members = service.investigation_detail(
@@ -481,16 +452,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 ).investigation.members
             except CurationRejectedError:
                 return True, desired
-            tray, _scoped = analysis.investigation_scope_state(
-                members,
-                (doc.get("inv") or {}).get("member"),
-            )
+            tray, _scoped = analysis.investigation_scope_state(members, query["member"])
             return (
-                not service.analysis_scope_incomplete(project, tray),
+                not service.analysis_scope_incomplete(spec.object_id, tray),
                 desired,
             )
         if kind == "sweep":
-            sweep_id = parse_route(pathname).sub_id or ""
+            sweep_id = spec.sub_id or ""
             return (not service.sweep_incomplete(sweep_id), desired)
         if kind != "workspace":
             raise PreventUpdate
@@ -545,113 +513,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         State({"sel-sweep": ALL}, "value"),
         prevent_initial_call=True,
     )
-
-    @app.callback(
-        Output("project-picker", "options"),
-        Input("url", "pathname"),
-    )
-    def _load_projects(pathname: str | None):
-        if pathname is None:
-            raise PreventUpdate
-        return project_options(service.projects())
-
-    @app.callback(
-        Output("url", "pathname", allow_duplicate=True),
-        Output("url", "search", allow_duplicate=True),
-        Input("project-picker", "value"),
-        State("route-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _navigate_to_workspace(project: str | None, rendered_route: str | None):
-        target = f"{ROUTES_BASE}/project/{project}" if project else f"{ROUTES_BASE}/"
-        # The picker's value is mirrored from project-store on load and
-        # hydration; a target the rendered route already shows would only
-        # re-fire every pathname-driven callback for a second lap.
-        if target == rendered_route:
-            raise PreventUpdate
-        # On the artifact viewer the picker mirrors the artifact's
-        # project; that adoption must not hijack the viewer route. The
-        # investigation pages mirror their project the same way.
-        rendered = parse_route(rendered_route)
-        # The sweep and exceptions pages mirror their project the same
-        # way (rewrite epic jernerics-xjxa): a mirrored picker value
-        # must not hijack their routes either.
-        if rendered.kind in (
-            "artifact",
-            "investigations",
-            "investigation",
-            "investigation-edit",
-            "sweep",
-            "exceptions",
-        ):
-            raise PreventUpdate
-        # A genuine project switch starts a fresh scope: the previous
-        # project's ?view= must not ride along, or its hydration would
-        # pin the old sweeps onto the new project.
-        if rendered.kind == "workspace" and rendered.object_id != project:
-            return target, ""
-        return target, no_update
-
-    @app.callback(
-        Output("project-picker", "value"),
-        Input("project-store", "data"),
-        Input("url", "search"),
-        State("project-picker", "value"),
-    )
-    def _show_current_project(
-        project: str | None, search: str | None, picked: str | None
-    ):
-        # The picker mirrors project-store; with nothing picked, a
-        # shared ?sel= token names the project for a fresh session
-        # (jernerics-xbx). Picking it here — a plain write through the
-        # picker's own callback — runs the exact settle path of a
-        # manual pick, so the label follows and a chosen project is
-        # never overridden. A view-only URL edit must not re-run that
-        # settle path and cascade through the project store.
-        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
-        if project:
-            if "project-store.data" in triggered:
-                # An identical mirror write re-fires the picker's own
-                # watchers and re-enters the store; skip it.
-                if project == picked:
-                    raise PreventUpdate
-                return project
-            raise PreventUpdate
-        selection, _error = analysis.cold_start(service, search)
-        return selection.project if selection else None
-
-    @app.callback(
-        Output("project-store", "data"),
-        Input("project-picker", "value"),
-        State("project-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _remember_project(project: str | None, current: str | None):
-        if project == current:
-            raise PreventUpdate
-        return project
-
-    @app.callback(
-        Output("project-store", "data", allow_duplicate=True),
-        Input("url", "pathname"),
-        State("project-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _adopt_project_from_url(pathname: str | None, current: str | None):
-        spec = parse_route(pathname)
-        if spec.kind in (
-            "workspace",
-            "investigations",
-            "investigation",
-            "investigation-edit",
-            "investigation",
-            "investigation-edit",
-            "sweep",
-        ):
-            if spec.object_id == current:
-                raise PreventUpdate
-            return spec.object_id
-        raise PreventUpdate
 
     # -- Investigation views, member scope, and analysis regions ----------
 
@@ -775,7 +636,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("analysis-series-data", "data"),
         Output("analysis-updated", "children"),
-        Output({"analysis-refresh-store": ALL}, "data"),
+        Output("analysis-series-status", "children", allow_duplicate=True),
         Input("view-store", "data"),
         Input({"analysis-refresh": ALL}, "n_clicks"),
         Input("poll", "n_intervals"),
@@ -816,13 +677,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 raise PreventUpdate
         now = time.time_ns()
         try:
-            data, updated, state = analysis.series_data_outputs(
+            data, updated = analysis.series_data_outputs(
                 service, record.project, tray, doc, now
             )
         except Exception as error:
-            data, updated, state = analysis.series_data_failure(error, now)
-        # The pattern-ALL store output takes one entry per mounted store.
-        return data, updated, [state]
+            return (*analysis.series_data_failure(error, now),)
+        return data, updated, no_update
 
     @app.callback(
         Output("analysis-series-panels", "children"),
@@ -978,6 +838,27 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("view-store", "data", allow_duplicate=True),
+        Input({"context-filter": dash.ALL}, "value"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_context_filters(values: list | None, current: dict | None):
+        # Re-rendered filter dropdowns fire as additions; the resolved
+        # id names the edited dimension and its value comes from the
+        # ALL input list (dash 4 child-id resolution).
+        dimension, control = pattern_trigger(dash.callback_context)
+        if control != "context-filter" or dimension is None:
+            raise PreventUpdate
+        value = pattern_input_value(
+            dash.callback_context.inputs_list, 0, "context-filter", dimension
+        )
+        doc = analysis.view_from_context_filter(current, dimension, value)
+        if doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
         Input({"panel-move-up": dash.ALL}, "n_clicks"),
         Input({"panel-move-down": dash.ALL}, "n_clicks"),
         State("view-store", "data"),
@@ -1005,20 +886,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if doc is None or doc == (current or {}):
             raise PreventUpdate
         return doc
-
-    @app.callback(
-        Output({"analysis-error": ALL}, "children", allow_duplicate=True),
-        Input({"analysis-refresh-store": ALL}, "data"),
-        prevent_initial_call=True,
-    )
-    def _show_inv_refresh_error(states: list | None):
-        # Only failures reach the page error region; recovery shows in
-        # the status line and the next navigation rewrites the store.
-        state = (states or [None])[0]
-        error = (state or {}).get("error") or ""
-        if not error:
-            raise PreventUpdate
-        return [Error(error)]
 
     app.clientside_callback(
         """
@@ -1216,53 +1083,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             note,
             {} if picked else {"display": "none"},
         )
-
-    app.clientside_callback(
-        """
-        function(selection, data) {
-            const no = window.dash_clientside.no_update;
-            const host = document.getElementById("inv-points-figure");
-            const gd = host && (host.querySelector(".js-plotly-plot") || host);
-            if (!gd || !window.Plotly || !data || !data.tks
-                    || !data.tks.length) {
-                return no;
-            }
-            const VIRIDIS = ['#440154', '#482878', '#3e4989', '#31688e',
-                '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b',
-                '#fde725'];
-            const sel = new Set((selection && selection.tks) || []);
-            const n = data.tks.length;
-            let color;
-            let colorscale = "Viridis";
-            if (sel.size) {
-                const stops = [[0, "#ececec"]];
-                VIRIDIS.forEach((c, k) => {
-                    stops.push([(k + 1) / VIRIDIS.length, c]);
-                });
-                colorscale = stops;
-                const rank = new Map();
-                data.tks.forEach((tk) => {
-                    if (sel.has(tk)) {
-                        rank.set(tk, ((rank.size + 1) / sel.size) * n);
-                    }
-                });
-                color = data.tks.map((tk) => rank.get(tk) || 0);
-            } else {
-                color = data.tks.map((_, i) => i);
-            }
-            Plotly.restyle(gd, {
-                "line.color": [color],
-                "line.colorscale": [colorscale],
-                "line.showscale": [false],
-            });
-            return no;
-        }
-        """,
-        Output("inv-points-echo", "data"),
-        Input("inv-points-sel", "data"),
-        State("inv-points-data", "data"),
-        prevent_initial_call=True,
-    )
 
     @app.callback(
         Output("inv-points-sel", "data", allow_duplicate=True),
@@ -1570,137 +1390,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             [""],
         )
 
-    # -- Analysis tabs inside the workspace ------------------------------
-
-    @app.callback(
-        Output("view-store", "data"),
-        Output("analysis-message-store", "data"),
-        Input("url", "pathname"),
-        Input("url", "search"),
-        Input("project-store", "data"),
-        State("view-store", "data"),
-    )
-    def _hydrate_workspace_state(
-        pathname: str | None,
-        search: str | None,
-        project: str | None,
-        current: dict | None,
-    ):
-        # Shell-only outputs: this fires on every navigation, and Dash
-        # raises ReferenceError when a dispatched callback writes a
-        # component the current page does not mount (jernerics-8c9).
-        # Sole hydration writer: a ?sel= token lands as scope dimensions
-        # over whatever the ?view= document hydrated, include flags and
-        # focus survive both.
-        scope, tray_error = analysis.hydrate_tray(
-            service, project, pathname, search, (current or {}).get("scope")
-        )
-        view, view_error = analysis.hydrate_view(pathname, search, current)
-        message = tray_error or view_error
-        doc = view if view is not None else current
-        if scope is not None:
-            base = doc if doc is not None else analysis.default_view_state()
-            doc = analysis.edited_view(
-                base, {"scope": {**base.get("scope", {}), **scope}}
-            )
-        if doc is None or doc == current:
-            return no_update, message or ""
-        return doc, message or ""
-
-    @app.callback(
-        Output("url", "search"),
-        Input("url", "pathname"),
-        Input("view-store", "data"),
-        State("url", "search"),
-        prevent_initial_call=True,
-    )
-    def _sync_selection_url(
-        pathname: str | None,
-        view_doc: dict | None,
-        current_search: str | None,
-    ):
-        """Sole owner of ``url.search``: mints ``?view=`` from view edits
-        on the workspace page and drops it when navigating away. Only
-        shell-resident ids, so it can fire on any page."""
-        triggered = {item["prop_id"] for item in dash.callback_context.triggered}
-        target = analysis.synced_search(
-            pathname,
-            view_doc,
-            current_search,
-            url_navigated="url.pathname" in triggered,
-        )
-        if target is None:
-            raise PreventUpdate
-        return target
-
-    @app.callback(
-        Output({"analysis-error": ALL}, "children"),
-        Input("analysis-message-store", "data"),
-    )
-    def _show_analysis_message(message: str | None):
-        # One entry per matched pattern component; a clear stays an event.
-        return [Error(message)] if message else [no_update]
-
-    # -- Scroll preservation across refreshes ----------------------------
-
-    app.clientside_callback(
-        """
-        function(clicks, tick) {
-            const grids = [];
-            document.querySelectorAll(".ag-body-viewport").forEach(
-                (viewport) => {
-                    let root = viewport;
-                    while (root && root !== document.body && !root.id) {
-                        root = root.parentElement;
-                    }
-                    if (!root || !root.id) return;
-                    grids.push({
-                        id: root.id,
-                        top: viewport.scrollTop,
-                        left: viewport.scrollLeft,
-                    });
-                }
-            );
-            return {
-                x: window.scrollX,
-                y: window.scrollY,
-                grids: grids,
-            };
-        }
-        """,
-        Output("scroll-restore-store", "data"),
-        Input({"analysis-refresh": ALL}, "n_clicks"),
-        Input("poll", "n_intervals"),
-        prevent_initial_call=True,
-    )
-
-    app.clientside_callback(
-        """
-        function(refreshState, state) {
-            if (!state || !state.grids) {
-                return window.dash_clientside.no_update;
-            }
-            const restore = () => {
-                window.scrollTo(state.x || 0, state.y || 0);
-                for (const grid of state.grids) {
-                    const root = document.getElementById(grid.id);
-                    if (!root) continue;
-                    const viewport = root.querySelector(".ag-body-viewport");
-                    if (!viewport) continue;
-                    viewport.scrollTop = grid.top || 0;
-                    viewport.scrollLeft = grid.left || 0;
-                }
-            };
-            window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
-            return window.dash_clientside.no_update;
-        }
-        """,
-        Output("scroll-restore-store", "data", allow_duplicate=True),
-        Input({"analysis-refresh-store": ALL}, "data"),
-        State("scroll-restore-store", "data"),
-        prevent_initial_call=True,
-    )
-
     # -- Artifact viewer (jernerics-h5d.14) -------------------------------
 
     @app.callback(
@@ -1711,19 +1400,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     def _filter_artifact_rows(text: str | None):
         return components.grid_options(quickFilterText=text or "")
 
-    # -- ported at merge: R7 chrome swap / R3 exceptions / R6 investigations --
-    @app.callback(
-        Output("nav", "style"),
-        Input("url", "pathname"),
-    )
-    def _swap_page_chrome(pathname: str | None) -> dict[str, str]:
-        """New-shell pages render their own topbar; the legacy nav would
-        double it. Legacy pages always restore it."""
-        if parse_route(pathname).kind in NEW_SHELL_KINDS:
-            return {"display": "none"}
-        return {}
-
-    # ported at merge: _drive_exceptions_triage
+    # -- Exceptions triage -------------------------------------------------
     @app.callback(
         Output("exc-groupsets", "children"),
         Output("exc-note", "children"),
@@ -1771,7 +1448,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             cleared,
         )
 
-    # ported at merge: _toggle_include_invalid
+    # -- Investigation Compare: the include-invalid toggle ------------------
     @app.callback(
         Output("navigate", "href"),
         Input("inv-include-invalid", "value"),
@@ -1798,7 +1475,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             q=state["q"],
         )
 
-    # ported at merge: _edit_editor_mode
+    # -- Investigation editor ----------------------------------------------
     @app.callback(
         Output({"inv-edit-mode": ALL}, "className"),
         Output({"inv-edit-row": ALL}, "style"),
@@ -1840,7 +1517,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         "sweep-restore.n_clicks": "restore",
     }
 
-    # -- ported at merge: sweep page (R4) --
+    # -- Sweep page: live refresh, curation, retry-family picks ------------
     @app.callback(
         Output("sweep-page-body", "children"),
         Output("sweep-page-facts-store", "data"),
@@ -1883,7 +1560,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         )
         return body, {"digest": fresh, "cheap": cheap}
 
-    # -- ported at merge: sweep page (R4) --
     @app.callback(
         Output("sweep-message", "children"),
         Output("sweep-page-body", "children", allow_duplicate=True),
@@ -1937,7 +1613,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             },
         )
 
-    # -- ported at merge: sweep page (R4) --
+    # -- Sweep page: retry-family picks into the session scope --------------
     @app.callback(
         Output("view-store", "data", allow_duplicate=True),
         Input({"sweep-trial-pick": dash.ALL}, "value"),
@@ -1972,7 +1648,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         # A pattern-input callback returns its single output as a tuple.
         return (analysis.edited_view(current, {"scope": scope}),)
 
-    # -- ported at merge: sweep page sub-views (R5) ------------------------
+    # -- Sweep page sub-views ------------------------------------------------
 
     def _pattern_id(prop: str) -> dict[str, Any] | None:
         """The id dict of one triggered pattern prop, or ``None``."""
