@@ -3,6 +3,7 @@ import time
 from collections import Counter
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import parse_qs, quote
 from uuid import UUID
 
 from dash import dcc, html
@@ -15,7 +16,7 @@ from jernerics_schema import (
     materialize_selection,
 )
 
-from . import analysis, artifacts, components, figures
+from . import analysis, artifacts, components, figures, page
 from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
 from .render import SortColumn, sort_rows, sortable_columns
 from .routes import ROUTES_BASE
@@ -1041,7 +1042,14 @@ def sweep_hub_header(
         )
     )
     return [
-        investigation_crumb(project, record.name, sweep_name),
+        page.breadcrumbs(
+            [
+                (project, f"{ROUTES_BASE}/project/{quote(project, safe='')}"),
+                ("Investigations", investigations_index_href(project)),
+                record.name,
+                sweep_name,
+            ]
+        ),
         html.Div(
             [
                 html.Span("Views", className="annotate"),
@@ -1610,186 +1618,241 @@ def investigation_coverage_text(row: InvestigationRow) -> str:
     )
 
 
-def _investigation_index_rows(
-    project: str, rows: Sequence[InvestigationRow]
-) -> list[dict[str, Any]]:
-    return [
-        {
-            "investigation_id": row.investigation_id,
-            "name": row.name,
-            "link_href": (
-                f"{ROUTES_BASE}/project/{project}/investigation/" + row.investigation_id
-            ),
-            "link_label": row.name,
-            "factor": row.factor,
-            "outcome": row.outcome,
-            "member_count": row.member_count,
-            "coverage": investigation_coverage_text(row),
-            "last_activity_ns": row.last_activity_ns,
-            "edit_members": "",
-            "edit_href": (
-                f"{ROUTES_BASE}/project/{project}/investigation/"
-                + row.investigation_id
-                + "/edit"
-            ),
-        }
-        for row in rows
-    ]
+INVESTIGATION_VIEW_LABELS: dict[str, str] = {
+    "compare": "Compare",
+    "series": "Series",
+    "points": "Points",
+    "search": "Search",
+    "python": "Python",
+}
 
 
-_INVESTIGATION_COLUMNS: list[SortColumn] = [
-    SortColumn(
-        "name",
-        "Investigation",
-        "string",
-        definition={"cellRenderer": {"function": "renderLinkCell(params)"}},
-    ),
-    SortColumn("factor", "Factor", "string"),
-    SortColumn("outcome", "Outcome", "string"),
-    SortColumn("member_count", "Members", "numeric"),
-    SortColumn("coverage", "Coverage", "string"),
-    SortColumn(
-        "last_activity_ns",
-        "Last activity",
-        "ns",
-        definition={"valueFormatter": {"function": "renderRelative(x)"}},
-    ),
-    SortColumn(
-        "edit_members",
-        "",
-        "string",
-        definition={
-            "sortable": False,
-            "cellRenderer": {"function": "renderEditCell(params)"},
-        },
-    ),
-]
+def investigations_index_href(project: str) -> str:
+    """The investigations index URL for one project."""
+    return f"{ROUTES_BASE}/project/{quote(project, safe='')}/investigations"
 
 
-_UNORGANIZED_COLUMNS: list[SortColumn] = [
-    SortColumn(
-        "name",
-        "Sweep",
-        "string",
-        definition={"cellRenderer": {"function": "renderLinkCell(params)"}},
-    ),
-    SortColumn("state", "State", "string"),
-    SortColumn(
-        "expected_trials",
-        "Expected trials",
-        "numeric",
-        definition={"valueFormatter": {"function": "renderMissing(x)"}},
-    ),
-    SortColumn(
-        "last_activity_ns",
-        "Last activity",
-        "ns",
-        definition={"valueFormatter": {"function": "renderRelative(x)"}},
-    ),
-]
+def _editor_url(project: str, investigation_id: str | None) -> str:
+    """The member editor URL: ``/new`` for a create, ``/<id>/edit`` otherwise."""
+    base = f"{ROUTES_BASE}/project/{quote(project, safe='')}/investigation"
+    if investigation_id is None:
+        return f"{base}/new"
+    return f"{base}/{investigation_id}/edit"
 
 
-def investigations_tab(service: DashboardService, project: str | None) -> html.Div:
-    """The Investigations index: one row per investigation with its real
-    coverage facts, the project-scope Unorganized list, and the New
-    Investigation action into the (task .8) member editor."""
-    if not project:
-        return html.Div(
-            components.Empty(
-                "Pick a project in the header to browse its investigations."
-            )
-        )
+def sweep_page_url(project: str, sweep_id: str, via: str | None = None) -> str:
+    """The sweep page URL; ``?via=`` names the investigation that
+    linked here so the sweep page can offer the way back."""
+    url = f"{ROUTES_BASE}/project/{quote(project, safe='')}/sweep/{sweep_id}"
+    return f"{url}?via={via}" if via else url
+
+
+def investigation_search(
+    view: str = "compare",
+    member: str | None = None,
+    include_invalid: bool = False,
+    q: str | None = None,
+) -> str:
+    """The plain query string of an investigation page; Compare is the
+    default and never names itself."""
+    params: list[str] = []
+    if view != "compare":
+        params.append(f"view={view}")
+    if member:
+        params.append(f"member={quote(member, safe='')}")
+    if include_invalid:
+        params.append("include-invalid=1")
+    if q:
+        params.append(f"q={quote(q, safe='')}")
+    return f"?{'&'.join(params)}" if params else ""
+
+
+def investigation_url(
+    project: str,
+    investigation_id: str,
+    view: str = "compare",
+    member: str | None = None,
+    include_invalid: bool = False,
+    q: str | None = None,
+) -> str:
+    """One investigation page URL."""
+    base = (
+        f"{ROUTES_BASE}/project/{quote(project, safe='')}"
+        f"/investigation/{investigation_id}"
+    )
+    return base + investigation_search(view, member, include_invalid, q)
+
+
+def investigation_query(search: str | None) -> dict[str, Any]:
+    """The plain query state of an investigation page: the active view
+    (unknown names fall back to Compare), the requested member scope
+    (callers resolve it against the membership), the Compare
+    include-invalid flag, and the Search filter text."""
+    params = parse_qs((search or "").lstrip("?"))
+
+    def first(key: str) -> str:
+        return (params.get(key) or [""])[0]
+
+    view = first("view")
+    return {
+        "view": view if view in INVESTIGATION_VIEW_LABELS else "compare",
+        "member": first("member") or None,
+        "include_invalid": first("include-invalid") == "1",
+        "q": first("q"),
+    }
+
+
+def _rel(ns: int | None, now_ns: int) -> str:
+    """The coarse relative age the tables show."""
+    if not ns:
+        return "never"
+    delta = max(0, (now_ns - ns) // 1_000_000_000)
+    if delta < 90:
+        return f"{delta}s ago"
+    if delta < 5400:
+        return f"{delta // 60}m ago"
+    if delta < 172800:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
+
+
+def _fraction(done: int, total: int | None) -> str:
+    if total:
+        return f"{done}/{total}"
+    return str(done) if done else MISSING
+
+
+def _meta_strip(cells: Sequence[tuple[str, Any]]) -> html.Div:
+    """The fact strip: label/value pairs in a meta grid."""
+    return html.Div(
+        [html.Div([html.Span(label), html.B(value)]) for label, value in cells],
+        className="meta-grid",
+    )
+
+
+def _curation_badges(*flags: tuple[bool, str]) -> list[html.Span]:
+    """The invalid/archived badge spans for the flags that hold."""
+    return [html.Span(name, className=f"badge {name}") for flag, name in flags if flag]
+
+
+def investigations_index_page(
+    service: DashboardService, project: str, now_ns: int
+) -> html.Div:
+    """The Investigations index: one row per investigation with its
+    real coverage facts, and the project's Unorganized sweeps."""
     try:
         index_rows = service.investigations_index(project)
         unorganized = service.unorganized(project)
     except CurationUnavailableError as error:
-        return html.Div(components.Empty(str(error)))
-    unorganized_rows = sort_rows(
-        [
-            {
-                "sweep_id": summary.sweep_id,
-                "name": summary.name,
-                "link_href": analysis.workspace_focus_href(
-                    project, "sweep", summary.sweep_id
+        return page.page_shell(
+            "Investigations",
+            project,
+            components.Empty(str(error)),
+            scope="Project",
+        )
+    head = [
+        page.head_cell("Investigation"),
+        page.head_cell("Factor"),
+        page.head_cell("Outcome"),
+        page.head_cell("Members", numeric=True),
+        page.head_cell("Coverage"),
+        page.head_cell("Last activity", numeric=True),
+        page.head_cell(""),
+    ]
+    rows = [
+        html.Tr(
+            [
+                html.Td(
+                    html.A(
+                        html.Span(row.name, className="sfx"),
+                        href=investigation_url(project, row.investigation_id),
+                        className="sweep-link",
+                    )
                 ),
-                "link_label": summary.name,
-                "state": summary.state,
-                "expected_trials": summary.expected_trials,
-                "last_activity_ns": summary.latest_submitted_ns,
-            }
-            for summary in unorganized
-        ],
-        _UNORGANIZED_COLUMNS,
-        None,
-    )
-    return html.Div(
-        [
-            html.Div(
-                html.A(
-                    "New Investigation",
-                    href=f"{ROUTES_BASE}/project/{project}/investigation/new",
-                    className="btn btn-primary",
+                html.Td(row.factor),
+                html.Td(row.outcome),
+                html.Td(str(row.member_count), className="num"),
+                html.Td(investigation_coverage_text(row)),
+                html.Td(_rel(row.last_activity_ns, now_ns), className="num"),
+                html.Td(
+                    html.A(
+                        "Edit members",
+                        href=_editor_url(project, row.investigation_id),
+                    )
                 ),
-                className="actions",
+            ]
+        )
+        for row in index_rows
+    ]
+    unorganized_rows = [
+        html.Tr(
+            [
+                html.Td(
+                    html.A(summary.name, href=sweep_page_url(project, summary.sweep_id))
+                ),
+                html.Td(summary.state),
+                html.Td(
+                    _fraction(summary.succeeded, summary.expected_trials),
+                    className="num",
+                ),
+                html.Td(_rel(summary.latest_submitted_ns, now_ns), className="num"),
+            ]
+        )
+        for summary in unorganized
+    ]
+    body: list[Any] = [
+        html.H1("Investigations"),
+        html.P(
+            f"Cross-sweep questions over {project} · membership is server-persisted",
+            className="sub",
+        ),
+        html.Div(
+            html.A(
+                "New Investigation",
+                href=_editor_url(project, None),
+                className="btn btn-primary",
             ),
-            html.Section(
-                (
-                    [
-                        AgGrid(
-                            id="investigations-grid",
-                            rowData=_investigation_index_rows(project, index_rows),
-                            columnDefs=sortable_columns(_INVESTIGATION_COLUMNS),
-                            defaultColDef=_GRID_DEFAULTS,
-                            dashGridOptions=components.grid_options(),
-                            getRowId="params.data.investigation_id",
-                            className="ag-theme-alpine grid",
-                        )
-                    ]
-                    if index_rows
-                    else [
-                        components.Empty(
-                            "No investigations yet — pick sweeps in Overview and "
-                            "use Create Investigation, or start a new one."
-                        )
-                    ]
-                ),
-                className="section investigations-index",
+            className="actions",
+        ),
+        html.Section(
+            (
+                [html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])]
+                if index_rows
+                else [
+                    components.Empty(
+                        "No investigations yet — pick sweeps in Overview and "
+                        "use Create Investigation, or start a new one."
+                    )
+                ]
             ),
-            html.Section(
+            className="section investigations-index",
+        ),
+        html.H2("Unorganized"),
+        html.P(
+            f"{counted_sweeps(len(unorganized))} not in any Investigation",
+            className="sub",
+        ),
+    ]
+    if unorganized:
+        body.append(
+            html.Details(
                 [
-                    html.H3("Unorganized"),
-                    html.P(
-                        f"{counted_sweeps(len(unorganized))} not in any Investigation",
-                        className="overview-sub",
-                    ),
-                    *(
+                    html.Summary("Show list"),
+                    page.scroll_table(
                         [
-                            html.Details(
-                                [
-                                    html.Summary("Show list"),
-                                    AgGrid(
-                                        id="unorganized-grid",
-                                        rowData=unorganized_rows,
-                                        columnDefs=sortable_columns(
-                                            _UNORGANIZED_COLUMNS
-                                        ),
-                                        defaultColDef=_GRID_DEFAULTS,
-                                        dashGridOptions=components.grid_options(),
-                                        getRowId=_SWEEP_ROW_ID,
-                                        className="ag-theme-alpine grid",
-                                    ),
-                                ],
-                                className="failgroup",
-                            )
-                        ]
-                        if unorganized
-                        else []
+                            page.head_cell("Sweep"),
+                            page.head_cell("Status"),
+                            page.head_cell("Trials", numeric=True),
+                            page.head_cell("Last activity", numeric=True),
+                        ],
+                        unorganized_rows,
+                        sortable=True,
                     ),
                 ],
-                className="section investigations-unorganized",
-            ),
-        ],
-    )
+                className="failgroup",
+            )
+        )
+    return page.page_shell("Investigations", project, *body, scope="Project")
 
 
 def exceptions_tab(
@@ -1819,139 +1882,113 @@ def exceptions_tab(
     )
 
 
-_INVESTIGATION_VIEW_TITLES = {
-    "compare": "Compare",
-    "series": "Series",
-    "points": "Points",
-    "search": "Search",
-}
-
-
-def investigations_index_href(project: str) -> str:
-    """The workspace URL showing the project's Investigations tab."""
-    doc = dict(analysis.default_view_state(), active="investigations")
-    return f"{ROUTES_BASE}/project/{project}?view={analysis.encode_view_state(doc)}"
-
-
 def investigation_crumb(
     project: str,
     name: str,
-    view_label: str | None = None,
+    view: str = "compare",
     member_label: str | None = None,
 ) -> html.Div:
-    """``project › Investigations › name › view › member``; the trailing
-    view and member labels are omitted on pages that are their own
-    destination. The member label is a live region: the member-scope
-    callback rewrites it without a page remount."""
-    parts: list[Any] = [
-        html.A(project, href=f"{ROUTES_BASE}/project/{project}"),
-        html.Span(className="dim"),
-        html.A("Investigations", href=investigations_index_href(project)),
-        html.Span(className="dim"),
-        html.Span(name),
+    """``project › Investigations › name › view › member``; the
+    trailing view and member segments appear only when they narrow the
+    page beyond Compare over all members."""
+    crumbs: list[tuple[str, str] | str] = [
+        (project, f"{ROUTES_BASE}/project/{quote(project, safe='')}"),
+        ("Investigations", investigations_index_href(project)),
+        name,
     ]
-    if view_label:
-        parts.append(html.Span(className="dim"))
-        parts.append(html.Span(view_label))
-    parts.append(
-        html.Span(
-            [html.Span(className="dim"), html.Span(member_label)]
-            if member_label
-            else [],
-            id={"inv-crumb-member": "scope"},
+    if view != "compare":
+        crumbs.append(INVESTIGATION_VIEW_LABELS[view])
+    if member_label:
+        crumbs.append(member_label)
+    return page.breadcrumbs(crumbs)
+
+
+def _inv_nav_row(
+    project: str,
+    investigation_id: str,
+    view: str,
+    member: str | None,
+    include_invalid: bool,
+    q: str,
+) -> html.Div:
+    """The view switcher with its Python and Edit actions; Compare
+    never carries a member scope, the filter text stays on Search."""
+    views = [
+        (
+            INVESTIGATION_VIEW_LABELS[name],
+            investigation_url(
+                project,
+                investigation_id,
+                view=name,
+                member=member if name != "compare" else None,
+                include_invalid=include_invalid,
+                q=q if name == "search" else None,
+            ),
         )
-    )
-    return html.Div(parts, className="crumb")
-
-
-def _views_row(active: str) -> list[Any]:
-    """The view switcher; a clientside callback flips the ``on`` mark,
-    the view callback carries the state into the URL."""
-    return [
-        html.Span("Investigation views", className="annotate"),
-        html.Div(
-            [
-                html.Button(
-                    _INVESTIGATION_VIEW_TITLES[view],
-                    id={"inv-view": view},
-                    className="on" if view == active else "",
-                )
-                for view in INVESTIGATION_VIEWS
-            ],
-            className="seg",
-        ),
+        for name in INVESTIGATION_VIEWS
     ]
+    return page.inv_nav(
+        INVESTIGATION_VIEW_LABELS[view],
+        views,
+        python_href=investigation_url(
+            project, investigation_id, view="python", member=member
+        ),
+        edit_href=_editor_url(project, investigation_id),
+    )
 
 
-def member_scope_row(member_label: str | None) -> html.Div:
+def _scope_note_row(member_label: str | None, drop_href: str) -> html.Div:
     """The member-scope line: the visible scope fact plus the one-click
     way back to the full cohort (hidden while unscoped)."""
-    return html.Div(
-        [
-            html.Span(
-                f"Scoped to member {member_label}" if member_label else "",
-                id={"inv-member-note": "scope"},
-                className="annotate",
-            ),
-            html.Button(
-                "All members",
-                id={"inv-member-clear": "scope"},
-                n_clicks=0,
-                style={} if member_label else {"display": "none"},
-            ),
-        ],
-        className="member-row",
+    return page.limit_row(
+        html.Span(
+            f"Scoped to member {member_label}" if member_label else "",
+            id="inv-member-note",
+            className="annotate",
+        ),
+        html.A(
+            "All members",
+            href=drop_href,
+            className="btn",
+            id="inv-member-clear",
+            style={} if member_label else {"display": "none"},
+        ),
     )
 
 
-def python_panel(record: InvestigationRecord, member: str | None = None) -> list:
-    """The effective membership (the one member when narrowed) as an
-    encoded Selection token plus the runnable handoff snippet."""
+def python_body(record: InvestigationRecord, member: str | None = None) -> list[Any]:
+    """The Open in Python view: the exact effective Selection as an
+    opaque token plus the runnable handoff snippet."""
     selection = materialize_selection(record)
     if member:
         selection = Selection(project=record.project, sweeps=(UUID(member),))
     token = encode_selection(selection)
     snippet = analysis.python_snippet(token, record.project, "http://localhost:8000")
-    pre_style = {"whiteSpace": "pre", "overflowX": "auto"}
+    style = {"whiteSpace": "pre-wrap", "overflowX": "auto"}
     return [
+        html.Div(
+            [
+                html.Span("Copy the token or the snippet:", className="annotate"),
+                dcc.Clipboard(content=token, title="Copy selection token"),
+                dcc.Clipboard(content=snippet, title="Copy runnable snippet"),
+            ],
+            className="actions",
+        ),
+        html.Section(
+            html.Pre(token, className="config-json", style=style),
+            className="section",
+        ),
+        html.Section(
+            html.Pre(snippet, className="config-json", style=style),
+            className="section",
+        ),
         html.P(
             "The token decodes to the exact effective membership via "
             "jernerics_schema.decode_selection; point TrackingClient at "
             "your server.",
-            className="hint",
-        ),
-        html.Div(
-            [
-                html.Pre(token, className="config-json", style=pre_style),
-                dcc.Clipboard(content=token),
-            ],
-            className="snippet-row",
-        ),
-        html.Div(
-            [
-                html.Pre(snippet, className="config-json", style=pre_style),
-                dcc.Clipboard(content=snippet),
-            ],
-            className="snippet-row",
+            className="annotate",
         ),
     ]
-
-
-def open_in_python(
-    record: InvestigationRecord, member: str | None = None
-) -> html.Details:
-    """The Open in Python disclosure; the token content is a live region
-    the member-scope callback re-renders."""
-    return html.Details(
-        [
-            html.Summary("Open in Python", className="btn-primary"),
-            html.Div(
-                python_panel(record, member),
-                id={"inv-python": "content"},
-            ),
-        ],
-        className="py-details",
-    )
 
 
 def coverage_strip(doc: CompareDocument) -> html.Div:
@@ -1981,150 +2018,103 @@ def coverage_strip(doc: CompareDocument) -> html.Div:
     )
 
 
-_COMPARE_MEMBER_COLUMNS: list[SortColumn] = [
-    SortColumn(
-        "factor",
-        "Factor",
-        "string",
-        definition={"valueFormatter": {"function": "renderMissing(x)"}},
-    ),
-    SortColumn("name", "Sweep", "string"),
-    SortColumn("state", "State", "string"),
-    SortColumn(
-        "expected_trials",
-        "Expected trials",
-        "numeric",
-        definition={"valueFormatter": {"function": "renderMissing(x)"}},
-    ),
-    SortColumn("completed", "Completed", "numeric"),
-    SortColumn("usable", "Usable (with outcome)", "numeric"),
-    SortColumn("curation", "Curation", "string"),
-]
+def _sig_text(value: float | None) -> str:
+    return MISSING if value is None else f"{value:.4g}"
 
 
-def _compare_member_rows(doc: CompareDocument, project: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "sweep_id": member.sweep_id,
-            "factor": member.factor_value,
-            "name": member.name,
-            "link_href": analysis.workspace_focus_href(
-                project, "sweep", member.sweep_id
-            ),
-            "link_label": member.name,
-            "state": member.state,
-            "expected_trials": member.expected_trials,
-            "completed": member.completed,
-            "usable": member.usable,
-            "curation": (
-                " ".join(
-                    name
-                    for flag, name in (
-                        (member.invalid, "invalid"),
-                        (member.archived, "archived"),
-                    )
-                    if flag
-                )
-                or MISSING
-            ),
-        }
-        for member in doc.members
-    ]
-
-
-def _matched_grid(
-    doc: CompareDocument, labels: dict[str, str], outcome: str
-) -> html.Section:
+def _matched_table(doc: CompareDocument, labels: dict[str, str]) -> html.Table:
     """Signatures matched by two or more analyzable members; one
     numeric column per member, missing stays missing."""
-    shared = [row for row in doc.signatures if row.matched >= 2]
-    columns = [
-        SortColumn("signature", "Signature", "string"),
-        *(
-            SortColumn(
-                sweep_id,
-                labels.get(sweep_id, short_id(sweep_id)),
-                "numeric",
-                definition={"valueFormatter": {"function": "renderMissing(x)"}},
+    head = [page.head_cell("Signature")] + [
+        page.head_cell(labels.get(sweep_id, short_id(sweep_id)), numeric=True)
+        for sweep_id in doc.analyzable
+    ]
+    rows = []
+    for row in doc.signatures:
+        if row.matched < 2:
+            continue
+        chip = (
+            [html.Span("common", className="count-badge neutral")] if row.common else []
+        )
+        rows.append(
+            html.Tr(
+                [html.Td([row.label, *chip], className="mono")]
+                + [
+                    html.Td(_sig_text(row.values.get(sweep_id)), className="num")
+                    for sweep_id in doc.analyzable
+                ]
             )
-            for sweep_id in doc.analyzable
-        ),
-    ]
+        )
+    return html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])
+
+
+def _members_table(
+    doc: CompareDocument, project: str, investigation_id: str
+) -> html.Table:
+    """The member inventory: factor, the sweep link (carrying the
+    ``?via=`` return path), status, completed, and usable trials."""
     rows = [
-        {
-            "signature": row.label,
-            **{sweep_id: row.values.get(sweep_id) for sweep_id in doc.analyzable},
-        }
-        for row in shared
-    ]
-    common = sum(1 for row in shared if row.common)
-    return html.Section(
-        [
-            html.H3(f"Matched comparison ({outcome})"),
-            html.P(
-                f"{len(shared)} signatures matched by ≥2 analyzable members · "
-                f"{common} common to all {len(doc.analyzable)} · medians pool "
-                "matched trials; no imputation, no outliers suppressed.",
-                className="overview-sub",
-            ),
-            AgGrid(
-                id="compare-matched-grid",
-                rowData=sort_rows(rows, columns, None),
-                columnDefs=sortable_columns(columns),
-                defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions=components.grid_options(),
-                getRowId="params.data.signature",
-                className="ag-theme-alpine grid",
-            ),
-        ],
-        className="section compare-matched",
-    )
-
-
-def _members_grid(doc: CompareDocument, project: str) -> html.Section:
-    return html.Section(
-        [
-            html.H3("Members"),
-            AgGrid(
-                id="compare-members-grid",
-                rowData=sort_rows(
-                    _compare_member_rows(doc, project),
-                    _COMPARE_MEMBER_COLUMNS,
-                    None,
+        html.Tr(
+            [
+                html.Td(member.factor_value or MISSING),
+                html.Td(
+                    [
+                        html.A(
+                            member.name,
+                            href=sweep_page_url(
+                                project, member.sweep_id, investigation_id
+                            ),
+                        ),
+                        *_curation_badges(
+                            (member.invalid, "invalid"), (member.archived, "archived")
+                        ),
+                    ]
                 ),
-                columnDefs=sortable_columns(_COMPARE_MEMBER_COLUMNS),
-                defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions=components.grid_options(),
-                getRowId=_SWEEP_ROW_ID,
-                className="ag-theme-alpine grid",
-            ),
-        ],
-        className="section compare-members",
-    )
+                html.Td(member.state),
+                html.Td(
+                    _fraction(member.completed, member.expected_trials),
+                    className="num",
+                ),
+                html.Td(
+                    _fraction(member.usable, member.expected_trials),
+                    className="num",
+                ),
+            ]
+        )
+        for member in doc.members
+    ]
+    head = [
+        page.head_cell("Factor"),
+        page.head_cell("Sweep"),
+        page.head_cell("Status"),
+        page.head_cell("Completed", numeric=True),
+        page.head_cell("Usable trials", numeric=True),
+    ]
+    return html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])
 
 
-def compare_empty_state(doc: CompareDocument, include_invalid: bool) -> html.Div:
+def compare_empty_state(doc: CompareDocument, include_invalid: bool) -> html.Section:
     """The honest empty state: an analysis set with nothing to compare
     names exactly who is excluded and why."""
     members_total = len(doc.members)
     no_outcome = members_total - len(doc.analyzable)
     if doc.analyzable:
-        return html.Div(
+        return html.Section(
             html.P(
                 f"{no_outcome} of {members_total} members have no outcome "
                 "data; the rest are compared below."
             ),
-            className="empty-state",
+            className="section",
         )
     if include_invalid:
-        return html.Div(
+        return html.Section(
             html.P(
                 f"None of the {members_total} members has outcome data — "
                 "nothing to compare."
             ),
-            className="empty-state",
+            className="section",
         )
-    return html.Div(
+    return html.Section(
         html.P(
             "No analyzable members in the analysis set — "
             f"{doc.excluded_data_bearing} data-bearing members are marked "
@@ -2133,39 +2123,66 @@ def compare_empty_state(doc: CompareDocument, include_invalid: bool) -> html.Div
             "Tick “include invalid members in analysis” to see the real "
             "comparison."
         ),
-        className="empty-state",
+        className="section",
     )
 
 
-def compare_children(
+def compare_body(
     doc: CompareDocument,
     project: str,
     outcome: str,
+    investigation_id: str,
     include_invalid: bool,
 ) -> list[Any]:
-    """The Compare view's body for one analysis set: heatmap + ranking
-    over the common signatures, the matched-signature table, and the
-    member inventory. No analyzable members or no global overlap each
-    render their honest state instead of a manufactured ranking."""
+    """The Compare view for one analysis set: the coverage strip, the
+    include-invalid toggle, the honest empty states, the charts over
+    the common signatures, the matched-signature table, and the member
+    inventory. No analyzable members or no global overlap each render
+    their honest state instead of a manufactured ranking."""
     members = {member.sweep_id: member for member in doc.members}
     labels = {
         sweep_id: member.factor_value or member.name
         for sweep_id, member in members.items()
     }
     common = [row for row in doc.signatures if row.common]
-    body: list[Any] = []
+    invalid = sum(1 for member in doc.members if member.invalid)
+    body: list[Any] = [coverage_strip(doc)]
+    if invalid:
+        body.append(
+            page.limit_row(
+                html.Label(
+                    [
+                        dcc.Checklist(
+                            id="inv-include-invalid",
+                            options=[
+                                {
+                                    "label": " Include invalid members in analysis",
+                                    "value": "invalid",
+                                }
+                            ],
+                            value=["invalid"] if include_invalid else [],
+                            className="include-toggle",
+                        ),
+                        html.Span(
+                            f"{invalid} members marked invalid",
+                            className="annotate",
+                        ),
+                    ]
+                )
+            )
+        )
     if not doc.analyzable:
         body.append(compare_empty_state(doc, include_invalid))
     elif not common:
         body.append(
-            html.Div(
+            html.Section(
                 html.P(
-                    f"No sampled signature is completed by all "
+                    "No sampled signature is completed by all "
                     f"{len(doc.analyzable)} analyzable members — no global "
                     "overlap. Pairwise matches are listed below; no ranking "
                     "is manufactured."
                 ),
-                className="empty-state",
+                className="section",
             )
         )
     else:
@@ -2189,12 +2206,12 @@ def compare_children(
             [
                 html.Section(
                     [
-                        html.H3("Outcome heatmap"),
+                        html.H2("Outcome heatmap"),
                         html.P(
                             "factor by exact sampled signature "
                             f"({keys}) — no imputation, no outliers "
                             "suppressed.",
-                            className="overview-sub",
+                            className="annotate",
                         ),
                         dcc.Graph(
                             figure=figures.compare_heatmap(
@@ -2207,7 +2224,7 @@ def compare_children(
                 ),
                 html.Section(
                     [
-                        html.H3("Median over common signatures"),
+                        html.H2("Median over common signatures"),
                         dcc.Graph(
                             figure=figures.compare_ranking(
                                 row_labels, medians, matched_counts
@@ -2219,9 +2236,32 @@ def compare_children(
                 ),
             ]
         )
-    if doc.signatures:
-        body.append(_matched_grid(doc, labels, outcome))
-    body.append(_members_grid(doc, project))
+    shared = [row for row in doc.signatures if row.matched >= 2]
+    if shared:
+        common_count = sum(1 for row in shared if row.common)
+        body.append(
+            html.Section(
+                [
+                    html.H2(f"Matched comparison ({outcome})"),
+                    html.P(
+                        f"{len(shared)} signatures matched by ≥2 analyzable "
+                        f"members · {common_count} common to all "
+                        f"{len(doc.analyzable)} · medians pool "
+                        "matched trials; no imputation, no outliers "
+                        "suppressed.",
+                        className="annotate",
+                    ),
+                    _matched_table(doc, labels),
+                ],
+                className="section compare-matched",
+            )
+        )
+    body.append(
+        html.Section(
+            [html.H2("Members"), _members_table(doc, project, investigation_id)],
+            className="section compare-members",
+        )
+    )
     return body
 
 
@@ -2230,213 +2270,279 @@ def investigation_page(
     project: str,
     investigation_id: str,
     search: str | None = None,
+    now_ns: int | None = None,
 ) -> html.Div:
-    """The Investigation workspace: breadcrumb, header naming the
-    investigation, the view row, the member-scope line, the Open in
-    Python / Edit members actions, and every view's region — Compare
-    content, the Series tray, the Points set, and the member Search.
-    The ``?view=`` document carries the active view and the member
-    scope; an unknown member falls back to all members."""
+    """The Investigation workspace on the new shell: crumbs, header,
+    the view row, and one view per page — Compare, Series, Points,
+    Search, or Python. The plain query string carries the view, the
+    member scope, and the Compare include-invalid flag; an unknown
+    member falls back to all members and Compare never poses as
+    scoped."""
+    now = time.time_ns() if now_ns is None else now_ns
     if not project or not investigation_id:
-        return html.Div(components.Empty("No investigation requested."))
-    detail = service.investigation_detail(investigation_id)
-    record = detail.investigation
-    decoded, error = analysis.decoded_view_param(search)
-    doc = decoded or analysis.default_view_state()
-    tray, scoped = analysis.investigation_scope_state(
-        record.members, doc["inv"]["member"]
-    )
-    active = doc["inv"]["view"]
+        return page.page_shell(
+            "Investigations",
+            project,
+            components.Empty("No investigation requested."),
+            scope="Investigation",
+        )
+    try:
+        detail = service.investigation_detail(investigation_id)
+        record = detail.investigation
+        query = investigation_query(search)
+        view = query["view"]
+        tray, scoped = analysis.investigation_scope_state(
+            record.members, query["member"]
+        )
+        if view == "compare":
+            compare = service.investigation_compare(
+                investigation_id, include_invalid=query["include_invalid"]
+            )
+    except CurationUnavailableError as error:
+        return page.page_shell(
+            "Investigations",
+            project,
+            components.Empty(str(error)),
+            scope="Investigation",
+        )
     member_label = None
     if scoped:
         focused = service.sweep_detail(scoped)
         member_label = focused.overview.name if focused else short_id(scoped)
-    compare = service.investigation_compare(investigation_id)
-    invalid = sum(1 for member in compare.members if member.invalid)
-    display = {"display": "block"}
-    hidden = {"display": "none"}
-    regions = [
-        html.Div(
-            [
-                coverage_strip(compare),
-                *(
-                    [
-                        dcc.Checklist(
-                            id={"inv-compare-toggle": "include"},
-                            options=[
-                                {
-                                    "label": " include invalid members in analysis",
-                                    "value": "invalid",
-                                }
-                            ],
-                            value=[],
-                            className="include-toggle",
-                        ),
-                    ]
-                    if invalid
-                    else []
-                ),
-                html.Div(
-                    compare_children(compare, project, record.outcome, False),
-                    id={"inv-compare": "content"},
-                ),
-            ],
-            id={"inv-region": "compare"},
-            style=display if active == "compare" else hidden,
-        ),
-        html.Div(
-            _series_region(service, project, tray, doc),
-            id={"inv-region": "series"},
-            style=display if active == "series" else hidden,
-        ),
-        html.Div(
-            analysis.points_tab(service, project, tray, record.outcome),
-            id={"inv-region": "points"},
-            style=display if active == "points" else hidden,
-        ),
-        html.Div(
-            search_region(
-                service,
-                project,
-                investigation_id,
-                record.members,
-                scoped,
-            ),
-            id={"inv-region": "search"},
-            style=display if active == "search" else hidden,
+    h1 = (
+        record.name
+        if view == "compare"
+        else (f"{record.name} — {INVESTIGATION_VIEW_LABELS[view]}")
+    )
+    if member_label and view in ("series", "points", "search"):
+        h1 = f"{h1} — {member_label}"
+    header: list[Any] = [
+        investigation_crumb(project, record.name, view, member_label),
+        html.H1(h1),
+        _inv_nav_row(
+            project,
+            investigation_id,
+            view,
+            scoped,
+            query["include_invalid"],
+            query["q"],
         ),
     ]
-    return html.Div(
-        [
-            *([components.Error(error)] if error else []),
-            investigation_crumb(
-                project,
-                record.name,
-                _INVESTIGATION_VIEW_TITLES[active],
-                member_label,
-            ),
-            html.H2(record.name),
+    drop_href = investigation_url(
+        project,
+        investigation_id,
+        view=view,
+        include_invalid=query["include_invalid"],
+        q=query["q"],
+    )
+    if view == "compare":
+        keys = ", ".join(compare.signature_keys)
+        if not keys:
+            keys = "none observed"
+        body: list[Any] = [
             html.P(
                 [
-                    f"factor {record.factor} · outcome {record.outcome} · "
-                    f"{counted_sweeps(detail.coverage.members)}",
+                    "factor ",
+                    html.B(record.factor),
+                    " · outcome ",
+                    html.B(record.outcome),
+                    " (final) · matching by exact sampled signature "
+                    f"({keys}) · no imputation, no outliers suppressed",
                 ],
-                className="inv-sub",
+                className="sub",
             ),
-            html.Div(
-                [
-                    *_views_row(active),
-                    member_scope_row(member_label),
-                    open_in_python(record, scoped),
-                    html.A(
-                        "Edit members",
-                        href=f"{ROUTES_BASE}/project/{project}/investigation/"
-                        f"{investigation_id}/edit",
-                        className="btn-link",
-                    ),
-                ],
-                className="inv-views",
+            *compare_body(
+                compare,
+                project,
+                record.outcome,
+                investigation_id,
+                query["include_invalid"],
             ),
-            html.Div(id={"analysis-error": "page"}),
-            *regions,
-        ],
-        className="page investigation",
+        ]
+        wide = False
+    elif view == "series":
+        body = [
+            html.P(
+                "trials of the member cohort with fetched series · same "
+                "trajectory semantics as sweep-scoped Series",
+                className="sub",
+            ),
+            *series_body(service, project, record, tray, member_label, drop_href),
+        ]
+        wide = True
+    elif view == "points":
+        body = [
+            html.P(
+                "member trials × tracked scalars (final logged value) · "
+                f"params → {record.outcome} selection below",
+                className="sub",
+            ),
+            *points_body(service, project, record, tray, member_label, drop_href),
+        ]
+        wide = True
+    elif view == "search":
+        body = [
+            html.P(
+                "Search covers the investigation's members only; the "
+                "project's other sweeps are out of scope here.",
+                className="sub",
+            ),
+            *search_body(
+                service,
+                project,
+                record,
+                scoped,
+                member_label,
+                drop_href,
+                query["q"],
+                now,
+            ),
+        ]
+        wide = False
+    else:
+        scope_note = f", narrowed to member {member_label}" if member_label else ""
+        body = [
+            html.P(
+                "The exact effective Selection — the investigation's "
+                f"persisted members{scope_note}.",
+                className="sub",
+            ),
+            *python_body(record, scoped),
+        ]
+        wide = False
+    return page.page_shell(
+        "Investigations",
+        project,
+        *header,
+        *body,
+        wide=wide,
+        scope="Investigation",
     )
 
 
-def _series_region(
+def series_body(
     service: DashboardService,
     project: str,
+    record: InvestigationRecord,
     tray: dict[str, Any],
-    doc: dict[str, Any],
-) -> html.Div:
-    """The Series tray over the investigation scope: the sweep-scope
-    Series components, initialized from the page's view document."""
+    member_label: str | None,
+    drop_href: str,
+) -> list[Any]:
+    """The Series view: the fact strip, the member-scope line, and the
+    sweep-scope Series machinery over the investigation scope."""
     now = time.time_ns()
+    doc = analysis.default_view_state()
     snapshot = analysis.series_snapshot(service, project, tray, doc, now)
     panels, _payload, key_options, color_options, facet_options, filters, status = (
         analysis.render_series_outputs(doc, snapshot)
     )
     panels, figure = analysis.extract_series_figure(panels)
-    return series_tab(
-        doc,
-        panels,
-        figure,
-        key_options,
-        color_options,
-        facet_options,
-        filters,
-        status,
-        analysis.updated_ago(now),
-    )
-
-
-_EDITOR_SWEEP_COLUMNS: list[SortColumn] = [
-    SortColumn("name", "Sweep", "string"),
-    SortColumn("state", "State", "string"),
-    SortColumn("member", "Member", "string"),
-    SortColumn("curation", "Curation", "string"),
-    SortColumn("completed", "Completed", "numeric"),
-    SortColumn(
-        "expected_trials",
-        "Expected trials",
-        "numeric",
-        definition={"valueFormatter": {"function": "renderMissing(x)"}},
-    ),
-    SortColumn(
-        "last_activity_ns",
-        "Last activity",
-        "ns",
-        definition={"valueFormatter": {"function": "renderRelative(x)"}},
-    ),
-]
-
-
-def editor_rows(
-    summaries: Sequence[SweepSummary], member_ids: Sequence[str], project: str
-) -> list[dict[str, Any]]:
-    """Every project sweep as an editor row; ``member`` marks saved
-    membership so the checkbox (the working set) never hides a change."""
-    saved = set(member_ids)
     return [
-        {
-            "sweep_id": summary.sweep_id,
-            "name": summary.name,
-            "link_label": summary.name,
-            "link_href": analysis.workspace_focus_href(
-                project, "sweep", summary.sweep_id
-            ),
-            "state": summary.state,
-            "member": "member" if summary.sweep_id in saved else MISSING,
-            "curation": sweep_curation(summary) or MISSING,
-            "completed": summary.succeeded,
-            "expected_trials": summary.expected_trials,
-            "last_activity_ns": summary.latest_submitted_ns,
-        }
-        for summary in sorted(summaries, key=lambda row: row.name.casefold())
+        _meta_strip(
+            [
+                ("Members", len(tray["sweeps"])),
+                ("Trials", len(snapshot["trials"])),
+                ("Factor", record.factor),
+                ("Outcome", record.outcome),
+            ]
+        ),
+        _scope_note_row(member_label, drop_href),
+        series_tab(
+            doc,
+            panels,
+            figure,
+            key_options,
+            color_options,
+            facet_options,
+            filters,
+            status,
+            analysis.updated_ago(now),
+        ),
     ]
 
 
-def _editor_grid(rows: list[dict[str, Any]]) -> AgGrid:
-    """The project sweep table with row-selection checkboxes; the
-    working selection arrives through the loader callback."""
-    return AgGrid(
-        id={"inv-edit-grid": "grid"},
-        rowData=rows,
-        columnDefs=sortable_columns(_EDITOR_SWEEP_COLUMNS),
-        defaultColDef=_GRID_DEFAULTS,
-        dashGridOptions=components.grid_options(
-            pagination=True,
-            paginationPageSize=_OVERVIEW_PAGE_SIZE,
-            rowSelection={
-                "mode": "multiRow",
-                "checkboxes": True,
-                "headerCheckboxSelection": True,
-                "enableClickSelection": False,
-            },
+def points_body(
+    service: DashboardService,
+    project: str,
+    record: InvestigationRecord,
+    tray: dict[str, Any],
+    member_label: str | None,
+    drop_href: str,
+) -> list[Any]:
+    """The Points view: the fact strip, the member-scope line, and the
+    trials × final-scalars table with its params → outcome plot."""
+    return [
+        _meta_strip(
+            [
+                ("Members", len(tray["sweeps"])),
+                ("Factor", record.factor),
+                ("Outcome", record.outcome),
+            ]
         ),
-        getRowId=_SWEEP_ROW_ID,
-        className="ag-theme-alpine grid",
+        _scope_note_row(member_label, drop_href),
+        analysis.points_tab(service, project, tray, record.outcome),
+    ]
+
+
+def _editor_table(
+    summaries: Sequence[SweepSummary],
+    picked: Sequence[str],
+    project: str,
+    now_ns: int,
+) -> html.Div:
+    """The project sweep table with a working checkbox per row; the
+    boxes start at the saved membership."""
+    saved = set(picked)
+    rows = []
+    for summary in sorted(summaries, key=lambda row: row.name.casefold()):
+        sweep_id = str(summary.sweep_id)
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(
+                        dcc.Checklist(
+                            id={"inv-edit-pick": sweep_id},
+                            options=[{"label": "", "value": sweep_id}],
+                            value=[sweep_id] if sweep_id in saved else [],
+                            className="pick",
+                        ),
+                        className="selbox",
+                    ),
+                    html.Td(
+                        [
+                            html.A(
+                                summary.name,
+                                href=sweep_page_url(project, sweep_id),
+                            ),
+                            *_curation_badges(
+                                (summary.invalid, "invalid"),
+                                (summary.archived, "archived"),
+                            ),
+                        ]
+                    ),
+                    html.Td(page.status_dot(summary.state)),
+                    html.Td(
+                        _fraction(summary.succeeded, summary.expected_trials),
+                        className="num",
+                    ),
+                    html.Td(
+                        _rel(summary.latest_submitted_ns, now_ns),
+                        className="num",
+                    ),
+                ],
+                id={"inv-edit-row": sweep_id},
+            )
+        )
+    return page.scroll_table(
+        [
+            html.Th("", className="selbox"),
+            page.head_cell("Sweep"),
+            page.head_cell("Status"),
+            page.head_cell("Trials", numeric=True),
+            page.head_cell("Last activity", numeric=True),
+        ],
+        rows,
+        sortable=True,
     )
 
 
@@ -2542,87 +2648,101 @@ def investigation_edit_page(
     project: str,
     investigation_id: str | None,
     seed_sweeps: Sequence[str],
+    now_ns: int | None = None,
 ) -> html.Div:
     """The member editor: create (``/new``, seeded from ?sweeps=) and
     edit (``/<id>/edit``) are distinct flows — a create never overwrites
     an existing investigation, and nothing is written until Save."""
-    if not project:
-        return html.Div(
-            components.Empty("Pick a project in the header to edit investigations.")
-        )
-    summaries = service.sweep_overview(project)
-    if investigation_id is None:
-        picked = sorted(set(seed_sweeps))
-        state = {
-            "picked": picked,
-            "saved": [],
-            "name": "",
-            "factor": None,
-            "outcome": None,
-        }
-        preview = service.investigation_preview(project, picked)
-        return html.Div(
-            [
-                investigation_crumb(project, "New Investigation"),
-                html.H2("New Investigation"),
+    now = time.time_ns() if now_ns is None else now_ns
+    crumbs = [
+        (project, f"{ROUTES_BASE}/project/{quote(project, safe='')}"),
+        ("Investigations", investigations_index_href(project)),
+    ]
+    try:
+        summaries = service.sweep_overview(project)
+        if investigation_id is None:
+            picked = sorted(set(seed_sweeps))
+            state = {
+                "picked": picked,
+                "saved": [],
+                "name": "",
+                "factor": None,
+                "outcome": None,
+            }
+            preview = service.investigation_preview(project, picked)
+            body: list[Any] = [
+                page.breadcrumbs([*crumbs, "New Investigation"]),
+                html.H1("New Investigation"),
                 html.P(
                     "Drafts stay local until Save; a name this project's "
                     "investigations already use cannot be created again with "
                     "a different body.",
-                    className="inv-sub",
+                    className="sub",
                 ),
-                html.Div(
-                    [
-                        dcc.Input(
-                            id={"inv-edit-name": "name"},
-                            value="",
-                            placeholder="Investigation name…",
-                            className="quick-filter inv-name",
-                        ),
-                        dcc.Dropdown(
-                            id={"inv-edit-factor": "factor"},
-                            options=editor_factor_options(preview),
-                            placeholder="Comparison factor…",
-                            className="inv-dd",
-                        ),
-                        dcc.Dropdown(
-                            id={"inv-edit-outcome": "outcome"},
-                            options=editor_outcome_options(preview),
-                            placeholder="Outcome key…",
-                            className="inv-dd",
-                        ),
-                    ],
-                    className="inv-create-controls",
+                page.limit_row(
+                    html.Span("Name", className="annotate"),
+                    dcc.Input(
+                        id={"inv-edit-name": "name"},
+                        value="",
+                        placeholder="Investigation name…",
+                        className="inv-name",
+                    ),
                 ),
-                *_editor_body(project, summaries, state, preview, editing=False),
-            ],
-            className="page investigation-edit",
-        )
-    detail = service.investigation_detail(investigation_id)
-    record = detail.investigation
-    members = [str(sweep) for sweep in record.members]
-    state = {
-        "picked": list(members),
-        "saved": list(members),
-        "name": record.name,
-        "factor": record.factor,
-        "outcome": record.outcome,
-    }
-    preview = service.investigation_preview(project, members)
-    return html.Div(
-        [
-            investigation_crumb(project, record.name, "Edit members"),
-            html.H2("Edit members"),
+                page.limit_row(
+                    html.Span("Comparison factor", className="annotate"),
+                    dcc.Dropdown(
+                        id={"inv-edit-factor": "factor"},
+                        options=editor_factor_options(preview),
+                        placeholder="Comparison factor…",
+                        className="inv-dd",
+                    ),
+                ),
+                page.limit_row(
+                    html.Span("Outcome key", className="annotate"),
+                    dcc.Dropdown(
+                        id={"inv-edit-outcome": "outcome"},
+                        options=editor_outcome_options(preview),
+                        placeholder="Outcome key…",
+                        className="inv-dd",
+                    ),
+                ),
+                *_editor_body(
+                    project, summaries, state, preview, editing=False, now_ns=now
+                ),
+            ]
+            return page.page_shell(
+                "Investigations", project, *body, scope="Investigation"
+            )
+        detail = service.investigation_detail(investigation_id)
+        record = detail.investigation
+        members = [str(sweep) for sweep in record.members]
+        state = {
+            "picked": list(members),
+            "saved": list(members),
+            "name": record.name,
+            "factor": record.factor,
+            "outcome": record.outcome,
+        }
+        preview = service.investigation_preview(project, members)
+        body = [
+            page.breadcrumbs([*crumbs, record.name, "Edit members"]),
+            html.H1("Edit members"),
             html.P(
                 f"{record.name} · factor {record.factor} · outcome "
                 f"{record.outcome} — the name, factor, and outcome are "
                 "fixed; membership edits save explicitly.",
-                className="inv-sub",
+                className="sub",
             ),
-            *_editor_body(project, summaries, state, preview, editing=True),
-        ],
-        className="page investigation-edit",
-    )
+            *_editor_body(project, summaries, state, preview, editing=True, now_ns=now),
+        ]
+    except CurationUnavailableError as error:
+        return page.page_shell(
+            "Investigations",
+            project,
+            components.Empty(str(error)),
+            scope="Investigation",
+        )
+    return page.page_shell("Investigations", project, *body, scope="Investigation")
 
 
 def _editor_body(
@@ -2632,11 +2752,25 @@ def _editor_body(
     preview: InvestigationPreview,
     *,
     editing: bool,
+    now_ns: int,
 ) -> list[Any]:
     """Controls shared by the create and edit flows: the deterministic
-    preview, the project sweep table with the working selection, and
-    the save row."""
-    rows = editor_rows(summaries, state["saved"], project)
+    preview, the working-set seg and save row, and the project sweep
+    table with a checkbox per sweep."""
+    seg = html.Div(
+        [
+            html.A(
+                f"All sweeps ({len(summaries)})",
+                id={"inv-edit-mode": "all"},
+                className="on",
+            ),
+            html.A(
+                f"Members ({len(state['picked'])})",
+                id={"inv-edit-mode": "members"},
+            ),
+        ],
+        className="seg",
+    )
     return [
         dcc.Store(id={"inv-edit-state": "members"}, data=state),
         html.Div(
@@ -2644,50 +2778,43 @@ def _editor_body(
             id={"inv-edit-preview": "preview"},
             className="inv-preview",
         ),
-        html.Section(
-            [
-                html.H3("Project sweeps"),
-                _editor_grid(rows),
-                html.P(
-                    "Checkboxes edit the working member set; the Member "
-                    "column shows what is saved. Selection never mutates "
-                    "membership directly.",
-                    className="hint",
-                ),
-            ],
-            className="section editor-sweeps",
+        page.limit_row(
+            seg,
+            html.Span(className="spacer"),
+            html.Button(
+                "Save members" if editing else "Create investigation",
+                id={"inv-edit-save": "save"},
+                n_clicks=0,
+                disabled=not editing,
+                className="btn-primary",
+            ),
+            *(
+                [
+                    html.Button(
+                        "Discard changes",
+                        id={"inv-edit-discard": "discard"},
+                        n_clicks=0,
+                        className="btn",
+                    )
+                ]
+                if editing
+                else []
+            ),
+            html.Span(id={"inv-edit-message": "message"}),
         ),
-        html.Div(
-            [
-                html.Button(
-                    "Save members" if editing else "Create investigation",
-                    id={"inv-edit-save": "save"},
-                    n_clicks=0,
-                    disabled=not editing,
-                    className="btn-primary",
-                ),
-                *(
-                    [
-                        html.Button(
-                            "Discard changes",
-                            id={"inv-edit-discard": "discard"},
-                            n_clicks=0,
-                            className="btn-link",
-                        )
-                    ]
-                    if editing
-                    else []
-                ),
-                html.Span(id={"inv-edit-message": "message"}),
-            ],
-            className="inv-save-row",
+        _editor_table(summaries, state["picked"], project, now_ns),
+        html.P(
+            "Checkboxes edit the working member set; the seg narrows the "
+            "view to the current picks. Selection never mutates "
+            "membership directly.",
+            className="annotate",
         ),
         html.P(
             html.A(
                 f"Back to {project} investigations",
                 href=investigations_index_href(project),
             ),
-            className="hint",
+            className="annotate",
         ),
     ]
 
@@ -2834,115 +2961,100 @@ def series_tab(
     )
 
 
-_SEARCH_COLUMNS: list[SortColumn] = [
-    SortColumn(
-        "name",
-        "Sweep",
-        "string",
-        definition={"cellRenderer": {"function": "renderLinkCell(params)"}},
-    ),
-    SortColumn("state", "State", "string"),
-    SortColumn("completed", "Completed", "numeric"),
-    SortColumn(
-        "expected_trials",
-        "Expected trials",
-        "numeric",
-        definition={"valueFormatter": {"function": "renderMissing(x)"}},
-    ),
-    SortColumn(
-        "last_activity_ns",
-        "Last activity",
-        "ns",
-        definition={"valueFormatter": {"function": "renderRelative(x)"}},
-    ),
-]
-
-
 def search_rows(
     summaries: Sequence[SweepSummary],
     project: str,
     investigation_id: str,
-) -> list[dict[str, Any]]:
-    """One Search row per member sweep; the link opens the sweep hub
-    carrying the investigation return path."""
-
-    def hub_href(sweep_id: str) -> str:
-        doc = analysis.with_focus(
-            analysis.default_view_state(), {"kind": "sweep", "id": sweep_id}
-        )
-        doc = analysis.edited_view(doc, {"via": investigation_id})
-        return f"{ROUTES_BASE}/project/{project}?view={analysis.encode_view_state(doc)}"
-
-    return [
-        {
-            "sweep_id": summary.sweep_id,
-            "name": summary.name,
-            "link_href": hub_href(summary.sweep_id),
-            "link_label": summary.name,
-            "state": summary.state,
-            "completed": summary.succeeded,
-            "expected_trials": summary.expected_trials,
-            "last_activity_ns": summary.latest_submitted_ns,
-        }
-        for summary in sorted(summaries, key=lambda row: row.name.casefold())
+    needle: str,
+    now_ns: int,
+) -> tuple[list[html.Tr], int, int]:
+    """(rows, shown, total) for the member filter; the sweep links
+    carry the investigation return path."""
+    ordered = sorted(summaries, key=lambda row: row.name.casefold())
+    shown = [
+        summary
+        for summary in ordered
+        if not needle or needle in summary.name.casefold()
     ]
+    rows = [
+        html.Tr(
+            [
+                html.Td(
+                    html.A(
+                        summary.name,
+                        href=sweep_page_url(
+                            project, summary.sweep_id, investigation_id
+                        ),
+                    )
+                ),
+                html.Td(summary.state),
+                html.Td(
+                    _fraction(summary.succeeded, summary.expected_trials),
+                    className="num",
+                ),
+                html.Td(_rel(summary.latest_submitted_ns, now_ns), className="num"),
+            ]
+        )
+        for summary in shown
+    ]
+    return rows, len(shown), len(ordered)
 
 
-def search_region(
+def search_body(
     service: DashboardService,
     project: str,
-    investigation_id: str,
-    members: Sequence[Any] | None,
-    member: str | None = None,
-) -> html.Div:
-    """The minimal member filter: a debounced name filter over the
-    member sweeps only (the scoped member alone when narrowed); a
-    sweep's link opens the hub carrying the investigation return
-    path."""
-    member_ids = {str(sweep) for sweep in members or ()}
-    if member and member in member_ids:
-        member_ids = {member}
-    rows = search_rows(
-        [
-            summary
-            for summary in service.sweep_overview(project)
-            if summary.sweep_id in member_ids
-        ],
-        project,
-        investigation_id,
+    record: InvestigationRecord,
+    scoped: str | None,
+    member_label: str | None,
+    drop_href: str,
+    q: str,
+    now_ns: int,
+) -> list[Any]:
+    """The member filter: a debounced name filter over the member
+    sweeps only (the scoped member alone when narrowed); a sweep's
+    link opens the sweep page carrying the investigation return path."""
+    member_ids = {str(sweep) for sweep in record.members}
+    if scoped and str(scoped) in member_ids:
+        member_ids = {str(scoped)}
+    summaries = [
+        summary
+        for summary in service.sweep_overview(project)
+        if summary.sweep_id in member_ids
+    ]
+    rows, shown, total = search_rows(
+        summaries, project, str(record.id), q.strip().casefold(), now_ns
     )
-    return html.Div(
-        [
-            html.P(
-                "Search covers the investigation's members only; the "
-                "project's other sweeps are out of scope here.",
-                className="hint",
+    return [
+        _scope_note_row(member_label, drop_href),
+        page.limit_row(
+            dcc.Input(
+                id="inv-search-q",
+                type="search",
+                placeholder="Filter member sweeps…",
+                value=q,
+                debounce=True,
+                className="inv-search-input",
             ),
-            html.Div(
+            html.Span(
+                f"{shown} of {total} member sweeps",
+                id="inv-search-note",
+                className="annotate",
+            ),
+        ),
+        html.Div(
+            page.scroll_table(
                 [
-                    dcc.Input(
-                        id="inv-search-q",
-                        type="search",
-                        placeholder="Filter member sweeps…",
-                        className="quick-filter",
-                        debounce=True,
-                    ),
-                    html.Span(id="inv-search-note", className="series-status"),
+                    page.head_cell("Sweep"),
+                    page.head_cell("Status"),
+                    page.head_cell("Trials", numeric=True),
+                    page.head_cell("Last activity", numeric=True),
                 ],
-                className="analysis-controls",
+                rows,
+                sortable=True,
             ),
-            AgGrid(
-                id="inv-search-grid",
-                rowData=rows,
-                columnDefs=sortable_columns(_SEARCH_COLUMNS),
-                defaultColDef=_GRID_DEFAULTS,
-                dashGridOptions=components.grid_options(),
-                getRowId=_SWEEP_ROW_ID,
-                className="ag-theme-alpine grid",
-            ),
-        ],
-        className="section",
-    )
+            id="inv-search-results",
+        ),
+    ]
 
 
 def workspace_page(
@@ -3057,17 +3169,11 @@ def workspace_page(
                                 value="overview",
                                 children=[
                                     dcc.Tab(label="Overview", value="overview"),
-                                    dcc.Tab(
-                                        label="Investigations", value="investigations"
-                                    ),
                                     dcc.Tab(label="Exceptions", value="exceptions"),
                                 ],
                             ),
                             html.Div(
                                 id="workspace-overview", style={"display": "block"}
-                            ),
-                            html.Div(
-                                id="workspace-investigations", style={"display": "none"}
                             ),
                             html.Div(
                                 id="workspace-exceptions", style={"display": "none"}

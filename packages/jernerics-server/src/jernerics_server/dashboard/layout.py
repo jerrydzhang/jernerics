@@ -29,6 +29,7 @@ def shell() -> html.Div:
                 href=f"{ROUTES_BASE}/assets/favicon.svg",
             ),
             dcc.Location(id="url", refresh=False),
+            dcc.Location(id="navigate", refresh="callback-nav"),
             html.Header(
                 className="nav",
                 children=[

@@ -2075,7 +2075,6 @@ class TestScopeBar:
         )
         assert [tab.value for tab in tabs.children] == [
             "overview",
-            "investigations",
             "exceptions",
         ]
 
@@ -2468,8 +2467,9 @@ class TestWorkspaceRouteServes:
         rendered = str(page)
         assert "analysis-selection-store" not in rendered
         assert "Project lab" in rendered
-        assert "Investigations" in rendered
         assert "Exceptions" in rendered
+        # the Investigations tab moved to its own route (rewrite epic)
+        assert "Investigations" not in rendered
         assert "analysis-scope-bar" in rendered
         assert "Browse scope" in rendered
         assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
