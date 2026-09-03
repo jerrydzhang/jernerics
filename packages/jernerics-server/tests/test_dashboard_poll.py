@@ -513,6 +513,11 @@ class TestPageChromeSwap:
 
     def test_legacy_pages_restore_the_nav(self, authed, callback_map):
         client, _store = authed
-        response, payload = self._swap(client, callback_map, WORKSPACE)
+        # The workspace overview cut over to the new shell (R2), so no
+        # legacy page remains to restore the nav; the not-found surface
+        # is the one page still on legacy chrome.
+        response, payload = self._swap(
+            client, callback_map, "/dashboard/does-not-exist"
+        )
         assert response.status_code == 200
         assert payload["nav"]["style"] == {}
