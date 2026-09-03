@@ -87,6 +87,8 @@ _INVESTIGATION_COLUMNS = (
     "updated_ns",
 )
 
+_SUBMISSION_VALUE_COLUMNS = ("git_hash", "config_source")
+
 
 class QueryNotAuthorizedError(StoreError):
     """The read-only query authorizer rejected a statement."""
@@ -712,6 +714,121 @@ class Store:
             except BaseException:
                 self._con.execute("ROLLBACK")
                 raise
+
+    def sweep_identities(self, sweep_ids: Sequence[str]) -> list[tuple[str, str, str]]:
+        """(sweep_id, project, name) rows for the given sweep ids."""
+        ids = list(dict.fromkeys(sweep_ids))
+        if not ids:
+            return []
+        placeholders = ", ".join("?" * len(ids))
+        with self._lock:
+            return self._con.execute(
+                "SELECT sweep_id, project, name FROM sweeps "
+                f"WHERE sweep_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+
+    def distinct_submission_values(
+        self, column: str, sweep_ids: Sequence[str]
+    ) -> list[tuple[str]]:
+        """Distinct non-null ``column`` values across the sweeps' submissions."""
+        if column not in _SUBMISSION_VALUE_COLUMNS:
+            raise StoreError(f"not a submissions value column: {column!r}")
+        ids = list(dict.fromkeys(sweep_ids))
+        if not ids:
+            return []
+        placeholders = ", ".join("?" * len(ids))
+        with self._lock:
+            return self._con.execute(
+                f"SELECT DISTINCT s.{column} FROM submissions s "
+                f"WHERE s.{column} IS NOT NULL "
+                f"AND s.sweep_id IN ({placeholders}) "
+                f"ORDER BY s.{column}",
+                ids,
+            ).fetchall()
+
+    def manual_param_key_values(
+        self, sweep_ids: Sequence[str]
+    ) -> list[tuple[str, str, str]]:
+        """(key, sweep_id, value_json) manual params of completed trials."""
+        ids = list(dict.fromkeys(sweep_ids))
+        if not ids:
+            return []
+        placeholders = ", ".join("?" * len(ids))
+        with self._lock:
+            return self._con.execute(
+                "SELECT tp.key, t.sweep_id, tp.value_json FROM trial_params tp "
+                "JOIN trials t ON t.trial_id = tp.trial_id "
+                "WHERE tp.kind = 'manual' AND t.state = 'completed' "
+                f"AND t.sweep_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+
+    def sweep_ids_with_config_source(
+        self, sweep_ids: Sequence[str]
+    ) -> list[tuple[str]]:
+        """Sweep ids among the given carrying a submission config source."""
+        ids = list(dict.fromkeys(sweep_ids))
+        if not ids:
+            return []
+        placeholders = ", ".join("?" * len(ids))
+        with self._lock:
+            return self._con.execute(
+                "SELECT sweep_id FROM submissions "
+                "WHERE config_source IS NOT NULL "
+                f"AND sweep_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+
+    def value_keys_by_sweep(self, sweep_ids: Sequence[str]) -> list[tuple[str, str]]:
+        """(key, sweep_id) scalar values of completed trials."""
+        ids = list(dict.fromkeys(sweep_ids))
+        if not ids:
+            return []
+        placeholders = ", ".join("?" * len(ids))
+        with self._lock:
+            return self._con.execute(
+                "SELECT tv.key, t.sweep_id FROM tracked_values tv "
+                "JOIN executions e ON e.execution_id = tv.execution_id "
+                "JOIN trials t ON t.trial_id = e.trial_id "
+                "WHERE tv.value_type = 'scalar' AND t.state = 'completed' "
+                f"AND t.sweep_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+
+    def sweep_state_facts(self, sweep_ids: Sequence[str]) -> list[tuple[str, int, int]]:
+        """(state, updated_ns, invalid) rows; invalid flags a curation mark."""
+        ids = list(dict.fromkeys(sweep_ids))
+        if not ids:
+            return []
+        placeholders = ", ".join("?" * len(ids))
+        with self._lock:
+            return self._con.execute(
+                "SELECT s.state, s.updated_ns, c.invalid_ns IS NOT NULL "
+                "FROM sweeps s LEFT JOIN sweep_curation c "
+                "ON c.sweep_id = s.sweep_id "
+                f"WHERE s.sweep_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+
+    def count_sweeps_with_scalar_values(
+        self, key: str, sweep_ids: Sequence[str]
+    ) -> int:
+        """Count of the given sweeps with completed trials logging scalar ``key``."""
+        ids = list(dict.fromkeys(sweep_ids))
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" * len(ids))
+        with self._lock:
+            row = self._con.execute(
+                "SELECT COUNT(DISTINCT t.sweep_id) FROM trials t "
+                "JOIN executions e ON e.trial_id = t.trial_id "
+                "JOIN tracked_values tv ON tv.execution_id = e.execution_id "
+                "WHERE t.state = 'completed' AND tv.value_type = 'scalar' "
+                f"AND tv.key = ? AND t.sweep_id IN ({placeholders})",
+                [key, *ids],
+            ).fetchone()
+        return int(row[0])
 
     def investigations(
         self, project: str, include_archived: bool = False

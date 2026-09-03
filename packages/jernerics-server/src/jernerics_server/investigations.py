@@ -149,17 +149,10 @@ class InvestigationService:
 
     def preview(self, project: str, sweep_ids: Sequence[str]) -> InvestigationPreview:
         ids = list(dict.fromkeys(sweep_ids))
-        rows: dict[str, tuple[str, str]] = {}
-        if ids:
-            _, found = self._store.query(
-                "SELECT sweep_id, project, name FROM sweeps "
-                f"WHERE sweep_id IN ({_placeholders(len(ids))})",
-                ids,
-            )
-            rows = {
-                sweep_id: (sweep_project, name)
-                for sweep_id, sweep_project, name in found
-            }
+        rows = {
+            sweep_id: (sweep_project, name)
+            for sweep_id, sweep_project, name in self._store.sweep_identities(ids)
+        }
         unknown = sorted(sid for sid in ids if sid not in rows)
         foreign = sorted(sid for sid in rows if rows[sid][0] != project)
         members = [sid for sid in ids if rows.get(sid, ("", ""))[0] == project]
@@ -192,14 +185,12 @@ class InvestigationService:
             ("git_hash_divergence", "git_hash"),
             ("config_source_divergence", "config_source"),
         ):
-            _, rows = self._store.query(
-                f"SELECT DISTINCT s.{column} FROM submissions s "
-                f"WHERE s.{column} IS NOT NULL "
-                f"AND s.sweep_id IN ({_placeholders(len(members))}) "
-                f"ORDER BY s.{column}",
-                list(members),
+            values = sorted(
+                {
+                    row[0]
+                    for row in self._store.distinct_submission_values(column, members)
+                }
             )
-            values = sorted({row[0] for row in rows})
             if len(values) > 1:
                 warnings.append(
                     PreviewWarning(
@@ -215,36 +206,20 @@ class InvestigationService:
         if not members:
             return ()
         carriers: dict[tuple[FactorKind, str], set[str]] = {}
-        _, rows = self._store.query(
-            "SELECT tp.key, t.sweep_id, tp.value_json FROM trial_params tp "
-            "JOIN trials t ON t.trial_id = tp.trial_id "
-            "WHERE tp.kind = 'manual' AND t.state = 'completed' "
-            f"AND t.sweep_id IN ({_placeholders(len(members))})",
-            list(members),
-        )
         numeric_keys: set[str] = set()
         param_carriers: dict[str, set[str]] = {}
-        for key, sweep_id, value_json in rows:
+        for key, sweep_id, value_json in self._store.manual_param_key_values(members):
             if not _categorical(json.loads(value_json)):
                 numeric_keys.add(key)
             param_carriers.setdefault(key, set()).add(sweep_id)
         for key, ids in param_carriers.items():
             if key not in numeric_keys:
                 carriers["manual_param", key] = ids
-        _, rows = self._store.query(
-            "SELECT sweep_id FROM submissions "
-            "WHERE config_source IS NOT NULL "
-            f"AND sweep_id IN ({_placeholders(len(members))})",
-            list(members),
-        )
-        carriers["config_source", "config_source"] = {row[0] for row in rows}
-        _, rows = self._store.query(
-            "SELECT sweep_id, name FROM sweeps "
-            f"WHERE sweep_id IN ({_placeholders(len(members))})",
-            list(members),
-        )
+        carriers["config_source", "config_source"] = {
+            row[0] for row in self._store.sweep_ids_with_config_source(members)
+        }
         token_carriers: dict[str, set[str]] = {}
-        for sweep_id, name in rows:
+        for sweep_id, _sweep_project, name in self._store.sweep_identities(members):
             for token in _name_tokens(name):
                 token_carriers.setdefault(token, set()).add(sweep_id)
         for token, ids in token_carriers.items():
@@ -263,16 +238,8 @@ class InvestigationService:
     ) -> tuple[OutcomeCandidate, ...]:
         if not members:
             return ()
-        _, rows = self._store.query(
-            "SELECT tv.key, t.sweep_id FROM tracked_values tv "
-            "JOIN executions e ON e.execution_id = tv.execution_id "
-            "JOIN trials t ON t.trial_id = e.trial_id "
-            "WHERE tv.value_type = 'scalar' AND t.state = 'completed' "
-            f"AND t.sweep_id IN ({_placeholders(len(members))})",
-            list(members),
-        )
         carriers: dict[str, set[str]] = {}
-        for key, sweep_id in rows:
+        for key, sweep_id in self._store.value_keys_by_sweep(members):
             carriers.setdefault(key, set()).add(sweep_id)
         ordered = sorted(carriers.items(), key=lambda item: (-len(item[1]), item[0]))
         return tuple(
@@ -289,27 +256,16 @@ class InvestigationService:
                 invalid=0,
                 last_activity_ns=None,
             )
-        _, rows = self._store.query(
-            "SELECT s.state, s.updated_ns, c.invalid_ns IS NOT NULL FROM sweeps s "
-            "LEFT JOIN sweep_curation c ON c.sweep_id = s.sweep_id "
-            f"WHERE s.sweep_id IN ({_placeholders(len(members))})",
-            members,
-        )
+        rows = self._store.sweep_state_facts(members)
         completed = sum(1 for state, _, _ in rows if state == "completed")
         invalid = sum(1 for _, _, flagged in rows if flagged)
         last_activity = max(updated for _, updated, _ in rows)
-        _, outcome_rows = self._store.query(
-            "SELECT COUNT(DISTINCT t.sweep_id) FROM trials t "
-            "JOIN executions e ON e.trial_id = t.trial_id "
-            "JOIN tracked_values tv ON tv.execution_id = e.execution_id "
-            "WHERE t.state = 'completed' AND tv.value_type = 'scalar' "
-            "AND tv.key = ? "
-            f"AND t.sweep_id IN ({_placeholders(len(members))})",
-            [record.outcome, *members],
+        with_outcome = self._store.count_sweeps_with_scalar_values(
+            record.outcome, members
         )
         return InvestigationCoverage(
             members=len(members),
-            with_outcome=outcome_rows[0][0],
+            with_outcome=with_outcome,
             completed=completed,
             invalid=invalid,
             last_activity_ns=last_activity,
@@ -341,10 +297,6 @@ class InvestigationService:
             updated_ns=data["updated_ns"],
             members=data["members"],
         )
-
-
-def _placeholders(n: int) -> str:
-    return ", ".join("?" * n)
 
 
 def _categorical(value: object) -> bool:
