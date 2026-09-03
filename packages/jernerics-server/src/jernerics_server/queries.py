@@ -150,7 +150,7 @@ _ZERO_COUNTS: dict[str, int] = {
 }
 
 
-_CURRENT_SWEEPS_CTES = (
+_SWEEP_CURATED_CTES = (
     "live AS ("
     "SELECT t.sweep_id AS sweep_id, SUM(t.state = 'waiting') AS waiting, "
     "SUM(t.state = 'running') AS running FROM trials t GROUP BY t.sweep_id), "
@@ -166,14 +166,20 @@ _CURRENT_SWEEPS_CTES = (
     "OR COALESCE(ended.started, 0) > COALESCE(ended.terminal, 0) AS incomplete "
     "FROM sweeps s LEFT JOIN sweep_curation c ON c.sweep_id = s.sweep_id "
     "LEFT JOIN live ON live.sweep_id = s.sweep_id "
-    "LEFT JOIN ended ON ended.sweep_id = s.sweep_id), "
-    "current_sweeps AS ("
+    "LEFT JOIN ended ON ended.sweep_id = s.sweep_id)"
+)
+_ALL_SWEEPS_CTES = _SWEEP_CURATED_CTES + (
+    ", current_sweeps AS (SELECT * FROM sweep_curated)"
+)
+_CURRENT_SWEEPS_CTES = _SWEEP_CURATED_CTES + (
+    ", current_sweeps AS ("
     "SELECT * FROM sweep_curated WHERE incomplete OR NOT (archived OR invalid))"
 )
-"""CTE chain ending in ``current_sweeps``: every sweep with its curation
+"""CTE chains ending in ``current_sweeps``: every sweep with its curation
 facts and the completeness notion :meth:`QueryService.sweep_overview`
 computes; a sweep is current while incomplete, or terminal and neither
-archived nor invalid."""
+archived nor invalid. ``_ALL_SWEEPS_CTES`` keeps curated sweeps in so
+the historical failure roll-up can include them."""
 
 
 class QueryService:
@@ -1044,7 +1050,7 @@ class QueryService:
             "FROM executions e JOIN trials t ON e.trial_id = t.trial_id "
             "JOIN sel ON t.sweep_id = sel.sweep_id) x GROUP BY x.sweep_id), "
             "trial_states AS ("
-            "SELECT t.sweep_id AS sweep_id, "
+            "SELECT t.sweep_id AS sweep_id, COUNT(*) AS trials, "
             "SUM(t.state = 'waiting') AS waiting, "
             "SUM(t.state = 'running') AS running "
             "FROM trials t JOIN sel ON t.sweep_id = sel.sweep_id "
@@ -1056,6 +1062,7 @@ class QueryService:
             "COALESCE(m.n_stale, 0), COALESCE(m.n_unknown, 0), "
             "COALESCE(m.n_succeeded, 0), COALESCE(m.n_failed, 0), "
             "COALESCE(ts.waiting, 0), COALESCE(ts.running, 0), "
+            "COALESCE(ts.trials, 0), "
             "sel.archived_ns, sel.invalid_ns, sel.invalid_reason "
             "FROM sel LEFT JOIN latest_sub ls ON ls.sweep_id = sel.sweep_id "
             "LEFT JOIN jobs j ON j.sweep_id = sel.sweep_id "
@@ -1085,6 +1092,7 @@ class QueryService:
                         "failed",
                         "waiting_trials",
                         "running_trials",
+                        "trials",
                         "archived_ns",
                         "invalid_ns",
                         "invalid_reason",
@@ -1097,11 +1105,16 @@ class QueryService:
         ]
 
     def failed_executions(
-        self, selection: Selection, *, limit: int = 200
+        self,
+        selection: Selection,
+        *,
+        limit: int = 200,
+        include_curated: bool = False,
     ) -> list[dict[str, Any]]:
         """Failed executions under the selection, most recent first;
         sweeps hidden by curation stay out so the list matches the
-        overview roll-up's failed counts."""
+        overview roll-up's failed counts, unless ``include_curated``
+        pulls the project's historical list."""
         sweep_ids = self._selected_sweep_ids(selection)
         if sweep_ids == []:
             return []
@@ -1112,9 +1125,10 @@ class QueryService:
             scope += f" AND cur.sweep_id IN ({_placeholders(len(sweep_ids))})"
         params.append(limit)
         _, rows = self._store.query(
-            f"WITH {_CURRENT_SWEEPS_CTES} "
+            f"WITH {_ALL_SWEEPS_CTES if include_curated else _CURRENT_SWEEPS_CTES} "
             "SELECT cur.sweep_id, cur.name, t.trial_id, t.number, "
-            "e.execution_id, e.failure_kind, e.failure_summary, e.updated_ns "
+            "e.execution_id, e.failure_kind, e.failure_summary, e.exit_code, "
+            "e.hostname, e.updated_ns "
             "FROM executions e "
             "JOIN trials t ON e.trial_id = t.trial_id "
             "JOIN current_sweeps cur ON cur.sweep_id = t.sweep_id "
@@ -1133,6 +1147,8 @@ class QueryService:
                         "execution_id",
                         "failure_kind",
                         "failure_summary",
+                        "exit_code",
+                        "hostname",
                         "updated_ns",
                     ),
                     row,

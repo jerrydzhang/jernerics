@@ -15,7 +15,7 @@ from jernerics_schema import (
     materialize_selection,
 )
 
-from . import analysis, artifacts, components, figures
+from . import analysis, artifacts, components, figures, page
 from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
 from .render import SortColumn, sort_rows, sortable_columns
 from .routes import ROUTES_BASE
@@ -25,7 +25,6 @@ from .service import (
     CurationUnavailableError,
     DashboardService,
     ExecutionDetail,
-    FailedExecutionRow,
     FamilyRow,
     InvestigationPreview,
     InvestigationRow,
@@ -42,7 +41,6 @@ INVESTIGATION_VIEWS = analysis.INVESTIGATION_VIEWS
 _INCOMPLETE_TRIAL_STATES = ("waiting", "running")
 
 
-_FAILED_VIEW_LIMIT = 200
 _OVERVIEW_PAGE_SIZE = 25
 _MONITORING_ORDER = ("active", "quiet", "stale", "failed", "succeeded", UNKNOWN)
 _STATE_TILE_LABELS = {
@@ -1394,119 +1392,6 @@ def scoped_sweeps(
     ]
 
 
-def failed_view_section(
-    panel: list[Any] | None = None, *, open: bool = False
-) -> html.Details:
-    """The failure-triage view; the Exceptions tab mounts it open with
-    its panel already filled, and a curation action re-renders it."""
-    return html.Details(
-        [
-            html.Summary("Failed executions"),
-            dcc.Input(
-                id="failed-reason",
-                type="text",
-                placeholder="Reason (required for Mark invalid)",
-                className="reason-input",
-            ),
-            html.Div(panel or [], id="failed-trials-panel"),
-        ],
-        id="failed-trials-view",
-        open=open,
-    )
-
-
-def failed_view_panel(
-    service: DashboardService,
-    project: str,
-    scoped: Sequence[SweepSummary],
-    now_ns: int,
-    message: html.Div | None = None,
-) -> list[Any]:
-    """Children of the failure view: per-sweep groups of failed
-    executions — kind and summary without opening each execution, a
-    focus link per trial, one mark-invalid action per sweep, and
-    select-all/batch controls for invalidating many sweeps at once."""
-    rows = service.failed_executions(
-        project, [s.sweep_id for s in scoped], limit=_FAILED_VIEW_LIMIT
-    )
-    children: list[Any] = []
-    if message is not None:
-        children.append(message)
-    names = {s.sweep_id: s.name for s in scoped}
-    by_sweep: dict[str, list[FailedExecutionRow]] = {}
-    for row in rows:
-        by_sweep.setdefault(row.sweep_id, []).append(row)
-    if by_sweep:
-        children.append(
-            html.Div(
-                [
-                    dcc.Checklist(
-                        id="failed-select-all",
-                        options=[{"label": "Select all failed sweeps", "value": "all"}],
-                        value=[],
-                    ),
-                    html.Button(
-                        "Mark selected invalid",
-                        id="failed-invalid-batch",
-                        className="action",
-                    ),
-                ],
-                className="failed-controls",
-            )
-        )
-    for sweep_id, group in by_sweep.items():
-        children.append(
-            html.Div(
-                [
-                    html.P(
-                        [
-                            focus_button(
-                                names.get(sweep_id, short_id(sweep_id)),
-                                "sweep",
-                                sweep_id,
-                            ),
-                            dcc.Checklist(
-                                id={"failed-sweep": sweep_id},
-                                options=[{"label": "", "value": sweep_id}],
-                                value=[],
-                                className="failed-sweep-check",
-                            ),
-                            html.Button(
-                                "Mark sweep invalid",
-                                id={"failed-invalid": sweep_id},
-                                className="action",
-                            ),
-                        ],
-                        className="failed-sweep-head",
-                    ),
-                    components.DataTable(
-                        ("Trial", "#", "Kind", "Summary", "Last activity"),
-                        [
-                            (
-                                focus_button(
-                                    f"#{row.trial_number}", "trial", row.trial_id
-                                ),
-                                row.trial_number,
-                                row.failure_kind or UNKNOWN,
-                                row.failure_summary or MISSING,
-                                components.relative_time(row.updated_ns, now_ns),
-                            )
-                            for row in group
-                        ],
-                    ),
-                ],
-                className="failed-sweep",
-            )
-        )
-    if not rows:
-        children.append(components.Empty("No failed executions in scope."))
-    elif len(rows) >= _FAILED_VIEW_LIMIT:
-        children.append(
-            html.P("Showing the most recent; narrow the scope.", className="hint")
-        )
-    return children
-
-
 def overview_tab(
     service: DashboardService,
     project: str | None,
@@ -1789,33 +1674,6 @@ def investigations_tab(service: DashboardService, project: str | None) -> html.D
                 className="section investigations-unorganized",
             ),
         ],
-    )
-
-
-def exceptions_tab(
-    service: DashboardService,
-    project: str | None,
-    tray: dict[str, Any] | None,
-    now_ns: int,
-) -> html.Div:
-    """Project-scoped failure triage: the failure view, mounted open
-    with its panel already filled (the Overview tiles filter instead of
-    opening it)."""
-    if not project:
-        return html.Div(
-            components.Empty("Pick a project in the header to browse its exceptions.")
-        )
-    scoped = scoped_sweeps(service.sweep_overview(project), tray)
-    if not any(summary.failed for summary in scoped):
-        return html.Div(
-            components.Empty(f"No failed executions in project {project}."),
-            className="section exceptions-view",
-        )
-    return html.Div(
-        failed_view_section(
-            failed_view_panel(service, project, scoped, now_ns), open=True
-        ),
-        className="section exceptions-view",
     )
 
 
@@ -3052,25 +2910,32 @@ def workspace_page(
                     ),
                     html.Div(
                         [
-                            dcc.Tabs(
-                                id={"analysis-tabs": "canvas"},
-                                value="overview",
-                                children=[
-                                    dcc.Tab(label="Overview", value="overview"),
-                                    dcc.Tab(
-                                        label="Investigations", value="investigations"
+                            html.Div(
+                                [
+                                    dcc.Tabs(
+                                        id={"analysis-tabs": "canvas"},
+                                        value="overview",
+                                        children=[
+                                            dcc.Tab(label="Overview", value="overview"),
+                                            dcc.Tab(
+                                                label="Investigations",
+                                                value="investigations",
+                                            ),
+                                        ],
                                     ),
-                                    dcc.Tab(label="Exceptions", value="exceptions"),
+                                    html.A(
+                                        "Exceptions",
+                                        href=page.tab_href("Exceptions", project),
+                                        className="workspace-tab-link",
+                                    ),
                                 ],
+                                className="workspace-tab-row",
                             ),
                             html.Div(
                                 id="workspace-overview", style={"display": "block"}
                             ),
                             html.Div(
                                 id="workspace-investigations", style={"display": "none"}
-                            ),
-                            html.Div(
-                                id="workspace-exceptions", style={"display": "none"}
                             ),
                         ],
                         className="workspace-canvas",

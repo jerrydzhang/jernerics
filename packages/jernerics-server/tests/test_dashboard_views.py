@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from dash import dcc, html
+from dash import html
 from dash.development.base_component import Component
 from dash_ag_grid import AgGrid
 from fastapi.testclient import TestClient
@@ -46,7 +46,6 @@ from jernerics_server.dashboard.callbacks import (
     lineage_panel,
     page_content,
     remember_workspace,
-    selected_failed_sweeps,
     sort_from_columns,
     tray_from_grid,
     workspace_state,
@@ -80,8 +79,6 @@ from jernerics_server.dashboard.workspace import (
     curation_note,
     curation_transitions,
     detail_curation,
-    exceptions_tab,
-    failed_view_panel,
     family_grid_row,
     inspector_content,
     overview_filter_matches,
@@ -655,12 +652,13 @@ class TestWorkspaceLayout:
     def test_workspace_mounts_browser_tabs_and_inspector_once(self, service):
         page, polls = page_content("/dashboard/project/ops", service)
         rendered = str(page)
-        for tab in ("overview", "investigations", "exceptions"):
+        for tab in ("overview", "investigations"):
             assert f"value='{tab}'" in rendered
         for gone in ("catalog", "series", "points", "optuna", "python"):
             assert f"value='{gone}'" not in rendered
         assert "id='workspace-investigations'" in rendered
-        assert "id='workspace-exceptions'" in rendered
+        # The Exceptions entry routes to the new-shell page.
+        assert f"href='{ROUTES_BASE}/project/ops/exceptions'" in rendered
         assert "id='sweep-grid'" in rendered
         assert "id='analysis-family-grid'" in rendered
         assert "id='analysis-expand'" in rendered
@@ -1223,7 +1221,6 @@ class TestOverviewTab:
         assert sections == ["section overview-sweeps"]
         rendered = str(overview)
         assert "Sweeps" in rendered
-        assert "failed-trials-view" not in rendered  # triage lives in Exceptions
 
     def test_tiles_report_the_scope_facts(self, service):
         tiles = {
@@ -2151,33 +2148,48 @@ class TestMountedCurationJourney:
         assert picked == [str(SWEEP_B)]
 
 
-class TestFailureView:
-    """jernerics-g5rw.7: the Exceptions tab carries the scope-wide
-    failure triage view; kind and summary read inline, trials focus in
-    one click, and marking the sweep invalid acts from that context.
-    jernerics-zdpq: many parallel failures from one shared bug die in
-    one batched mark-invalid — group checkboxes, a select-all, and a
-    single apply_curation call."""
+class TestExceptionsPage:
+    """jernerics-cq78: the Exceptions page groups the scope-wide failed
+    executions by cause, sweep, or host over Active/All segments; the
+    working selection feeds one mark-invalid action, and ``?sweep=``
+    pre-expands a deep-linked sweep's group."""
 
     _dispatch = TestMountedCurationJourney._dispatch
     _callback_key = staticmethod(TestMountedCurationJourney._callback_key)
     _callback_map = TestMountedCurationJourney._callback_map
 
-    def test_service_lists_failed_executions_with_kind_and_summary(self, service):
-        rows = service.failed_executions("ops")
-        assert [(row.trial_number, row.failure_kind) for row in rows] == [
-            (1, "exception")
-        ]
-        row = rows[0]
-        assert row.sweep_id == str(SWEEP_A)
-        assert row.sweep_name == "alpha"
-        assert row.trial_id == str(F0)
-        assert row.failure_summary == "boom: divide by zero"
+    _TRIAGE_OUTPUTS = {
+        "exc-groupsets.children",
+        "exc-note.children",
+        "exc-selection-count.children",
+    }
 
-    def test_hidden_curated_sweep_failures_stay_out(self, curated):
-        store, service = curated
+    def _triage_dispatch(self, client, callback_map, sweeps, reason):
+        return self._dispatch(
+            client,
+            callback_map,
+            self._TRIAGE_OUTPUTS,
+            inputs=[
+                {
+                    "id": "exc-selection-store",
+                    "property": "data",
+                    "value": {"sweeps": sweeps, "reason": reason, "mode": "cause"},
+                }
+            ],
+            state=[
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"{ROUTES_BASE}/project/ops/exceptions",
+                },
+                {"id": "url", "property": "search", "value": ""},
+            ],
+        )
+
+    @staticmethod
+    def _ingest_failure(store, trial_id: uuid.UUID) -> None:
         now = datetime.now(UTC)
-        failure = uuid.uuid4()
+        execution = uuid.uuid4()
         result = IngestService(store).apply(
             IngestRequest(
                 protocol_version=PROTOCOL_VERSION,
@@ -2185,15 +2197,15 @@ class TestFailureView:
                     ExecutionStartEvent(
                         event_id=uuid.uuid4(),
                         recorded_at=now,
-                        execution_id=failure,
-                        trial_id=CUR_T1,
+                        execution_id=execution,
+                        trial_id=trial_id,
                         hostname="node01",
                         started_at=now,
                     ),
                     ExecutionEndEvent(
                         event_id=uuid.uuid4(),
                         recorded_at=now,
-                        execution_id=failure,
+                        execution_id=execution,
                         ended_at=now,
                         outcome=ExecutionOutcome.FAILURE,
                         exit_code=1,
@@ -2204,133 +2216,10 @@ class TestFailureView:
             )
         )
         assert not result.conflicts
-        assert [row.failure_kind for row in service.failed_executions("curate")] == [
-            "timeout"
-        ]
-        store.mark_sweep_invalid(str(CUR_SWEEP_OLD), "bad shard map")
-        assert service.failed_executions("curate") == []
-
-    def test_panel_groups_failures_with_focus_and_summary(self, service):
-        scoped = scoped_sweeps(service.sweep_overview("ops"), None)
-        rendered = str(failed_view_panel(service, "ops", scoped, 0))
-        assert "boom: divide by zero" in rendered
-        assert "exception" in rendered
-        assert _focus_ref("trial", F0) in rendered
-        assert _focus_ref("sweep", SWEEP_A) in rendered
-        assert "Mark sweep invalid" in rendered
-
-    def test_exceptions_tab_embeds_filled_failure_view(self, service):
-        rendered = exceptions_tab(service, "ops", {"sweeps": []}, 0)
-        details = next(
-            node
-            for node in _walk(rendered)
-            if getattr(node, "id", None) == "failed-trials-view"
-        )
-        assert getattr(details, "open", False) is True
-        children = str(details)
-        assert "boom: divide by zero" in children
-        assert "exception" in children
-        assert "Mark sweep invalid" in children
-
-    def test_failure_view_absent_without_failures(self, curated):
-        _store, service = curated
-        rendered = str(exceptions_tab(service, "curate", {"sweeps": []}, 0))
-        assert "failed-trials-view" not in rendered
-        assert "No failed executions in project curate." in rendered
-
-    _FAILED_OUTPUTS = {
-        "failed-trials-panel.children",
-        "sweep-grid.rowData",
-        "sweep-grid.selectedRows",
-        "workspace-curation-note.children",
-        '{"failed-sweep":["ALL"]}.value',
-    }
-
-    def _failed_state(self, reason: str) -> list[dict]:
-        return [
-            {"id": "failed-reason", "property": "value", "value": reason},
-            {"id": "project-store", "property": "data", "value": "ops"},
-            {"id": "view-store", "property": "data", "value": None},
-            {"id": "sweep-grid", "property": "selectedRows", "value": None},
-        ]
-
-    def _failed_inputs(
-        self,
-        group_ids: list[str],
-        *,
-        batch: int = 0,
-        checked: set[str] | None = None,
-        select_all: list | None = None,
-    ) -> list:
-        picked = checked or set()
-        return [
-            [
-                {"id": {"failed-invalid": sid}, "property": "n_clicks", "value": 0}
-                for sid in group_ids
-            ],
-            {"id": "failed-invalid-batch", "property": "n_clicks", "value": batch},
-            [
-                {
-                    "id": {"failed-sweep": sid},
-                    "property": "value",
-                    "value": [sid] if sid in picked else [],
-                }
-                for sid in group_ids
-            ],
-            {
-                "id": "failed-select-all",
-                "property": "value",
-                "value": select_all or [],
-            },
-        ]
-
-    def _failed_payload(
-        self,
-        callback_map,
-        inputs,
-        state,
-        changed,
-        group_ids: list[str],
-    ) -> dict:
-        """Dispatch body the way the browser sends it: the wildcard
-        output expands to one concrete entry per mounted checklist."""
-        key = self._callback_key(callback_map, self._FAILED_OUTPUTS)
-        specs = [
-            part.split("@")[0]
-            for part in key.removeprefix("..").removesuffix("..").split("...")
-            if part
-        ]
-        outputs = []
-        for spec in specs:
-            prop = spec.rsplit(".", 1)[1]
-            if spec.startswith("{"):
-                outputs.append(
-                    [
-                        {"id": {"failed-sweep": sid}, "property": prop}
-                        for sid in group_ids
-                    ]
-                )
-            else:
-                outputs.append({"id": spec.rsplit(".", 1)[0], "property": prop})
-        return {
-            "output": key,
-            "outputs": outputs,
-            "inputs": inputs,
-            "state": list(state),
-            "changedPropIds": changed,
-        }
-
-    def _failed_dispatch(self, client, callback_map, inputs, state, changed, group_ids):
-        response = client.post(
-            "/dashboard/_dash-update-component",
-            json=self._failed_payload(callback_map, inputs, state, changed, group_ids),
-        )
-        assert response.status_code == 200, response.text
-        return response.json()["response"]
 
     def _fail_sweep_b(self, store) -> None:
         """A failed execution on beta's only trial (T9) so the ops scope
-        carries two failed-sweep groups."""
+        carries two failed sweeps."""
         now = datetime.now(UTC)
         execution = uuid.uuid4()
         result = IngestService(store).apply(
@@ -2360,196 +2249,153 @@ class TestFailureView:
         )
         assert not result.conflicts
 
-    def test_panel_renders_batch_controls_and_group_checkboxes(self, store_and_service):
-        store, service = store_and_service
-        self._fail_sweep_b(store)
-        scoped = scoped_sweeps(service.sweep_overview("ops"), None)
-        rendered = failed_view_panel(service, "ops", scoped, 0)
-        check_ids = [
-            node.id
-            for node in _walk(html.Div(rendered))
-            if isinstance(node, dcc.Checklist)
+    def test_service_lists_failed_executions_with_kind_and_summary(self, service):
+        rows = service.failed_executions("ops")
+        assert [(row.trial_number, row.failure_kind) for row in rows] == [
+            (1, "exception")
         ]
-        assert {"failed-sweep": str(SWEEP_A)} in check_ids
-        assert {"failed-sweep": str(SWEEP_B)} in check_ids
-        assert "failed-select-all" in check_ids
-        button_ids = [
-            node.id
-            for node in _walk(html.Div(rendered))
-            if isinstance(node, html.Button)
+        row = rows[0]
+        assert row.sweep_id == str(SWEEP_A)
+        assert row.sweep_name == "alpha"
+        assert row.trial_id == str(F0)
+        assert row.exit_code == 1
+        assert row.hostname == "node01"
+        assert row.failure_summary == "boom: divide by zero"
+
+    def test_hidden_curated_sweep_failures_stay_out(self, curated):
+        store, service = curated
+        self._ingest_failure(store, CUR_T1)
+        assert [row.failure_kind for row in service.failed_executions("curate")] == [
+            "timeout"
         ]
-        assert "failed-invalid-batch" in button_ids
-        assert {"failed-invalid": str(SWEEP_A)} in button_ids
+        store.mark_sweep_invalid(str(CUR_SWEEP_OLD), "bad shard map")
+        assert service.failed_executions("curate") == []
+        historical = service.failed_executions("curate", include_curated=True)
+        assert [row.failure_kind for row in historical] == ["timeout"]
 
-    def test_panel_omits_batch_controls_without_failures(self, service):
-        beta = scoped_sweeps(service.sweep_overview("ops"), {"sweeps": [str(SWEEP_B)]})
-        rendered = str(failed_view_panel(service, "ops", beta, 0))
-        assert "No failed executions in scope." in rendered
-        assert "failed-select-all" not in rendered
-        assert "failed-invalid-batch" not in rendered
+    def test_active_page_groups_failures_by_cause_with_selection(self, service):
+        page, polls = page_content(f"{ROUTES_BASE}/project/ops/exceptions", service)
+        assert polls is False
+        rendered = str(page)
+        assert "1 failed executions · Active sweeps — not yet curated" in rendered
+        assert f"href='{ROUTES_BASE}/project/ops/exceptions'" in rendered
+        assert f"href='{ROUTES_BASE}/project/ops/exceptions?scope=all'" in rendered
+        assert "exception · exit code 1" in rendered
+        assert " — boom: divide by zero" in rendered
+        assert "×1" in rendered
+        assert "1 sweep" in rendered
+        assert "node01" in rendered
+        assert f"name='{SWEEP_A}'" in rendered  # the id the action reads
+        assert "Mark invalid" in rendered
+        assert "exc-reason" in rendered
+        assert "exc-selection-count" in rendered
+        assert rendered.count("hidden=True") == 2  # sweep and host sets
+        assert "hidden=False" in rendered  # cause set starts visible
 
-    def test_mark_invalid_from_failure_view_persists_reason(self, mutable_client):
+    def test_all_three_groupsets_render_heads(self, service):
+        page, _ = page_content(f"{ROUTES_BASE}/project/ops/exceptions", service)
+        rendered = str(page)
+        assert "By cause" in rendered
+        assert "By sweep" in rendered
+        assert "By host" in rendered
+        assert "host node01" in rendered
+        assert "alpha" in rendered
+
+    def test_all_scope_includes_curated_failures_and_annotates(self, curated):
+        store, service = curated
+        self._ingest_failure(store, CUR_T1)
+        store.mark_sweep_invalid(str(CUR_SWEEP_OLD), "bad shard map")
+        active, _ = page_content(f"{ROUTES_BASE}/project/curate/exceptions", service)
+        assert "killed after 3600s" not in str(active)
+        all_page, _ = page_content(
+            f"{ROUTES_BASE}/project/curate/exceptions",
+            service,
+            search="?scope=all",
+        )
+        rendered = str(all_page)
+        assert "All sweeps — historical" in rendered
+        assert "killed after 3600s" in rendered
+        assert "active excludes 1 curated sweeps" in rendered
+        assert "badge invalid" in rendered
+
+    def test_deep_link_pre_expands_the_sweep_group(self, service):
+        linked, _ = page_content(
+            f"{ROUTES_BASE}/project/ops/exceptions",
+            service,
+            search=f"?sweep={SWEEP_A}",
+        )
+        details = [
+            node
+            for node in _walk(linked)
+            if isinstance(node, html.Details)
+            and getattr(node, "id", None) == f"sweep-{SWEEP_A}"
+        ]
+        assert details
+        assert all(getattr(node, "open", False) is True for node in details)
+        plain, _ = page_content(f"{ROUTES_BASE}/project/ops/exceptions", service)
+        collapsed = [
+            node
+            for node in _walk(plain)
+            if isinstance(node, html.Details)
+            and getattr(node, "id", None) == f"sweep-{SWEEP_A}"
+        ]
+        assert collapsed
+        assert not any(getattr(node, "open", False) for node in collapsed)
+
+    def test_page_without_failures_renders_empty_rollup(self, curated):
+        _store, service = curated
+        page, _ = page_content(f"{ROUTES_BASE}/project/curate/exceptions", service)
+        rendered = str(page)
+        assert "0 failed executions · Active sweeps — not yet curated" in rendered
+        assert "sel-sweep" not in rendered
+        assert "Mark invalid" in rendered  # the bulkbar still mounts
+
+    def test_mark_invalid_persists_reason_and_refreshes_the_rollup(
+        self, mutable_client
+    ):
         store, client = mutable_client
         callback_map = self._callback_map(client)
-        response = self._failed_dispatch(
-            client,
-            callback_map,
-            self._failed_inputs([str(SWEEP_A)]),
-            self._failed_state("bad shards"),
-            changed=[f'{{"failed-invalid": "{SWEEP_A}"}}.n_clicks'],
-            group_ids=[str(SWEEP_A)],
+        response = self._triage_dispatch(
+            client, callback_map, [str(SWEEP_A)], "bad shards"
         )
         row = store._curation_row(str(SWEEP_A))
         assert row[1] is not None and row[2] == "bad shards"
-        children = str(response["failed-trials-panel"]["children"])
-        assert "Marked invalid" in children
-        row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
-        assert row_ids == [str(SWEEP_A), str(SWEEP_B)]
-        grid_row = next(
-            entry
-            for entry in response["sweep-grid"]["rowData"]
-            if entry["sweep_id"] == str(SWEEP_A)
-        )
-        assert grid_row["invalid"] is True
-        note = str(response["workspace-curation-note"]["children"])
-        assert "alpha is invalid" in note
+        assert "Marked invalid alpha" in str(response["exc-note"]["children"])
+        assert response["exc-selection-count"]["children"] == "0 sweeps selected"
+        # Alpha is incomplete, so it stays in the roll-up carrying its
+        # curation badges; a terminal sweep would leave Active entirely.
+        assert "badge invalid" in str(response["exc-groupsets"]["children"])
 
-    def test_mark_invalid_without_reason_is_rejected(self, mutable_client):
+    def test_mark_invalid_requires_a_reason(self, mutable_client):
         store, client = mutable_client
         callback_map = self._callback_map(client)
-        response = self._failed_dispatch(
-            client,
-            callback_map,
-            self._failed_inputs([str(SWEEP_A)]),
-            self._failed_state("   "),
-            changed=[f'{{"failed-invalid": "{SWEEP_A}"}}.n_clicks'],
-            group_ids=[str(SWEEP_A)],
-        )
-        children = str(response["failed-trials-panel"]["children"])
-        assert "requires a reason" in children
+        response = self._triage_dispatch(client, callback_map, [str(SWEEP_A)], "   ")
+        assert "requires a reason" in str(response["exc-note"]["children"])
         assert store._curation_row(str(SWEEP_A))[1] is None
+        assert "boom: divide by zero" in str(response["exc-groupsets"]["children"])
 
-    def test_batch_mark_invalid_invalidates_every_checked_sweep(self, mutable_client):
+    def test_batch_mark_invalid_covers_every_checked_sweep(self, mutable_client):
         """The shared-bug case: one click invalidates every checked sweep
         through a single apply_curation call carrying the full id list."""
         store, client = mutable_client
         self._fail_sweep_b(store)
-        service = DashboardService(QueryService(store))
-        groups = [str(SWEEP_A), str(SWEEP_B)]
         callback_map = self._callback_map(client)
-        response = self._failed_dispatch(
-            client,
-            callback_map,
-            self._failed_inputs(groups, batch=1, checked=set(groups)),
-            self._failed_state("bad shards"),
-            changed=["failed-invalid-batch.n_clicks"],
-            group_ids=groups,
+        response = self._triage_dispatch(
+            client, callback_map, [str(SWEEP_A), str(SWEEP_B)], "bad shards"
         )
         for sweep_id in (SWEEP_A, SWEEP_B):
             row = store._curation_row(str(sweep_id))
             assert row[1] is not None and row[2] == "bad shards"
-        children = str(response["failed-trials-panel"]["children"])
-        assert "Marked invalid alpha, beta." in children
-        row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
-        assert row_ids == [str(SWEEP_A)]  # completed beta left discovery
-        assert response["sweep-grid"]["selectedRows"] == []
-        note = str(response["workspace-curation-note"]["children"])
-        assert "alpha is invalid" in note
+        assert "Marked invalid alpha, beta." in str(response["exc-note"]["children"])
 
-    def test_batch_mark_invalid_without_reason_is_rejected(self, mutable_client):
+    def test_empty_selection_prompts_without_acting(self, mutable_client):
         store, client = mutable_client
         self._fail_sweep_b(store)
-        service = DashboardService(QueryService(store))
-        groups = [str(SWEEP_A), str(SWEEP_B)]
         callback_map = self._callback_map(client)
-        response = self._failed_dispatch(
-            client,
-            callback_map,
-            self._failed_inputs(groups, batch=1, checked=set(groups)),
-            self._failed_state("   "),
-            changed=["failed-invalid-batch.n_clicks"],
-            group_ids=groups,
-        )
-        children = str(response["failed-trials-panel"]["children"])
-        assert "requires a reason" in children
+        response = self._triage_dispatch(client, callback_map, [], "bad shards")
+        assert "Select sweeps first" in str(response["exc-note"]["children"])
+        assert "exc-groupsets" not in str(response)
         assert store._curation_row(str(SWEEP_A))[1] is None
-        assert store._curation_row(str(SWEEP_B))[1] is None
-
-    def test_batch_mark_invalid_with_empty_selection_prompts(self, mutable_client):
-        store, client = mutable_client
-        self._fail_sweep_b(store)
-        service = DashboardService(QueryService(store))
-        groups = [str(SWEEP_A), str(SWEEP_B)]
-        callback_map = self._callback_map(client)
-        response = self._failed_dispatch(
-            client,
-            callback_map,
-            self._failed_inputs(groups, batch=1),
-            self._failed_state("bad shards"),
-            changed=["failed-invalid-batch.n_clicks"],
-            group_ids=groups,
-        )
-        children = str(response["failed-trials-panel"]["children"])
-        assert "Select sweeps first" in children
-        assert store._curation_row(str(SWEEP_A))[1] is None
-        assert store._curation_row(str(SWEEP_B))[1] is None
-        assert "sweep-grid" not in str(response)
-
-    def test_select_all_mirrors_onto_group_checklists(self, mutable_client):
-        store, client = mutable_client
-        self._fail_sweep_b(store)
-        service = DashboardService(QueryService(store))
-        groups = [str(SWEEP_A), str(SWEEP_B)]
-        callback_map = self._callback_map(client)
-        response = self._failed_dispatch(
-            client,
-            callback_map,
-            self._failed_inputs(groups, select_all=["all"]),
-            self._failed_state(""),
-            changed=["failed-select-all.value"],
-            group_ids=groups,
-        )
-        assert set(response) == {f'{{"failed-sweep":"{sid}"}}' for sid in groups}
-        for sid in groups:
-            assert response[f'{{"failed-sweep":"{sid}"}}'] == {"value": [sid]}
-        response = self._failed_dispatch(
-            client,
-            callback_map,
-            self._failed_inputs(groups, select_all=[]),
-            self._failed_state(""),
-            changed=["failed-select-all.value"],
-            group_ids=groups,
-        )
-        for sid in groups:
-            assert response[f'{{"failed-sweep":"{sid}"}}'] == {"value": []}
-
-    def test_checkbox_refire_actuates_nothing(self, mutable_client):
-        """A checklist write or panel re-render remount re-fires the ALL
-        input; only an explicit control may act."""
-        store, client = mutable_client
-        self._fail_sweep_b(store)
-        groups = [str(SWEEP_A), str(SWEEP_B)]
-        callback_map = self._callback_map(client)
-        response = client.post(
-            "/dashboard/_dash-update-component",
-            json=self._failed_payload(
-                callback_map,
-                self._failed_inputs(groups, checked={str(SWEEP_A)}),
-                self._failed_state("bad shards"),
-                [f'{{"failed-sweep": "{SWEEP_A}"}}.value'],
-                groups,
-            ),
-        )
-        assert response.status_code == 204  # PreventUpdate
-        assert store._curation_row(str(SWEEP_A))[1] is None
-
-    def test_selected_failed_sweeps_flattens_checked_values(self):
-        assert selected_failed_sweeps([]) == []
-        assert selected_failed_sweeps([[], []]) == []
-        assert selected_failed_sweeps([[], [str(SWEEP_A)], [str(SWEEP_B)]]) == [
-            str(SWEEP_A),
-            str(SWEEP_B),
-        ]
 
 
 def _find_pres(node: Component) -> list[html.Pre]:
@@ -2916,10 +2762,7 @@ class TestOverviewControlsWiring:
                 dep["id"] == {"analysis-tabs": "canvas"}
                 for dep in callback_map[key]["inputs"]
             )
-            and (
-                "workspace-investigations.children" in key_outputs(key)
-                or "workspace-exceptions.children" in key_outputs(key)
-            )
+            and ("workspace-investigations.children" in key_outputs(key))
         ]
 
     def _post_view_edit(self, client, key, inputs, state, changed):

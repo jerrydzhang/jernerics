@@ -1383,6 +1383,28 @@ class TestUrlSync:
             is None
         )
 
+    def test_navigation_keeps_non_workspace_queries(self, service):
+        assert (
+            synced_search(
+                "/dashboard/project/lab/exceptions",
+                default_view_state(),
+                "?scope=all&sweep=bad-sweep",
+                url_navigated=True,
+            )
+            is None
+        )
+
+    def test_navigation_strips_only_the_workspace_parameters(self, service):
+        assert (
+            synced_search(
+                "/dashboard/project/lab/exceptions",
+                default_view_state(),
+                "?view=%7B%22v%22%3A2%7D&sweep=bad-sweep",
+                url_navigated=True,
+            )
+            == "?sweep=bad-sweep"
+        )
+
     def test_navigation_onto_workspace_never_mints_over_a_deep_link(self, service):
         doc = self._doc(_edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None))
         deep_link = "?view=" + encode_view_state(
@@ -2076,7 +2098,6 @@ class TestScopeBar:
         assert [tab.value for tab in tabs.children] == [
             "overview",
             "investigations",
-            "exceptions",
         ]
 
 

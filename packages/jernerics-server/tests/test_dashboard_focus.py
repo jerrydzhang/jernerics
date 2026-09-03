@@ -182,12 +182,12 @@ class TestHydrationKeepsFocus:
 
     def test_view_param_without_focus_keeps_current_focus(self):
         doc = _focused()
-        shared = dict(default_view_state(), active="exceptions")
+        shared = dict(default_view_state(), active="investigations")
         search = f"?view={encode_view_state(shared)}"
         hydrated, error = hydrate_view(WORKSPACE, search, doc)
         assert error is None
         assert hydrated is not None
-        assert hydrated["active"] == "exceptions"
+        assert hydrated["active"] == "investigations"
         assert hydrated["focus"] == doc["focus"]
 
     def test_view_param_with_explicit_focus_wins(self):

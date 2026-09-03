@@ -54,13 +54,17 @@ def topbar(project: str | None, scope: str = "Active sweeps") -> html.Div:
     return html.Div(children, className="topbar")
 
 
+def tab_href(label: str, project: str) -> str:
+    """The URL one tab row entry points at."""
+    return _TAB_HREFS[label].format(base=ROUTES_BASE, project=quote(project, safe=""))
+
+
 def tab_bar(active: str, project: str) -> html.Div:
     """Project tabs with the active one carrying class ``on``."""
-    quoted = quote(project, safe="")
     links = [
         html.A(
             label,
-            href=_TAB_HREFS[label].format(base=ROUTES_BASE, project=quoted),
+            href=tab_href(label, project),
             className="on" if label == active else None,
         )
         for label in TABS

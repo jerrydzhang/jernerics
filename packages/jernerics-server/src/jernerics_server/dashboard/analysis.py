@@ -20,7 +20,7 @@ import json
 import math
 from collections.abc import Sequence
 from typing import Any
-from urllib.parse import parse_qs, quote
+from urllib.parse import parse_qs, parse_qsl, quote, urlencode
 
 from dash import dcc, html, no_update
 from dash_ag_grid import AgGrid
@@ -66,7 +66,7 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "resizable": True,
     "minWidth": 100,
 }
-_ANALYSIS_VIEWS = ("overview", "investigations", "exceptions")
+_ANALYSIS_VIEWS = ("overview", "investigations")
 INVESTIGATION_VIEWS = ("compare", "series", "points", "search")
 """The Investigation workspace's view row."""
 
@@ -846,6 +846,19 @@ def canonical_view(doc: dict[str, Any]) -> dict[str, Any]:
     return view_from_include(doc, include_values(doc))
 
 
+_WORKSPACE_SEARCH_KEYS = {"view", "sel"}
+
+
+def _drop_workspace_params(search: str) -> str:
+    """The search string without the workspace-only ``view``/``sel``
+    parameters, re-encoded with the survivors in their original order."""
+    if not search:
+        return ""
+    parsed = parse_qsl(search.removeprefix("?"), keep_blank_values=True)
+    kept = [(key, value) for key, value in parsed if key not in _WORKSPACE_SEARCH_KEYS]
+    return ("?" + urlencode(kept)) if kept else ""
+
+
 def synced_search(
     pathname: str | None,
     view_doc: dict[str, Any] | None,
@@ -862,13 +875,12 @@ def synced_search(
     no separate ``?sel=`` is minted anymore."""
     if url_navigated:
         kind = parse_route(pathname).kind
-        if current_search and kind not in (
-            "workspace",
-            "investigation",
-            "investigation-edit",
-        ):
-            return ""
-        return None
+        if kind in ("workspace", "investigation", "investigation-edit"):
+            return None
+        # Other pages (exceptions, sweep) carry their own query state;
+        # navigation may only drop the workspace parameters, never theirs.
+        remaining = _drop_workspace_params(current_search or "")
+        return remaining if remaining != (current_search or "") else None
     if parse_route(pathname).kind not in ("workspace", "investigation"):
         return None
     return search_from_state(view_doc, current_search)
