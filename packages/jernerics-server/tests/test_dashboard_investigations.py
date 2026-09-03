@@ -1420,49 +1420,6 @@ class TestMemberScopeAndViews:
             "Search": None,
         }
 
-    def test_sweep_page_gates_views_on_real_data(self, cmp_service, sig):
-        # cmp members carry the outcome at step 0 only — no step series,
-        # so Series is unsupported; every member has trials, so Points
-        # renders; Search always opens over all members.
-        hub = workspace.sweep_hub_header(
-            cmp_service, CMP, str(CS1), "cmp_f01", sig.compare
-        )
-        crumb, views = hub
-        crumb_text = _text(crumb).replace("›", "")
-        assert CMP in crumb_text and "sig-comparecmp_f01" in crumb_text
-        labels = [
-            node.children
-            for node in _walk_children(views)
-            if isinstance(node, (html.A, html.Span))
-            and node.children in {"Overview", "Series", "Points", "Search"}
-        ]
-        assert labels == ["Overview", "Points", "Search"]
-        links = {
-            node.children: node.href
-            for node in _walk_children(views)
-            if isinstance(node, html.A) and node.href
-        }
-        points_href = links["Points"]
-        assert f"/investigation/{sig.compare}" in points_href
-        assert points_href.endswith(f"?view=points&member={CS1}")
-        assert links["Search"].endswith(f"/investigation/{sig.compare}?view=search")
-        back = _text(views).count("Back to sig-compare")
-        assert back == 1
-
-    def test_sweep_hub_renders_nothing_without_a_via(self, cmp_service, sig):
-        assert (
-            workspace.sweep_hub_header(cmp_service, CMP, str(CS1), "cmp_f01", None)
-            == []
-        )
-        assert (
-            workspace.sweep_hub_header(
-                cmp_service, CMP, str(CS1), "cmp_f01", "no-such-inv"
-            )
-            == []
-        )
-        foreign = workspace.investigation_page(cmp_service, CMP, sig.compare)
-        assert _string_id_node(foreign, "inv-tabs")  # sanity: page builds
-
     def test_points_table_carries_the_member_trials(self, cmp_service, sig):
         tray, _scoped = investigation_scope_state([str(CS1), str(CS2), str(CS3)], None)
         grid = next(

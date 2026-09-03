@@ -20,7 +20,6 @@ from .render import SortColumn, sort_rows
 from .routes import ROUTES_BASE
 from .service import (
     CompareDocument,
-    CurationRejectedError,
     CurationUnavailableError,
     DashboardService,
     InvestigationPreview,
@@ -1965,92 +1964,6 @@ def search_body(
                 sortable=True,
             ),
             id="inv-search-results",
-        ),
-    ]
-
-
-def _via_investigation(
-    service: DashboardService, project: str, via: str | None
-) -> InvestigationRecord | None:
-    """The investigation a ``via`` return path names, when it exists in
-    this store and belongs to the same project; anything else is an
-    unknown context and renders none."""
-    if not via:
-        return None
-    try:
-        record = service.investigation_detail(str(via)).investigation
-    except (CurationRejectedError, CurationUnavailableError):
-        return None
-    return record if record.project == project else None
-
-
-def sweep_hub_header(
-    service: DashboardService,
-    project: str,
-    sweep_id: str,
-    sweep_name: str,
-    via: str | None,
-) -> list[Any]:
-    """Breadcrumb, back link, and the data-supported views row for a
-    sweep opened from an investigation: Series and Points narrow to this
-    member, Search opens over all members, Overview is the hub itself.
-    A sweep reached outside an investigation renders no hub."""
-    record = _via_investigation(service, project, via)
-    if record is None:
-        return []
-    series_supported = any(
-        entry["kind"] == "scalar" and entry["steps"]
-        for entry in service.analysis_value_keys(project, {"sweeps": [sweep_id]})
-    )
-    detail = service.sweep_detail(sweep_id)
-    points_supported = bool(detail and detail.overview.started)
-    views: list[Any] = [html.Span("Overview", className="on")]
-    if series_supported:
-        views.append(
-            html.A(
-                "Series",
-                href=analysis.investigation_view_href(
-                    project, str(record.id), "series", sweep_id
-                ),
-            )
-        )
-    if points_supported:
-        views.append(
-            html.A(
-                "Points",
-                href=analysis.investigation_view_href(
-                    project, str(record.id), "points", sweep_id
-                ),
-            )
-        )
-    views.append(
-        html.A(
-            "Search",
-            href=analysis.investigation_view_href(project, str(record.id), "search"),
-        )
-    )
-    return [
-        page.breadcrumbs(
-            [
-                (project, f"{ROUTES_BASE}/project/{quote(project, safe='')}"),
-                ("Investigations", investigations_index_href(project)),
-                record.name,
-                sweep_name,
-            ]
-        ),
-        html.Div(
-            [
-                html.Span("Views", className="annotate"),
-                html.Div(views, className="seg"),
-                html.A(
-                    f"Back to {record.name}",
-                    href=analysis.investigation_view_href(
-                        project, str(record.id), "compare"
-                    ),
-                    className="btn-link",
-                ),
-            ],
-            className="inv-views",
         ),
     ]
 

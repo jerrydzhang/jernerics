@@ -888,7 +888,6 @@ class TestDataCatalog:
 
 def _series_doc(**overrides: Any) -> dict:
     doc = default_view_state()
-    doc["active"] = "investigations"
     doc["series"].update(overrides)
     return doc
 
@@ -1472,7 +1471,6 @@ class TestViewStateCodec:
 
     def test_round_trip_is_exact_and_url_safe(self):
         doc = default_view_state()
-        doc["active"] = "investigations"
         doc["series"] = {
             **doc["series"],
             "keys": ["loss", "accuracy", "delta"],
@@ -1504,7 +1502,6 @@ class TestViewStateCodec:
         }
         doc["highlighted_trials"] = [str(RA0)]
         doc["auto_refresh"] = True
-        doc["optuna"] = {"contour_x": "lr", "contour_y": "seed"}
         encoded = encode_view_state(doc)
         assert all(char not in '{}":,&' for char in encoded)
         assert decode_view_state(unquote(encoded)) == doc
@@ -1560,13 +1557,14 @@ class TestViewStateCodec:
 
     def test_unknown_fields_are_dropped_and_not_re_emitted(self):
         doc = default_view_state()
-        doc["active"] = "investigations"
+        doc["scope"]["include_archived"] = True
         payload = json.dumps(
             {
                 **doc,
                 "layout": "saved",
                 "series": {**doc["series"], "hover": 1, "plotly": {"x": 2}},
-                "optuna": {**doc["optuna"], "zoom": "in"},
+                "optuna": {"zoom": "in"},
+                "active": "investigations",
             }
         )
         assert decode_view_state(payload) == doc
@@ -1575,8 +1573,8 @@ class TestViewStateCodec:
         assert decode_view_state(json.dumps({"v": VIEW_VERSION})) == (
             default_view_state()
         )
-        partial = json.dumps({"v": VIEW_VERSION, "active": "investigations"})
-        assert decode_view_state(partial)["active"] == "investigations"
+        partial = json.dumps({"v": VIEW_VERSION, "auto_refresh": True})
+        assert decode_view_state(partial)["auto_refresh"] is True
         assert decode_view_state(partial)["series"]["keys"] == []
 
     @pytest.mark.parametrize(
@@ -1591,8 +1589,6 @@ class TestViewStateCodec:
             json.dumps({"v": VIEW_VERSION, "scope": {"expand": "yes"}}),
             json.dumps({"v": VIEW_VERSION, "scope": {"include_archived": 1}}),
             json.dumps({"v": VIEW_VERSION, "scope": {"families": [""]}}),
-            json.dumps({"v": VIEW_VERSION, "active": "selection"}),
-            json.dumps({"v": VIEW_VERSION, "active": "catalog", "series": []}),
             json.dumps({"v": VIEW_VERSION, "series": {"keys": "loss"}}),
             json.dumps({"v": VIEW_VERSION, "series": {"keys": [""]}}),
             json.dumps({"v": VIEW_VERSION, "series": {"mode": "scatter"}}),
@@ -1665,7 +1661,6 @@ class TestViewStateCodec:
             json.dumps({"v": VIEW_VERSION, "series": {"axes": {"loss": 1}}}),
             json.dumps({"v": VIEW_VERSION, "highlighted_trials": [7]}),
             json.dumps({"v": VIEW_VERSION, "auto_refresh": "yes"}),
-            json.dumps({"v": VIEW_VERSION, "optuna": {"contour_x": 4}}),
         ],
     )
     def test_bad_payloads_fail_with_descriptive_errors(self, payload):
@@ -1675,8 +1670,6 @@ class TestViewStateCodec:
     def test_error_messages_name_the_problem(self):
         with pytest.raises(ViewStateError, match="expected version 2"):
             decode_view_state(json.dumps({"v": 3}))
-        with pytest.raises(ViewStateError, match="unsupported analysis view"):
-            decode_view_state(json.dumps({"v": 1, "active": "selection"}))
         with pytest.raises(ViewStateError, match="malformed"):
             decode_view_state("%zz{")
 
@@ -1721,14 +1714,13 @@ class TestViewStateCodec:
         from_legacy = decode_view_state(json.dumps(legacy))
         diff = {
             "v": VIEW_VERSION,
-            "active": "investigations",
             "scope": {"include_archived": True},
             "series": {"keys": ["loss"]},
         }
         assert decode_view_state(json.dumps(diff)) == from_legacy
         # the re-encode is a minimal defaults-diff: no default field rides
         payload = set(json.loads(unquote(encode_view_state(from_legacy))))
-        assert payload == {"v", "active", "scope", "series"}
+        assert payload == {"v", "scope", "series"}
 
     def test_legacy_v1_scope_never_carries_sweeps(self):
         """v1 kept selection in the session tray; its tokens decode with
@@ -1747,14 +1739,14 @@ class TestViewStateCodec:
 
 class TestViewHydration:
     def test_valid_document_lands_in_the_store(self):
-        doc = dict(default_view_state(), active="investigations")
+        doc = dict(default_view_state(), auto_refresh=True)
         hydrated, error = hydrate_view(
             "/dashboard/project/lab", f"?view={encode_view_state(doc)}", None
         )
         assert error is None and hydrated == doc
 
     def test_equal_state_is_left_alone(self):
-        doc = dict(default_view_state(), active="investigations")
+        doc = dict(default_view_state(), auto_refresh=True)
         search = f"?view={encode_view_state(doc)}"
         assert hydrate_view("/dashboard/project/lab", search, doc) == (None, None)
 
@@ -1763,7 +1755,7 @@ class TestViewHydration:
             default_view_state(),
             None,
         )
-        doc = dict(default_view_state(), active="points")
+        doc = dict(default_view_state(), auto_refresh=True)
         assert hydrate_view("/dashboard/project/lab", "", doc) == (
             default_view_state(),
             None,
@@ -1777,7 +1769,7 @@ class TestViewHydration:
         assert error is not None and "view state" in error
 
     def test_off_analysis_route_the_store_is_untouched(self):
-        doc = dict(default_view_state(), active="points")
+        doc = dict(default_view_state(), auto_refresh=True)
         assert hydrate_view("/dashboard/", "?view=%7Bbroken", doc) == (
             None,
             None,
@@ -1790,7 +1782,7 @@ class TestViewSync:
     garbage is never silently rewritten away."""
 
     def test_view_edit_mints_the_parameter(self, service):
-        doc = dict(default_view_state(), active="investigations")
+        doc = dict(default_view_state(), auto_refresh=True)
         target = search_from_state(doc, "")
         assert target is not None and target.startswith("?view=")
         assert decode_view_state(unquote(target.removeprefix("?view="))) == doc
@@ -1799,7 +1791,7 @@ class TestViewSync:
         assert search_from_state(default_view_state(), "") is None
 
     def test_unchanged_state_is_not_rewritten(self, service):
-        doc = dict(default_view_state(), active="investigations")
+        doc = dict(default_view_state(), auto_refresh=True)
         target = search_from_state(doc, "")
         assert target is not None
         assert search_from_state(doc, target) is None
@@ -1808,14 +1800,11 @@ class TestViewSync:
         assert search_from_state(default_view_state(), "?view=%zz{") is None
 
     _ALL_FIELDS = {
-        "active",
         "keys",
         "mode",
         "reduction",
         "color",
         "facet",
-        "contour_x",
-        "contour_y",
     }
 
     def test_control_edits_rebuild_state_and_preserve_uncontrolled_fields(self):
@@ -1830,17 +1819,13 @@ class TestViewSync:
         doc["auto_refresh"] = True
         edited = view_from_controls(
             doc,
-            active="investigations",
             keys=["accuracy", "score"],
             mode="overlay",
             reduction="max",
             color="shard",
             facet=None,
-            contour_x="lr",
-            contour_y="seed",
             edited=self._ALL_FIELDS,
         )
-        assert edited["active"] == "investigations"
         assert edited["series"]["keys"] == ["accuracy", "score"]
         assert edited["series"]["mode"] == "overlay"
         assert edited["series"]["reduction"] == "max"
@@ -1859,14 +1844,11 @@ class TestViewSync:
         junk_keys: list[Any] = ["loss", "", "accuracy", "loss", None]
         edited = view_from_controls(
             default_view_state(),
-            active=None,
             keys=junk_keys,
             mode=None,
             reduction=None,
             color=None,
             facet=None,
-            contour_x=None,
-            contour_y=None,
             edited={"keys"},
         )
         assert edited["series"]["keys"] == ["loss", "accuracy"]
@@ -1878,28 +1860,22 @@ class TestViewSync:
         )
         overlaid = view_from_controls(
             doc,
-            active="investigations",
             keys=["loss", "accuracy"],
             mode="overlay",
             reduction=None,
             color=None,
             facet=None,
-            contour_x=None,
-            contour_y=None,
             edited={"mode"},
         )
         assert overlaid["series"]["mode"] == "overlay"
         assert overlaid["series"]["axes"] == doc["series"]["axes"]
         restored = view_from_controls(
             overlaid,
-            active="investigations",
             keys=["loss", "accuracy"],
             mode="stacked",
             reduction=None,
             color=None,
             facet=None,
-            contour_x=None,
-            contour_y=None,
             edited={"mode"},
         )
         assert restored["series"]["axes"] == doc["series"]["axes"]
@@ -1909,7 +1885,7 @@ class TestViewSync:
         """The control-sync write fires the edit callback with every
         input; a dropdown whose options have not loaded reports None and
         must not wipe the hydrated keys."""
-        doc: dict[str, Any] = dict(default_view_state(), active="investigations")
+        doc: dict[str, Any] = default_view_state()
         doc["series"] = {
             **doc["series"],
             "keys": ["loss"],
@@ -1918,57 +1894,45 @@ class TestViewSync:
         }
         tab_echo = view_from_controls(
             doc,
-            active="investigations",
             keys=None,
             mode=None,
             reduction="mean",
             color=None,
             facet=None,
-            contour_x=None,
-            contour_y=None,
-            edited={"active", "reduction"},
+            edited={"reduction"},
         )
         assert tab_echo["series"]["keys"] == ["loss"]
         assert tab_echo["series"]["color"] == "shard"
         assert tab_echo == doc
 
     def test_edited_fields_maps_triggered_prop_ids(self):
-        assert edited_fields({"analysis-tabs.value", "analysis-contour-x.value"}) == {
-            "active",
-            "contour_x",
+        assert edited_fields({"analysis-key.value", "analysis-mode.value"}) == {
+            "keys",
+            "mode",
         }
-        assert edited_fields({"analysis-mode.value"}) == {"mode"}
+        assert edited_fields({"analysis-tabs.value"}) == set()
         assert edited_fields({"url.search"}) == set()
 
     _LOADED: dict[str, set[str] | None] = {
         "keys": {"loss", "accuracy", "summary"},
         "color": {"host", "shard"},
         "facet": {"host", "shard"},
-        "contour_x": {"lr", "seed"},
-        "contour_y": {"lr", "seed"},
     }
 
     def test_control_values_read_the_ordered_series_keys(self):
         doc = default_view_state()
         doc["series"]["keys"] = ["accuracy", "loss"]
-        active, keys, mode, reduction, color, facet, cx, cy, display, auto = (
-            control_values(
-                doc,
-                self._LOADED,
-            )
+        keys, mode, reduction, color, facet, display, auto = control_values(
+            doc,
+            self._LOADED,
         )
-        assert (active, keys, mode, reduction) == (
-            "overview",
-            ["accuracy", "loss"],
-            "stacked",
-            "none",
-        )
-        assert (color, facet, cx, cy) == (None, None, None, None)
+        assert (keys, mode, reduction) == (["accuracy", "loss"], "stacked", "none")
+        assert (color, facet) == (None, None)
         assert (display, auto) == ("all", [])
-        assert control_values(None, self._LOADED)[1] == []
+        assert control_values(None, self._LOADED)[0] == []
         doc["series"]["trial_display"] = "median_iqr"
         doc["auto_refresh"] = True
-        assert control_values(doc, self._LOADED)[8:] == ("median_iqr", ["auto"])
+        assert control_values(doc, self._LOADED)[5:] == ("median_iqr", ["auto"])
 
     def test_values_wait_for_their_options(self):
         """A value written before its options exist is dropped by the
@@ -1976,16 +1940,13 @@ class TestViewSync:
         for the options-arrival write."""
         doc = default_view_state()
         doc["series"] = {**doc["series"], "keys": ["loss"], "color": "shard"}
-        doc["optuna"] = {**doc["optuna"], "contour_x": "lr"}
         unloaded: dict[str, set[str] | None] = {name: None for name in self._LOADED}
-        _a, keys, _m, _r, color, _f, cx, _cy, _d, _ar = control_values(doc, unloaded)
+        keys, _m, _r, color, _f, _d, _ar = control_values(doc, unloaded)
         assert keys is no_update
         assert color is no_update
-        assert cx is no_update
         partial = {**self._LOADED, "keys": set()}
-        _a, keys, _m, _r, _c, _f, cx, _cy, _d, _ar = control_values(doc, partial)
+        keys, _m, _r, _c, _f, _d, _ar = control_values(doc, partial)
         assert keys is no_update
-        assert cx == "lr"
 
 
 class TestEntryPoints:
@@ -2253,7 +2214,7 @@ class TestColdStartMountedJourney:
     def test_deep_link_settles_view_state_alongside_the_tray(
         self, authed, callback_map
     ):
-        doc: dict[str, Any] = dict(default_view_state(), active="investigations")
+        doc: dict[str, Any] = dict(default_view_state(), auto_refresh=True)
         doc["series"] = {**doc["series"], "keys": ["loss"], "reduction": "mean"}
         sel = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = f"?sel={sel}&view={encode_view_state(doc)}"
@@ -2274,7 +2235,7 @@ class TestColdStartMountedJourney:
         )
         assert result["view-store"]["data"]["scope"]["sweeps"] == [str(SWEEP_A)]
         assert result["view-store"]["data"]["series"]["keys"] == ["loss"]
-        assert result["view-store"]["data"]["active"] == "investigations"
+        assert result["view-store"]["data"]["auto_refresh"] is True
 
     def test_malformed_view_parameter_defaults_and_errors(self, authed, callback_map):
         sel = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
@@ -2439,7 +2400,7 @@ class TestIncludeControls:
             decode_view_state(payload)
 
     def test_checklist_values_and_edits_touch_only_the_flags(self):
-        doc: dict[str, Any] = dict(default_view_state(), active="investigations")
+        doc: dict[str, Any] = default_view_state()
         doc["series"] = {**doc["series"], "keys": ["loss"]}
         doc["scope"]["sweeps"] = [str(SWEEP_A)]
         edited = view_from_include(doc, ["invalid"])
@@ -2447,7 +2408,6 @@ class TestIncludeControls:
         assert edited["scope"]["include_archived"] is False
         assert edited["scope"]["sweeps"] == [str(SWEEP_A)]
         assert edited["series"] == doc["series"]
-        assert edited["active"] == "investigations"
         assert include_values(edited) == ["invalid"]
         assert include_values(view_from_include(edited, ["archived", "invalid"])) == [
             "archived",
@@ -3110,14 +3070,11 @@ class TestTrialDisplayCodec:
         )
         edited = view_from_controls(
             doc,
-            active=None,
             keys=None,
             mode=None,
             reduction=None,
             color=None,
             facet=None,
-            contour_x=None,
-            contour_y=None,
             trial_display="garbage",
             edited={"trial_display"},
         )
@@ -3129,22 +3086,17 @@ class TestTrialDisplayCodec:
         strings, so the edit side must normalize to None or the next
         hydration resets the whole view to defaults."""
         doc = _series_doc(keys=["loss"], color="shard")
-        doc["optuna"] = {"contour_x": "lr", "contour_y": "seed"}
         edited = view_from_controls(
             doc,
-            active=None,
             keys=None,
             mode=None,
             reduction=None,
             color="",
             facet="",
-            contour_x="",
-            contour_y="",
-            edited={"color", "facet", "contour_x", "contour_y"},
+            edited={"color", "facet"},
         )
         assert edited["series"]["color"] is None
         assert edited["series"]["facet"] is None
-        assert edited["optuna"] == {"contour_x": None, "contour_y": None}
         decoded = decode_view_state(unquote(encode_view_state(edited)))
         assert decoded == edited
 
@@ -3152,28 +3104,22 @@ class TestTrialDisplayCodec:
         doc = default_view_state()
         edited = view_from_controls(
             doc,
-            active=None,
             keys=None,
             mode=None,
             reduction=None,
             color=None,
             facet=None,
-            contour_x=None,
-            contour_y=None,
             auto_refresh=True,
             edited={"auto_refresh"},
         )
         assert edited["auto_refresh"] is True
         untouched = view_from_controls(
             edited,
-            active=None,
             keys=None,
             mode=None,
             reduction=None,
             color=None,
             facet=None,
-            contour_x=None,
-            contour_y=None,
             edited=set(),
         )
         assert untouched["auto_refresh"] is True
