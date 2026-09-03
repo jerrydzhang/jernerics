@@ -4,7 +4,6 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from urllib.parse import unquote
 
 import pytest
 from dash import dcc, html
@@ -29,7 +28,6 @@ from jernerics_schema import (
 from jernerics_server.dashboard import analysis, workspace
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
-    decode_view_state,
     default_scope_state,
     default_view_state,
     encode_view_state,
@@ -37,12 +35,9 @@ from jernerics_server.dashboard.analysis import (
     investigation_scope_state,
     points_tab,
     seed_sweeps_from_search,
-    synced_search,
     tray_from_selection,
-    view_from_inv,
 )
 from jernerics_server.dashboard.callbacks import page_content
-from jernerics_server.dashboard.components import MISSING
 from jernerics_server.dashboard.routes import ROUTES_BASE
 from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import (
@@ -51,13 +46,9 @@ from jernerics_server.dashboard.service import (
     DashboardService,
 )
 from jernerics_server.dashboard.workspace import (
-    compare_children,
-    compare_empty_state,
-    coverage_strip,
     editor_factor_options,
     editor_outcome_options,
     editor_preview_panel,
-    investigations_tab,
 )
 from jernerics_server.ingest import IngestService
 from jernerics_server.investigations import InvestigationService
@@ -369,95 +360,100 @@ class TestInvestigationsUnavailable:
             service.create_investigation(LAB, "alpha-compare", "lr", OUTCOME)
 
 
-class TestInvestigationsTab:
-    """The Investigations index renders the DashboardService facts with
-    the shared sortable-table helper (jernerics-g5rw.7)."""
+class TestInvestigationsIndexPage:
+    """The Investigations index on the new shell renders the
+    DashboardService facts as a table, the Unorganized list, and the
+    editor action (jernerics-g5rw.7, re-skinned)."""
 
-    def test_no_project_guards(self, service):
-        rendered = str(investigations_tab(service, None))
-        assert "Pick a project in the header" in rendered
+    def _page(self, service, now_ns=1_000_000_000_000):
+        return workspace.investigations_index_page(service, LAB, now_ns)
+
+    def _index_rows(self, page):
+        section = next(
+            node
+            for node in _walk_children(page)
+            if isinstance(node, html.Section)
+            and "investigations-index" in (node.className or "")
+        )
+        table = _of(section, html.Table)[0]
+        return _of(table, html.Tr)[1:]  # head row first
 
     def test_reads_need_a_store(self, store):
         read_only = DashboardService(QueryService(store))
-        rendered = str(investigations_tab(read_only, LAB))
-        assert "no write store" in rendered
+        page = self._page(read_only)
+        assert "no write store" in str(page)
 
     def test_index_rows_match_service_facts(self, service, compare):
-        tab = investigations_tab(service, LAB)
-        grid = next(
-            node
-            for node in _walk_ag_grids(tab)
-            if getattr(node, "id", None) == "investigations-grid"
-        )
-        assert {column["field"] for column in grid.columnDefs} == {
-            "name",
-            "factor",
-            "outcome",
-            "member_count",
-            "coverage",
-            "last_activity_ns",
-            "edit_members",
-        }
-        rows = {row["investigation_id"]: row for row in grid.rowData}
+        page = self._page(service)
+        rows = self._index_rows(page)
         service_rows = {
             row.investigation_id: row for row in service.investigations_index(LAB)
         }
-        assert set(rows) == set(service_rows)
-        for investigation_id, row in rows.items():
-            facts = service_rows[investigation_id]
-            assert row["name"] == facts.name
-            assert row["factor"] == facts.factor
-            assert row["outcome"] == facts.outcome
-            assert row["member_count"] == facts.member_count
-            assert row["coverage"] == (
+        assert len(rows) == len(service_rows)
+        for row in rows:
+            cells = _of(row, html.Td)
+            link = _of(cells[0], html.A)[0]
+            facts = service_rows[link.href.rsplit("/", 1)[1]]
+            assert _text(link) == facts.name
+            assert _text(cells[1]) == facts.factor
+            assert _text(cells[2]) == facts.outcome
+            assert _text(cells[3]) == str(facts.member_count)
+            assert _text(cells[4]) == (
                 f"{facts.with_outcome} with outcome · "
                 f"{facts.member_count - facts.completed} incomplete · "
                 f"{facts.invalid} invalid"
             )
-            assert row["last_activity_ns"] == facts.last_activity_ns
-            assert row["edit_href"] == (
-                f"{ROUTES_BASE}/project/{LAB}/investigation/{investigation_id}/edit"
-            )
-            assert row["link_href"] == (
-                f"{ROUTES_BASE}/project/{LAB}/investigation/{investigation_id}"
+            edit = _of(cells[6], html.A)[0]
+            assert edit.href == (
+                f"{ROUTES_BASE}/project/{LAB}/investigation/"
+                f"{facts.investigation_id}/edit"
             )
 
     def test_archived_investigations_stay_off_the_default_index(self, service, compare):
-        tab = investigations_tab(service, LAB)
-        grid = next(
-            node
-            for node in _walk_ag_grids(tab)
-            if getattr(node, "id", None) == "investigations-grid"
-        )
-        assert len(grid.rowData) == 2  # gamma-empty is archived
+        page = self._page(service)
+        assert len(self._index_rows(page)) == 2  # gamma-empty is archived
 
     def test_unorganized_lists_sweeps_in_no_investigation(self, service, compare):
-        tab = investigations_tab(service, LAB)
-        grid = next(
-            node
-            for node in _walk_ag_grids(tab)
-            if getattr(node, "id", None) == "unorganized-grid"
+        page = self._page(service)
+        details = _of(page, html.Details)[0]
+        links = {_text(link): link.href for link in _walk_anchors(details)}
+        assert str(LONE_SWEEP) not in links
+        lone = next(
+            href for name, href in links.items() if name and name != "Show list"
         )
-        unorganized = {row["sweep_id"] for row in grid.rowData}
-        assert unorganized == {str(LONE_SWEEP)}  # the lab sweep in no investigation
-        for row in grid.rowData:
-            assert row["link_href"].startswith(f"{ROUTES_BASE}/project/{LAB}")
-        rendered = str(tab)
+        assert lone == f"{ROUTES_BASE}/project/{LAB}/sweep/{LONE_SWEEP}"
+        rendered = str(page)
         assert "Unorganized" in rendered
         assert "1 sweep not in any Investigation" in rendered
 
     def test_new_investigation_action_targets_the_editor_route(self, service, compare):
-        tab = investigations_tab(service, LAB)
+        page = self._page(service)
         link = next(
-            node for node in _walk_anchors(tab) if node.children == "New Investigation"
+            node for node in _walk_anchors(page) if node.children == "New Investigation"
         )
         assert link.href == f"{ROUTES_BASE}/project/{LAB}/investigation/new"
 
+    def test_route_parses_to_the_index_kind(self):
+        from jernerics_server.dashboard.routes import parse_route
 
-def _walk_ag_grids(component):
-    from dash_ag_grid import AgGrid
+        spec = parse_route(f"{ROUTES_BASE}/project/{LAB}/investigations")
+        assert (spec.kind, spec.object_id, spec.sub_id) == (
+            "investigations",
+            LAB,
+            None,
+        )
 
-    return [node for node in _walk_children(component) if isinstance(node, AgGrid)]
+    def test_page_content_renders_the_index_page(self, service, compare):
+        page, polls = page_content(
+            f"{ROUTES_BASE}/project/{LAB}/investigations", service
+        )
+        assert polls is False
+        assert "Investigations" in _text(page)
+        assert "not in any Investigation" in _text(page)
+
+
+def _of(node, kind):
+    return [item for item in _walk_children(node) if isinstance(item, kind)]
 
 
 def _walk_anchors(component):
@@ -472,7 +468,7 @@ def _walk_children(node):
     if isinstance(children, (list, tuple)):
         for child in children:
             yield from _walk_children(child)
-    elif children is not None and hasattr(children, "children"):
+    elif isinstance(children, Component):
         yield from _walk_children(children)
 
 
@@ -672,16 +668,19 @@ class TestInvestigationCompare:
     def test_no_global_overlap_renders_no_manufactured_ranking(self, cmp_service, sig):
         doc = cmp_service.investigation_compare(sig.disjoint)
         assert doc.signatures and all(row.matched == 1 for row in doc.signatures)
-        children = compare_children(doc, CMP, OUTCOME, False)
-        assert "no global overlap" in str(children)
+        body = workspace.compare_body(doc, CMP, OUTCOME, sig.disjoint, False)
+        assert "no global overlap" in _text(body)
         assert not [
-            node for node in _walk_children(children) if isinstance(node, dcc.Graph)
+            node
+            for section in body
+            for node in _walk_children(section)
+            if isinstance(node, dcc.Graph)
         ]
 
     def test_empty_analysis_set_names_the_exclusions(self, cmp_service, sig):
         doc = cmp_service.investigation_compare(sig.only_invalid)
         assert doc.analyzable == ()
-        text = str(compare_empty_state(doc, include_invalid=False))
+        text = str(workspace.compare_empty_state(doc, include_invalid=False))
         assert "No analyzable members in the analysis set" in text
         assert "1 data-bearing members are marked invalid" in text
         assert "include invalid members in analysis" in text
@@ -697,71 +696,75 @@ class TestInvestigationCompare:
 
 
 class TestInvestigationWorkspacePage:
-    """The Investigation shell and Compare view assembly."""
+    """The new-shell Investigation page: crumbs, header, the view row,
+    and the Compare view assembly."""
 
     def test_shell_names_project_investigation_and_default_view(self, cmp_service, sig):
         page = workspace.investigation_page(cmp_service, CMP, sig.compare)
-        text = str(page)
+        text = _text(page)
         assert "sig-compare" in text
-        assert "factor problem · outcome heldout_rmse · 3 sweeps" in text
-        hrefs = [node.href for node in _walk_anchors(page)]
-        assert f"{ROUTES_BASE}/project/{CMP}" in hrefs
-
-    def test_views_row_mounts_all_view_regions(self, cmp_service, sig):
-        page = workspace.investigation_page(cmp_service, CMP, sig.compare)
-        buttons = [
+        assert (
+            "factor problem · outcome heldout_rmse (final) · matching by "
+            "exact sampled signature" in text
+        )
+        crumb = next(
             node
             for node in _walk_children(page)
-            if isinstance(node, html.Button)
-            and isinstance(getattr(node, "id", None), dict)
-            and "inv-view" in node.id
+            if isinstance(node, html.Div) and node.className == "crumb"
+        )
+        crumb_links = [
+            node.href
+            for node in _walk_children(crumb)
+            if isinstance(node, html.A) and node.href
         ]
-        assert [button.children for button in buttons] == [
+        assert crumb_links == [
+            f"{ROUTES_BASE}/project/{CMP}",
+            f"{ROUTES_BASE}/project/{CMP}/investigations",
+        ]
+
+    def test_view_row_mounts_links_with_query_state(self, cmp_service, sig):
+        page = workspace.investigation_page(cmp_service, CMP, sig.compare)
+        seg = _string_id_node(page, "inv-tabs")
+        links = _of(seg, html.A)
+        assert [link.children for link in links] == [
             "Compare",
             "Series",
             "Points",
             "Search",
         ]
-        regions = {
-            node.id["inv-region"]: node
+        assert [getattr(link, "className", None) for link in links] == [
+            "on",
+            None,
+            None,
+            None,
+        ]
+        base = f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}"
+        assert links[0].href == base
+        assert links[1].href == f"{base}?view=series"
+        assert links[2].href == f"{base}?view=points"
+        assert links[3].href == f"{base}?view=search"
+        actions = {
+            node.children: node.href
             for node in _walk_children(page)
-            if isinstance(getattr(node, "id", None), dict) and "inv-region" in node.id
+            if isinstance(node, html.A) and getattr(node, "className", None) == "btn"
         }
-        assert regions["compare"].style == {"display": "block"}
-        for view in ("series", "points", "search"):
-            assert regions[view].style == {"display": "none"}
-        ids = {
-            node.id
-            for node in _walk_children(page)
-            if isinstance(getattr(node, "id", None), str)
-        }
-        assert "analysis-key" in ids
-        assert "inv-points-grid" in ids
-        assert "inv-search-grid" in ids
+        assert actions["Open in Python"] == f"{base}?view=python"
+        assert actions["Edit members"] == f"{base}/edit"
 
-    def test_open_in_python_exports_the_member_selection_token(self, cmp_service, sig):
-        page = workspace.investigation_page(cmp_service, CMP, sig.compare)
+    def test_python_view_exports_the_member_selection_token(self, cmp_service, sig):
+        page = _inv_page(cmp_service, sig.compare, view="python")
         clipboards = [
             node for node in _walk_children(page) if isinstance(node, dcc.Clipboard)
         ]
         selection = decode_selection_token(clipboards[0].content)
         assert selection.project == CMP
         assert set(selection.sweeps or ()) == {CS1, CS2, CS3}
-        edit_links = [
-            node.href
-            for node in _walk_anchors(page)
-            if node.href and node.href.endswith("/edit")
-        ]
-        assert edit_links == [
-            f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}/edit"
-        ]
 
     def test_coverage_strip_matches_the_derived_members(self, cmp_service, sig):
         doc = cmp_service.investigation_compare(sig.compare)
+        strip = workspace.coverage_strip(doc)
         numbers = [
-            node.children
-            for node in _walk_children(coverage_strip(doc))
-            if isinstance(node, html.B)
+            node.children for node in _walk_children(strip) if isinstance(node, html.B)
         ]
         assert numbers == [3, 2, 1, 3, 0]  # members/valid/invalid/outcome/incomplete
 
@@ -769,12 +772,12 @@ class TestInvestigationWorkspacePage:
         self, cmp_service, cmp_shared, sig
     ):
         page = workspace.investigation_page(cmp_service, CMP, sig.compare)
-        assert _pattern_nodes(page, "inv-compare-toggle")
+        assert _string_id_node(page, "inv-include-invalid") is not None
         pair = cmp_shared.create(
             CMP, "pair", "problem", OUTCOME, members=[str(CS1), str(CS2)]
         )
         clean = workspace.investigation_page(cmp_service, CMP, str(pair.id))
-        assert not _pattern_nodes(clean, "inv-compare-toggle")
+        assert _string_id_node(clean, "inv-include-invalid") is None
 
     def test_only_invalid_page_renders_the_exclusion_empty_state(
         self, cmp_service, sig
@@ -813,8 +816,13 @@ class TestInvestigationEditorPages:
         page = workspace.investigation_edit_page(cmp_service, CMP, None, seed)
         state = _first_pattern(page, "inv-edit-state").data
         assert state["picked"] == seed and state["saved"] == []
-        grid = _first_pattern(page, "inv-edit-grid")
-        assert "initialState" not in grid.dashGridOptions
+        picks = {
+            node.id["inv-edit-pick"]: node.value
+            for node in _pattern_nodes(page, "inv-edit-pick")
+        }
+        assert set(picks) == {str(CS1), str(CS2), str(CS3), str(CS4), str(CS5)}
+        assert picks[str(CS1)] == [str(CS1)] and picks[str(CS2)] == [str(CS2)]
+        assert picks[str(CS3)] == []
         assert _first_pattern(page, "inv-edit-name") is not None
         assert _first_pattern(page, "inv-edit-save").disabled is True
         assert not _pattern_nodes(page, "inv-edit-discard")
@@ -842,8 +850,17 @@ class TestInvestigationEditorPages:
         page = workspace.investigation_edit_page(cmp_service, CMP, sig.compare, [])
         state = _first_pattern(page, "inv-edit-state").data
         assert state["picked"] == state["saved"] == [str(CS1), str(CS2), str(CS3)]
-        grid = _first_pattern(page, "inv-edit-grid")
-        assert "initialState" not in grid.dashGridOptions
+        picks = {
+            node.id["inv-edit-pick"]: node.value
+            for node in _pattern_nodes(page, "inv-edit-pick")
+        }
+        assert picks == {
+            str(CS1): [str(CS1)],
+            str(CS2): [str(CS2)],
+            str(CS3): [str(CS3)],
+            str(CS4): [],
+            str(CS5): [],
+        }
         assert not _pattern_nodes(page, "inv-edit-name")
         assert not _pattern_nodes(page, "inv-edit-factor")
         assert _first_pattern(page, "inv-edit-save").disabled is False
@@ -998,21 +1015,36 @@ class TestEditorCallbacks:
             "outcome": extra.get("outcome"),
         }
 
-    def test_grid_selection_updates_the_picked_members(self, mounted):
-        key = self._key(mounted.callback_map, "inv-edit-state", "inv-edit-grid")
+    def test_checkbox_edits_update_the_picked_members(self, mounted):
+        key = self._key(mounted.callback_map, "inv-edit-state", "inv-edit-pick")
         result = self._dispatch(
             mounted,
             key,
             inputs=[
                 [
                     {
-                        "id": {"inv-edit-grid": "grid"},
-                        "property": "selectedRows",
-                        "value": [{"sweep_id": str(CS1)}],
+                        "id": [
+                            {"inv-edit-pick": str(CS1)},
+                            {"inv-edit-pick": str(CS2)},
+                        ],
+                        "property": "value",
+                        "value": [[str(CS1)], []],
                     }
                 ]
             ],
             state=[
+                [
+                    {
+                        "id": {"inv-edit-pick": str(CS1)},
+                        "property": "id",
+                        "value": {"inv-edit-pick": str(CS1)},
+                    },
+                    {
+                        "id": {"inv-edit-pick": str(CS2)},
+                        "property": "id",
+                        "value": {"inv-edit-pick": str(CS2)},
+                    },
+                ],
                 [
                     {
                         "id": {"inv-edit-state": "members"},
@@ -1021,7 +1053,7 @@ class TestEditorCallbacks:
                             [str(CS1), str(CS2)], [str(CS1), str(CS2)]
                         ),
                     }
-                ]
+                ],
             ],
         )
         assert self._out(result, "inv-edit-state", "data")["picked"] == [str(CS1)]
@@ -1049,10 +1081,37 @@ class TestEditorCallbacks:
             state=[
                 [
                     {
-                        "id": {"inv-edit-grid": "grid"},
-                        "property": "selectedRows",
-                        "value": [],
+                        "id": {"inv-edit-pick": str(CS1)},
+                        "property": "id",
+                        "value": {"inv-edit-pick": str(CS1)},
+                    },
+                    {
+                        "id": {"inv-edit-pick": str(CS2)},
+                        "property": "id",
+                        "value": {"inv-edit-pick": str(CS2)},
+                    },
+                ],
+                [
+                    {
+                        "id": [
+                            {"inv-edit-pick": str(CS1)},
+                            {"inv-edit-pick": str(CS2)},
+                        ],
+                        "property": "value",
+                        "value": [[], []],
                     }
+                ],
+                [
+                    {
+                        "id": {"inv-edit-mode": "all"},
+                        "property": "id",
+                        "value": {"inv-edit-mode": "all"},
+                    },
+                    {
+                        "id": {"inv-edit-mode": "members"},
+                        "property": "id",
+                        "value": {"inv-edit-mode": "members"},
+                    },
                 ],
                 {"id": "url", "property": "pathname", "value": self._CREATE_ROUTE},
             ],
@@ -1061,13 +1120,13 @@ class TestEditorCallbacks:
         text = _text(self._out(result, "inv-edit-preview", "children"))
         assert "2 project members picked" in text
         assert "+2 -0 (unsaved)" in text
-        # the empty grid selection mismatches the working set: the loader
-        # hands the pre-selection to the grid (one entry per picked row)
-        selection = self._single(self._out(result, "inv-edit-grid", "selectedRows"))
-        assert selection == [
-            {"sweep_id": str(CS1)},
-            {"sweep_id": str(CS2)},
+        # The mounted checkboxes take the working selection (one entry
+        # per row), and the seg's Members label follows the picks.
+        assert self._out(result, "inv-edit-pick", "value") == [
+            [str(CS1)],
+            [str(CS2)],
         ]
+        assert self._out(result, "inv-edit-mode", "children")[1] == "Members (2)"
 
     def test_save_on_edit_flow_replaces_and_syncs_members(self, mounted):
         key = self._key(mounted.callback_map, "url.pathname", "inv-edit-save")
@@ -1107,10 +1166,8 @@ class TestEditorCallbacks:
             for sweep in mounted.shared.detail(mounted.compare).investigation.members
         ]
         assert members == [str(CS1)]
-        rows = self._single(self._out(result, "inv-edit-grid", "rowData"))
-        member_column = {row["sweep_id"]: row["member"] for row in rows}
-        assert member_column[str(CS1)] == "member"
-        assert member_column[str(CS2)] == MISSING
+        # the working set stays in the store; no grid echo comes back
+        assert "inv-edit-grid" not in json.dumps(result["response"])
 
     def test_save_on_create_requires_a_complete_body(self, mounted):
         key = self._key(mounted.callback_map, "url.pathname", "inv-edit-save")
@@ -1199,14 +1256,26 @@ class TestEditorCallbacks:
                         "property": "data",
                         "value": self._state([str(CS1)], [str(CS1), str(CS2)]),
                     }
-                ]
+                ],
+                [
+                    {
+                        "id": {"inv-edit-pick": str(CS1)},
+                        "property": "id",
+                        "value": {"inv-edit-pick": str(CS1)},
+                    },
+                    {
+                        "id": {"inv-edit-pick": str(CS2)},
+                        "property": "id",
+                        "value": {"inv-edit-pick": str(CS2)},
+                    },
+                ],
             ],
         )
         state = self._single(self._out(result, "inv-edit-state", "data"))
         assert state["picked"] == [str(CS1), str(CS2)]
-        assert self._single(self._out(result, "inv-edit-grid", "selectedRows")) == [
-            {"sweep_id": str(CS1)},
-            {"sweep_id": str(CS2)},
+        assert self._out(result, "inv-edit-pick", "value") == [
+            [str(CS1)],
+            [str(CS2)],
         ]
 
 
@@ -1237,23 +1306,17 @@ def _text(node) -> str:
 def _inv_page(
     cmp_service,
     investigation_id: str,
-    view: str | None = None,
+    view: str = "compare",
     member: str | None = None,
 ):
-    """The investigation page for one ``?view=`` document (member scope
-    included), plus the decoded state the URL carries."""
-    doc = default_view_state()
-    if view is not None or member is not None:
-        doc["inv"] = {
-            **doc["inv"],
-            "view": view or "compare",
-            "member": member,
-        }
+    """The investigation page for one plain query string (view and
+    member scope included)."""
+    search = workspace.investigation_search(view, member)
     return workspace.investigation_page(
         cmp_service,
         CMP,
         investigation_id,
-        search=f"?view={encode_view_state(doc)}",
+        search=search,
     )
 
 
@@ -1270,108 +1333,79 @@ class TestMemberScopeAndViews:
     and carries the via return path, and Open in Python exports the
     exact effective membership."""
 
-    def test_member_scope_round_trips_through_the_view_codec(self, cmp_service, sig):
-        doc = default_view_state()
-        doc["inv"] = {"view": "series", "member": str(CS2)}
-        hydrated, error = hydrate_view(
-            f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}",
-            f"?view={encode_view_state(doc)}",
-            None,
+    def test_member_scope_round_trips_through_the_query_string(self):
+        search = workspace.investigation_search("series", str(CS2))
+        query = workspace.investigation_query(search)
+        assert query["view"] == "series"
+        assert query["member"] == str(CS2)
+        # Compare is the default; an unknown view name falls back to it.
+        assert workspace.investigation_query("")["view"] == "compare"
+        assert workspace.investigation_query("?view=bogus")["view"] == "compare"
+        # Links compose: the flag and filter ride their own params.
+        full = workspace.investigation_query(
+            workspace.investigation_search(
+                "compare", None, include_invalid=True, q="rmse"
+            )
         )
-        assert error is None
-        assert hydrated is not None
-        assert hydrated["inv"] == {"view": "series", "member": str(CS2)}
-        # A workspace navigation without a view document resets it.
-        plain, _error = hydrate_view(
-            f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}", None, doc
-        )
-        assert plain is not None
-        assert plain["inv"] == {"view": "compare", "member": None}
-        assert plain["via"] is None
+        assert full["include_invalid"] is True
+        assert full["q"] == "rmse"
 
     def test_page_renders_the_scoped_member_fact_and_controls(self, cmp_service, sig):
         page = _inv_page(cmp_service, sig.compare, view="series", member=str(CS2))
-        crumb = _first_pattern(page, "inv-crumb-member")
-        assert _text(crumb) == "cmp_f02"
-        note = _first_pattern(page, "inv-member-note")
+        note = _string_id_node(page, "inv-member-note")
         assert _text(note) == "Scoped to member cmp_f02"
-        clear = _first_pattern(page, "inv-member-clear")
+        clear = _string_id_node(page, "inv-member-clear")
         assert clear.style == {}
-        python_clip = _first_pattern(page, "inv-python").children[1].children[0]
-        selection = decode_selection_token(python_clip.children)
-        assert selection.sweeps == (CS2,)
+        assert clear.href == (
+            f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}?view=series"
+        )
+        assert _text(page).count("cmp_f02") >= 2  # crumb, h1, and the note
 
     def test_unknown_member_falls_back_to_all_members(self, cmp_service, sig):
         tray, scoped = investigation_scope_state([str(CS1), str(CS2)], "deadbeef")
         assert scoped is None
         assert tray["sweeps"] == sorted({str(CS1), str(CS2)})
         page = _inv_page(cmp_service, sig.compare, view="points", member="deadbeef")
-        crumb = _first_pattern(page, "inv-crumb-member")
-        assert _text(crumb) == ""
-        note = _first_pattern(page, "inv-member-note")
+        note = _string_id_node(page, "inv-member-note")
         assert _text(note) == ""
+        clear = _string_id_node(page, "inv-member-clear")
+        assert clear.style == {"display": "none"}
+        python = _inv_page(cmp_service, sig.compare, view="python", member="deadbeef")
         clipboards = [
-            node for node in _walk_children(page) if isinstance(node, dcc.Clipboard)
+            node for node in _walk_children(python) if isinstance(node, dcc.Clipboard)
         ]
         selection = decode_selection_token(clipboards[0].content)
         assert set(selection.sweeps or ()) == {CS1, CS2, CS3}
 
-    def test_compare_drops_member_scope_and_the_url_follows(self):
-        doc = default_view_state()
-        doc["inv"] = {"view": "series", "member": str(CS2)}
-        doc = view_from_inv(doc, view="compare")
-        assert doc["inv"] == {"view": "compare", "member": None}
-        scoped_url = "?view=" + encode_view_state(
-            {"v": 2, "inv": {"view": "series", "member": str(CS2)}}
+    def test_compare_nav_never_carries_a_member_scope(self, cmp_service, sig):
+        page = _inv_page(cmp_service, sig.compare, view="series", member=str(CS2))
+        seg = _string_id_node(page, "inv-tabs")
+        links = {link.children: link.href for link in _of(seg, html.A)}
+        assert links["Compare"] == (
+            f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}"
         )
-        search = synced_search(
-            f"{ROUTES_BASE}/project/{CMP}/investigation/inv1",
-            doc,
-            scoped_url,
-            url_navigated=False,
+        assert f"member={CS2}" in links["Series"]
+        assert f"member={CS2}" in links["Search"]
+        # Python keeps the scope: its token names the member alone.
+        assert f"member={CS2}" in links["Points"]
+        python_link = next(
+            node.href
+            for node in _walk_children(page)
+            if isinstance(node, html.A) and node.children == "Open in Python"
         )
-        assert search == "" or "member" not in (search or "")
-        # Series and member edits mint the investigation URL.
-        doc = view_from_inv(doc, view="search", member=str(CS1))
-        minted = synced_search(
-            f"{ROUTES_BASE}/project/{CMP}/investigation/inv1",
-            doc,
-            "",
-            url_navigated=False,
-        )
-        assert minted == f"?view={encode_view_state(doc)}"
+        assert f"member={CS2}" in python_link
 
-    def test_page_regions_follow_the_url_view(self, cmp_service, sig):
+    def test_page_marks_the_url_view_in_the_nav(self, cmp_service, sig):
         page = _inv_page(cmp_service, sig.compare, view="points", member=str(CS2))
-        regions = {
-            node.id["inv-region"]: node.style
-            for node in _pattern_nodes(page, "inv-region")
+        seg = _string_id_node(page, "inv-tabs")
+        marks = {
+            link.children: getattr(link, "className", None) for link in _of(seg, html.A)
         }
-        assert regions == {
-            "compare": {"display": "none"},
-            "series": {"display": "none"},
-            "points": {"display": "block"},
-            "search": {"display": "none"},
-        }
-        buttons = {
-            node.id["inv-view"]: node.className
-            for node in _pattern_nodes(page, "inv-view")
-        }
-        assert buttons["points"] == "on"
-        assert buttons["compare"] == ""
-
-    def test_points_table_carries_the_member_trials(self, cmp_service, sig):
-        tray, _scoped = investigation_scope_state([str(CS1), str(CS2), str(CS3)], None)
-        grid = next(
-            node
-            for node in _walk_children(points_tab(cmp_service, CMP, tray, OUTCOME))
-            if isinstance(node, AgGrid)
-        )
-        assert {row["tk"] for row in grid.rowData} == {
-            str(CT1),
-            str(CT2),
-            str(CT3),
-            str(CT4),
+        assert marks == {
+            "Compare": None,
+            "Series": None,
+            "Points": "on",
+            "Search": None,
         }
 
     def test_sweep_hub_gates_views_on_real_data(self, cmp_service, sig):
@@ -1382,7 +1416,8 @@ class TestMemberScopeAndViews:
             cmp_service, CMP, str(CS1), "cmp_f01", sig.compare
         )
         crumb, views = hub
-        assert _text(crumb) == f"{CMP}Investigationssig-comparecmp_f01"
+        crumb_text = _text(crumb).replace("›", "")
+        assert CMP in crumb_text and "sig-comparecmp_f01" in crumb_text
         labels = [
             node.children
             for node in _walk_children(views)
@@ -1397,14 +1432,8 @@ class TestMemberScopeAndViews:
         }
         points_href = links["Points"]
         assert f"/investigation/{sig.compare}" in points_href
-        assert (
-            str(CS1)
-            in decode_view_state(unquote(points_href.split("view=")[1]))["inv"][
-                "member"
-            ]
-        )
-        search_doc = decode_view_state(unquote(links["Search"].split("view=")[1]))
-        assert search_doc["inv"] == {"view": "search", "member": None}
+        assert points_href.endswith(f"?view=points&member={CS1}")
+        assert links["Search"].endswith(f"/investigation/{sig.compare}?view=search")
         back = _text(views).count("Back to sig-compare")
         assert back == 1
 
@@ -1420,7 +1449,21 @@ class TestMemberScopeAndViews:
             == []
         )
         foreign = workspace.investigation_page(cmp_service, CMP, sig.compare)
-        assert _pattern_nodes(foreign, "inv-region")  # sanity: page builds
+        assert _string_id_node(foreign, "inv-tabs")  # sanity: page builds
+
+    def test_points_table_carries_the_member_trials(self, cmp_service, sig):
+        tray, _scoped = investigation_scope_state([str(CS1), str(CS2), str(CS3)], None)
+        grid = next(
+            node
+            for node in _walk_children(points_tab(cmp_service, CMP, tray, OUTCOME))
+            if isinstance(node, AgGrid)
+        )
+        assert {row["tk"] for row in grid.rowData} == {
+            str(CT1),
+            str(CT2),
+            str(CT3),
+            str(CT4),
+        }
 
     def test_via_return_path_survives_its_own_url_only(self, cmp_service, sig):
         doc = analysis.edited_view(
@@ -1445,12 +1488,12 @@ class TestMemberScopeAndViews:
 
     def test_python_token_exports_the_scoped_member_set(self, cmp_service, sig):
         record = cmp_service.investigation_detail(sig.compare).investigation
-        scoped = workspace.open_in_python(record, member=str(CS2))
+        scoped = html.Div(workspace.python_body(record, member=str(CS2)))
         clipboards = [
             node for node in _walk_children(scoped) if isinstance(node, dcc.Clipboard)
         ]
         assert decode_selection_token(clipboards[0].content).sweeps == (CS2,)
-        full = workspace.open_in_python(record)
+        full = html.Div(workspace.python_body(record))
         clipboards = [
             node for node in _walk_children(full) if isinstance(node, dcc.Clipboard)
         ]

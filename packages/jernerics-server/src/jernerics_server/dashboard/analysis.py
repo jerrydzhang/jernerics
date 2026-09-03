@@ -70,7 +70,6 @@ _ANALYSIS_VIEWS = ("overview", "investigations")
 INVESTIGATION_VIEWS = ("compare", "series", "points", "search")
 """The Investigation workspace's view row."""
 
-_INV_DEFAULT: dict[str, Any] = {"view": "compare", "member": None}
 
 _SERIES_MODES = ("stacked", "overlay")
 _TRIAL_DISPLAYS = ("all", "highlighted", "median_iqr")
@@ -94,11 +93,6 @@ def default_scope_state() -> dict[str, Any]:
     return {**EMPTY_TRAY, "include_archived": False, "include_invalid": False}
 
 
-def default_inv_state() -> dict[str, Any]:
-    """The investigation workspace's state: Compare over all members."""
-    return dict(_INV_DEFAULT)
-
-
 def default_view_state() -> dict[str, Any]:
     """The v2 view document with every control at its default."""
     return {
@@ -110,7 +104,6 @@ def default_view_state() -> dict[str, Any]:
         "focus": None,
         "via": None,
         "highlighted_trials": [],
-        "inv": default_inv_state(),
         "series": {
             "keys": [],
             "mode": "stacked",
@@ -305,7 +298,6 @@ def decode_view_state(raw: str) -> dict[str, Any]:
     )
     doc["focus"] = decode_focus(payload.get("focus"))
     doc["via"] = _optional_key(payload.get("via"), "via")
-    doc["inv"] = _decode_inv(payload.get("inv", {}))
     auto_refresh = payload.get("auto_refresh", False)
     _require(isinstance(auto_refresh, bool), "auto_refresh must be a boolean")
     doc["auto_refresh"] = auto_refresh
@@ -320,19 +312,6 @@ def decode_view_state(raw: str) -> dict[str, Any]:
         optuna.get("contour_y"), "optuna.contour_y"
     )
     return doc
-
-
-def _decode_inv(value: Any) -> dict[str, Any]:
-    """A validated investigation-workspace group: the active view and
-    the optional member sweep the analysis is narrowed to; unknown
-    fields are dropped and missing fields take defaults."""
-    _require(isinstance(value, dict), "inv must be an object")
-    state = default_inv_state()
-    view = value.get("view", state["view"])
-    _require(view in INVESTIGATION_VIEWS, f"unsupported investigation view {view!r}")
-    state["view"] = view
-    state["member"] = _optional_key(value.get("member"), "inv.member")
-    return state
 
 
 def encode_view_state(doc: dict[str, Any]) -> str:
@@ -871,8 +850,9 @@ def synced_search(
     minting on navigation would let a stale document clobber a freshly
     opened deep link before hydration lands, and the editor and
     investigation pages keep their own queries. View edits mint on the
-    workspace and investigation pages; the scope rides the document, so
-    no separate ``?sel=`` is minted anymore."""
+    workspace page; the scope rides the document, so no separate
+    ``?sel=`` is minted anymore. Investigation pages own their plain
+    query string (view, member, filters); their state never mints."""
     if url_navigated:
         kind = parse_route(pathname).kind
         if kind in ("workspace", "investigation", "investigation-edit"):
@@ -881,30 +861,9 @@ def synced_search(
         # navigation may only drop the workspace parameters, never theirs.
         remaining = _drop_workspace_params(current_search or "")
         return remaining if remaining != (current_search or "") else None
-    if parse_route(pathname).kind not in ("workspace", "investigation"):
+    if parse_route(pathname).kind != "workspace":
         return None
     return search_from_state(view_doc, current_search)
-
-
-def view_from_inv(
-    current: dict[str, Any] | None,
-    *,
-    view: str | None = None,
-    member: str | None = None,
-) -> dict[str, Any]:
-    """View doc after an investigation-workspace edit: the named view
-    (an unknown name falls back to Compare) and member scope — ``member
-    =None`` clears it. The comparison never inherits a member scope:
-    switching to Compare is how the scope visibly drops."""
-    doc = current or default_view_state()
-    state = dict(doc.get("inv") or default_inv_state())
-    if view is not None:
-        state["view"] = view if view in INVESTIGATION_VIEWS else "compare"
-        if state["view"] == "compare":
-            state["member"] = None
-    if member is not None:
-        state["member"] = member or None
-    return edited_view(doc, {"inv": state})
 
 
 def investigation_scope_state(
@@ -934,10 +893,16 @@ def investigation_view_href(
     member: str | None = None,
 ) -> str:
     """Investigation page URL showing one view, optionally narrowed to
-    one member sweep (the sweep hub's Series/Points links)."""
-    doc = view_from_inv(default_view_state(), view=view, member=member or "")
+    one member sweep (the sweep hub's Series/Points links). Compare
+    never carries a member scope; unknown views fall back to it."""
+    active = view if view in INVESTIGATION_VIEWS else "compare"
+    if active == "compare":
+        member = None
     target = f"{ROUTES_BASE}/project/{project}/investigation/{investigation_id}"
-    return f"{target}?view={encode_view_state(doc)}"
+    params = [f"view={active}"] if active != "compare" else []
+    if member:
+        params.append(f"member={quote(member, safe='')}")
+    return f"{target}?{'&'.join(params)}" if params else target
 
 
 def view_query(view_doc: dict[str, Any] | None) -> str:

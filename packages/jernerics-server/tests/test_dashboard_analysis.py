@@ -2095,10 +2095,7 @@ class TestScopeBar:
             for node in _walk(page, lambda n: type(n).__name__ == "Tabs")
             if node.id == {"analysis-tabs": "canvas"}
         )
-        assert [tab.value for tab in tabs.children] == [
-            "overview",
-            "investigations",
-        ]
+        assert [tab.value for tab in tabs.children] == ["overview"]
 
 
 class TestEntryPoints:
@@ -2489,8 +2486,11 @@ class TestWorkspaceRouteServes:
         rendered = str(page)
         assert "analysis-selection-store" not in rendered
         assert "Project lab" in rendered
-        assert "Investigations" in rendered
         assert "Exceptions" in rendered
+        # the Investigations tab moved to its own route (rewrite epic);
+        # the tab row keeps a link to it, never a mounted dcc.Tab
+        assert "value='investigations'" not in rendered
+        assert "/investigations" in rendered
         assert "analysis-scope-bar" in rendered
         assert "Browse scope" in rendered
         assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")

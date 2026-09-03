@@ -329,7 +329,7 @@ def _page_hrefs(page: Component) -> set[str]:
     for component in _components(page):
         if isinstance(component, AgGrid):
             hrefs |= _grid_hrefs(component)
-        elif isinstance(component, html.A) and component.href:
+        elif isinstance(component, html.A) and getattr(component, "href", None):
             hrefs.add(component.href)
     return {urljoin(LANDING, href) for href in hrefs}
 
@@ -376,16 +376,29 @@ class TestLinkGraphJourney:
     def test_landing_walk_stays_on_canonical_routes(self, scenario):
         pages = _walk_link_graph(scenario.service)
         kinds = {_route_kind(url) for url in pages}
-        assert kinds <= {"project", "workspace", "artifact", "exceptions"}
-        # The new-shell tab row carries the Investigations entry ahead of
-        # its route (R6 re-skin); the prototype mandates the full tab row.
+        assert kinds <= {
+            "project",
+            "workspace",
+            "artifact",
+            "exceptions",
+            "investigations",
+            "investigation",
+            "investigation-edit",
+            "sweep",
+        }
         for page in pages.values():
             for href in _page_hrefs(page):
                 kind = _route_kind(href)
-                if kind == "not-found":
-                    assert href.split("?", 1)[0].endswith("/investigations"), href
-                    continue
-                assert kind in {"project", "workspace", "artifact", "exceptions"}, href
+                assert kind in {
+                    "project",
+                    "workspace",
+                    "artifact",
+                    "exceptions",
+                    "investigations",
+                    "investigation",
+                    "investigation-edit",
+                    "sweep",
+                }, href
 
     def test_focused_inspector_reaches_every_object_kind(self, scenario):
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]

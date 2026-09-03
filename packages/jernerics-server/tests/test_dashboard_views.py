@@ -652,12 +652,20 @@ class TestWorkspaceLayout:
     def test_workspace_mounts_browser_tabs_and_inspector_once(self, service):
         page, polls = page_content("/dashboard/project/ops", service)
         rendered = str(page)
-        for tab in ("overview", "investigations"):
+        for tab in ("overview",):
             assert f"value='{tab}'" in rendered
-        for gone in ("catalog", "series", "points", "optuna", "python"):
+        gone_tabs = (
+            "catalog",
+            "investigations",
+            "series",
+            "points",
+            "optuna",
+            "exceptions",
+        )
+        for gone in gone_tabs:
             assert f"value='{gone}'" not in rendered
-        assert "id='workspace-investigations'" in rendered
-        # The Exceptions entry routes to the new-shell page.
+        # Investigations and Exceptions route to new-shell pages.
+        assert f"href='{ROUTES_BASE}/project/ops/investigations'" in rendered
         assert f"href='{ROUTES_BASE}/project/ops/exceptions'" in rendered
         assert "id='sweep-grid'" in rendered
         assert "id='analysis-family-grid'" in rendered

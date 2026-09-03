@@ -7,7 +7,6 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import unquote
 
 import httpx
 import optuna
@@ -36,12 +35,8 @@ from jernerics_schema import (
 )
 from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
-    decode_view_state,
-    default_view_state,
-    encode_view_state,
     investigation_scope_state,
     investigation_view_href,
-    view_from_inv,
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.callbacks import page_content
@@ -408,6 +403,14 @@ def _by_id(page: Component, component_id) -> Component:
     )
 
 
+def _pattern(page: Component, key: str) -> list:
+    return [
+        node
+        for node in _components(page)
+        if isinstance(getattr(node, "id", None), dict) and key in node.id
+    ]
+
+
 def _grid_rows(page: Component, grid_id: str) -> list[dict]:
     grid = _by_id(page, grid_id)
     assert isinstance(grid, AgGrid), grid_id
@@ -464,9 +467,9 @@ def _inv_url(investigation_id: str) -> str:
 
 
 def _view_url(investigation_id: str, view: str, member: str | None) -> tuple[str, str]:
-    """(pathname, ?view= search) for one investigation view."""
-    doc = view_from_inv(default_view_state(), view=view, member=member or "")
-    return _inv_url(investigation_id), f"?view={encode_view_state(doc)}"
+    """(pathname, search) for one investigation view."""
+    search = workspace.investigation_search(view, member)
+    return _inv_url(investigation_id), search
 
 
 def _selection_tokens(page: Component) -> list[Selection]:
@@ -626,9 +629,15 @@ class TestDashboardJourney:
             "loss",
             "acc",
         ]
-        rows = _grid_rows(page, {"inv-edit-grid": "grid"})
-        assert len(rows) == 5
-        assert all(row["member"] == workspace.MISSING for row in rows)
+        picked = set(_picked(world))
+        picks = _pattern(page, "inv-edit-pick")
+        assert len(picks) == 5
+        assert all(
+            node.value == [node.id["inv-edit-pick"]]
+            if node.id["inv-edit-pick"] in picked
+            else node.value == []
+            for node in picks
+        )
 
     def test_save_creates_the_investigation_and_opens_the_workspace(self, world, saved):
         pathname = saved["url"]["pathname"]
@@ -640,9 +649,12 @@ class TestDashboardJourney:
         assert detail.investigation.outcome == "loss"
         assert {str(m) for m in detail.investigation.members} == set(_picked(world))
         page, _polls = page_content(pathname, world.service)
-        text = _page_text(page)
+        text = " ".join(_page_text(page).split())
         assert MAIN_INV in text
-        assert "factor optimizer · outcome loss · 4 sweeps" in text
+        assert (
+            "factor optimizer · outcome loss (final) · matching by "
+            "exact sampled signature" in text
+        )
         for label in ("Compare", "Series", "Points", "Search"):
             assert label in text
         assert "Members 4" in text
@@ -650,7 +662,7 @@ class TestDashboardJourney:
         assert "Marked invalid (excluded by default) 1" in text
         assert "With outcome 4" in text
         assert "Incomplete 1" in text
-        toggle = _by_id(page, {"inv-compare-toggle": "include"})
+        toggle = _by_id(page, "inv-include-invalid")
         assert toggle.value == []
 
     def test_compare_renders_signature_matching_and_coverage(self, world, saved):
@@ -665,41 +677,38 @@ class TestDashboardJourney:
         )
         doc = world.service.investigation_compare(investigation_id)
         assert doc.signature_keys == ("act", "lr", "seed")
-        a = world.sweep_ids[ROBERTS]
-        d = world.sweep_ids[ROBERTS_PARTIAL]
-        b = world.sweep_ids[ROBERTS_SGD]
-        matched = _grid_rows(page, "compare-matched-grid")
-        assert matched == [
-            {
-                "signature": SIG_0,
-                a: _final_loss(0.5, 0),
-                d: _final_loss(0.5, 0),
-                b: _final_loss(0.8, 0),
-            },
-            {
-                "signature": SIG_1,
-                a: _final_loss(0.5, 1),
-                d: None,
-                b: _final_loss(0.8, 1),
-            },
-        ]
+        # the matched table renders one column per analyzable member;
+        # the common signature carries its chip, values render as text
+        assert SIG_0 in text and SIG_1 in text
+        assert "Matched comparison (loss)" in text
         assert (
             "2 signatures matched by ≥2 analyzable members · 1 common to "
             "all 3 · medians pool matched trials; no imputation, no "
             "outliers suppressed." in text
         )
-        members = _grid_rows(page, "compare-members-grid")
-        by_name = {row["name"]: row for row in members}
         # The factor column merges every carry source: the manual param
         # plus the submission config source.
-        assert by_name[ROBERTS]["factor"] == "adam / config_lr.py"
-        assert by_name[ROBERTS_SGD]["factor"] == "config_lr.py / sgd"
-        assert by_name[ROBERTS_PARTIAL]["usable"] == 1
-        assert by_name[ROBERTS_FLAGGED]["factor"] == "adadelta / config_lr.py"
-        assert by_name[ROBERTS_FLAGGED]["usable"] == 2
+        assert "adam / config_lr.py" in text
+        assert "config_lr.py / sgd" in text
+        assert "adadelta / config_lr.py" in text
+        # usable fractions and curation badges ride their row cells
+        assert "roberts-lr completed 2/2 2/2" in text
+        assert "roberts-lr-partial running 1/2 1/2" in text
+        assert "roberts-lr-flagged invalid archived completed 2/2 2/2" in text
 
-        # mark_sweep_invalid archives too; the cell shows both facts.
-        assert by_name[ROBERTS_FLAGGED]["curation"] == "invalid archived"
+        # every member name links to the sweep page carrying the
+        # investigation return path
+        for name in (ROBERTS, ROBERTS_SGD, ROBERTS_PARTIAL, ROBERTS_FLAGGED):
+            expected = (
+                f"{ROUTES_BASE}/project/{PROJECT}/sweep/{world.sweep_ids[name]}"
+                f"?via={investigation_id}"
+            )
+            assert any(
+                isinstance(node, html.A)
+                and node.href == expected
+                and node.children == name
+                for node in _components(page)
+            ), name
 
     def test_series_and_points_scope_to_the_materialized_member(self, world, saved):
         investigation_id = saved["url"]["pathname"].rsplit("/", 1)[1]
@@ -708,7 +717,7 @@ class TestDashboardJourney:
         series_page, _polls = page_content(path, world.service, search=search)
         text = _page_text(series_page)
         assert f"Scoped to member {ROBERTS_PARTIAL}" in text
-        clear_button = _by_id(series_page, {"inv-member-clear": "scope"})
+        clear_button = _by_id(series_page, "inv-member-clear")
         assert clear_button.style == {}
         key_dropdown = _by_id(series_page, "analysis-key")
         assert [option["value"] for option in key_dropdown.options] == ["loss"]
@@ -741,31 +750,17 @@ class TestDashboardJourney:
     ):
         investigation_id = saved["url"]["pathname"].rsplit("/", 1)[1]
         sgd = world.sweep_ids[ROBERTS_SGD]
-        response = _dispatch(
-            world,
-            needle={"url.pathname", "url.search"},
-            input_id="compare-members-grid",
-            inputs=[
-                {
-                    "id": "compare-members-grid",
-                    "property": "cellClicked",
-                    "value": {"rowId": sgd},
-                }
-            ],
-            state=[
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": _inv_url(investigation_id),
-                }
-            ],
-            changed=["compare-members-grid.cellClicked"],
+        # the member inventory links straight to the sweep page and
+        # carries the investigation return path
+        page, _polls = page_content(_inv_url(investigation_id), world.service)
+        via_link = next(
+            node
+            for node in _components(page)
+            if isinstance(node, html.A)
+            and node.href
+            and node.href.endswith(f"/sweep/{sgd}?via={investigation_id}")
         )
-        search = response["url"]["search"]
-        assert response["url"]["pathname"] == f"{ROUTES_BASE}/project/{PROJECT}"
-        doc = decode_view_state(unquote(search.removeprefix("?view=")))
-        assert doc["focus"] == {"kind": "sweep", "id": sgd}
-        assert doc["via"] == investigation_id
+        assert via_link.children == ROBERTS_SGD
 
         hub = workspace.inspector_content(
             world.service,
@@ -808,15 +803,18 @@ class TestDashboardJourney:
     ):
         investigation_id = saved["url"]["pathname"].rsplit("/", 1)[1]
         record = world.service.investigation_detail(investigation_id)
-        page, _polls = page_content(_inv_url(investigation_id), world.service)
+        path, search = _view_url(investigation_id, "python", None)
+        page, _polls = page_content(path, world.service, search=search)
         tokens = _selection_tokens(page)
         assert Selection(project=PROJECT, sweeps=record.investigation.members) in (
             tokens
         )
 
         sgd = world.sweep_ids[ROBERTS_SGD]
-        path, search = _view_url(investigation_id, "series", sgd)
-        scoped_page, _polls = page_content(path, world.service, search=search)
+        scoped_path, scoped_search = _view_url(investigation_id, "python", sgd)
+        scoped_page, _polls = page_content(
+            scoped_path, world.service, search=scoped_search
+        )
         assert Selection(
             project=PROJECT, sweeps=(uuid.UUID(sgd),)
         ) in _selection_tokens(scoped_page)
@@ -1016,8 +1014,8 @@ class TestEdgeFacts:
         assert doc.signatures[0].common
         assert not doc.signatures[1].common
         assert doc.signatures[0].values[flagged] == _final_loss(1.2, 0)
-        page = workspace.compare_children(doc, PROJECT, "loss", True)
-        text = _page_text(html.Div(page))
+        body = workspace.compare_body(doc, PROJECT, "loss", investigation_id, True)
+        text = _page_text(html.Div(body))
         assert (
             "2 signatures matched by ≥2 analyzable members · 1 common to "
             "all 4 · medians pool matched trials; no imputation, no "
@@ -1047,9 +1045,7 @@ class TestEdgeFacts:
         assert member.usable == 1
         assert hob in doc.analyzable
         page, _polls = page_content(_inv_url(archived_pair), world.service)
-        rows = _grid_rows(page, "compare-members-grid")
-        by_name = {row["name"]: row for row in rows}
-        assert by_name[HOB]["curation"] == "archived"
+        assert f"{HOB} archived" in _page_text(page)
 
     def test_incomplete_member_reflects_live_coverage(self, world, saved):
         investigation_id = saved["url"]["pathname"].rsplit("/", 1)[1]
@@ -1080,7 +1076,7 @@ class TestEdgeFacts:
         page, _polls = page_content(path, world.service, search=search)
         text = _page_text(page)
         assert "Scoped to member" not in text
-        clear_button = _by_id(page, {"inv-member-clear": "scope"})
+        clear_button = _by_id(page, "inv-member-clear")
         assert clear_button.style == {"display": "none"}
         key_dropdown = _by_id(page, "analysis-key")
         assert [option["value"] for option in key_dropdown.options] == [
@@ -1111,7 +1107,6 @@ class TestEdgeFacts:
             hob: _final_loss(0.4, 0),
         }
         page, _polls = page_content(_inv_url(width_mix), world.service)
-        assert _grid_rows(page, "compare-matched-grid") == []
         text = _page_text(page)
         assert (
             "No sampled signature is completed by all 2 analyzable "
@@ -1120,7 +1115,9 @@ class TestEdgeFacts:
         )
         assert "Outcome heatmap" not in text
         assert "Median over common signatures" not in text
-        assert _grid_rows(page, "compare-members-grid")
+        assert "Matched comparison" not in text
+        # the member inventory still renders
+        assert ROBERTS in text and HOB in text
 
 
 class TestIndexAndArchive:
@@ -1135,12 +1132,28 @@ class TestIndexAndArchive:
         )
         return str(record.id)
 
+    @staticmethod
+    def _index_page(world):
+        return workspace.investigations_index_page(
+            world.service, PROJECT, time.time_ns()
+        )
+
+    @staticmethod
+    def _index_names(page) -> set[str]:
+        return {
+            node.children
+            for node in _components(page)
+            if isinstance(node, html.Span)
+            and getattr(node, "className", None) == "sfx"
+            and node.children
+        }
+
     def test_index_rows_show_names_factors_outcomes_and_coverage(
         self, world, pending_archive
     ):
-        tab = workspace.investigations_tab(world.service, PROJECT)
-        rows = {row["name"]: row for row in _grid_rows(tab, "investigations-grid")}
-        assert set(rows) == {
+        page = self._index_page(world)
+        names = self._index_names(page)
+        assert names == {
             MAIN_INV,
             "agent-curated",
             "atlas-flagged-only",
@@ -1148,50 +1161,56 @@ class TestIndexAndArchive:
             "atlas-width-mix",
             "atlas-pending-archive",
         }
-        flagged = rows["atlas-flagged-only"]
-        assert (flagged["factor"], flagged["outcome"]) == ("optimizer", "loss")
-        assert flagged["member_count"] == 1
-        assert flagged["coverage"] == "1 with outcome · 0 incomplete · 1 invalid"
-        for row in rows.values():
-            assert row["link_href"].endswith(
-                f"/investigation/{row['investigation_id']}"
+        text = _page_text(page)
+        for row in world.service.investigations_index(PROJECT):
+            assert (
+                f"{row.with_outcome} with outcome · "
+                f"{row.member_count - row.completed} incomplete · "
+                f"{row.invalid} invalid" in text
             )
-            assert row["edit_href"].endswith(
-                f"/investigation/{row['investigation_id']}/edit"
+            assert any(
+                isinstance(node, html.A)
+                and node.href
+                and node.href.endswith(f"/investigation/{row.investigation_id}")
+                for node in _components(page)
+            )
+            assert any(
+                isinstance(node, html.A)
+                and node.href
+                and node.href.endswith(f"/investigation/{row.investigation_id}/edit")
+                for node in _components(page)
             )
 
     def test_every_sweep_organized_leaves_unorganized_empty(
         self, world, pending_archive
     ):
-        tab = workspace.investigations_tab(world.service, PROJECT)
-        assert "not in any Investigation" in _page_text(tab)
+        page = self._index_page(world)
+        assert "not in any Investigation" in _page_text(page)
         assert world.service.unorganized(PROJECT) == []
 
     def test_archive_hides_from_the_default_index_and_restore_brings_back(
         self, world, pending_archive
     ):
         world.service.archive_investigation(pending_archive)
-        tab = workspace.investigations_tab(world.service, PROJECT)
-        names = {row["name"] for row in _grid_rows(tab, "investigations-grid")}
-        assert "atlas-pending-archive" not in names
+        page = self._index_page(world)
+        assert "atlas-pending-archive" not in self._index_names(page)
         archived = world.service.investigations_index(PROJECT, include_archived=True)
         assert "atlas-pending-archive" in {row.name for row in archived}
         assert world.service.unorganized(PROJECT) == []
 
         world.service.restore_investigation(pending_archive)
-        tab = workspace.investigations_tab(world.service, PROJECT)
-        names = {row["name"] for row in _grid_rows(tab, "investigations-grid")}
-        assert "atlas-pending-archive" in names
+        page = self._index_page(world)
+        assert "atlas-pending-archive" in self._index_names(page)
 
     def test_edit_members_page_marks_saved_membership(self, world, saved):
         pathname = saved["url"]["pathname"]
         investigation_id = pathname.rsplit("/", 1)[1]
         detail = world.service.investigation_detail(investigation_id)
         page, _polls = page_content(f"{_inv_url(investigation_id)}/edit", world.service)
-        rows = {row["name"]: row for row in _grid_rows(page, {"inv-edit-grid": "grid"})}
         saved_ids = {str(member) for member in detail.investigation.members}
-        for name, row in rows.items():
-            expected = "member" if row["sweep_id"] in saved_ids else workspace.MISSING
-            assert row["member"] == expected, name
+        for node in _pattern(page, "inv-edit-pick"):
+            sweep_id = node.id["inv-edit-pick"]
+            expected = [sweep_id] if sweep_id in saved_ids else []
+            assert node.value == expected, sweep_id
         save_button = _by_id(page, {"inv-edit-save": "save"})
         assert save_button.disabled is False

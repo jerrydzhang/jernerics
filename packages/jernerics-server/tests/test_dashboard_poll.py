@@ -330,6 +330,7 @@ class TestOverviewPollCascade:
         }
         inputs = [
             {"id": "url", "property": "pathname", "value": WORKSPACE},
+            {"id": "url", "property": "search", "value": None},
             {"id": "poll", "property": "n_intervals", "value": 0},
         ]
         response, page = _dispatch(
@@ -354,6 +355,7 @@ class TestOverviewPollCascade:
             wanted,
             inputs=[
                 {"id": "url", "property": "pathname", "value": WORKSPACE},
+                {"id": "url", "property": "search", "value": None},
                 {"id": "poll", "property": "n_intervals", "value": 1},
             ],
             state=[

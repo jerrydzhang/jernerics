@@ -2,9 +2,11 @@
 
 Deep links: ``/dashboard`` (project catalog), ``/dashboard/project/<name>``
 (the persistent workspace; its query string carries the selection token and
-the view document), ``/dashboard/project/<name>/investigation/new`` and
+the view document), ``/dashboard/project/<name>/investigations`` (the
+investigations index), ``/dashboard/project/<name>/investigation/new`` and
 ``.../investigation/<id>[/edit]`` (the investigation editor; ``<id>``
-alone is the investigation workspace), ``/dashboard/project/<name>/sweep/<id>``
+alone is the investigation workspace, its plain query string carries the
+view, member scope, and filters), ``/dashboard/project/<name>/sweep/<id>``
 and ``/dashboard/project/<name>/exceptions`` (new-shell pages; routes
 exist ahead of their rendering), and ``/dashboard/artifact-view/<hex>``
 (the viewer; ``/dashboard/artifact/<hex>`` is the raw download alias
@@ -23,6 +25,7 @@ PageKind = Literal[
     "workspace",
     "sweep",
     "exceptions",
+    "investigations",
     "investigation",
     "investigation-edit",
     "artifact",
@@ -32,6 +35,7 @@ PageKind = Literal[
 _PROJECT_PREFIX = f"{ROUTES_BASE}/project/"
 _ARTIFACT_VIEW_PREFIX = f"{ROUTES_BASE}/artifact-view/"
 _INVESTIGATION_SEGMENT = "investigation"
+_INVESTIGATIONS_SEGMENT = "investigations"
 _SWEEP_SEGMENT = "sweep"
 _EXCEPTIONS_SEGMENT = "exceptions"
 
@@ -49,9 +53,7 @@ class PageSpec:
     polls: bool = False
 
 
-NEW_SHELL_KINDS: frozenset[PageKind] = frozenset(
-    {"project", "artifact", "exceptions"}
-)
+NEW_SHELL_KINDS: frozenset[PageKind] = frozenset({"project", "artifact", "exceptions"})
 """Kinds whose pages render the new-shell chrome themselves, so the
 legacy nav hides for them. Grows as cutover rounds land their pages;
 dies with the demolition task."""
@@ -91,6 +93,10 @@ def _parse_project_segments(segments: list[str]) -> PageSpec | None:
             )
         if len(segments) == 3:
             return PageSpec(kind="investigation", object_id=project, sub_id=segments[2])
+        return None
+    if segments[1] == _INVESTIGATIONS_SEGMENT:
+        if len(segments) == 2:
+            return PageSpec(kind="investigations", object_id=project)
         return None
     if len(segments) == 2 and segments[1] == _EXCEPTIONS_SEGMENT:
         return PageSpec(kind="exceptions", object_id=project)
