@@ -18,7 +18,7 @@ import dash
 from dash import ALL, Input, Output, State, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import analysis, artifacts, components, figures, layout, workspace
+from . import analysis, artifacts, components, exceptions, figures, layout, workspace
 from .components import Error, short_id
 from .routes import ROUTES_BASE, parse_route
 from .service import (
@@ -134,6 +134,13 @@ def page_content(
         except CurationRejectedError:
             return layout.missing_object_page("investigation", investigation_id), False
         return page, False
+    if spec.kind == "exceptions":
+        return (
+            exceptions.exceptions_page(
+                service, spec.object_id or "", search=search, now_ns=now
+            ),
+            False,
+        )
     if spec.kind == "investigation-edit":
         try:
             page = workspace.investigation_edit_page(
@@ -486,25 +493,6 @@ def triggered_action(triggered: set[str], mapping: dict[str, str]) -> str | None
     return next((action for prop, action in mapping.items() if prop in triggered), None)
 
 
-def selected_failed_sweeps(values: list) -> list[str]:
-    """Checked sweep ids from the failure view's per-group checklists;
-    each checklist carries one option, so a non-empty value is one id."""
-    return [str(item) for group in values or [] for item in group]
-
-
-def mounted_failed_sweep_ids() -> list[str]:
-    """Mounted failure-view checklist ids from the request's ALL input —
-    the layout truth select-all writes must match, not a fresh read."""
-    return [
-        str(item["id"]["failed-sweep"])
-        for slot in dash.callback_context.inputs_list or []
-        for item in (slot if isinstance(slot, list) else [slot])
-        if isinstance(item, dict)
-        and isinstance(item.get("id"), dict)
-        and "failed-sweep" in item["id"]
-    ]
-
-
 def _event_field(event: Any, name: str) -> Any:
     """One ``triggered`` entry field; Dash has shipped both dict and
     attribute event shapes."""
@@ -712,13 +700,11 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         """
         function(active) {
             const display = (value) => ({display: active === value ? "block" : "none"});
-            return [display("overview"), display("investigations"),
-                    display("exceptions")];
+            return [display("overview"), display("investigations")];
         }
         """,
         Output("workspace-overview", "style"),
         Output("workspace-investigations", "style"),
-        Output("workspace-exceptions", "style"),
         Input({"analysis-tabs": ALL}, "value"),
     )
 
@@ -1155,114 +1141,76 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             note,
         )
 
-    # -- Failure view: the roll-up's scope-wide failed executions --------
+    # -- Exceptions page: working selection into mark-invalid ------------
 
-    @app.callback(
-        Output("failed-trials-panel", "children"),
-        Output("sweep-grid", "rowData", allow_duplicate=True),
-        Output("sweep-grid", "selectedRows", allow_duplicate=True),
-        Output("workspace-curation-note", "children", allow_duplicate=True),
-        Output({"failed-sweep": dash.ALL}, "value"),
-        Input({"failed-invalid": dash.ALL}, "n_clicks"),
-        Input("failed-invalid-batch", "n_clicks"),
-        Input({"failed-sweep": dash.ALL}, "value"),
-        Input("failed-select-all", "value"),
-        State("failed-reason", "value"),
-        State("project-store", "data"),
-        State("view-store", "data"),
-        State("sweep-grid", "selectedRows"),
+    app.clientside_callback(
+        """
+        function(n_clicks) {
+            if (!n_clicks) { return window.dash_clientside.no_update; }
+            const picked = Array.from(
+                document.querySelectorAll('#exc-groupsets .sel-sweep:checked')
+            ).map(box => box.name);
+            const reason =
+                (document.getElementById('exc-reason') || {}).value || '';
+            const mode = document.querySelector('#exc-mode-seg .on');
+            return {
+                sweeps: picked,
+                reason: reason,
+                mode: mode ? mode.dataset.mode : 'cause',
+            };
+        }
+        """,
+        Output("exc-selection-store", "data"),
+        Input("exc-mark-invalid", "n_clicks"),
         prevent_initial_call=True,
     )
-    def _drive_failed_view(
-        _invalid: list,
-        _batch: int | None,
-        checks: list,
-        select_all: list,
-        reason: str | None,
-        project: str | None,
-        view_doc: dict | None,
-        grid_selection: list[dict] | None,
+
+    @app.callback(
+        Output("exc-groupsets", "children"),
+        Output("exc-note", "children"),
+        Output("exc-selection-count", "children"),
+        Input("exc-selection-store", "data"),
+        State("url", "pathname"),
+        State("url", "search"),
+        prevent_initial_call=True,
+    )
+    def _drive_exceptions_triage(
+        action: dict | None,
+        pathname: str | None,
+        search: str | None,
     ):
-        # One entry point: a group's Mark invalid or the batch button
-        # acts, then re-renders the view; select-all mirrors onto the
-        # group checklists. The Exceptions tab mounts the view open and
-        # already filled.
-        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
-        value, name = pattern_trigger(dash.callback_context)
-        scoped = workspace.scoped_sweeps(
-            service.sweep_overview(project or ""), (view_doc or {}).get("scope")
+        # The store write lands only from the page's Mark invalid press
+        # (the clientside writer collects the DOM selection); every
+        # other store echo is a no-op. The roll-up re-renders so freshly
+        # invalidated sweeps leave it, and the selection restarts empty.
+        spec = parse_route(pathname)
+        if spec.kind != "exceptions":
+            raise PreventUpdate
+        cleared = "0 sweeps selected"
+        sweeps = [str(s) for s in (action or {}).get("sweeps") or []]
+        if not sweeps:
+            return (
+                no_update,
+                exceptions.action_note(
+                    False,
+                    "Select sweeps first — actions apply to checked failed sweeps.",
+                ),
+                cleared,
+            )
+        ok, report = apply_curation(
+            service, "invalid", sweeps, str((action or {}).get("reason") or "")
         )
-        # ALL-input writes and re-render remounts re-fire this callback —
-        # only an explicit control acts, everything else stays put.
-        untouched = [no_update] * len(checks or [])
-        if "failed-select-all.value" in triggered:
-            checked = bool(select_all)
-            return (
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                [
-                    [sweep_id] if checked else []
-                    for sweep_id in mounted_failed_sweep_ids()
-                ],
-            )
-        if name == "failed-invalid" and value:
-            ok, report = apply_curation(service, "invalid", [str(value)], reason or "")
-            # The action refreshes the grid too — both surfaces move
-            # together, with the surviving selection and the note.
-            fresh, note = _post_action_grid(service, project, view_doc)
-            kept = {str(row["sweep_id"]) for row in grid_selection or []}
-            return (
-                workspace.failed_view_panel(
-                    service,
-                    project or "",
-                    scoped,
-                    time.time_ns(),
-                    workspace.action_message(ok, report),
-                ),
-                fresh,
-                [row for row in fresh if row["sweep_id"] in kept],
-                note,
-                untouched,
-            )
-        if "failed-invalid-batch.n_clicks" in triggered:
-            sweep_ids = selected_failed_sweeps(checks)
-            if not sweep_ids:
-                return (
-                    workspace.failed_view_panel(
-                        service,
-                        project or "",
-                        scoped,
-                        time.time_ns(),
-                        workspace.action_message(
-                            False,
-                            "Select sweeps first — "
-                            "actions apply to checked failed sweeps.",
-                        ),
-                    ),
-                    no_update,
-                    no_update,
-                    no_update,
-                    untouched,
-                )
-            ok, report = apply_curation(service, "invalid", sweep_ids, reason or "")
-            fresh, note = _post_action_grid(service, project, view_doc)
-            kept = {str(row["sweep_id"]) for row in grid_selection or []}
-            return (
-                workspace.failed_view_panel(
-                    service,
-                    project or "",
-                    scoped,
-                    time.time_ns(),
-                    workspace.action_message(ok, report),
-                ),
-                fresh,
-                [row for row in fresh if row["sweep_id"] in kept],
-                note,
-                untouched,
-            )
-        raise PreventUpdate
+        return (
+            exceptions.rollup(
+                service,
+                spec.object_id or "",
+                scope_all=exceptions.scope_all(search),
+                now_ns=time.time_ns(),
+                visible_mode=str((action or {}).get("mode") or "cause"),
+            ),
+            exceptions.action_note(ok, report),
+            cleared,
+        )
 
     # -- Focus: the inspector region --------------------------------------
 
@@ -1538,7 +1486,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             project, [str(row["sweep_id"]) for row in picked_rows]
         )
 
-    # -- Investigations and Exceptions tabs ------------------------------
+    # -- Investigations tab ----------------------------------------------
 
     @app.callback(
         Output("workspace-investigations", "children"),
@@ -1553,22 +1501,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if tab != "investigations":
             raise PreventUpdate
         return workspace.investigations_tab(service, project)
-
-    @app.callback(
-        Output("workspace-exceptions", "children"),
-        Input("view-store", "data"),
-        Input({"analysis-tabs": ALL}, "value"),
-        State("project-store", "data"),
-    )
-    def _render_exceptions(
-        view_doc: dict | None, tabs: list | None, project: str | None
-    ):
-        tab = (tabs or [None])[0]
-        if tab != "exceptions":
-            raise PreventUpdate
-        return workspace.exceptions_tab(
-            service, project, (view_doc or {}).get("scope"), time.time_ns()
-        )
 
     # -- Investigation workspace and member editor (jernerics-g5rw.8) ----
 

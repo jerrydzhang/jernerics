@@ -889,6 +889,23 @@
   display: none !important;
 }
 
+.np .action-note {
+  margin: 0 0 12px;
+  font-size: 13px;
+}
+
+.np .action-note:empty {
+  display: none;
+}
+
+.np .action-note.ok {
+  color: var(--success-fg);
+}
+
+.np .action-note.err {
+  color: var(--crit-fg);
+}
+
 .np table.sortable thead th {
   cursor: pointer;
   user-select: none;

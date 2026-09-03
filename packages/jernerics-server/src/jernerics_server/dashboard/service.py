@@ -107,6 +107,7 @@ class SweepSummary:
     latest_submitted_ns: int | None
     waiting_trials: int
     running_trials: int
+    trials: int
     archived_ns: int | None
     invalid_ns: int | None
     invalid_reason: str | None
@@ -153,6 +154,8 @@ class FailedExecutionRow:
     execution_id: str
     failure_kind: str | None
     failure_summary: str | None
+    exit_code: int | None
+    hostname: str
     updated_ns: int
 
 
@@ -420,6 +423,7 @@ class DashboardService:
                 latest_submitted_ns=row["latest_submitted_ns"],
                 waiting_trials=row["waiting_trials"],
                 running_trials=row["running_trials"],
+                trials=row["trials"],
                 archived_ns=row["archived_ns"],
                 invalid_ns=row["invalid_ns"],
                 invalid_reason=row["invalid_reason"],
@@ -433,9 +437,11 @@ class DashboardService:
         sweep_ids: Sequence[str] = (),
         *,
         limit: int = 200,
+        include_curated: bool = False,
     ) -> list[FailedExecutionRow]:
         """Failed executions under the project (optionally narrowed to
-        sweeps), curated terminal sweeps excluded, most recent first."""
+        sweeps), curated terminal sweeps excluded most recent first;
+        ``include_curated`` pulls the project's historical list."""
         selection = Selection(
             project=project,
             sweeps=tuple(uuid.UUID(s) for s in sweep_ids) or None,
@@ -449,9 +455,13 @@ class DashboardService:
                 execution_id=row["execution_id"],
                 failure_kind=row["failure_kind"],
                 failure_summary=row["failure_summary"],
+                exit_code=row["exit_code"],
+                hostname=row["hostname"],
                 updated_ns=row["updated_ns"],
             )
-            for row in self.queries.failed_executions(selection, limit=limit)
+            for row in self.queries.failed_executions(
+                selection, limit=limit, include_curated=include_curated
+            )
         ]
 
     def _curation_store(self) -> Store:

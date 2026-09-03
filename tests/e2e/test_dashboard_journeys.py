@@ -316,6 +316,12 @@ def _grid_hrefs(grid: AgGrid) -> set[str]:
     return hrefs
 
 
+def _route_kind(url: str) -> str:
+    """The page a URL denotes, parsed from the path the way the router
+    sees it (dcc.Location splits the query off before parse_route)."""
+    return parse_route(url.split("?", 1)[0]).kind
+
+
 def _page_hrefs(page: Component) -> set[str]:
     """Every dashboard URL a rendered layout links or navigates to,
     resolved against ROUTES_BASE."""
@@ -337,12 +343,12 @@ def _walk_link_graph(service) -> dict[str, Component]:
         url = queue.popleft()
         if url in pages:
             continue
-        page, _polls = page_content(url, service)
+        page, _polls = page_content(url.split("?", 1)[0], service)
         pages[url] = page
         queue.extend(
             href
             for href in _page_hrefs(page) - pages.keys()
-            if parse_route(href).kind != "not-found"
+            if _route_kind(href) != "not-found"
         )
     return pages
 
@@ -369,12 +375,17 @@ class TestSeededWorld:
 class TestLinkGraphJourney:
     def test_landing_walk_stays_on_canonical_routes(self, scenario):
         pages = _walk_link_graph(scenario.service)
-        kinds = {parse_route(url).kind for url in pages}
-        assert {"project", "workspace"} <= kinds
-        assert kinds <= {"project", "workspace", "artifact"}
+        kinds = {_route_kind(url) for url in pages}
+        assert kinds <= {"project", "workspace", "artifact", "exceptions"}
+        # The new-shell tab row carries the Investigations entry ahead of
+        # its route (R6 re-skin); the prototype mandates the full tab row.
         for page in pages.values():
             for href in _page_hrefs(page):
-                assert parse_route(href).kind in {"project", "workspace", "artifact"}
+                kind = _route_kind(href)
+                if kind == "not-found":
+                    assert href.split("?", 1)[0].endswith("/investigations"), href
+                    continue
+                assert kind in {"project", "workspace", "artifact", "exceptions"}, href
 
     def test_focused_inspector_reaches_every_object_kind(self, scenario):
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
