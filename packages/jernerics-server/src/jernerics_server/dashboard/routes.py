@@ -56,6 +56,7 @@ class PageSpec:
 NEW_SHELL_KINDS: frozenset[PageKind] = frozenset(
     {
         "project",
+        "workspace",
         "artifact",
         "exceptions",
         "investigations",
