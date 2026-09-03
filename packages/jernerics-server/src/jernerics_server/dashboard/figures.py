@@ -41,6 +41,9 @@ _DENSE_SERIES_LIMIT = 100
 _STUDY_FIG_MAX_PARAMS = 8
 """Slice subplot cap per sweep; extra params are omitted, not merged."""
 
+MAX_PARAM_DIMS = _STUDY_FIG_MAX_PARAMS
+"""Public cap for params → outcome parallel-coordinate dimensions."""
+
 _PANEL_HEIGHT = 360
 """Height of one series subplot row."""
 
@@ -778,6 +781,59 @@ def parallel_coordinates(trials: list[dict[str, Any]]) -> go.Figure:
     figure.update_layout(
         height=_STUDY_FIG_HEIGHT,
         margin={**_STUDY_FIG_MARGIN, "l": 44, "r": 44},
+    )
+    return figure
+
+
+_POINTS_FIG_HEIGHT = 380
+
+
+def padded_range(values: list[float]) -> list[float]:
+    """Full-data range with 5% headroom; a constant dimension spans
+    ±0.5. Ranges always cover every line, so brushing can never
+    rescale an axis."""
+    present = [value for value in values if not math.isnan(value)]
+    if not present:
+        return [0.0, 1.0]
+    low, high = min(present), max(present)
+    if low == high:
+        low, high = low - 0.5, high + 0.5
+    pad = (high - low) * 0.05
+    return [low - pad, high + pad]
+
+
+def points_parcoords(dims: list[dict[str, Any]]) -> go.Figure:
+    """Params → outcome parallel coordinates over the trials×final-scalars
+    set. Every line stays plotted, each dimension carries its explicit
+    full-data range (brushing fades natively, axes never rescale), and
+    the line colors are the line order so the client restyles a
+    selection's colors without re-reading the data."""
+    dimensions = [
+        go.parcoords.Dimension(
+            values=dim["values"],
+            label=dim["label"],
+            range=dim["range"],
+            **(
+                {"tickvals": dim["tickvals"], "ticktext": dim["ticktext"]}
+                if dim.get("tickvals") is not None
+                else {}
+            ),
+        )
+        for dim in dims
+    ]
+    figure = go.Figure(
+        go.Parcoords(
+            dimensions=dimensions,
+            line={
+                "color": list(range(len(dims[0]["values"]) if dims else 0)),
+                "colorscale": "Viridis",
+                "showscale": False,
+            },
+        )
+    )
+    figure.update_layout(
+        height=_POINTS_FIG_HEIGHT,
+        margin={**_STUDY_FIG_MARGIN, "l": 60, "r": 60},
     )
     return figure
 

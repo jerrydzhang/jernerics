@@ -9,6 +9,7 @@ TestClient page 200s.
 """
 
 import json
+import math
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -35,7 +36,7 @@ from jernerics_schema import (
     decode_selection,
     encode_selection,
 )
-from jernerics_server.dashboard import components
+from jernerics_server.dashboard import analysis, components
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
     VIEW_VERSION,
@@ -63,11 +64,10 @@ from jernerics_server.dashboard.analysis import (
     include_values,
     mounted_selection,
     moved_keys,
-    optuna_tab_content,
     param_text,
     points_tab,
+    points_view_data,
     python_snippet,
-    python_tab,
     scope_fingerprint,
     search_from_state,
     series_data_failure,
@@ -773,20 +773,22 @@ class TestUnifiedSelectionStore:
             assert options["ensureDomOrder"] is True
             assert options["rowSelection"] == {"mode": "multiRow"}
 
-    def test_points_grids_carry_the_pair(self, service):
+    def test_points_grid_carries_click_selection(self, service):
         page = points_tab(
             service,
             PROJECT,
             _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
+            "score",
         )
-        grids = _grids(page)
-        assert len(grids) == 2
-        for grid in grids:
-            assert grid.dashGridOptions == {
-                "enableCellTextSelection": True,
-                "ensureDomOrder": True,
-                "pagination": False,
-            }
+        grid = _grids(page)[0]
+        assert grid.id == "inv-points-grid"
+        assert grid.getRowId == "params.data.tk"
+        options = grid.dashGridOptions
+        assert options["enableCellTextSelection"] is True
+        assert options["ensureDomOrder"] is True
+        assert options["pagination"] is False
+        assert options["rowSelection"]["mode"] == "multiRow"
+        assert options["rowSelection"]["enableClickSelection"] is True
 
 
 class TestTray:
@@ -1131,139 +1133,82 @@ class TestSeriesPanels:
         assert "No value keys selected" in str(panels)
 
 
-class TestPointsTable:
-    def test_json_pretty_strings_and_missing_markers(self, service):
+class TestPointsView:
+    """The Points view: trials x final scalars with the params ->
+    outcome parallel coordinates; line order equals row order and
+    dimension ranges always cover every line."""
+
+    def test_rows_carry_final_scalars_and_raw_sort_fields(self, service):
         page = points_tab(
             service,
             PROJECT,
             _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
+            "score",
         )
-        grids = _grids(page)
-        values_grid, params_grid = grids[0], grids[1]
-        value_rows = {row["trial"]: row for row in values_grid.rowData}
-        tb_row = next(
-            row for label, row in value_rows.items() if label.startswith("#1 cc32")
-        )
+        grid = _grids(page)[0]
+        by_tk = {row["tk"]: row for row in grid.rowData}
+        assert len(grid.rowData) == 6
+        # Sweep C's trial has the non-step "score" final.
+        assert by_tk[str(TC)]["score"] == "0.78"
+        assert by_tk[str(TC)]["score_raw"] == pytest.approx(0.78)
+        # Sweep A's trials have no non-step key: the missing marker.
+        assert by_tk[str(RA0)]["score"] == components.MISSING
+        assert by_tk[str(RA0)]["score_raw"] is None
 
-        assert tb_row["summary"] == json.dumps(
-            {"acc": 0.91, "epochs": 2, "notes": "beta run"},
-            indent=2,
-            sort_keys=True,
-        )
-        assert "\n" in tb_row["summary"]
-        ra0_row = next(
-            row for label, row in value_rows.items() if label.startswith("#1 cc31")
-        )
-        assert ra0_row["summary"] == "—"
-        assert ra0_row["score"] == "—"
-        param_rows = {row["trial"]: row for row in params_grid.rowData}
-        tc_row = next(
-            row for label, row in param_rows.items() if label.startswith("#1 cc33")
-        )
-        assert tc_row["lr"] == "—"
-        assert tc_row["seed"] == "—"
-        assert tc_row["lr"] != "0.2"
-
-    def test_large_json_payload_keeps_full_text_with_clamped_cell(self):
-        payload = {"blob": "x" * 4096, "ok": True}
-        text = json.dumps(payload, indent=2, sort_keys=True)
-        assert len(text) > components.TEXT_LIMIT
-        service = _points_service(
-            values={"cc320000-0000-4000-8000-000000000000": {"summary": [payload]}},
-            value_keys=[{"key": "summary", "kind": "json"}],
-            params={},
-            param_keys=[],
-        )
-        page = points_tab(service, PROJECT, _tray())
-        values_grid, _params_grid = _grids(page)
-        column = values_grid.columnDefs[1]
-        assert column["cellRenderer"] == "ClampedCell"
-        assert column["clampLimit"] == components.TEXT_LIMIT
-        assert column["maxWidth"] == 480
-        row = values_grid.rowData[0]
-        assert row["summary"] == text
-
-    def test_large_param_value_gets_the_same_treatment(self):
-        value = "y" * 4096
-        service = _points_service(
-            values={},
-            value_keys=[],
-            params={"cc320000-0000-4000-8000-000000000000": {"config": value}},
-            param_keys=["config"],
-        )
-        page = points_tab(service, PROJECT, _tray())
-        _values_grid, params_grid = _grids(page)
-        column = params_grid.columnDefs[1]
-        assert column["cellRenderer"] == "ClampedCell"
-        assert column["clampLimit"] == components.TEXT_LIMIT
-        assert params_grid.rowData[0]["config"] == value
-
-    def test_presence_counts_in_column_headers(self, service):
+    def test_value_columns_sort_numerically_over_raw_fields(self, service):
         page = points_tab(
             service,
             PROJECT,
             _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
+            "score",
         )
-        headers = [column["headerName"] for column in _grids(page)[1].columnDefs]
-        assert any(header.startswith("lr · 3/6") for header in headers), headers
-        assert any(header.startswith("seed · 2/6") for header in headers), headers
+        grid = _grids(page)[0]
+        score = next(c for c in grid.columnDefs if c["field"] == "score")
+        assert score["comparator"] == {
+            "function": "renderTypedSort('numeric', 'score_raw')"
+        }
 
-    def test_long_key_headers_clamp_and_keep_the_full_tooltip(self):
-        key = "k" * 300
-        service = _points_service(
-            values={"cc320000-0000-4000-8000-000000000000": {key: [1.5]}},
-            value_keys=[{"key": key, "kind": "scalar"}],
-            params={"cc320000-0000-4000-8000-000000000000": {"lr": 0.2}},
-            param_keys=["lr"],
+    def test_dims_cover_params_sweep_and_outcome(self, service):
+        trials = service.analysis_trials(
+            PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)])
         )
-        page = points_tab(service, PROJECT, _tray())
-        values_grid, params_grid = _grids(page)
-        value_column = values_grid.columnDefs[1]
-        assert value_column["headerName"] == (
-            f"{components.clamp_text(key)} · scalar · 1/1"
+        keys = analysis.points_scalar_keys(
+            service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)])
         )
-        assert value_column["headerTooltip"] == f"{key} · scalar · 1/1"
-        param_column = params_grid.columnDefs[1]
-        assert param_column["headerName"] == "lr · 1/1"
-        assert param_column["headerTooltip"] == "lr · 1/1"
-
-
-class TestOptunaFigures:
-    def test_sweep_a_figure_set(self, service):
-        content, x_options, y_options = optuna_tab_content(
-            service, PROJECT, _tray(), None, None
+        finals = service.analysis_finals(
+            PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)])
         )
-        graphs = [graph.figure for graph in _graphs(content)]
-        history, parcoords, slice_fig, contour, timeline = graphs
-        completed = [t for t in history.data[0].x]
-        assert completed == [3, 4]
-        assert history.data[0].y == (0.12, 0.34)
-        labels = [dim["label"] for dim in parcoords.data[0].dimensions]
-        assert labels == ["lr", "seed", "objective"]
-        assert len(slice_fig.data) == 2
-        assert contour.data[0].type == "contour"
-        assert {option["value"] for option in x_options} == {"lr", "seed"}
-        assert y_options == x_options
-        assert timeline.data[0].type == "bar"
-        assert len(timeline.data[0].y) == 4
+        view = points_view_data(trials, keys, finals, "score")
+        assert [row["tk"] for row in view["rows"]] == view["tks"]
+        labels = [dim["label"] for dim in view["dims"]]
+        assert labels[-1] == "score (final)"
+        assert labels[-2] == "sweep"
+        # lr varies and is numeric; seed is missing on some trials but
+        # varies by presence, so both are numeric dims.
+        assert "lr" in labels
+        sweep_dim = view["dims"][-2]
+        assert sweep_dim["ticktext"] == sorted(set(sweep_dim["ticktext"]))
+        assert len(view["dims"][-1]["values"]) == len(view["tks"])
+        for dim in view["dims"]:
+            present = [v for v in dim["values"] if not math.isnan(v)]
+            if present:
+                assert dim["range"][0] <= min(present)
+                assert dim["range"][1] >= max(present)
+        assert view["with_outcome"] == 1
 
-    def test_figure_set_is_compact(self, service):
-        content, _x, _y = optuna_tab_content(service, PROJECT, _tray(), None, None)
-        heights = [graph.figure.layout.height for graph in _graphs(content)]
-        assert all(200 <= height <= 480 for height in heights)
-
-    def test_param_less_sweep_degrades_to_empty_contour(self, service):
-        content, x_options, _y = optuna_tab_content(
-            service, PROJECT, _tray(sweeps=[str(SWEEP_C)]), None, None
+    def test_no_numeric_outcome_leaves_an_honest_empty_state(self, service):
+        page = points_tab(
+            service,
+            PROJECT,
+            _tray(sweeps=[str(SWEEP_A)]),
+            "absent_key",
         )
-        graphs = [graph.figure for graph in _graphs(content)]
-        assert len(graphs) == 4
-        parcoords = graphs[1]
-        labels = [dim["label"] for dim in parcoords.data[0].dimensions]
-        assert labels == ["objective"]
-        rendered = str(content)
-        assert "at least two numeric" in rendered
-        assert x_options == []
+        assert "numeric final values" in str(page)
+
+    def test_member_scope_narrows_the_rows(self, service):
+        single = points_tab(service, PROJECT, _tray(sweeps=[str(SWEEP_C)]), "score")
+        grid = _grids(single)[0]
+        assert [row["tk"] for row in grid.rowData] == [str(TC)]
 
 
 class TestUrlReload:
@@ -2126,7 +2071,7 @@ class TestScopeBar:
         tabs = next(
             node
             for node in _walk(page, lambda n: type(n).__name__ == "Tabs")
-            if node.id == "analysis-tabs"
+            if node.id == {"analysis-tabs": "canvas"}
         )
         assert [tab.value for tab in tabs.children] == [
             "overview",
@@ -2273,9 +2218,19 @@ class TestColdStartMountedJourney:
             for part in key.removeprefix("..").removesuffix("..").split("...")
             if part
         ]
-        outputs = [
-            {"id": spec.split(".")[0], "property": spec.split(".")[1]} for spec in specs
-        ]
+        outputs = []
+        for spec in specs:
+            prop = spec.rsplit(".", 1)[1]
+            raw = spec.rsplit(".", 1)[0]
+            if raw.startswith("{"):
+                wildcard = json.loads(raw)
+                concrete = {
+                    name: "canvas" if values == ["ALL"] else values
+                    for name, values in wildcard.items()
+                }
+                outputs.append({"id": concrete, "property": prop})
+            else:
+                outputs.append({"id": raw, "property": prop})
         response = client.post(
             "/dashboard/_dash-update-component",
             json={
@@ -2459,7 +2414,7 @@ class TestColdStartMountedJourney:
         assert "view state is malformed" in result["analysis-message-store"]["data"]
 
     _SYNC_OUTPUTS = {
-        "analysis-tabs.value",
+        '{"analysis-tabs":["ALL"]}.value',
         "analysis-include.value",
         "analysis-expand.value",
     }
@@ -2474,32 +2429,32 @@ class TestColdStartMountedJourney:
             self._SYNC_OUTPUTS,
             [{"id": "view-store", "property": "data", "value": doc}],
         )
-        assert result["analysis-tabs"]["value"] == "investigations"
+        tabs_key = next(
+            key for key in result if key.lstrip("{").startswith('"analysis-tabs"')
+        )
+        assert result[tabs_key]["value"] == ["investigations"]
         assert result["analysis-include"]["value"] == ["archived"]
         assert result["analysis-expand"]["value"] == ["expand"]
 
 
 class TestContinueInPython:
-    def test_snippet_uses_real_client_api(self, service):
-        page = python_tab(service, PROJECT, _tray(), "http://localhost:8000")
-        snippet = _pres(page)[1].children
+    def test_snippet_uses_real_client_api(self):
+        from jernerics.tracking import TrackingClient
+        from jernerics.tracking.client import ProjectHandle
+        from jernerics_schema import decode_selection
+
+        selection = Selection(project=PROJECT, sweeps=(SWEEP_A,))
+        snippet = python_snippet(
+            encode_selection(selection), PROJECT, "http://localhost:8000"
+        )
         assert snippet.startswith("from jernerics.tracking import TrackingClient")
         assert "from jernerics_schema import decode_selection" in snippet
         assert "TrackingClient(" in snippet
         assert 'decode_selection("' in snippet
         assert f'client.project("{PROJECT}")' in snippet
         token = snippet.split('decode_selection("')[1].split('")')[0]
-        import jernerics.tracking as tracking_module
-        from jernerics.tracking.client import (
-            ProjectHandle,
-            TrackingClient,
-        )
-
-        assert tracking_module.TrackingClient is TrackingClient
-        assert callable(TrackingClient.project)
-        assert callable(ProjectHandle.values)
-        decoded = decode_selection(token)
-        assert decoded == service.analysis_selection(PROJECT, _tray())
+        assert decode_selection(token) == selection
+        assert TrackingClient is not None and callable(ProjectHandle.values)
 
     def test_python_snippet_shows_token(self):
         snippet = python_snippet("abc123", PROJECT, "http://localhost:8000")
@@ -4310,14 +4265,24 @@ class TestWorkspaceChurnGates:
             return found
 
         capture = specs("scroll-restore-store")
+
+        def input_ids(spec):
+            return {
+                dep["id"]
+                if isinstance(dep["id"], str)
+                else json.dumps(dep["id"], sort_keys=True)
+                for dep in spec["inputs"]
+            }
+
         assert any(
-            {dep["id"] for dep in spec["inputs"]} == {"analysis-refresh", "poll"}
+            input_ids(spec) == {'{"analysis-refresh":["ALL"]}', "poll"}
             for spec in capture
         )
         restore = [
             spec
             for spec in capture
-            if {dep["id"] for dep in spec["inputs"]} == {"workspace-overview"}
+            if input_ids(spec)
+            == {'{"analysis-refresh-store":["ALL"]}', "workspace-overview"}
         ]
         assert len(restore) == 1
         assert {dep["id"] for dep in restore[0].get("state", [])} == {
