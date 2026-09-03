@@ -25,8 +25,10 @@ from jernerics_schema import (
     TrialSnapshotEvent,
     TrialState,
     ValueEvent,
+    decode_selection,
 )
 from jernerics_server.dashboard import sweep as sweep_page
+from jernerics_server.dashboard import sweep_views
 from jernerics_server.dashboard.analysis import (
     default_view_state,
     edited_view,
@@ -361,7 +363,27 @@ class TestPageComposition:
 
 
 class TestSubNavAvailability:
-    def test_via_scopes_series_points_and_search(self, service, investigation_id):
+    def test_without_via_supported_views_link_the_sweep_sub_views(
+        self, service, investigation_id
+    ):
+        body = _render(service, SWEEP)
+        assert _seg_labels(body) == [
+            "Overview",
+            "Series",
+            "Points",
+            "Search",
+            "Optuna",
+        ]
+        hrefs = _seg_hrefs(body)
+        assert set(hrefs) == {"Series", "Points", "Search", "Optuna"}
+        for view in ("series", "points", "search", "optuna"):
+            assert hrefs[view.capitalize()] == sweep_views.sweep_href(
+                PROJECT, str(SWEEP), view
+            )
+
+    def test_via_keeps_member_scoped_investigation_destinations(
+        self, service, investigation_id
+    ):
         body = _render(service, SWEEP, via=investigation_id)
         assert _seg_labels(body) == [
             "Overview",
@@ -375,27 +397,108 @@ class TestSubNavAvailability:
             assert f"view={view.lower()}&member={SWEEP}" in hrefs[view]
         assert "view=search" in hrefs["Search"]
         assert "member=" not in hrefs["Search"]
+        assert hrefs["Optuna"] == sweep_views.sweep_href(PROJECT, str(SWEEP), "optuna")
 
-    def test_without_via_data_supported_views_render_inert(self, service):
-        body = _render(service, SWEEP)
-        assert _seg_labels(body) == ["Overview", "Series", "Points", "Optuna"]
-        assert _seg_hrefs(body) == {}
+    def test_sub_nav_marks_the_active_view(self, service):
+        data = sweep_page.collect(service, str(SWEEP), None)
+        assert data is not None
+        row = sweep_page._views_row(PROJECT, str(SWEEP), data, "series")
+        links = [
+            node
+            for node in _walk(row)
+            if isinstance(node, html.A) and getattr(node, "href", None)
+        ]
+        assert [
+            str(node.children)
+            for node in links
+            if getattr(node, "className", None) == "on"
+        ] == ["Series"]
 
     def test_series_needs_step_series_and_optuna_needs_distributions(self, service):
         body = _render(service, DONE)
-        assert _seg_labels(body) == ["Overview", "Points"]
+        assert _seg_labels(body) == ["Overview", "Points", "Search"]
+        assert _seg_hrefs(body) == {
+            "Points": sweep_views.sweep_href(PROJECT, str(DONE), "points"),
+            "Search": sweep_views.sweep_href(PROJECT, str(DONE), "search"),
+        }
 
-    def test_via_crumb_and_back_link(self, service, investigation_id):
-        body = _render(service, SWEEP, via=investigation_id)
-        crumb = _text(
-            next(node for node in body if getattr(node, "className", None) == "crumb")
+
+class TestSubViews:
+    def test_series_renders_blocks_chips_and_pcp(self, service):
+        page, polls = page_content(
+            f"{WORKSPACE}/sweep/{SWEEP}", service, search="?view=series"
         )
-        assert "Investigations" in crumb
-        assert "roberts" in crumb
-        actions = _text(
-            next(node for node in body if getattr(node, "className", None) == "actions")
+        rendered = _flat(page)
+        assert "sweep-series-blocks" in rendered
+        assert "loss" in rendered
+        assert "sweep-series-display" in rendered
+        assert "sweep-series-scale" in rendered
+        assert "sweep-series-row" in rendered
+        assert polls is True
+
+    def test_points_renders_grid_and_parcoords(self, service):
+        page, polls = page_content(
+            f"{WORKSPACE}/sweep/{SWEEP}", service, search="?view=points"
         )
-        assert "← roberts" in actions
+        rendered = _flat(page)
+        assert "sweep-points-grid" in rendered
+        assert "sweep-points-figure" in rendered
+        assert "objective (final)" in rendered
+        assert polls is True
+
+    def test_search_filters_this_sweeps_trials(self, service):
+        page, polls = page_content(
+            f"{WORKSPACE}/sweep/{SWEEP}", service, search="?view=search"
+        )
+        rendered = _flat(page)
+        assert "sweep-search-q" in rendered
+        assert "2 of 2 trials" in rendered
+        data = sweep_views.search_data_fetch(service, PROJECT, str(SWEEP), 0)
+        rows = sweep_views.search_rows(data, "0.1")
+        assert len(rows) == 1
+        assert polls is True
+
+    def test_optuna_renders_the_study_figures(self, service):
+        page, polls = page_content(
+            f"{WORKSPACE}/sweep/{SWEEP}", service, search="?view=optuna"
+        )
+        rendered = _flat(page)
+        for section in (
+            "Objective history",
+            "Params → objective",
+            "Parameter slices",
+            "Objective contour",
+            "Trial timeline",
+        ):
+            assert section in rendered
+        assert polls is True
+
+    def test_optuna_contour_needs_two_distinct_numeric_params(self, service):
+        data = service.analysis_trials(PROJECT, sweep_views.sweep_tray(str(SWEEP)))
+        for y_key in (None, "lr"):
+            figure = sweep_views.contour_figure(data, "lr", y_key)
+            assert "contour needs" in str(figure.layout.title)
+
+    def test_python_disclosure_carries_the_sweep_token(self, service):
+        page, _polls = page_content(f"{WORKSPACE}/sweep/{SWEEP}", service)
+        pres = [
+            node
+            for node in _walk(page)
+            if isinstance(node, html.Pre) and "config-json" in str(node.className)
+        ]
+        token = str(pres[0].children)
+        selection = decode_selection(token)
+        assert selection.project == PROJECT
+        assert selection.sweeps == (SWEEP,)
+
+    def test_unsupported_view_falls_back_to_the_overview(self, service):
+        page, polls = page_content(
+            f"{WORKSPACE}/sweep/{DONE}", service, search="?view=optuna"
+        )
+        rendered = _flat(page)
+        assert "Executions" in rendered and "Trials" in rendered
+        assert "sweep-optuna-history" not in rendered
+        assert polls is False
 
 
 class TestRetryRootPicking:

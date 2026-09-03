@@ -26,7 +26,7 @@ from jernerics_schema import (
 
 from jernerics_server.investigations import InvestigationRecord
 
-from . import analysis, components, workspace
+from . import analysis, components, sweep_views, workspace
 from .page import (
     artifact_chips,
     breadcrumbs,
@@ -324,41 +324,51 @@ def _sub_line(data: SweepPageData, now_ns: int) -> html.P:
     return html.P(parts, className="sub")
 
 
-def _views_row(project: str, sweep_id: str, data: SweepPageData) -> html.Div:
-    """The sub-nav: Overview always; the analysis views only where the
-    sweep's real data supports them. A ``via`` investigation gives
-    Series/Points/Search a member-scoped destination; until R5 ships the
-    sweep-page sub-views, a data-supported view without a destination
-    renders as an inert link."""
+def _views_row(
+    project: str, sweep_id: str, data: SweepPageData, view: str | None
+) -> html.Div:
+    """The sub-nav: Overview plus the analysis sub-views the sweep's
+    real data supports, as ``?view=`` links on this page. A ``via``
+    investigation keeps R4's member-scoped destinations for
+    Series/Points/Search — only Optuna, which no investigation view
+    covers, opens the sweep-page sub-view."""
     points_supported = data.overview.started > 0
     optuna_supported = any(row.distributions for row in data.trials)
+    search_supported = bool(data.trials)
     via = data.via_record
 
-    def entry(label: str, supported: bool, href: str | None) -> Component | None:
+    def scoped(view_name: str) -> str | None:
+        if via is None or view_name == "optuna":
+            return sweep_views.sweep_href(project, sweep_id, view_name)
+        # Series and Points narrow to this member; Search stays
+        # cohort-scoped (R4's pinned destination).
+        member = sweep_id if view_name in ("series", "points") else None
+        return analysis.investigation_view_href(project, str(via.id), view_name, member)
+
+    def entry(label: str, view_name: str, supported: bool) -> Component | None:
         if not supported:
             return None
-        return html.A(label, href=href) if href else html.A(label)
+        return html.A(
+            label,
+            href=scoped(view_name),
+            className="on" if view == view_name else None,
+        )
 
-    def scoped(view: str) -> str | None:
-        if via is None:
-            return None
-        return analysis.investigation_view_href(project, str(via.id), view, sweep_id)
-
-    views: list[Component] = [html.Span("Overview", className="on")]
-    search_href = (
-        analysis.investigation_view_href(project, str(via.id), "search")
-        if via
-        else None
-    )
-    for label, supported, href in (
-        ("Series", data.series_supported, scoped("series")),
-        ("Points", points_supported, scoped("points")),
-        ("Search", via is not None, search_href),
-        ("Optuna", optuna_supported, None),
+    if view is None:
+        views: list[Component] = [html.Span("Overview", className="on")]
+    else:
+        views: list[Component] = [
+            html.A("Overview", href=sweep_views.sweep_href(project, sweep_id))
+        ]
+    for label, view_name, supported in (
+        ("Series", "series", data.series_supported),
+        ("Points", "points", points_supported),
+        ("Search", "search", search_supported),
+        ("Optuna", "optuna", optuna_supported),
     ):
-        view = entry(label, supported, href)
-        if view is not None:
-            views.append(view)
+        item = entry(label, view_name, supported)
+        if item is not None:
+            views.append(item)
     return limit_row(
         html.Span("Views", className="annotate"), html.Div(views, className="seg")
     )
@@ -688,9 +698,11 @@ def render(
     sweep_id: str,
     now_ns: int,
     picked_families: set[str],
+    view: str | None = None,
 ) -> list[Component | str]:
-    """The page body: crumb, heading, sub-nav, provenance, then the
-    Executions, Trials, and Params tables."""
+    """The shared chrome: crumb, heading, sub-nav, actions, the Python
+    disclosure, provenance, and — on the overview — the Executions,
+    Trials, and Params tables."""
     numbers = _numbers(data)
     lost = _lost_executions(data)
     ordered = sorted(
@@ -704,28 +716,86 @@ def render(
         _breadcrumbs(data, project),
         _heading(data),
         _sub_line(data, now_ns),
-        _views_row(project, sweep_id, data),
+        _views_row(project, sweep_id, data, view),
         _actions_row(data, project, sweep_id),
+        sweep_views.python_disclosure(project, sweep_id),
         _provenance_grid(data, now_ns),
-        html.Section(
-            [
-                html.H2("Executions"),
-                scroll_table(
+        *(
+            []
+            if view
+            else [
+                html.Section(
                     [
-                        head_cell("Trial", numeric=True),
-                        head_cell("Execution"),
-                        head_cell("Host"),
-                        head_cell("Outcome"),
-                        head_cell("Started", numeric=True),
-                        head_cell("Ended", numeric=True),
-                    ],
-                    [_execution_cells(row, numbers, lost, now_ns) for row in ordered],
+                        html.H2("Executions"),
+                        scroll_table(
+                            [
+                                head_cell("Trial", numeric=True),
+                                head_cell("Execution"),
+                                head_cell("Host"),
+                                head_cell("Outcome"),
+                                head_cell("Started", numeric=True),
+                                head_cell("Ended", numeric=True),
+                            ],
+                            [
+                                _execution_cells(row, numbers, lost, now_ns)
+                                for row in ordered
+                            ],
+                        ),
+                    ]
                 ),
+                _trials_section(data, picked_families),
+                _params_table(data),
             ]
         ),
-        _trials_section(data, picked_families),
-        _params_table(data),
     ]
+
+
+def _subview(
+    service: DashboardService, project: str, sweep_id: str, view: str, now_ns: int
+) -> list[Component | str]:
+    """The active sub-view's body; every caller has already checked
+    :func:`_supported`."""
+    if view == "series":
+        return [sweep_views.series_body(service, project, sweep_id, now_ns)]
+    if view == "points":
+        return [sweep_views.points_body(service, project, sweep_id)]
+    if view == "search":
+        return [sweep_views.search_body(service, project, sweep_id, now_ns)]
+    if view == "optuna":
+        return [sweep_views.optuna_body(service, project, sweep_id, now_ns)]
+    return []
+
+
+def _supported(view: str | None, data: SweepPageData) -> bool:
+    """Whether the sweep's real data supports a sub-view — the same
+    gates the sub-nav applies to its links."""
+    if view == "series":
+        return data.series_supported
+    if view == "points":
+        return data.overview.started > 0
+    if view == "search":
+        return bool(data.trials)
+    if view == "optuna":
+        return any(row.distributions for row in data.trials)
+    return False
+
+
+def page_body(
+    service: DashboardService,
+    data: SweepPageData,
+    project: str,
+    sweep_id: str,
+    now_ns: int,
+    picked_families: set[str],
+    view: str | None = None,
+) -> list[Component | str]:
+    """The full page body: the shared chrome plus the active sub-view;
+    an unsupported or unknown view shows the overview."""
+    active = view if _supported(view, data) else None
+    body = list(render(data, project, sweep_id, now_ns, picked_families, active))
+    if active is not None:
+        body.extend(_subview(service, project, sweep_id, active, now_ns))
+    return body
 
 
 def page(
@@ -735,6 +805,7 @@ def page(
     via: str | None,
     now_ns: int,
     picked_families: set[str],
+    view: str | None = None,
 ) -> html.Div | None:
     """The full sweep page, or ``None`` when the id names no sweep."""
     data = collect(service, sweep_id, via)
@@ -744,7 +815,7 @@ def page(
         "",
         project,
         html.Div(
-            render(data, project, sweep_id, now_ns, picked_families),
+            page_body(service, data, project, sweep_id, now_ns, picked_families, view),
             id="sweep-page-body",
         ),
         dcc.Store(id="sweep-page-facts-store", data={"digest": digest(data)}),

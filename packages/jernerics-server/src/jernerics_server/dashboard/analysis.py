@@ -66,7 +66,6 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "resizable": True,
     "minWidth": 100,
 }
-_ANALYSIS_VIEWS = ("overview", "investigations")
 INVESTIGATION_VIEWS = ("compare", "series", "points", "search")
 """The Investigation workspace's view row."""
 
@@ -97,7 +96,6 @@ def default_view_state() -> dict[str, Any]:
     """The v2 view document with every control at its default."""
     return {
         "v": VIEW_VERSION,
-        "active": "overview",
         "auto_refresh": False,
         "overview_filter": None,
         "scope": default_scope_state(),
@@ -115,7 +113,6 @@ def default_view_state() -> dict[str, Any]:
             "axes": {},
             "overlay_axis": default_axis_state(),
         },
-        "optuna": {"contour_x": None, "contour_y": None},
     }
 
 
@@ -242,12 +239,6 @@ def decode_view_state(raw: str) -> dict[str, Any]:
             f"unsupported view state: expected version {VIEW_VERSION}",
         )
     doc = default_view_state()
-    active = payload.get("active", doc["active"])
-    _require(
-        isinstance(active, str) and active in _ANALYSIS_VIEWS,
-        f"unsupported analysis view {active!r}",
-    )
-    doc["active"] = active
     series = payload.get("series", {})
     _require(isinstance(series, dict), "series must be an object")
     doc["series"]["keys"] = list(
@@ -303,14 +294,6 @@ def decode_view_state(raw: str) -> dict[str, Any]:
     doc["auto_refresh"] = auto_refresh
     doc["overview_filter"] = _overview_filter(payload.get("overview_filter"))
     doc["scope"] = _decode_scope(payload.get("scope", {}))
-    optuna = payload.get("optuna", {})
-    _require(isinstance(optuna, dict), "optuna must be an object")
-    doc["optuna"]["contour_x"] = _optional_key(
-        optuna.get("contour_x"), "optuna.contour_x"
-    )
-    doc["optuna"]["contour_y"] = _optional_key(
-        optuna.get("contour_y"), "optuna.contour_y"
-    )
     return doc
 
 
@@ -474,20 +457,16 @@ def control_values(
     doc: dict[str, Any] | None,
     loaded: dict[str, set[str] | None],
 ) -> tuple[Any, ...]:
-    """(active, keys, mode, reduction, color, facet, contour_x,
-    contour_y, trial_display, auto_refresh) the analysis controls take
-    from the view state; dropdown values arrive only once their options
-    carry them."""
+    """(keys, mode, reduction, color, facet, trial_display, auto_refresh)
+    the analysis controls take from the view state; dropdown values
+    arrive only once their options carry them."""
     doc = doc or default_view_state()
     return (
-        doc["active"],
         _gated_keys(doc["series"]["keys"], loaded.get("keys")),
         doc["series"]["mode"],
         doc["series"]["reduction"],
         _gated_value(doc["series"]["color"], loaded.get("color")),
         _gated_value(doc["series"]["facet"], loaded.get("facet")),
-        _gated_value(doc["optuna"]["contour_x"], loaded.get("contour_x")),
-        _gated_value(doc["optuna"]["contour_y"], loaded.get("contour_y")),
         doc["series"]["trial_display"],
         ["auto"] if doc["auto_refresh"] else [],
     )
@@ -496,14 +475,11 @@ def control_values(
 def view_from_controls(
     current: dict[str, Any] | None,
     *,
-    active: str | None,
     keys: list[str] | None,
     mode: str | None,
     reduction: str | None,
     color: str | None,
     facet: str | None,
-    contour_x: str | None,
-    contour_y: str | None,
     trial_display: str | None = None,
     auto_refresh: bool | None = None,
     edited: set[str],
@@ -533,31 +509,19 @@ def view_from_controls(
         series["color"] = color or None
     if "facet" in edited:
         series["facet"] = facet or None
-    optuna = dict(doc["optuna"])
-    if "contour_x" in edited:
-        optuna["contour_x"] = contour_x or None
-    if "contour_y" in edited:
-        optuna["contour_y"] = contour_y or None
     auto_refresh_state = bool(doc["auto_refresh"])
     if "auto_refresh" in edited and auto_refresh is not None:
         auto_refresh_state = bool(auto_refresh)
     return edited_view(
         doc,
         {
-            "active": (
-                active
-                if "active" in edited and active in _ANALYSIS_VIEWS
-                else doc["active"]
-            ),
             "series": series,
-            "optuna": optuna,
             "auto_refresh": auto_refresh_state,
         },
     )
 
 
 _CONTROL_IDS = {
-    "analysis-tabs": "active",
     "analysis-key": "keys",
     "analysis-mode": "mode",
     "analysis-reduction": "reduction",
@@ -565,8 +529,6 @@ _CONTROL_IDS = {
     "analysis-auto-refresh": "auto_refresh",
     "analysis-color": "color",
     "analysis-facet": "facet",
-    "analysis-contour-x": "contour_x",
-    "analysis-contour-y": "contour_y",
 }
 
 
@@ -850,14 +812,16 @@ def synced_search(
     (``?view=``/``?sel=``) — minting on navigation would let a stale
     document clobber a freshly opened deep link before hydration lands.
     Every page owns its own query string now (workspace: scope/filter/
-    limit/page; investigation: view/member params; editor: sweeps seed);
-    their state never mints, and the workspace page owns its search
-    parameters outright, so a ``view=`` write there would clobber them."""
+    limit/page; investigation: view/member params; sweep: the view
+    sub-view and via; editor: sweeps seed); their state never mints,
+    and the workspace page owns its search parameters outright, so a
+    ``view=`` write there would clobber them."""
     if url_navigated:
         kind = parse_route(pathname).kind
-        # The investigation pages use ``view`` as their own parameter, so
-        # the codec-token drop must never touch their navigation.
-        if kind == "investigation":
+        # The investigation and sweep pages use ``view`` as their own
+        # parameter, so the codec-token drop must never touch their
+        # navigation.
+        if kind in ("investigation", "sweep"):
             return None
         remaining = _drop_workspace_params(current_search or "")
         return remaining if remaining != (current_search or "") else None
@@ -877,6 +841,14 @@ def investigation_scope_state(
     if scoped:
         picked = [scoped]
     return {**default_scope_state(), "sweeps": picked}, scoped
+
+
+def view_query(view_doc: dict[str, Any] | None) -> str:
+    """The ``view=`` query fragment; empty when the state is absent or
+    default (a default state does not belong in the URL)."""
+    if not view_doc or view_doc == default_view_state():
+        return ""
+    return f"view={encode_view_state(view_doc)}"
 
 
 def workspace_focus_href(project: str, kind: str, object_id: str) -> str:
@@ -903,14 +875,6 @@ def investigation_view_href(
     if member:
         params.append(f"member={quote(member, safe='')}")
     return f"{target}?{'&'.join(params)}" if params else target
-
-
-def view_query(view_doc: dict[str, Any] | None) -> str:
-    """The ``view=`` query fragment; empty when the state is absent or
-    default (a default state does not belong in the URL)."""
-    if not view_doc or view_doc == default_view_state():
-        return ""
-    return f"view={encode_view_state(view_doc)}"
 
 
 def decoded_view_param(search: str | None) -> tuple[dict[str, Any] | None, str | None]:

@@ -28,27 +28,15 @@ def _focused(kind: str = "sweep", object_id: uuid.UUID = SWEEP_A) -> dict:
 
 
 def _control_edit(doc: dict, edited: set[str], **values) -> dict:
-    blanks = {
-        name: None
-        for name in (
-            "active",
-            "keys",
-            "mode",
-            "reduction",
-            "color",
-            "facet",
-            "contour_x",
-            "contour_y",
-        )
-    }
+    blanks = {name: None for name in ("keys", "mode", "reduction", "color", "facet")}
     return view_from_controls(doc, **{**blanks, **values}, edited=edited)
 
 
 class TestEditedViewFunnel:
     def test_changes_apply_and_focus_survives(self):
         doc = _focused()
-        edited = edited_view(doc, {"active": "investigations"})
-        assert edited["active"] == "investigations"
+        edited = edited_view(doc, {"auto_refresh": True})
+        assert edited["auto_refresh"] is True
         assert edited["focus"] == doc["focus"]
 
     def test_change_that_names_focus_overrides_it(self):
@@ -56,18 +44,12 @@ class TestEditedViewFunnel:
         assert edited_view(doc, {"focus": None})["focus"] is None
 
     def test_absent_current_starts_from_defaults(self):
-        assert edited_view(None, {"active": "investigations"}) == dict(
-            default_view_state(), active="investigations"
+        assert edited_view(None, {"auto_refresh": True}) == dict(
+            default_view_state(), auto_refresh=True
         )
 
 
 class TestFocusSurvivesViewEdits:
-    def test_tab_switch_keeps_focus(self):
-        doc = _focused()
-        switched = _control_edit(doc, {"active"}, active="investigations")
-        assert switched["active"] == "investigations"
-        assert switched["focus"] == doc["focus"]
-
     def test_series_control_edits_keep_focus(self):
         doc = _focused()
         picked = _control_edit(doc, {"keys"}, keys=["loss", "acc"])
@@ -164,9 +146,7 @@ class TestHydrationKeepsFocus:
         assert hydrate_view(WORKSPACE, None, doc) == (None, None)
 
     def test_no_view_param_resets_controls_but_keeps_focus(self):
-        doc = _control_edit(
-            _focused(), {"keys", "active"}, keys=["loss"], active="investigations"
-        )
+        doc = _control_edit(_focused(), {"keys"}, keys=["loss"])
         hydrated, error = hydrate_view(WORKSPACE, "?sel=tok", doc)
         assert error is None
         assert hydrated == _focused()
@@ -179,7 +159,7 @@ class TestHydrationKeepsFocus:
 
     def test_view_param_without_focus_keeps_current_focus(self):
         doc = _focused()
-        shared = dict(default_view_state(), active="overview")
+        shared = default_view_state()
         search = f"?view={encode_view_state(shared)}"
         # Post-overview-cutover the workspace owns its plain query
         # string; codec hydration is investigation pages only, so a

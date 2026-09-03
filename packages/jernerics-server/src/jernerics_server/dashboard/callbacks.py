@@ -23,9 +23,11 @@ from . import (
     artifacts,
     components,
     exceptions,
+    figures,
     layout,
     page,
     sweep,
+    sweep_views,
     workspace,
 )
 from .components import Error
@@ -168,6 +170,7 @@ def page_content(
             picked_families=set(
                 ((view_doc or {}).get("scope") or {}).get("families") or ()
             ),
+            view=sweep_views.view_from_search(search),
         )
         if found is None:
             return layout.missing_object_page("sweep", sweep_id), False
@@ -708,23 +711,18 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         facet: str | None,
         current: dict | None,
     ):
-        # The investigation Series controls have no analysis-tabs/contour
-        # siblings, so the workspace control-edit callback never wires
-        # here (a missing input unwires the whole callback); this variant
-        # carries the same edits without them.
+        # The investigation Series controls carry the whole surviving
+        # control surface of the view document.
         edited = analysis.edited_fields(dash.callback_context.triggered_prop_ids)
         if not edited or len(edited) > 2:
             raise PreventUpdate
         doc = analysis.view_from_controls(
             current,
-            active=None,
             keys=keys,
             mode=mode,
             reduction=reduction,
             color=color,
             facet=facet,
-            contour_x=None,
-            contour_y=None,
             trial_display=display,
             auto_refresh="auto" in (auto_flags or []),
             edited=edited,
@@ -765,13 +763,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             },
         )
         return (
+            values[0],
             values[1],
             values[2],
             values[3],
             values[4],
             values[5],
-            values[8],
-            values[9],
+            values[6],
         )
 
     @app.callback(
@@ -1864,6 +1862,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if spec.kind != "sweep":
             raise PreventUpdate
         sweep_id = spec.sub_id or ""
+        # Sub-views own their refresh through the same poll tick; a
+        # wholesale body swap here would reset their client state.
+        if sweep_views.view_from_search(search) is not None:
+            raise PreventUpdate
         # Facts before trees: the cheap overview gate skips the full
         # sweep read on every unchanged tick.
         cheap = _content_digest(service.sweep_facts(sweep_id))
@@ -1876,8 +1878,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if fresh == (facts or {}).get("digest"):
             return no_update, {"digest": fresh, "cheap": cheap}
         picked = set(((view_doc or {}).get("scope") or {}).get("families") or ())
-        body = sweep.render(
-            data, spec.object_id or "", sweep_id, time.time_ns(), picked
+        body = sweep.page_body(
+            service, data, spec.object_id or "", sweep_id, time.time_ns(), picked
         )
         return body, {"digest": fresh, "cheap": cheap}
 
@@ -1917,8 +1919,14 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if data is None:
             return workspace.action_message(ok, report), no_update, no_update
         picked = set(((view_doc or {}).get("scope") or {}).get("families") or ())
-        body = sweep.render(
-            data, spec.object_id or "", sweep_id, time.time_ns(), picked
+        body = sweep.page_body(
+            service,
+            data,
+            spec.object_id or "",
+            sweep_id,
+            time.time_ns(),
+            picked,
+            sweep_views.view_from_search(search),
         )
         return (
             workspace.action_message(ok, report),
@@ -1963,3 +1971,613 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         scope["families"] = merged
         # A pattern-input callback returns its single output as a tuple.
         return (analysis.edited_view(current, {"scope": scope}),)
+
+    # -- ported at merge: sweep page sub-views (R5) ------------------------
+
+    def _pattern_id(prop: str) -> dict[str, Any] | None:
+        """The id dict of one triggered pattern prop, or ``None``."""
+        raw = str(prop).split(".", 1)[0]
+        if not raw.startswith("{"):
+            return None
+        try:
+            resolved = json.loads(raw)
+        except ValueError:
+            return None
+        return resolved if isinstance(resolved, dict) else None
+
+    def _pattern_value(values_list: Any, target: dict[str, Any]) -> Any:
+        """The current value of the ALL-pattern input whose id matches."""
+        for entry in values_list or []:
+            if isinstance(entry, dict) and entry.get("id") == target:
+                return entry.get("value")
+        return None
+
+    @app.callback(
+        Output("sweep-series-blocks", "children"),
+        Output("sweep-series-chips", "children"),
+        Output("sweep-series-add", "options"),
+        Output("sweep-series-add", "value"),
+        Output("sweep-series-state", "data"),
+        Output("sweep-series-snap", "data"),
+        Output("sweep-series-updated", "children"),
+        Output("sweep-series-pcp", "figure"),
+        Output("sweep-series-pcp-data", "data"),
+        Input("poll", "n_intervals"),
+        Input("sweep-series-add", "value"),
+        Input({"sweep-series-drop": ALL}, "n_clicks"),
+        Input({"sweep-series-display": ALL}, "value"),
+        Input({"sweep-series-scale": ALL}, "value"),
+        State("sweep-series-state", "data"),
+        State("sweep-series-snap", "data"),
+        State("url", "pathname"),
+        State("url", "search"),
+        prevent_initial_call=True,
+    )
+    def _update_sweep_series(
+        _tick: int | None,
+        added: str | None,
+        _drops: list,
+        displays: list,
+        scales: list,
+        state: dict | None,
+        snapshot: dict | None,
+        pathname: str | None,
+        search: str | None,
+    ):
+        if sweep_views.view_from_search(search) != "series":
+            raise PreventUpdate
+        route = sweep_views.route_sweep(pathname)
+        if route is None:
+            raise PreventUpdate
+        project, sweep_id = route
+        context = dash.callback_context
+        triggered = {str(prop) for prop in context.triggered_prop_ids}
+        pressed = pressed_props(context)
+        state = state or sweep_views.default_series_state()
+        keys = list(state.get("keys") or [])
+        display = dict(state.get("display") or {})
+        scale = dict(state.get("scale") or {})
+        keys_changed = False
+        if "sweep-series-add.value" in triggered and added and added not in keys:
+            keys = [*keys, str(added)]
+            keys_changed = True
+        for prop in pressed:
+            target = _pattern_id(prop)
+            if not target or "sweep-series-drop" not in target:
+                continue
+            dropped = str(target["sweep-series-drop"])
+            keys = [entry for entry in keys if entry != dropped]
+            keys_changed = True
+        for prop in triggered:
+            target = _pattern_id(prop)
+            if not target:
+                continue
+            if "sweep-series-display" in target:
+                value = _pattern_value(displays, target)
+                if value is not None:
+                    display[str(target["sweep-series-display"])] = value
+            if "sweep-series-scale" in target:
+                value = _pattern_value(scales, target)
+                if value is not None:
+                    scale[str(target["sweep-series-scale"])] = value
+        controls_changed = display != dict(state.get("display") or {}) or scale != dict(
+            state.get("scale") or {}
+        )
+        cheap = sweep_views.facts_digest(service, sweep_id)
+        stale = cheap != state.get("cheap")
+        if not keys_changed and not controls_changed and not stale:
+            raise PreventUpdate
+        if keys_changed or stale or snapshot is None:
+            now = time.time_ns()
+            snapshot = sweep_views.series_snapshot_fetch(
+                service, project, sweep_id, keys, now
+            )
+        state = {
+            "keys": keys,
+            "display": display,
+            "scale": scale,
+            "cheap": cheap,
+        }
+        figure, pcp_data = sweep_views.series_pcp_outputs(state, snapshot)
+        offered = {
+            entry["value"]
+            for entry in snapshot.get("key_options") or []
+            if isinstance(entry, dict) and entry.get("value")
+        }
+        return (
+            sweep_views.series_blocks(state, snapshot),
+            sweep_views.series_chips(state, snapshot),
+            [{"label": key, "value": key} for key in sorted(offered - set(keys))],
+            None,
+            state,
+            snapshot,
+            analysis.updated_ago(int(snapshot.get("at_ns") or 0)),
+            figure,
+            pcp_data,
+        )
+
+    @app.callback(
+        Output("sweep-series-sel", "data", allow_duplicate=True),
+        Input({"sweep-series-row": ALL}, "n_clicks"),
+        State("sweep-series-sel", "data"),
+        prevent_initial_call=True,
+    )
+    def _toggle_sweep_series_row(_rows: list, current: dict | None):
+        pressed = pressed_props(dash.callback_context)
+        picked = {str(tk) for tk in (current or {}).get("tks") or []}
+        changed = False
+        for prop in pressed:
+            target = _pattern_id(prop)
+            compound = target and target.get("sweep-series-row")
+            if not compound:
+                continue
+            tk = str(compound).rsplit(":", 1)[-1]
+            picked.symmetric_difference_update({tk})
+            changed = True
+        if not changed:
+            raise PreventUpdate
+        return {"tks": sorted(picked)}
+
+    @app.callback(
+        Output("sweep-series-pcp-note", "children"),
+        Output("sweep-series-clear", "style"),
+        Input("sweep-series-sel", "data"),
+        State("sweep-series-pcp-data", "data"),
+        prevent_initial_call=True,
+    )
+    def _note_sweep_series_selection(
+        selection: dict | None,
+        pcp_data: dict | None,
+    ):
+        picked = sorted(str(tk) for tk in (selection or {}).get("tks") or [])
+        total = len((pcp_data or {}).get("tks") or [])
+        note = f"{len(picked)} of {total} trials selected" if picked else ""
+        return note, {} if picked else {"display": "none"}
+
+    @app.callback(
+        Output("sweep-series-sel", "data", allow_duplicate=True),
+        Input("sweep-series-clear", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _clear_sweep_series_selection(_clicks: int | None):
+        if not pressed_props(dash.callback_context):
+            raise PreventUpdate
+        return {"tks": []}
+
+    app.clientside_callback(
+        """
+        function(restyle, data) {
+            const no = window.dash_clientside.no_update;
+            if (!restyle || !data || !data.tks || !data.tks.length) {
+                return no;
+            }
+            if (!JSON.stringify(restyle).includes("constraintrange")) {
+                return no;
+            }
+            const host = document.getElementById("sweep-series-pcp");
+            const gd = host && (host.querySelector(".js-plotly-plot") || host);
+            const full = gd && gd._fullData && gd._fullData[0];
+            const dims = (full && full.dimensions) || [];
+            if (!dims.length) {
+                return no;
+            }
+            const cons = [];
+            dims.forEach((dim) => {
+                let cr = dim ? dim.constraintrange : null;
+                if (cr === undefined || cr === null) return;
+                if (!Array.isArray(cr)) cr = [cr];
+                const ranges = cr.length && Array.isArray(cr[0]) ? cr : [cr];
+                ranges.forEach((r) => {
+                    if (Array.isArray(r) && r.length >= 2) {
+                        cons.push([Math.min(r[0], r[1]), Math.max(r[0], r[1])]);
+                    }
+                });
+            });
+            const tks = [];
+            (full.dimensions[0].values || []).forEach((_, line) => {
+                const inside = dims.every((dim) => {
+                    if (!dim.constraintrange) return true;
+                    let cr = dim.constraintrange;
+                    if (!Array.isArray(cr)) cr = [cr];
+                    const ranges = cr.length && Array.isArray(cr[0])
+                        ? cr : [cr];
+                    const v = dim.values[line];
+                    if (v !== v) return false;
+                    return ranges.some((r) => {
+                        if (!Array.isArray(r) || r.length < 2) return false;
+                        return v >= Math.min(r[0], r[1])
+                            && v <= Math.max(r[0], r[1]);
+                    });
+                });
+                if (inside) tks.push(data.tks[line]);
+            });
+            tks.sort();
+            return {tks: tks};
+        }
+        """,
+        Output("sweep-series-sel", "data", allow_duplicate=True),
+        Input("sweep-series-pcp", "restyleData"),
+        State("sweep-series-pcp-data", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(selection, data) {
+            const no = window.dash_clientside.no_update;
+            const host = document.getElementById("sweep-series-pcp");
+            const gd = host && (host.querySelector(".js-plotly-plot") || host);
+            if (!gd || !window.Plotly || !data || !data.tks
+                    || !data.tks.length) {
+                return no;
+            }
+            const VIRIDIS = ['#440154', '#482878', '#3e4989', '#31688e',
+                '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b',
+                '#fde725'];
+            const sel = new Set((selection && selection.tks) || []);
+            const n = data.tks.length;
+            let color;
+            let colorscale = "Viridis";
+            if (sel.size) {
+                const stops = [[0, "#ececec"]];
+                VIRIDIS.forEach((c, k) => {
+                    stops.push([(k + 1) / VIRIDIS.length, c]);
+                });
+                colorscale = stops;
+                const rank = new Map();
+                data.tks.forEach((tk) => {
+                    if (sel.has(tk)) {
+                        rank.set(tk, ((rank.size + 1) / sel.size) * n);
+                    }
+                });
+                color = data.tks.map((tk) => rank.get(tk) || 0);
+            } else {
+                color = data.tks.map((_, i) => i);
+            }
+            Plotly.restyle(gd, {
+                "line.color": [color],
+                "line.colorscale": [colorscale],
+                "line.showscale": [false],
+            });
+            return no;
+        }
+        """,
+        Output("sweep-series-echo", "data"),
+        Input("sweep-series-sel", "data"),
+        State("sweep-series-pcp-data", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(selection, state) {
+            const no = window.dash_clientside.no_update;
+            const tks = new Set((selection && selection.tks) || []);
+            document.querySelectorAll('#sweep-series-blocks tr.trial-row')
+                .forEach((row) => {
+                    let tk = null;
+                    try {
+                        tk = JSON.parse(row.id)["sweep-series-row"]
+                            .split(":").pop();
+                    } catch (err) {
+                        return;
+                    }
+                    row.classList.toggle('row-sel', tks.has(tk));
+                    row.classList.toggle('row-dim', tks.size > 0 && !tks.has(tk));
+                });
+            document.querySelectorAll('#sweep-series-blocks .js-plotly-plot')
+                .forEach((gd) => {
+                    if (!window.Plotly || !gd.data) return;
+                    const opacity = gd.data.map((trace) => {
+                        if (!trace.customdata || !trace.customdata.length) {
+                            return trace.opacity;
+                        }
+                        return tks.has(String(trace.customdata[0])) || !tks.size
+                            ? 1 : 0.15;
+                    });
+                    Plotly.restyle(gd, {opacity: opacity});
+                });
+            return no;
+        }
+        """,
+        Output("sweep-series-echo", "data", allow_duplicate=True),
+        Input("sweep-series-sel", "data"),
+        Input("sweep-series-state", "data"),
+        prevent_initial_call=True,
+    )
+
+    # -- Points: the sweep-scoped selection split --------------------------
+
+    @app.callback(
+        Output("sweep-points-grid", "rowData"),
+        Output("sweep-points-note", "children"),
+        Output("sweep-points-clear", "style"),
+        Input("sweep-points-sel", "data"),
+        State("url", "pathname"),
+        State("url", "search"),
+        prevent_initial_call=True,
+    )
+    def _filter_sweep_points_rows(
+        selection: dict | None,
+        pathname: str | None,
+        search: str | None,
+    ):
+        if sweep_views.view_from_search(search) != "points":
+            raise PreventUpdate
+        route = sweep_views.route_sweep(pathname)
+        if route is None:
+            raise PreventUpdate
+        project, sweep_id = route
+        built = sweep_views.points_view(service, project, sweep_id)
+        picked = sorted(str(tk) for tk in (selection or {}).get("tks") or [])
+        rows = built["view"]["rows"]
+        if picked:
+            keep = set(picked)
+            rows = [row for row in rows if row["tk"] in keep]
+        note = (
+            f"{len(rows)} of {len(built['view']['rows'])} trials shown"
+            if picked
+            else ""
+        )
+        return (
+            rows,
+            note,
+            {} if picked else {"display": "none"},
+        )
+
+    app.clientside_callback(
+        """
+        function(restyle, data) {
+            const no = window.dash_clientside.no_update;
+            if (!restyle || !data || !data.tks || !data.tks.length) {
+                return no;
+            }
+            if (!JSON.stringify(restyle).includes("constraintrange")) {
+                return no;
+            }
+            const host = document.getElementById("sweep-points-figure");
+            const gd = host && (host.querySelector(".js-plotly-plot") || host);
+            const full = gd && gd._fullData && gd._fullData[0];
+            const dims = (full && full.dimensions) || [];
+            if (!dims.length) {
+                return no;
+            }
+            const cons = [];
+            dims.forEach((dim) => {
+                let cr = dim ? dim.constraintrange : null;
+                if (cr === undefined || cr === null) return;
+                if (!Array.isArray(cr)) cr = [cr];
+                const ranges = cr.length && Array.isArray(cr[0]) ? cr : [cr];
+                ranges.forEach((r) => {
+                    if (Array.isArray(r) && r.length >= 2) {
+                        cons.push([Math.min(r[0], r[1]), Math.max(r[0], r[1])]);
+                    }
+                });
+            });
+            const tks = [];
+            (full.dimensions[0].values || []).forEach((_, line) => {
+                const inside = dims.every((dim) => {
+                    if (!dim.constraintrange) return true;
+                    let cr = dim.constraintrange;
+                    if (!Array.isArray(cr)) cr = [cr];
+                    const ranges = cr.length && Array.isArray(cr[0])
+                        ? cr : [cr];
+                    const v = dim.values[line];
+                    if (v !== v) return false;
+                    return ranges.some((r) => {
+                        if (!Array.isArray(r) || r.length < 2) return false;
+                        return v >= Math.min(r[0], r[1])
+                            && v <= Math.max(r[0], r[1]);
+                    });
+                });
+                if (inside) tks.push(data.tks[line]);
+            });
+            tks.sort();
+            return {tks: tks};
+        }
+        """,
+        Output("sweep-points-sel", "data"),
+        Input("sweep-points-figure", "restyleData"),
+        State("sweep-points-data", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(rows, data) {
+            const no = window.dash_clientside.no_update;
+            if (rows === undefined || rows === null) {
+                return no;
+            }
+            const tks = (rows || [])
+                .map((row) => row && row.tk)
+                .filter(Boolean)
+                .sort();
+            return {tks: tks};
+        }
+        """,
+        Output("sweep-points-sel", "data", allow_duplicate=True),
+        Input("sweep-points-grid", "selectedRows"),
+        State("sweep-points-data", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(selection, data) {
+            const no = window.dash_clientside.no_update;
+            const host = document.getElementById("sweep-points-figure");
+            const gd = host && (host.querySelector(".js-plotly-plot") || host);
+            if (!gd || !window.Plotly || !data || !data.tks
+                    || !data.tks.length) {
+                return no;
+            }
+            const VIRIDIS = ['#440154', '#482878', '#3e4989', '#31688e',
+                '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b',
+                '#fde725'];
+            const sel = new Set((selection && selection.tks) || []);
+            const n = data.tks.length;
+            let color;
+            let colorscale = "Viridis";
+            if (sel.size) {
+                const stops = [[0, "#ececec"]];
+                VIRIDIS.forEach((c, k) => {
+                    stops.push([(k + 1) / VIRIDIS.length, c]);
+                });
+                colorscale = stops;
+                const rank = new Map();
+                data.tks.forEach((tk) => {
+                    if (sel.has(tk)) {
+                        rank.set(tk, ((rank.size + 1) / sel.size) * n);
+                    }
+                });
+                color = data.tks.map((tk) => rank.get(tk) || 0);
+            } else {
+                color = data.tks.map((_, i) => i);
+            }
+            Plotly.restyle(gd, {
+                "line.color": [color],
+                "line.colorscale": [colorscale],
+                "line.showscale": [false],
+            });
+            return no;
+        }
+        """,
+        Output("sweep-points-echo", "data"),
+        Input("sweep-points-sel", "data"),
+        State("sweep-points-data", "data"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("sweep-points-sel", "data", allow_duplicate=True),
+        Output("sweep-points-grid", "selectedRows"),
+        Input("sweep-points-clear", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _clear_sweep_points_selection(_clicks: int | None):
+        if not pressed_props(dash.callback_context):
+            raise PreventUpdate
+        return {"tks": []}, []
+
+    # -- Search: the trial filter ------------------------------------------
+
+    @app.callback(
+        Output("sweep-search-results", "children"),
+        Output("sweep-search-note", "children"),
+        Output("sweep-search-data", "data"),
+        Input("sweep-search-q", "value"),
+        Input("poll", "n_intervals"),
+        State("sweep-search-data", "data"),
+        State("url", "pathname"),
+        State("url", "search"),
+        prevent_initial_call=True,
+    )
+    def _update_sweep_search(
+        query: str | None,
+        _tick: int | None,
+        data: dict | None,
+        pathname: str | None,
+        search: str | None,
+    ):
+        if sweep_views.view_from_search(search) != "search":
+            raise PreventUpdate
+        route = sweep_views.route_sweep(pathname)
+        if route is None:
+            raise PreventUpdate
+        project, sweep_id = route
+        data = data or {}
+        if "poll.n_intervals" in {
+            str(prop) for prop in dash.callback_context.triggered_prop_ids
+        }:
+            cheap = sweep_views.facts_digest(service, sweep_id)
+            if cheap != data.get("cheap"):
+                data = sweep_views.search_data_fetch(
+                    service, project, sweep_id, time.time_ns()
+                )
+        needle = str(query or "").strip().casefold()
+        rows = sweep_views.search_rows(data, needle)
+        total = len(data.get("rows") or [])
+        return (
+            page.scroll_table(
+                [
+                    page.head_cell("Trial", numeric=True),
+                    page.head_cell("State"),
+                    page.head_cell("Objective", numeric=True),
+                    page.head_cell("Config"),
+                ],
+                rows,
+                sortable=True,
+            ),
+            f"{len(rows)} of {total} trials",
+            data,
+        )
+
+    # -- Optuna: mirrored-state figures -------------------------------------
+
+    @app.callback(
+        Output("sweep-optuna-data", "data"),
+        Output("sweep-optuna-history", "figure"),
+        Output("sweep-optuna-parcoords", "figure"),
+        Output("sweep-optuna-slices", "figure"),
+        Output("sweep-optuna-contour", "figure"),
+        Output("sweep-optuna-timeline", "figure"),
+        Output("sweep-optuna-x", "options"),
+        Output("sweep-optuna-y", "options"),
+        Input("poll", "n_intervals"),
+        State("sweep-optuna-data", "data"),
+        State("sweep-optuna-x", "value"),
+        State("sweep-optuna-y", "value"),
+        State("url", "pathname"),
+        State("url", "search"),
+        prevent_initial_call=True,
+    )
+    def _refresh_sweep_optuna(
+        _tick: int | None,
+        data: dict | None,
+        x_key: str | None,
+        y_key: str | None,
+        pathname: str | None,
+        search: str | None,
+    ):
+        if sweep_views.view_from_search(search) != "optuna":
+            raise PreventUpdate
+        route = sweep_views.route_sweep(pathname)
+        if route is None:
+            raise PreventUpdate
+        project, sweep_id = route
+        cheap = sweep_views.facts_digest(service, sweep_id)
+        if cheap == (data or {}).get("cheap"):
+            raise PreventUpdate
+        trials = service.analysis_trials(project, sweep_views.sweep_tray(sweep_id))
+        options = [
+            {"label": key, "value": key}
+            for key in sweep_views.numeric_param_keys_for(trials)
+        ]
+        return (
+            {"trials": trials, "cheap": cheap},
+            figures.optimization_history(trials),
+            figures.parallel_coordinates(trials),
+            figures.slice_figure(trials),
+            sweep_views.contour_figure(trials, x_key, y_key),
+            figures.trial_timeline(trials),
+            options,
+            options,
+        )
+
+    @app.callback(
+        Output("sweep-optuna-contour", "figure", allow_duplicate=True),
+        Input("sweep-optuna-x", "value"),
+        Input("sweep-optuna-y", "value"),
+        State("sweep-optuna-data", "data"),
+        prevent_initial_call=True,
+    )
+    def _reaxis_sweep_optuna_contour(
+        x_key: str | None,
+        y_key: str | None,
+        data: dict | None,
+    ):
+        if not pressed_props(dash.callback_context):
+            raise PreventUpdate
+        trials = (data or {}).get("trials") or []
+        return sweep_views.contour_figure(trials, x_key, y_key)
