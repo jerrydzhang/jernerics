@@ -763,19 +763,23 @@
   margin: 4px 0 10px;
 }
 
-.np .pager button {
+.np .pager button,
+.np .pager a,
+.np .pager span {
   min-width: 28px;
   padding: 3px 8px;
   font-size: 12px;
+  text-align: center;
 }
 
-.np .pager button.on {
+.np .pager .on {
   background: var(--text);
   color: #fff;
   border-color: var(--text);
 }
 
-.np .pager button:disabled {
+.np .pager button:disabled,
+.np .pager span {
   opacity: 0.4;
   cursor: default;
 }

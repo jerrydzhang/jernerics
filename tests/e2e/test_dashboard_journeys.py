@@ -5,23 +5,26 @@ the front doors between them exist. One finished sweep — its single
 trial completed, execution ended, and artifact received — is driven
 through the real pipeline (deploy submission events, a runner trial
 with live streaming, post-hook reconciliation and blob upload) into a
-fresh authenticated server with the dashboard mounted. The link-graph
-walk then starts at the landing page and follows ONLY links harvested
-from rendered layouts: ``html.A`` hrefs, AG Grid markdown cells, and
-the artifact grid's row-click navigation. A mounted smoke proves
-browser login exchanges the API key for a session cookie and
-``/dashboard/`` renders over real TCP.
+fresh authenticated server with the dashboard mounted. The dashboard is
+a router over server-rendered pages: the link-graph walk starts at the
+landing page and follows ONLY links harvested from rendered layouts
+(``html.A`` hrefs), and every click is a full page load. The overview's
+URL-state journeys prove a shared URL restores the whole composition —
+scope, filter, limit, page, and sort are plain query params. A mounted
+smoke proves browser login exchanges the API key for a session cookie
+and ``/dashboard/`` renders over real TCP.
 """
 
-import re
 import socket
 import threading
 import time
+import uuid
 from collections import deque
+from datetime import UTC, datetime
 from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import quote, urljoin
+from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 import optuna
@@ -40,14 +43,7 @@ from jernerics.post_hook import PipelineResult, run_pipeline
 from jernerics.retry import RetryContext
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import ship_events_file
-from jernerics_schema import Selection, encode_selection
-from jernerics_server.dashboard import workspace
-from jernerics_server.dashboard.analysis import (
-    default_view_state,
-    edited_view,
-    encode_view_state,
-    with_focus,
-)
+from jernerics_schema import SweepSnapshotEvent, sweep_id_for
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.artifacts import raw_href, viewer_href
 from jernerics_server.dashboard.auth import COOKIE_NAME
@@ -130,9 +126,6 @@ def search_space(trial):
 def objective(results):
     return results["loss"]
 """
-
-_ARTIFACT_ROW_ID = "params.data.artifact_id"
-_MARKDOWN_HREF = re.compile(r"\]\(([^)]+)\)")
 
 
 def _rows(db_path: Path, sql: str, params: list | None = None) -> list[tuple]:
@@ -256,6 +249,27 @@ def scenario(tmp_path_factory):
         == PipelineResult.SWEEP_COMPLETE
     )
 
+    # The terminal snapshot ships after the post-hook: its reconcile
+    # sweep snapshot (running) would otherwise be the sweep's last word.
+    write_submission_events(
+        [
+            SweepSnapshotEvent(
+                event_id=uuid.uuid4(),
+                recorded_at=datetime.now(UTC),
+                project=PROJECT,
+                sweep_id=sweep_id_for(PROJECT, SWEEP),
+                name=SWEEP,
+                state="completed",
+            )
+        ],
+        LocalHost(),
+        str(tracking_dir),
+        "terminal.jsonl",
+    )
+    assert ship_events_file(
+        tracking_dir / "submission" / "terminal.jsonl", base_url, API_KEY
+    )
+
     model_path = tracking_dir.parent / "artifacts-out" / "model-0.txt"
     yield SimpleNamespace(
         app=app,
@@ -283,47 +297,28 @@ def _page_text(page: Component) -> str:
 
     def collect(node: object) -> None:
         children = getattr(node, "children", None)
-        if isinstance(children, str):
-            chunks.append(children)
+        if isinstance(children, str | int | float):
+            chunks.append(str(children))
         elif isinstance(children, Component):
             collect(children)
         elif isinstance(children, list | tuple):
             for child in children:
-                collect(child)
+                if isinstance(child, str | int | float):
+                    chunks.append(str(child))
+                else:
+                    collect(child)
 
     collect(page)
     return " ".join(chunks)
 
 
-def _grid_hrefs(grid: AgGrid) -> set[str]:
-    """Navigation an AG Grid offers the user: markdown cells (the grid's
-    markdown renderer emits anchors for them) and the artifact listing's
-    row click, whose rowId is the artifact id and whose callback maps it
-    through viewer_href."""
-    markdown_fields = {
-        column["field"]
-        for column in getattr(grid, "columnDefs", None) or []
-        if column.get("cellRenderer") == "markdown"
-    }
-    opens_viewer = getattr(grid, "getRowId", None) == _ARTIFACT_ROW_ID
-    hrefs: set[str] = set()
-    for row in getattr(grid, "rowData", None) or []:
-        for field in markdown_fields:
-            if isinstance(row.get(field), str):
-                hrefs.update(_MARKDOWN_HREF.findall(row[field]))
-        if opens_viewer and row.get("artifact_id"):
-            hrefs.add(viewer_href(str(row["artifact_id"])))
-    return hrefs
-
-
 def _page_hrefs(page: Component) -> set[str]:
-    """Every dashboard URL a rendered layout links or navigates to,
-    resolved against ROUTES_BASE."""
+    """Every dashboard URL a rendered layout links to, resolved against
+    ROUTES_BASE — pages are server-rendered, so links are the only
+    navigation a layout offers."""
     hrefs: set[str] = set()
     for component in _components(page):
-        if isinstance(component, AgGrid):
-            hrefs |= _grid_hrefs(component)
-        elif isinstance(component, html.A) and component.href:
+        if isinstance(component, html.A) and getattr(component, "href", None):
             hrefs.add(component.href)
     return {urljoin(LANDING, href) for href in hrefs}
 
@@ -337,7 +332,10 @@ def _walk_link_graph(service) -> dict[str, Component]:
         url = queue.popleft()
         if url in pages:
             continue
-        page, _polls = page_content(url, service)
+        parts = urlsplit(url)
+        page, _polls = page_content(
+            parts.path, service, search=f"?{parts.query}" if parts.query else None
+        )
         pages[url] = page
         queue.extend(
             href
@@ -371,34 +369,26 @@ class TestLinkGraphJourney:
         pages = _walk_link_graph(scenario.service)
         kinds = {parse_route(url).kind for url in pages}
         assert {"project", "workspace"} <= kinds
-        assert kinds <= {"project", "workspace", "artifact"}
+        # The sweep and exceptions routes exist ahead of their pages
+        # (they render the not-found surface for now); the artifact
+        # viewer is linked from no current page.
+        canonical = {"project", "workspace", "sweep", "exceptions", "artifact"}
+        assert kinds <= canonical
         for page in pages.values():
             for href in _page_hrefs(page):
-                assert parse_route(href).kind in {"project", "workspace", "artifact"}
+                spec = parse_route(href)
+                if spec.kind == "not-found":
+                    # The Investigations index is a tab target ahead of
+                    # its page (it renders not-found for now).
+                    assert href.endswith("/investigations"), href
+                else:
+                    assert spec.kind in canonical, href
 
-    def test_focused_inspector_reaches_every_object_kind(self, scenario):
-        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
-        trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
-        execution_id = _rows(scenario.db_path, "SELECT execution_id FROM executions")[
-            0
-        ][0]
+    def test_artifact_viewer_links_back_into_the_project(self, scenario):
         artifact_id = _rows(
             scenario.db_path,
             "SELECT artifact_id FROM artifacts WHERE key = 'model'",
         )[0][0]
-
-        for kind, object_id in (
-            ("sweep", sweep_id),
-            ("trial", trial_id),
-            ("execution", execution_id),
-        ):
-            rendered = str(
-                workspace.inspector_content(
-                    scenario.service, {"kind": kind, "id": object_id}, 0
-                )
-            )
-            assert short_id(object_id) in rendered
-
         viewer, _polls = page_content(viewer_href(artifact_id), scenario.service)
         assert short_id(artifact_id) in _page_text(viewer)
         back_links = [
@@ -436,197 +426,148 @@ class TestLinkGraphJourney:
         assert served.status_code == 200
         assert served.content == scenario.model_bytes
 
-    def test_every_grid_stays_text_selectable(self, scenario):
-        """jernerics-eqn: AG Grid defaults to user-select: none; every
-        grid the link graph reaches carries the copyability pair and
-        keeps the options it already had."""
-        pages = _walk_link_graph(scenario.service)
-        grids = [
-            (url, grid)
-            for url, page in pages.items()
-            for grid in _components(page)
-            if isinstance(grid, AgGrid)
-        ]
-        assert {grid.id for _, grid in grids} >= {
-            "sweep-grid",
-            "analysis-family-grid",
-        }
-        for url, grid in grids:
-            options = grid.dashGridOptions or {}
-            assert options.get("enableCellTextSelection") is True, (url, grid.id)
-            assert options.get("ensureDomOrder") is True, (url, grid.id)
-        by_id = {grid.id: grid for _, grid in grids}
-        assert by_id["sweep-grid"].dashGridOptions["rowSelection"] == {
-            "mode": "multiRow"
-        }
-        assert by_id["analysis-family-grid"].dashGridOptions["rowSelection"] == {
-            "mode": "multiRow"
-        }
 
-
-class TestWorkspaceStateJourney:
-    """Scope edits, Series activation, and shared-URL restore over the
-    mounted server — the state journeys a working browser performs."""
+class TestOverviewUrlJourney:
+    """The overview page's state journeys: the whole page state is the
+    URL's query string, every control is a full-page-load link, and a
+    fresh render of a shared URL restores the exact composition."""
 
     @staticmethod
-    def _callback_key(callback_map, wanted: set[str]) -> str:
-        def outputs_of(key):
-            stripped = key.removeprefix("..").removesuffix("..")
-            return {part.split("@")[0] for part in stripped.split("...") if part}
-
-        return next(key for key in callback_map if outputs_of(key) == wanted)
-
-    def _post(self, scenario, wanted, inputs, state=(), changed=()):
-        key = self._callback_key(
-            build_dash_app(scenario.app.state.dashboard).callback_map, wanted
+    def _render(scenario, search=""):
+        page, polls = page_content(
+            f"{ROUTES_BASE}/project/{PROJECT}", scenario.service, search=search
         )
-        specs = [
-            part.split("@")[0]
-            for part in key.removeprefix("..").removesuffix("..").split("...")
-            if part
-        ]
-        outputs = [
-            {"id": spec.split(".")[0], "property": spec.split(".")[1]} for spec in specs
-        ]
-        return httpx.post(
-            f"{scenario.base_url}{ROUTES_BASE}/_dash-update-component",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            json={
-                "output": key,
-                "outputs": outputs[0] if len(outputs) == 1 else outputs,
-                "inputs": inputs,
-                "state": list(state),
-                "changedPropIds": list(changed),
-            },
+        return page, polls
+
+    @staticmethod
+    def _open(scenario, href):
+        """Follow one rendered link: a click is a full page load of the
+        href's path and query."""
+        parts = urlsplit(href)
+        return page_content(
+            parts.path,
+            scenario.service,
+            search=f"?{parts.query}" if parts.query else None,
         )
 
-    def test_shared_workspace_url_restores_scope_view_and_focus(self, scenario):
+    @staticmethod
+    def _sweep_rows(page):
+        return [
+            node
+            for node in _components(page)
+            if isinstance(node, html.Tr)
+            and getattr(node, "className", None) == "sweep-row"
+        ]
+
+    def test_default_url_renders_the_active_scope(self, scenario):
+        page, polls = self._render(scenario)
+        text = _page_text(page)
+        assert "Active sweeps · last activity" in text
+        assert "0 failed executions · 0 sweeps" in text
+        assert "0 interrupted runs" in text
+        assert "1 completed sweeps" in text
+        assert "0 sweeps with no trials yet" in text
+        assert "showing 1–1 of 1" in text
+        assert polls is False
+        # The project scope mounts no grid anymore: the sweeps table is
+        # server-rendered HTML.
+        assert not [node for node in _components(page) if isinstance(node, AgGrid)]
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
-        trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
-        doc = with_focus(
-            edited_view(default_view_state(), {"active": "overview"}),
-            {"kind": "trial", "id": trial_id},
+        row = self._sweep_rows(page)[0]
+        cells = _page_text(row)
+        assert SWEEP in cells
+        assert "completed" in cells
+        assert "1/1" in cells
+        assert "0.25" in cells
+        name_link = next(
+            node
+            for node in _components(row)
+            if isinstance(node, html.A)
+            and getattr(node, "className", None) == "sweep-link"
         )
-        doc["scope"]["sweeps"] = [sweep_id]
-        search = f"?view={encode_view_state(doc)}"
-        response = self._post(
-            scenario,
-            {"analysis-message-store.data", "view-store.data"},
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": f"{ROUTES_BASE}/project/{PROJECT}",
-                },
-                {"id": "url", "property": "search", "value": search},
-                {"id": "project-store", "property": "data", "value": PROJECT},
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-            changed=["url.search"],
+        assert name_link.href == f"{ROUTES_BASE}/project/{PROJECT}/sweep/{sweep_id}"
+        # The selection bar is clientside: the server renders it hidden
+        # with its ids and one checkbox per row; no journey can dispatch it.
+        selbar = next(
+            node for node in _components(page) if getattr(node, "id", None) == "selbar"
         )
-        assert response.status_code == 200
-        restored = response.json()["response"]
-        assert restored["view-store"]["data"]["scope"]["sweeps"] == [sweep_id]
-        assert restored["view-store"]["data"]["active"] == "overview"
-        assert restored["view-store"]["data"]["focus"] == {
-            "kind": "trial",
-            "id": trial_id,
+        assert selbar.hidden is True
+        assert {"sel-count", "sel-create", "sel-clear"} <= {
+            getattr(node, "id", None) for node in _components(selbar)
         }
-        assert restored["analysis-message-store"]["data"] == ""
+        assert {"sel-sweep": sweep_id} in [
+            getattr(node, "id", None)
+            for node in _components(page)
+            if isinstance(getattr(node, "id", None), dict)
+        ]
+        pager = next(
+            node
+            for node in _components(page)
+            if isinstance(node, html.Div)
+            and getattr(node, "className", None) == "pager"
+        )
+        assert not getattr(pager, "children", None)
 
-    def test_legacy_sel_token_still_hydrates_the_scope(self, scenario):
-        """A legacy ``?sel=`` deep link (or a continue-in-Python URL
-        opened in a browser) hydrates into the view doc's scope."""
-        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
-        token = encode_selection(Selection(project=PROJECT, sweeps=[sweep_id]))
-        response = self._post(
-            scenario,
-            {"analysis-message-store.data", "view-store.data"},
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": f"{ROUTES_BASE}/project/{PROJECT}",
-                },
-                {"id": "url", "property": "search", "value": f"?sel={token}"},
-                {"id": "project-store", "property": "data", "value": PROJECT},
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-            changed=["url.search"],
+    def test_tile_click_lands_on_the_filtered_page(self, scenario):
+        page, _polls = self._render(scenario)
+        tiles = [
+            node
+            for node in _components(page)
+            if isinstance(node, html.A)
+            and getattr(node, "className", None)
+            and "tile" in node.className.split()
+        ]
+        assert len(tiles) == 4
+        completed = next(
+            tile for tile in tiles if "completed sweeps" in _page_text(tile)
         )
-        assert response.status_code == 200
-        restored = response.json()["response"]
-        assert restored["view-store"]["data"]["scope"]["sweeps"] == [sweep_id]
-        assert restored["analysis-message-store"]["data"] == ""
+        filtered, _polls = self._open(scenario, completed.href)
+        assert "showing 1–1 of 1 (filtered from 1)" in _page_text(filtered)
+        chip = next(
+            node
+            for node in _components(filtered)
+            if isinstance(node, html.Span)
+            and getattr(node, "className", None) == "chip"
+        )
+        assert "1 sweep completed" in _page_text(chip)
+        remove = next(node for node in _components(chip) if isinstance(node, html.A))
+        assert remove.href == f"{ROUTES_BASE}/project/{PROJECT}"
+        failed = next(tile for tile in tiles if "failed executions" in _page_text(tile))
+        empty, _polls = self._open(scenario, failed.href)
+        assert "showing 0–0 of 0 (filtered from 1)" in _page_text(empty)
+        assert self._sweep_rows(empty) == []
 
-    def test_sweep_picked_in_the_browser_rides_the_url_and_hydrates_back(
-        self, scenario
-    ):
-        """jernerics-2se user-visible win: picking a sweep in the browser
-        grid writes the view doc's scope; the URL mint carries it as a
-        defaults-diff; a fresh session hydrating that URL restores the
-        exact same scope."""
-        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
-        # 1. the browser grid checkPick writes the scope into the view doc
-        picked = self._post(
-            scenario,
-            {"view-store.data"},
-            [
-                {
-                    "id": "sweep-grid",
-                    "property": "selectedRows",
-                    "value": [
-                        {"sweep_id": sweep_id},
-                    ],
-                }
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-            changed=["sweep-grid.selectedRows"],
+    def test_scope_sort_and_unknown_params_restore_the_composition(self, scenario):
+        all_page, _polls = self._render(scenario, "?scope=all")
+        assert (
+            "All sweeps — including 0 archived/invalid · last activity"
+            in _page_text(all_page)
         )
-        assert picked.status_code == 200
-        doc = picked.json()["response"]["view-store"]["data"]
-        assert doc["scope"]["sweeps"] == [sweep_id]
-        # 2. the URL sync mints ?view= from that doc
-        synced = self._post(
-            scenario,
-            {"url.search"},
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": f"{ROUTES_BASE}/project/{PROJECT}",
-                },
-                {"id": "view-store", "property": "data", "value": doc},
-            ],
-            state=[{"id": "url", "property": "search", "value": ""}],
-            changed=["view-store.data"],
+        sorted_page, _polls = self._render(scenario, "?sort=trials:desc")
+        marked = [
+            th
+            for th in _components(sorted_page)
+            if isinstance(th, html.Th) and getattr(th, "data-dir", None)
+        ]
+        assert [(th.children.children, getattr(th, "data-dir")) for th in marked] == [
+            ("Trials", "desc")
+        ]
+        # Clicking the sorted header again flips the direction.
+        assert marked[0].children.href == (
+            f"{ROUTES_BASE}/project/{PROJECT}?sort=trials:asc"
         )
-        assert synced.status_code == 200
-        search = synced.json()["response"]["url"]["search"]
-        assert search.startswith("?view=")
-        assert sweep_id in search  # the pick rides the URL
-        # 3. a fresh session hydrating that URL restores the same scope
-        restored = self._post(
-            scenario,
-            {"analysis-message-store.data", "view-store.data"},
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": f"{ROUTES_BASE}/project/{PROJECT}",
-                },
-                {"id": "url", "property": "search", "value": search},
-                {"id": "project-store", "property": "data", "value": PROJECT},
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-            changed=["url.search"],
+        # Unknown values fall back to the defaults.
+        fallback, _polls = self._render(
+            scenario, "?scope=bogus&f=bogus&limit=7&page=0&sort=nope:up"
         )
-        assert restored.status_code == 200
-        body = restored.json()["response"]
-        fresh = body["view-store"]["data"]
-        assert fresh["scope"]["sweeps"] == [sweep_id]
-        assert fresh["active"] == "overview"
-        assert body["analysis-message-store"]["data"] == ""
+        text = _page_text(fallback)
+        assert "Active sweeps · last activity" in text
+        assert "showing 1–1 of 1" in text
+        assert not [
+            th
+            for th in _components(fallback)
+            if isinstance(th, html.Th) and getattr(th, "data-dir", None)
+        ]
 
 
 class TestMountedDashboardHttp:
@@ -734,20 +675,15 @@ class TestArtifactRowClickNavigation:
             },
         )
 
-    def test_row_id_expression_is_a_registered_asset_function(self, scenario):
-        trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
-        page = workspace.inspector_content(
-            scenario.service, {"kind": "trial", "id": trial_id}, 0
+    def test_row_id_expressions_resolve_through_the_registered_asset(self, scenario):
+        # dash-ag-grid evaluates a getRowId expression only when it is
+        # the registered asset-function form (an inline JS string is
+        # inert without dangerously_allow_code); the mounted app ships
+        # that asset on every page the grids mount on.
+        index = httpx.get(
+            f"{scenario.base_url}{ROUTES_BASE}/",
+            headers={"Authorization": f"Bearer {API_KEY}"},
         )
-        grid = next(
-            component
-            for component in _components(page)
-            if isinstance(component, AgGrid) and component.id == "artifact-grid"
-        )
-        assert grid.getRowId == _ARTIFACT_ROW_ID
-
-        auth = {"Authorization": f"Bearer {API_KEY}"}
-        index = httpx.get(f"{scenario.base_url}{ROUTES_BASE}/", headers=auth)
         assert "assets/dashAgGridFunctions.js" in index.text
 
     def test_cell_clicked_with_artifact_uuid_navigates_to_viewer(self, scenario):

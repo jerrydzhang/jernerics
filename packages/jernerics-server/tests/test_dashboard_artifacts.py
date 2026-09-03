@@ -45,7 +45,6 @@ from jernerics_server.dashboard.artifacts import (
 from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.components import short_id
 from jernerics_server.dashboard.routes import parse_route
-from jernerics_server.dashboard.workspace import inspector_content
 from jernerics_server.http import create_app
 from jernerics_server.store import Store
 
@@ -275,47 +274,11 @@ class TestVersionList:
         assert all(row.available for row in rows)
         assert rows[0].sha256 != rows[1].sha256
 
-    def test_trial_inspector_grid_lists_every_artifact_with_state(self, env):
-        page = inspector_content(env.service, {"kind": "trial", "id": str(TRIAL)}, 0)
-        grid = _find(page, AgGrid, "artifact-grid")[0]
-        by_key = {}
-        for row in grid.rowData:
-            by_key.setdefault(row["key"], []).append(row)
-        assert [row["version"] for row in by_key["model"]] == ["v1", "v2"]
-        assert all(row["state"] == "available" for row in by_key["model"])
-        assert by_key["pending.bin"][0]["state"] == "pending"
-        assert by_key["inspection.json"][0]["context"] == "stage=eval"
-        assert by_key["stdout"][0]["source"] == "system"
-
-    def test_execution_inspector_grid_lists_execution_bound_artifacts(self, env):
-        page = inspector_content(
-            env.service, {"kind": "execution", "id": str(EXECUTION)}, 0
-        )
-        grid = _find(page, AgGrid, "artifact-grid")[0]
-        keys = {row["key"] for row in grid.rowData}
-        assert {
-            "model",
-            "inspection.json",
-            "big",
-            "plot",
-            "pending.bin",
-            "custom",
-            "stdout",
-            "stderr",
-        } <= keys
-
 
 class TestCellTextSelection:
     """jernerics-eqn: the listing and rows grids carry
     enableCellTextSelection + ensureDomOrder so identifiers (ids,
     sha256) stay copyable, without dropping existing options."""
-
-    def test_listing_grid_carries_the_pair(self, env):
-        page = inspector_content(env.service, {"kind": "trial", "id": str(TRIAL)}, 0)
-        options = _find(page, AgGrid, "artifact-grid")[0].dashGridOptions
-        assert options["enableCellTextSelection"] is True
-        assert options["ensureDomOrder"] is True
-        assert options["pagination"] is False
 
     def test_rows_grid_keeps_quick_filter_and_carries_the_pair(self, env):
         page, _ = page_content(

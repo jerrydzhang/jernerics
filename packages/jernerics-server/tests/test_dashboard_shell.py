@@ -160,17 +160,6 @@ class TestPageComposition:
         assert items[1].className is None
         assert isinstance(items[2], html.Span)
 
-    def test_limit_segment(self):
-        seg = page.limit_segment("50")
-        spans = _of(seg, html.Span)
-        assert [span.children for span in spans] == ["25", "50", "all"]
-        assert [span.to_plotly_json()["props"]["data-limit"] for span in spans] == [
-            "25",
-            "50",
-            "all",
-        ]
-        assert [span.className for span in spans] == [None, "on", None]
-
     def test_scroll_table_dom(self):
         table = page.scroll_table(
             [page.head_cell("Sweep"), page.head_cell("Trials", numeric=True)],

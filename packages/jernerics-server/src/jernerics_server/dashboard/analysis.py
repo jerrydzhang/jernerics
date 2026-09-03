@@ -854,12 +854,12 @@ def synced_search(
     url_navigated: bool,
 ) -> str | None:
     """The URL search after a navigation or a view edit; ``None`` leaves
-    it alone. Navigations may only drop the workspace parameters —
-    minting on navigation would let a stale document clobber a freshly
-    opened deep link before hydration lands, and the editor and
-    investigation pages keep their own queries. View edits mint on the
-    workspace and investigation pages; the scope rides the document, so
-    no separate ``?sel=`` is minted anymore."""
+    it alone. Navigations may only drop the parameters of pages that no
+    longer mint — minting on navigation would let a stale document
+    clobber a freshly opened deep link before hydration lands, and the
+    editor page keeps its own query. View edits mint on the
+    investigation page only: the workspace page owns its search
+    parameters outright, so a ``view=`` write there would clobber them."""
     if url_navigated:
         kind = parse_route(pathname).kind
         if current_search and kind not in (
@@ -869,7 +869,7 @@ def synced_search(
         ):
             return ""
         return None
-    if parse_route(pathname).kind not in ("workspace", "investigation"):
+    if parse_route(pathname).kind != "investigation":
         return None
     return search_from_state(view_doc, current_search)
 

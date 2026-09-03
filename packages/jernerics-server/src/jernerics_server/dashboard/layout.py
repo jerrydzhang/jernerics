@@ -39,11 +39,6 @@ def shell() -> html.Div:
                         clearable=True,
                         className="project-picker",
                     ),
-                    html.Button(
-                        id="selection-tray",
-                        className="tray",
-                        style={"display": "none"},
-                    ),
                     html.Form(
                         [
                             html.Button("Log out", type="submit", className="logout"),
@@ -59,7 +54,6 @@ def shell() -> html.Div:
             dcc.Store(id="overview-digest-store"),
             dcc.Store(id="poll-gate-facts-store"),
             dcc.Store(id="view-store", data=default_view_state()),
-            dcc.Store(id="workspace-store", storage_type="session"),
             dcc.Store(id="route-store"),
             dcc.Interval(id="poll", interval=POLL_INTERVAL_MS, disabled=True),
         ],

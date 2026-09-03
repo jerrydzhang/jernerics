@@ -7,7 +7,6 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import unquote
 
 import httpx
 import optuna
@@ -36,11 +35,9 @@ from jernerics_schema import (
 )
 from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
-    decode_view_state,
     default_view_state,
     encode_view_state,
     investigation_scope_state,
-    investigation_view_href,
     view_from_inv,
 )
 from jernerics_server.dashboard.app import build_dash_app
@@ -669,6 +666,10 @@ class TestDashboardJourney:
         d = world.sweep_ids[ROBERTS_PARTIAL]
         b = world.sweep_ids[ROBERTS_SGD]
         matched = _grid_rows(page, "compare-matched-grid")
+        # jernerics-eqn: cell text stays selectable on every grid.
+        options = _by_id(page, "compare-matched-grid").dashGridOptions
+        assert options["enableCellTextSelection"] is True
+        assert options["ensureDomOrder"] is True
         assert matched == [
             {
                 "signature": SIG_0,
@@ -736,9 +737,7 @@ class TestDashboardJourney:
             "loss",
         ]
 
-    def test_sweep_opened_from_the_investigation_returns_via_the_hub(
-        self, world, saved
-    ):
+    def test_sweep_opened_from_the_investigation_lands_on_its_page(self, world, saved):
         investigation_id = saved["url"]["pathname"].rsplit("/", 1)[1]
         sgd = world.sweep_ids[ROBERTS_SGD]
         response = _dispatch(
@@ -761,47 +760,11 @@ class TestDashboardJourney:
             ],
             changed=["compare-members-grid.cellClicked"],
         )
-        search = response["url"]["search"]
-        assert response["url"]["pathname"] == f"{ROUTES_BASE}/project/{PROJECT}"
-        doc = decode_view_state(unquote(search.removeprefix("?view=")))
-        assert doc["focus"] == {"kind": "sweep", "id": sgd}
-        assert doc["via"] == investigation_id
-
-        hub = workspace.inspector_content(
-            world.service,
-            {"kind": "sweep", "id": sgd},
-            time.time_ns(),
-            project=PROJECT,
-            via=investigation_id,
+        # A member click is a full page load to that sweep's page.
+        assert response["url"]["pathname"] == (
+            f"{ROUTES_BASE}/project/{PROJECT}/sweep/{sgd}"
         )
-        text = _page_text(hub)
-        assert PROJECT in text and "Investigations" in text
-        assert MAIN_INV in text and ROBERTS_SGD in text
-        links = {
-            node.children: node.href
-            for node in _components(hub)
-            if isinstance(node, html.A) and node.href
-        }
-        assert links[f"Back to {MAIN_INV}"] == investigation_view_href(
-            PROJECT, investigation_id, "compare"
-        )
-        assert links["Series"] == investigation_view_href(
-            PROJECT, investigation_id, "series", sgd
-        )
-        assert links["Points"] == investigation_view_href(
-            PROJECT, investigation_id, "points", sgd
-        )
-        assert links["Search"] == investigation_view_href(
-            PROJECT, investigation_id, "search"
-        )
-
-        plain = workspace.inspector_content(
-            world.service,
-            {"kind": "sweep", "id": sgd},
-            time.time_ns(),
-            project=PROJECT,
-        )
-        assert f"Back to {MAIN_INV}" not in _page_text(plain)
+        assert response["url"]["search"] == ""
 
     def test_open_in_python_token_decodes_to_the_materialized_selection(
         self, world, saved
@@ -1138,8 +1101,7 @@ class TestIndexAndArchive:
     def test_index_rows_show_names_factors_outcomes_and_coverage(
         self, world, pending_archive
     ):
-        tab = workspace.investigations_tab(world.service, PROJECT)
-        rows = {row["name"]: row for row in _grid_rows(tab, "investigations-grid")}
+        rows = {row.name: row for row in world.service.investigations_index(PROJECT)}
         assert set(rows) == {
             MAIN_INV,
             "agent-curated",
@@ -1149,38 +1111,27 @@ class TestIndexAndArchive:
             "atlas-pending-archive",
         }
         flagged = rows["atlas-flagged-only"]
-        assert (flagged["factor"], flagged["outcome"]) == ("optimizer", "loss")
-        assert flagged["member_count"] == 1
-        assert flagged["coverage"] == "1 with outcome · 0 incomplete · 1 invalid"
-        for row in rows.values():
-            assert row["link_href"].endswith(
-                f"/investigation/{row['investigation_id']}"
-            )
-            assert row["edit_href"].endswith(
-                f"/investigation/{row['investigation_id']}/edit"
-            )
+        assert (flagged.factor, flagged.outcome) == ("optimizer", "loss")
+        assert flagged.member_count == 1
+        assert (flagged.with_outcome, flagged.completed, flagged.invalid) == (1, 1, 1)
 
     def test_every_sweep_organized_leaves_unorganized_empty(
         self, world, pending_archive
     ):
-        tab = workspace.investigations_tab(world.service, PROJECT)
-        assert "not in any Investigation" in _page_text(tab)
         assert world.service.unorganized(PROJECT) == []
 
     def test_archive_hides_from_the_default_index_and_restore_brings_back(
         self, world, pending_archive
     ):
         world.service.archive_investigation(pending_archive)
-        tab = workspace.investigations_tab(world.service, PROJECT)
-        names = {row["name"] for row in _grid_rows(tab, "investigations-grid")}
+        names = {row.name for row in world.service.investigations_index(PROJECT)}
         assert "atlas-pending-archive" not in names
         archived = world.service.investigations_index(PROJECT, include_archived=True)
         assert "atlas-pending-archive" in {row.name for row in archived}
         assert world.service.unorganized(PROJECT) == []
 
         world.service.restore_investigation(pending_archive)
-        tab = workspace.investigations_tab(world.service, PROJECT)
-        names = {row["name"] for row in _grid_rows(tab, "investigations-grid")}
+        names = {row.name for row in world.service.investigations_index(PROJECT)}
         assert "atlas-pending-archive" in names
 
     def test_edit_members_page_marks_saved_membership(self, world, saved):

@@ -4,7 +4,6 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from urllib.parse import unquote
 
 import pytest
 from dash import dcc, html
@@ -29,7 +28,6 @@ from jernerics_schema import (
 from jernerics_server.dashboard import analysis, workspace
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
-    decode_view_state,
     default_scope_state,
     default_view_state,
     encode_view_state,
@@ -57,7 +55,6 @@ from jernerics_server.dashboard.workspace import (
     editor_factor_options,
     editor_outcome_options,
     editor_preview_panel,
-    investigations_tab,
 )
 from jernerics_server.ingest import IngestService
 from jernerics_server.investigations import InvestigationService
@@ -367,97 +364,6 @@ class TestInvestigationsUnavailable:
             service.investigations_index(LAB)
         with pytest.raises(CurationUnavailableError):
             service.create_investigation(LAB, "alpha-compare", "lr", OUTCOME)
-
-
-class TestInvestigationsTab:
-    """The Investigations index renders the DashboardService facts with
-    the shared sortable-table helper (jernerics-g5rw.7)."""
-
-    def test_no_project_guards(self, service):
-        rendered = str(investigations_tab(service, None))
-        assert "Pick a project in the header" in rendered
-
-    def test_reads_need_a_store(self, store):
-        read_only = DashboardService(QueryService(store))
-        rendered = str(investigations_tab(read_only, LAB))
-        assert "no write store" in rendered
-
-    def test_index_rows_match_service_facts(self, service, compare):
-        tab = investigations_tab(service, LAB)
-        grid = next(
-            node
-            for node in _walk_ag_grids(tab)
-            if getattr(node, "id", None) == "investigations-grid"
-        )
-        assert {column["field"] for column in grid.columnDefs} == {
-            "name",
-            "factor",
-            "outcome",
-            "member_count",
-            "coverage",
-            "last_activity_ns",
-            "edit_members",
-        }
-        rows = {row["investigation_id"]: row for row in grid.rowData}
-        service_rows = {
-            row.investigation_id: row for row in service.investigations_index(LAB)
-        }
-        assert set(rows) == set(service_rows)
-        for investigation_id, row in rows.items():
-            facts = service_rows[investigation_id]
-            assert row["name"] == facts.name
-            assert row["factor"] == facts.factor
-            assert row["outcome"] == facts.outcome
-            assert row["member_count"] == facts.member_count
-            assert row["coverage"] == (
-                f"{facts.with_outcome} with outcome · "
-                f"{facts.member_count - facts.completed} incomplete · "
-                f"{facts.invalid} invalid"
-            )
-            assert row["last_activity_ns"] == facts.last_activity_ns
-            assert row["edit_href"] == (
-                f"{ROUTES_BASE}/project/{LAB}/investigation/{investigation_id}/edit"
-            )
-            assert row["link_href"] == (
-                f"{ROUTES_BASE}/project/{LAB}/investigation/{investigation_id}"
-            )
-
-    def test_archived_investigations_stay_off_the_default_index(self, service, compare):
-        tab = investigations_tab(service, LAB)
-        grid = next(
-            node
-            for node in _walk_ag_grids(tab)
-            if getattr(node, "id", None) == "investigations-grid"
-        )
-        assert len(grid.rowData) == 2  # gamma-empty is archived
-
-    def test_unorganized_lists_sweeps_in_no_investigation(self, service, compare):
-        tab = investigations_tab(service, LAB)
-        grid = next(
-            node
-            for node in _walk_ag_grids(tab)
-            if getattr(node, "id", None) == "unorganized-grid"
-        )
-        unorganized = {row["sweep_id"] for row in grid.rowData}
-        assert unorganized == {str(LONE_SWEEP)}  # the lab sweep in no investigation
-        for row in grid.rowData:
-            assert row["link_href"].startswith(f"{ROUTES_BASE}/project/{LAB}")
-        rendered = str(tab)
-        assert "Unorganized" in rendered
-        assert "1 sweep not in any Investigation" in rendered
-
-    def test_new_investigation_action_targets_the_editor_route(self, service, compare):
-        tab = investigations_tab(service, LAB)
-        link = next(
-            node for node in _walk_anchors(tab) if node.children == "New Investigation"
-        )
-        assert link.href == f"{ROUTES_BASE}/project/{LAB}/investigation/new"
-
-
-def _walk_ag_grids(component):
-    from dash_ag_grid import AgGrid
-
-    return [node for node in _walk_children(component) if isinstance(node, AgGrid)]
 
 
 def _walk_anchors(component):
@@ -1373,54 +1279,6 @@ class TestMemberScopeAndViews:
             str(CT3),
             str(CT4),
         }
-
-    def test_sweep_hub_gates_views_on_real_data(self, cmp_service, sig):
-        # cmp members carry the outcome at step 0 only — no step series,
-        # so Series is unsupported; every member has trials, so Points
-        # renders; Search always opens over all members.
-        hub = workspace.sweep_hub_header(
-            cmp_service, CMP, str(CS1), "cmp_f01", sig.compare
-        )
-        crumb, views = hub
-        assert _text(crumb) == f"{CMP}Investigationssig-comparecmp_f01"
-        labels = [
-            node.children
-            for node in _walk_children(views)
-            if isinstance(node, (html.A, html.Span))
-            and node.children in {"Overview", "Series", "Points", "Search"}
-        ]
-        assert labels == ["Overview", "Points", "Search"]
-        links = {
-            node.children: node.href
-            for node in _walk_children(views)
-            if isinstance(node, html.A)
-        }
-        points_href = links["Points"]
-        assert f"/investigation/{sig.compare}" in points_href
-        assert (
-            str(CS1)
-            in decode_view_state(unquote(points_href.split("view=")[1]))["inv"][
-                "member"
-            ]
-        )
-        search_doc = decode_view_state(unquote(links["Search"].split("view=")[1]))
-        assert search_doc["inv"] == {"view": "search", "member": None}
-        back = _text(views).count("Back to sig-compare")
-        assert back == 1
-
-    def test_sweep_hub_renders_nothing_without_a_via(self, cmp_service, sig):
-        assert (
-            workspace.sweep_hub_header(cmp_service, CMP, str(CS1), "cmp_f01", None)
-            == []
-        )
-        assert (
-            workspace.sweep_hub_header(
-                cmp_service, CMP, str(CS1), "cmp_f01", "no-such-inv"
-            )
-            == []
-        )
-        foreign = workspace.investigation_page(cmp_service, CMP, sig.compare)
-        assert _pattern_nodes(foreign, "inv-region")  # sanity: page builds
 
     def test_via_return_path_survives_its_own_url_only(self, cmp_service, sig):
         doc = analysis.edited_view(

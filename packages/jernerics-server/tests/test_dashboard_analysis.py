@@ -91,11 +91,7 @@ from jernerics_server.dashboard.analysis import (
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
-from jernerics_server.dashboard.callbacks import (
-    page_content,
-    pattern_trigger,
-    tray_from_grid,
-)
+from jernerics_server.dashboard.callbacks import page_content, pattern_trigger
 from jernerics_server.dashboard.figures import (
     axis_notes,
     clipped_count,
@@ -113,11 +109,7 @@ from jernerics_server.dashboard.layout import shell
 from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.dashboard.sessions import SessionSigner
-from jernerics_server.dashboard.workspace import (
-    browser_sweep_rows,
-    scope_bar,
-    workspace_page,
-)
+from jernerics_server.dashboard.workspace import active_sweeps, sweep_curation
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
 from jernerics_server.queries import QueryService
@@ -727,7 +719,7 @@ class TestUnifiedSelectionStore:
         )
         assert again is None and error is None
 
-    def test_workspace_and_analysis_edits_hit_one_scope(self):
+    def test_analysis_edits_hit_one_scope(self):
         scope = _edit_tray(
             [{"sweep_id": str(SWEEP_A)}],
             [{"root": str(RA0)}],
@@ -737,41 +729,12 @@ class TestUnifiedSelectionStore:
         assert scope["sweeps"] == [str(SWEEP_A)]
         assert scope["families"] == [str(RA0)]
         assert scope["include_archived"] is True
-        # Workspace sweep-grid edit: sweeps replaced, analysis picks kept.
-        scope = tray_from_grid([{"sweep_id": str(SWEEP_B)}], scope)
-        assert scope["sweeps"] == [str(SWEEP_B)]
-        assert scope["families"] == [str(RA0)]
-        # Analysis edit (grids carry the workspace's picks as selected
-        # rows): families replaced, sweeps and include flags kept.
-        scope = _edit_tray([{"sweep_id": str(SWEEP_B)}], [], ["expand"], scope)
-        assert scope["sweeps"] == [str(SWEEP_B)]
+        # A later edit replaces families and keeps the rest of the store.
+        scope = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], ["expand"], scope)
+        assert scope["sweeps"] == [str(SWEEP_A)]
         assert scope["families"] == []
         assert scope["expand"] is True
         assert scope["include_archived"] is True
-
-    def test_browser_rows_reflect_the_unified_store(self, service):
-        token = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
-        store, error = hydrate_tray(
-            service, PROJECT, "/dashboard/project/lab", f"?sel={token}", None
-        )
-        assert error is None and store is not None
-        rows = browser_sweep_rows(service.sweep_overview(PROJECT), store)
-        picked = set(store["sweeps"])
-        assert [row["sweep_id"] for row in rows if row["sweep_id"] in picked] == [
-            str(SWEEP_A)
-        ]
-
-    def test_browser_grids_carry_the_pair_and_multi_row_selection(self):
-        pickers = _grids(workspace_page(PROJECT))
-        assert [grid.id for grid in pickers] == [
-            "sweep-grid",
-            "analysis-family-grid",
-        ]
-        for grid in pickers:
-            options = grid.dashGridOptions
-            assert options["enableCellTextSelection"] is True
-            assert options["ensureDomOrder"] is True
-            assert options["rowSelection"] == {"mode": "multiRow"}
 
     def test_points_grid_carries_click_selection(self, service):
         page = points_tab(
@@ -1334,11 +1297,11 @@ class TestColdStartAdoption:
 
 class TestUrlSync:
     """jernerics-8c9/2se: one shell-only callback owns ``url.search`` —
-    view edits (the scope included) mint ``?view=`` on the workspace
-    page, navigations strip it, and a navigation never mints (a stale
-    document would clobber a freshly opened deep link before hydration
-    lands). No ``?sel=`` is minted anymore — the scope rides the view
-    document."""
+    view edits mint ``?view=`` on the investigation page only (the
+    workspace page owns its search parameters outright), a navigation
+    drops only the parameters of pages that no longer mint, and a
+    navigation never mints (a stale document would clobber a freshly
+    opened deep link before hydration lands)."""
 
     @staticmethod
     def _doc(scope=None, **changes):
@@ -1346,10 +1309,13 @@ class TestUrlSync:
             changes["scope"] = scope
         return edited_view(default_view_state(), changes)
 
-    def test_scope_edit_on_workspace_mints_the_view_parameter(self, service):
+    def test_view_edit_mints_on_the_investigation_page(self, service):
         scope = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
         target = synced_search(
-            "/dashboard/project/lab", self._doc(scope), "", url_navigated=False
+            "/dashboard/project/lab/investigation/inv-1",
+            self._doc(scope),
+            "",
+            url_navigated=False,
         )
         assert target is not None and target.startswith("?view=")
         doc = decode_view_state(unquote(target.removeprefix("?view=")))
@@ -1357,15 +1323,31 @@ class TestUrlSync:
             service.analysis_selection(PROJECT, scope)
         )
 
+    def test_view_edit_on_workspace_leaves_the_search_alone(self, service):
+        doc = self._doc(_edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None))
+        assert (
+            synced_search("/dashboard/project/lab", doc, "", url_navigated=False)
+            is None
+        )
+        assert (
+            synced_search("/dashboard/project/lab", doc, "?view=x", url_navigated=False)
+            is None
+        )
+
     def test_unchanged_state_leaves_the_search_alone(self, service):
         doc = self._doc(_tray())
         search = search_from_state(doc, "")
         assert (
-            synced_search("/dashboard/project/lab", doc, search, url_navigated=False)
+            synced_search(
+                "/dashboard/project/lab/investigation/inv-1",
+                doc,
+                search,
+                url_navigated=False,
+            )
             is None
         )
 
-    def test_view_edit_off_workspace_leaves_the_search_alone(self, service):
+    def test_view_edit_off_analytic_pages_leaves_the_search_alone(self, service):
         doc = self._doc(_edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None))
         assert synced_search("/dashboard/", doc, "?view=x", url_navigated=False) is None
 
@@ -1437,7 +1419,7 @@ class TestUrlSync:
         picker's own remember callback (the manual-pick path), hydration
         re-fires with a project and the scope lands — the settle re-fire
         is a no-op, the grid echo edits nothing, and the URL keeps the
-        token until the view rewrite normalizes it."""
+        token (the workspace page never mints ?view= over it)."""
         search = "?sel=" + encode_selection(
             Selection(project=PROJECT, sweeps=(SWEEP_A,))
         )
@@ -1458,12 +1440,6 @@ class TestUrlSync:
         assert hydrate_tray(
             service, PROJECT, "/dashboard/project/lab", search, scope
         ) == (None, None)
-        # loaders push the hydrated selection to the now-populated grids
-        rows = browser_sweep_rows(service.sweep_overview(PROJECT), scope)
-        picked = set(scope["sweeps"])
-        assert [row["sweep_id"] for row in rows if row["sweep_id"] in picked] == [
-            str(SWEEP_A)
-        ]
         # a grid echo against the settled scope edits nothing
         echo = tray_from_edit(
             [],
@@ -1475,9 +1451,17 @@ class TestUrlSync:
             expand_edited=False,
         )
         assert echo == scope
-        # the URL rewrite after hydration mints the scope as ?view=
-        target = search_from_state(self._doc(scope), search)
-        assert target is not None and target.startswith("?view=")
+        # the workspace page owns its search: the rewrite leaves the
+        # token in place instead of minting ?view= over it
+        assert (
+            synced_search(
+                "/dashboard/project/lab",
+                self._doc(scope),
+                search,
+                url_navigated=False,
+            )
+            is None
+        )
 
 
 class TestViewStateCodec:
@@ -2004,85 +1988,9 @@ class TestViewSync:
         assert cx == "lr"
 
 
-class TestScopeBar:
-    def test_shows_sweep_names_and_counts(self, service):
-        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_B)]))
-        rendered = str(bar)
-        assert "Scope: alpha, beta" in rendered
-        assert "2 sweeps" in rendered
-        assert "0 families" in rendered
-
-    def test_unknown_sweep_id_falls_back_to_short_id(self, service):
-        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_C)]))
-        assert "Scope: gamma" in str(bar)
-
-    def test_expansion_and_executions_surface_in_counts(self, service):
-        tray = _tray(families=[str(RA0)], executions=[str(EXA1)], expand=True)
-        rendered = str(scope_bar(service, PROJECT, tray))
-        assert "1 family" in rendered
-        assert "1 execution" in rendered
-        assert "retry families expanded" in rendered
-
-    def test_projectless_bar_tells_the_user_to_pick(self, service):
-        rendered = str(scope_bar(service, None, None))
-        assert "Pick a project" in rendered
-
-    def test_single_invalid_pick_keeps_the_full_sentence(self, tmp_path):
-        store = _seeded_store(tmp_path)
-        store.mark_sweep_invalid(str(SWEEP_C), "sensor drifted after epoch 1")
-        service = DashboardService(QueryService(store))
-        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_C)]))
-        rendered = str(bar)
-        assert (
-            "gamma is marked scientifically invalid — reason: "
-            "sensor drifted after epoch 1" in rendered
-        )
-        assert rendered.count("Continue only with that in mind") == 1
-        assert "scope-warning-summary" not in rendered
-
-    def test_multiple_invalid_picks_collapse_into_one_details(self, tmp_path):
-        store = _seeded_store(tmp_path)
-        store.mark_sweep_invalid(str(SWEEP_B), "contaminated training data")
-        store.mark_sweep_invalid(str(SWEEP_C), "sensor drifted after epoch 1")
-        service = DashboardService(QueryService(store))
-        bar = scope_bar(
-            service,
-            PROJECT,
-            _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
-        )
-        rendered = str(bar)
-        assert "2 of 3 picked sweeps marked invalid" in rendered
-        assert "scope-warning-summary" in rendered
-        assert "scope-warning-details" in rendered
-        assert "beta: contaminated training data" in rendered
-        assert "gamma: sensor drifted after epoch 1" in rendered
-        assert "beta invalid" in rendered and "gamma invalid" in rendered
-        assert rendered.count("is marked scientifically invalid") == 0
-        assert rendered.count("Continue only with that in mind") == 0
-
-    def test_scope_bar_sits_inside_the_browser_above_the_tabs(self):
-        page = workspace_page(PROJECT)
-        rendered = str(page)
-        assert "Browse scope" in rendered
-        assert "analysis-scope-bar" in rendered
-        assert "sweep-grid" in rendered
-        assert "analysis-family-grid" in rendered
-        assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
-        tabs = next(
-            node
-            for node in _walk(page, lambda n: type(n).__name__ == "Tabs")
-            if node.id == {"analysis-tabs": "canvas"}
-        )
-        assert [tab.value for tab in tabs.children] == [
-            "overview",
-            "investigations",
-            "exceptions",
-        ]
-
-
 class TestEntryPoints:
     """Doors back into the focused workspace: the artifact viewer's
-    back-links and the header tray."""
+    back-links and the shell's view store."""
 
     def test_focus_href_scopes_to_exactly_that_object(self):
         href = workspace_focus_href(PROJECT, "sweep", str(SWEEP_A))
@@ -2097,14 +2005,7 @@ class TestEntryPoints:
         assert doc["focus"]["kind"] == "trial"
         assert doc["series"]["keys"] == []
 
-    def test_shell_tray_is_a_button_and_view_store_starts_at_defaults(self):
-        anchor = next(
-            node
-            for node in _walk(
-                shell(), lambda n: getattr(n, "id", None) == "selection-tray"
-            )
-        )
-        assert type(anchor).__name__ == "Button"
+    def test_view_store_starts_at_defaults(self):
         store = next(
             node
             for node in _walk(shell(), lambda n: getattr(n, "id", None) == "view-store")
@@ -2168,19 +2069,6 @@ class TestCallbackGraphSafety:
                 continue
             states = {dep["id"] for dep in spec.get("state", [])}
             assert states <= shell_ids, key
-
-    def test_browser_grids_write_the_view_store_scope(self, callback_map):
-        grid_writers = [
-            key
-            for key, spec in callback_map.items()
-            if {"sweep-grid", "analysis-family-grid"}
-            & {dep["id"] for dep in spec["inputs"]}
-            and {"selectedRows"} & {dep["property"] for dep in spec["inputs"]}
-        ]
-        writers = [
-            key for key in grid_writers if self._outputs(key) == {"view-store.data"}
-        ]
-        assert len(writers) == 2
 
 
 class TestColdStartMountedJourney:
@@ -2414,27 +2302,50 @@ class TestColdStartMountedJourney:
         assert "view state is malformed" in result["analysis-message-store"]["data"]
 
     _SYNC_OUTPUTS = {
-        '{"analysis-tabs":["ALL"]}.value',
-        "analysis-include.value",
-        "analysis-expand.value",
+        "analysis-key.value",
+        "analysis-mode.value",
+        "analysis-reduction.value",
+        "analysis-color.value",
+        "analysis-facet.value",
+        "analysis-display.value",
+        "analysis-auto-refresh.value",
     }
 
     def test_control_sync_lands_each_value_on_its_component(self, authed, callback_map):
-        doc = {**default_view_state()}
-        doc["active"] = "investigations"
-        doc["scope"] = {**doc["scope"], "include_archived": True, "expand": True}
+        doc = default_view_state()
+        doc["series"] = {
+            **doc["series"],
+            "keys": ["loss"],
+            "color": "shard",
+            "trial_display": "median_iqr",
+        }
+        doc["auto_refresh"] = True
         result = self._dispatch(
             authed,
             callback_map,
             self._SYNC_OUTPUTS,
-            [{"id": "view-store", "property": "data", "value": doc}],
+            [
+                {"id": "view-store", "property": "data", "value": doc},
+                {
+                    "id": "analysis-key",
+                    "property": "options",
+                    "value": [{"value": "loss", "label": "loss"}],
+                },
+                {
+                    "id": "analysis-color",
+                    "property": "options",
+                    "value": [{"value": "shard", "label": "shard"}],
+                },
+                {"id": "analysis-facet", "property": "options", "value": None},
+            ],
         )
-        tabs_key = next(
-            key for key in result if key.lstrip("{").startswith('"analysis-tabs"')
-        )
-        assert result[tabs_key]["value"] == ["investigations"]
-        assert result["analysis-include"]["value"] == ["archived"]
-        assert result["analysis-expand"]["value"] == ["expand"]
+        assert result["analysis-key"]["value"] == ["loss"]
+        assert result["analysis-mode"]["value"] == "stacked"
+        assert result["analysis-reduction"]["value"] == "none"
+        assert result["analysis-color"]["value"] == "shard"
+        assert result["analysis-facet"]["value"] is None
+        assert result["analysis-display"]["value"] == "median_iqr"
+        assert result["analysis-auto-refresh"]["value"] == ["auto"]
 
 
 class TestContinueInPython:
@@ -2462,17 +2373,23 @@ class TestContinueInPython:
 
 
 class TestWorkspaceRouteServes:
-    def test_page_renders_the_workspace(self, service):
+    def test_page_renders_the_overview(self, service):
         page, polls = page_content("/dashboard/project/lab", service)
-        assert isinstance(polls, bool)
+        assert polls is False
         rendered = str(page)
-        assert "analysis-selection-store" not in rendered
-        assert "Project lab" in rendered
-        assert "Investigations" in rendered
-        assert "Exceptions" in rendered
-        assert "analysis-scope-bar" in rendered
-        assert "Browse scope" in rendered
-        assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
+        assert "Overview" in rendered
+        assert "Active sweeps" in rendered
+        for label in (
+            "failed executions",
+            "interrupted runs",
+            "completed sweeps",
+            "no trials yet",
+        ):
+            assert label in rendered
+        assert "showing 1–3 of 3" in rendered
+        for name in ("alpha", "beta", "gamma"):
+            assert name in rendered
+        assert "/sweep/" in rendered
 
     def test_deep_link_with_token_returns_200(self, authed):
         token = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
@@ -2551,87 +2468,33 @@ class TestIncludeControls:
 
 
 class TestCuratedDiscovery:
-    def test_terminal_curated_sweeps_hidden_from_discovery(self, curated_service):
+    def test_terminal_curated_sweeps_hidden_from_active_discovery(
+        self, curated_service
+    ):
         _store, service = curated_service
         summaries = service.sweep_overview(PROJECT)
-        rows = browser_sweep_rows(summaries, dict(EMPTY_TRAY))
-        assert [row["sweep_id"] for row in rows] == [str(SWEEP_A)]
-
-    def test_include_controls_reveal_their_own_category(self, curated_service):
-        _store, service = curated_service
-        summaries = service.sweep_overview(PROJECT)
-        rows = browser_sweep_rows(summaries, dict(EMPTY_TRAY), include_archived=True)
-        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_B)}
-        rows = browser_sweep_rows(summaries, dict(EMPTY_TRAY), include_invalid=True)
-        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_C)}
-        rows = browser_sweep_rows(
-            summaries, dict(EMPTY_TRAY), include_archived=True, include_invalid=True
-        )
-        assert {row["sweep_id"] for row in rows} == {
+        assert {summary.sweep_id for summary in summaries} == {
             str(SWEEP_A),
             str(SWEEP_B),
             str(SWEEP_C),
         }
+        assert [summary.sweep_id for summary in active_sweeps(summaries)] == [
+            str(SWEEP_A)
+        ]
 
-    def test_revealed_rows_carry_distinct_curation_markers(self, curated_service):
+    def test_all_scope_keeps_distinct_curation_markers(self, curated_service):
         _store, service = curated_service
-        rows = browser_sweep_rows(
-            service.sweep_overview(PROJECT),
-            dict(EMPTY_TRAY),
-            include_archived=True,
-            include_invalid=True,
-        )
-        markers = {row["sweep_id"]: row["curation"] for row in rows}
+        markers = {
+            summary.sweep_id: sweep_curation(summary)
+            for summary in service.sweep_overview(PROJECT)
+        }
         assert markers[str(SWEEP_B)] == "archived"
         assert markers[str(SWEEP_C)] == "invalid"
         assert markers[str(SWEEP_A)] == ""
 
-    def test_hydrated_curated_token_survives_with_include_off(self, curated_service):
-        _store, service = curated_service
-        selection = Selection(project=PROJECT, sweeps=(SWEEP_C,))
-        search = f"?sel={encode_selection(selection)}"
-        tray, error = hydrate_tray(
-            service, PROJECT, "/dashboard/project/lab", search, None
-        )
-        assert error is None and tray is not None
-        rows = browser_sweep_rows(service.sweep_overview(PROJECT), tray)
-        picked = set(tray["sweeps"])
-        assert [row["sweep_id"] for row in rows if row["sweep_id"] in picked] == [
-            str(SWEEP_C)
-        ]
-        assert {row["sweep_id"] for row in rows} == {str(SWEEP_A), str(SWEEP_C)}
-
-
-class TestCuratedScopeBar:
-    def test_archived_pick_badges_without_warning(self, curated_service):
-        _store, service = curated_service
-        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_B)]))
-        rendered = str(bar)
-        assert "Scope: beta" in rendered
-        assert "beta archived" in rendered
-        assert "badge-archived" in rendered
-        assert "scientifically invalid" not in rendered
-
-    def test_invalid_pick_badges_reason_and_warns(self, curated_service):
-        _store, service = curated_service
-        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_C)]))
-        rendered = str(bar)
-        assert "gamma invalid" in rendered
-        assert "badge-invalid" in rendered
-        assert "sensor drifted after epoch 1" in rendered
-        assert rendered.count("Continue only with that in mind") == 1
-
-    def test_mixed_scope_keeps_names_and_both_badges(self, curated_service):
-        _store, service = curated_service
-        bar = scope_bar(service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_C)]))
-        rendered = str(bar)
-        assert "Scope: alpha, gamma" in rendered
-        assert "2 sweeps" in rendered
-        assert "gamma archived" in rendered and "gamma invalid" in rendered
-
-    def test_curated_token_arrives_with_warning_for_invalid_sweep(
-        self, curated_service
-    ):
+    def test_hydrated_curated_token_survives_with_active_scope(self, curated_service):
+        # A ?sel= token naming an invalid sweep still hydrates the scope;
+        # hiding curated sweeps is a discovery-side concern, not hydration's.
         _store, service = curated_service
         selection = Selection(project=PROJECT, sweeps=(SWEEP_C,))
         tray, error = hydrate_tray(
@@ -2642,9 +2505,7 @@ class TestCuratedScopeBar:
             None,
         )
         assert error is None and tray is not None
-        rendered = str(scope_bar(service, PROJECT, tray))
-        assert "gamma is marked scientifically invalid" in rendered
-        assert rendered.count("Continue only with that in mind") == 1
+        assert tray["sweeps"] == [str(SWEEP_C)]
 
 
 def _fake_context(*prop_ids: str):
@@ -3847,11 +3708,9 @@ class TestRefreshBehavior:
         assert not auto_refresh_polls(service, PROJECT, default_view_state())
         assert not auto_refresh_polls(None, None, None)
 
-    def test_page_content_polls_while_the_workspace_scope_is_open(self, tmp_path):
+    def test_page_content_polls_while_visible_sweeps_are_incomplete(self, tmp_path):
         service = _live_service(tmp_path)
-        _page, polls = page_content(
-            "/dashboard/project/lab", service, view_doc=dict(default_view_state())
-        )
+        _page, polls = page_content("/dashboard/project/lab", service)
         assert polls is True
 
     def test_auto_refresh_flips_off_only_when_terminal(self):
@@ -4135,10 +3994,9 @@ class TestContextDiscoveryBeyondPagination:
 
 
 class TestWorkspaceChurnGates:
-    """jernerics-igq.3: hidden tabs never query or render, the project
-    picker ignores URL view edits once a project is established, the
-    inspector runs only on focus changes and polls, and the scroll
-    capture/restore clientside callbacks stay wired."""
+    """jernerics-igq.3: the project picker ignores URL view edits once a
+    project is established, and the scroll capture/restore clientside
+    callbacks stay wired."""
 
     @pytest.fixture(scope="class")
     def dash_app(self, tmp_path_factory):
@@ -4212,45 +4070,6 @@ class TestWorkspaceChurnGates:
         assert settle.status_code == 200
         assert settle.json()["response"]["project-picker"]["value"] == PROJECT
 
-    def test_inspector_runs_only_on_focus_changes_and_polls(self, authed, dash_app):
-        focus = {"kind": "sweep", "id": str(SWEEP_A)}
-        inputs = [
-            {
-                "id": "view-store",
-                "property": "data",
-                "value": {"focus": focus},
-            },
-            {"id": "poll", "property": "n_intervals", "value": 0},
-        ]
-        same = self._post(
-            authed,
-            dash_app.callback_map,
-            {"inspector.children", "inspector-render-store.data"},
-            inputs,
-            state=[
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {
-                    "id": "inspector-render-store",
-                    "property": "data",
-                    "value": {"focus": focus},
-                },
-            ],
-            changed=["view-store.data"],
-        )
-        assert same.status_code == 204
-        changed_focus = self._post(
-            authed,
-            dash_app.callback_map,
-            {"inspector.children", "inspector-render-store.data"},
-            inputs,
-            state=[
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "inspector-render-store", "property": "data", "value": None},
-            ],
-            changed=["view-store.data"],
-        )
-        assert changed_focus.status_code == 200
-
     def test_scroll_capture_and_restore_callbacks_are_wired(self, dash_app):
         def specs(output_id):
             found = []
@@ -4281,8 +4100,7 @@ class TestWorkspaceChurnGates:
         restore = [
             spec
             for spec in capture
-            if input_ids(spec)
-            == {'{"analysis-refresh-store":["ALL"]}', "workspace-overview"}
+            if input_ids(spec) == {'{"analysis-refresh-store":["ALL"]}'}
         ]
         assert len(restore) == 1
         assert {dep["id"] for dep in restore[0].get("state", [])} == {
