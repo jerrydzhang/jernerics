@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Literal
 from urllib.parse import quote
 
@@ -12,7 +12,6 @@ STYLESHEET_HREF = f"{ROUTES_BASE}/assets/page.css"
 
 TABS = ("Overview", "Investigations", "Exceptions")
 
-Limit = Literal["25", "50", "all"]
 
 _TAB_HREFS = {
     "Overview": "{base}/project/{project}",
@@ -128,21 +127,6 @@ def segment(options: Sequence[tuple[str, str | None, bool]]) -> html.Div:
     )
 
 
-def limit_segment(active: Limit = "25") -> html.Div:
-    """The 25/50/All page-size segment; ``data-limit`` marks each option."""
-    return html.Div(
-        [
-            html.Span(
-                value,
-                **{"data-limit": value},  # ty: ignore[invalid-argument-type]
-                className="on" if value == active else None,
-            )
-            for value in ("25", "50", "all")
-        ],
-        className="seg",
-    )
-
-
 def limit_row(*children: Component | str) -> html.Div:
     """A control row (segments, notes, actions) above or below a table."""
     return html.Div(list(children), className="limit-row")
@@ -167,10 +151,15 @@ def head_cell(
     *,
     numeric: bool = False,
     sort_dir: Literal["asc", "desc"] | None = None,
+    href: str | None = None,
 ) -> html.Th:
-    """A column header; ``numeric`` right-aligns, ``sort_dir`` draws the arrow."""
+    """A column header; ``numeric`` right-aligns, ``sort_dir`` draws the
+    arrow, and ``href`` makes the label a sort link."""
+    label_component: Component | str = (
+        html.A(label, href=href) if href is not None else label
+    )
     return html.Th(
-        label,
+        label_component,
         className="num" if numeric else None,
         **{"data-dir": sort_dir},  # ty: ignore[invalid-argument-type]
     )
@@ -251,16 +240,28 @@ def inv_nav(
     )
 
 
-def pager(current: int, total: int) -> html.Div:
-    """The page buttons (‹, 1..n, ›); empty once a single page remains."""
+def pager(
+    current: int,
+    total: int,
+    *,
+    href: Callable[[int], str] | None = None,
+) -> html.Div:
+    """The page buttons (‹, 1..n, ›); empty once a single page remains.
+    With ``href``, every step is a link and the out-of-range edge is a
+    plain span."""
     if total <= 1:
         return html.Div(className="pager")
-    buttons: list[Component | str] = [
-        html.Button("‹", disabled=current <= 1),
-    ]
-    buttons.extend(
-        html.Button(str(page), className="on" if page == current else None)
-        for page in range(1, total + 1)
-    )
-    buttons.append(html.Button("›", disabled=current >= total))
+    steps: list[tuple[str, int]] = [("‹", current - 1)]
+    steps.extend((str(page), page) for page in range(1, total + 1))
+    steps.append(("›", current + 1))
+    buttons: list[Component | str] = []
+    for label, target in steps:
+        on = "on" if target == current else None
+        off = target < 1 or target > total
+        if href is None:
+            buttons.append(html.Button(label, className=on, disabled=off))
+        elif off:
+            buttons.append(html.Span(label, className=on))
+        else:
+            buttons.append(html.A(label, href=href(target), className=on))
     return html.Div(buttons, className="pager")

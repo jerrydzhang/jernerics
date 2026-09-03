@@ -1,59 +1,44 @@
-import json
 import time
-from collections import Counter
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import parse_qs, quote
 from uuid import UUID
 
 from dash import dcc, html
-from dash_ag_grid import AgGrid
+from dash.development.base_component import Component
 from jernerics_schema import (
-    ExecutionRecord,
     InvestigationRecord,
     Selection,
     encode_selection,
     materialize_selection,
 )
 
-from . import analysis, artifacts, components, figures, page
-from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
-from .render import SortColumn, sort_rows, sortable_columns
+from . import analysis, components, figures, page
+from .components import MISSING, short_id
+from .render import SortColumn, sort_rows
 from .routes import ROUTES_BASE
 from .service import (
     CompareDocument,
     CurationRejectedError,
     CurationUnavailableError,
     DashboardService,
-    ExecutionDetail,
-    FamilyRow,
     InvestigationPreview,
     InvestigationRow,
-    SweepDetail,
     SweepSummary,
-    TrialDetail,
 )
 
-FOCUS_KINDS = ("sweep", "trial", "execution")
-
 INVESTIGATION_VIEWS = analysis.INVESTIGATION_VIEWS
-"""Re-exported view vocabulary; the ``view=`` codec owns the names."""
-
-_INCOMPLETE_TRIAL_STATES = ("waiting", "running")
 
 
 _OVERVIEW_PAGE_SIZE = 25
-_MONITORING_ORDER = ("active", "quiet", "stale", "failed", "succeeded", UNKNOWN)
-_STATE_TILE_LABELS = {
-    "completed": "completed sweeps",
-    "failed": "failed sweeps",
-    "no-data": "sweeps with no trials yet",
-    "running": "running sweeps",
-}
-_FILTER_CHIP_LABELS = {
-    "failed": "with failed executions",
-    "stale": "interrupted",
-}
+
+
+_OVERVIEW_LIMITS = ("25", "50", "all")
+
+
+_DEFAULT_OVERVIEW_LIMIT = "25"
+
 
 _GRID_DEFAULTS: dict[str, Any] = {
     "sortable": True,
@@ -61,20 +46,8 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "minWidth": 100,
 }
 
+
 _SWEEP_ROW_ID: Any = "params.data.sweep_id"
-_TRIAL_ROW_ID: Any = "params.data.root || params.data.trial_id"
-
-
-def focus_ref(kind: str, object_id: str) -> str:
-    """Pattern-id token naming one focusable object."""
-    return f"{kind}:{object_id}"
-
-
-def focus_button(label: str, kind: str, object_id: str) -> html.Button:
-    """In-page focus control; never navigates, never touches scope."""
-    return html.Button(
-        label, id={"focus-object": focus_ref(kind, object_id)}, className="focus-link"
-    )
 
 
 def sweep_curation(summary: SweepSummary) -> str:
@@ -95,1109 +68,479 @@ def hidden_curation(
     )
 
 
-def browser_sweep_rows(
-    summaries: Sequence[SweepSummary],
-    tray: dict[str, Any] | None,
-    *,
-    include_archived: bool = False,
-    include_invalid: bool = False,
-    now_ns: int | None = None,
-) -> list[dict[str, Any]]:
-    """Browser sweep rows; checkbox state mirrors the tray's sweeps.
-
-    Terminal archived/invalid sweeps stay out of discovery until the include
-    controls reveal them; sweeps already picked are never dropped, and
-    incomplete sweeps always stay discoverable.
-    """
-    now = time.time_ns() if now_ns is None else now_ns
-    picked = set((tray or {}).get("sweeps") or [])
-    rows = []
-    for summary in summaries:
-        if (
-            hidden_curation(
-                summary,
-                include_archived=include_archived,
-                include_invalid=include_invalid,
-            )
-            and not summary.incomplete
-            and summary.sweep_id not in picked
-        ):
-            continue
-        rows.append(
-            {
-                "sweep_id": summary.sweep_id,
-                "name": summary.name,
-                "state": summary.state,
-                "curation": sweep_curation(summary),
-                "archived": summary.archived,
-                "invalid": summary.invalid,
-                "incomplete": summary.incomplete,
-                "submitted_jobs": summary.submitted_jobs,
-                "expected_trials": (
-                    MISSING
-                    if summary.expected_trials is None
-                    else summary.expected_trials
-                ),
-                "backend": summary.backend or MISSING,
-                "latest_submission": (
-                    MISSING
-                    if summary.latest_submitted_ns is None
-                    else components.relative_time(summary.latest_submitted_ns, now)
-                ),
-                "health": summary.health,
-            }
-        )
-    return rows
-
-
-_BROWSER_SWEEP_COLUMNS: list[dict[str, Any]] = [
-    {"headerName": "Sweep", "field": "name"},
-    {"headerName": "State", "field": "state"},
-    {"headerName": "Curation", "field": "curation"},
-    {"headerName": "Submitted jobs", "field": "submitted_jobs"},
-    {"headerName": "Expected trials", "field": "expected_trials"},
-    {"headerName": "Backend", "field": "backend"},
-    {"headerName": "Latest submission", "field": "latest_submission"},
-    {"headerName": "Health", "field": "health"},
-]
-
-
-def browser_sweep_columns(sort: list | None) -> list[dict[str, Any]]:
-    """Browser column defs with a stored sort applied as each column's
-    initial sort (AG Grid's documented restore point for colId/sort)."""
-    by_field = {entry["colId"]: entry for entry in sort or []}
-    columns = []
-    for column in _BROWSER_SWEEP_COLUMNS:
-        entry = by_field.get(column["field"])
-        columns.append({**column, "sort": entry["sort"]} if entry else dict(column))
-    return columns
-
-
-def curation_transitions(archived: bool, invalid: bool) -> dict[str, bool]:
-    """Which curation actions are valid transitions for one sweep."""
-    return {
-        "archive": not archived,
-        "invalid": not invalid,
-        "restore_validity": invalid,
-        "restore": archived and not invalid,
-    }
-
-
-def selection_transitions(rows: list[dict] | None) -> dict[str, bool]:
-    """Valid transitions for a grid selection: an action is offered when
-    at least one selected row admits it."""
-    per_row = [
-        curation_transitions(bool(row.get("archived")), bool(row.get("invalid")))
-        for row in rows or []
-    ]
-    return {
-        action: any(transition[action] for transition in per_row)
-        for action in curation_transitions(False, False)
-    }
-
-
-def curation_note(rows: list[dict[str, Any]] | None) -> str:
-    """Why curated sweeps still appear: incomplete ones stay visible
-    while active, named by sweep and state so the marker cannot read
-    as a no-op."""
-    curated = [row for row in rows or [] if row.get("curation")]
-    if not curated:
-        return ""
-    active = [row for row in curated if row.get("incomplete")]
-    if active:
-        named = ", ".join(f"{row['name']} is {row['curation']}" for row in active)
-        return (
-            f"{named} but still active — curation does not cancel or hide "
-            "active work: incomplete sweeps stay visible and selectable "
-            "while they run."
-        )
-    return (
-        "Curated sweeps are listed only because they are picked or "
-        "included — curation changes review visibility only; tracked "
-        "facts are untouched."
-    )
-
-
 def action_message(ok: bool, text: str) -> html.Div:
     """Visible success/failure report for a curation action."""
     return html.Div(text, className=f"action-message {'ok' if ok else 'err'}")
 
 
-def workspace_actions() -> html.Div:
-    """Selected-row action bar; buttons enable per the scope selection."""
-    return html.Div(
-        [
-            html.Button("Archive", id="ws-archive", disabled=True, className="action"),
-            html.Button(
-                "Mark invalid", id="ws-invalid", disabled=True, className="action"
-            ),
-            html.Button(
-                "Restore validity",
-                id="ws-restore-validity",
-                disabled=True,
-                className="action",
-            ),
-            html.Button("Restore", id="ws-restore", disabled=True, className="action"),
-            dcc.Input(
-                id="ws-reason",
-                type="text",
-                placeholder="Reason (required for Mark invalid)",
-                className="reason-input",
-                style={"display": "none"},
-            ),
-        ],
-        className="action-bar",
-    )
+@dataclass(frozen=True)
+class OverviewPageUrl:
+    """The overview page's URL-carried state; defaults render Active at
+    25 rows a page, unfiltered, in the service's activity order."""
+
+    scope_all: bool = False
+    overview_filter: str | None = None
+    limit: str = _DEFAULT_OVERVIEW_LIMIT
+    page: int = 1
+    sort: list[dict[str, Any]] | None = None
 
 
-def curation_summary(picked: int) -> str:
-    """Summary label naming how many rows the curation panel acts on."""
-    return f"Curation ({picked} picked)" if picked else "Curation…"
-
-
-def curation_panel() -> html.Details:
-    """Collapsed affordance around the bulk curation actions; the
-    active-work note stays outside it."""
-    return html.Details(
-        [
-            html.Summary("Curation…", id="ws-curation-summary"),
-            workspace_actions(),
-            html.Div(id="workspace-message"),
-        ],
-        id="curation-panel",
-        className="curation-panel",
-    )
-
-
-def scope_bar(
-    service: DashboardService | None,
-    project: str | None,
-    tray: dict[str, Any] | None,
-) -> html.Div:
-    """The persistent scope line: ``All sweeps`` or the picked sweep names,
-    curation badges, and the tray's counts."""
-    tray = tray or analysis.EMPTY_TRAY
-    if not project or service is None:
-        return html.Div(
-            components.Empty("Pick a project in the header to browse its sweeps."),
-            className="scope-bar",
-        )
-    summaries = {
-        summary.sweep_id: summary for summary in service.sweep_overview(project)
-    }
-    picked_ids = list(tray.get("sweeps") or [])
-    picked = [
-        (summaries[sweep_id].name if sweep_id in summaries else short_id(sweep_id))
-        for sweep_id in picked_ids
-    ]
-    label = ", ".join(picked) if picked else "All sweeps"
-    children: list[Any] = [
-        html.Span(f"Scope: {label}", className="scope-sweeps"),
-        html.Span(analysis.tray_summary(tray), className="scope-counts"),
-    ]
-    invalid: list[tuple[str, str]] = []
-    for sweep_id, name in zip(picked_ids, picked, strict=True):
-        summary = summaries.get(sweep_id)
-        if summary is None:
-            continue
-        if summary.archived:
-            children.append(Badge(f"{name} archived", kind="archived"))
-        if summary.invalid:
-            children.append(Badge(f"{name} invalid", kind="invalid"))
-            invalid.append((name, summary.invalid_reason or "unrecorded"))
-    if len(invalid) == 1:
-        name, reason = invalid[0]
-        children.append(
-            html.Span(
-                f"{name} is marked scientifically invalid — reason: "
-                f"{reason}. Continue only with that in mind, or remove it "
-                "from the scope.",
-                className="scope-warning",
-            )
-        )
-    elif invalid:
-        children.append(
-            html.Details(
-                [
-                    html.Summary(
-                        f"{len(invalid)} of {len(picked)} picked sweeps marked invalid",
-                        className="scope-warning-summary",
-                    ),
-                    html.Ul(
-                        [html.Li(f"{name}: {reason}") for name, reason in invalid],
-                        className="scope-warning-list",
-                    ),
-                ],
-                className="scope-warning-details",
-            )
-        )
-    return html.Div(children, className="scope-bar")
-
-
-def _correlation_table(jobs: list[dict]) -> html.Table:
-    rows = [
-        [
-            short_id(job["submission_id"]),
-            job["backend"],
-            Badge(job["submission_state"]),
-            job["scheduler_job_id"] or MISSING,
-            job["role"] or MISSING,
-            Badge(job["job_state"]) if job["job_state"] else MISSING,
-        ]
-        for job in jobs
-    ]
-    return components.DataTable(
-        (
-            "Submission",
-            "Backend",
-            "Submission state",
-            "Scheduler job",
-            "Role",
-            "Job state",
-        ),
-        rows,
-    )
-
-
-def _monitoring_badges(counts: dict[str, int]) -> list[html.Span]:
-    """One pill per nonzero monitoring label, in the canonical order; an
-    all-zero scope renders a single quiet note."""
-    badges = [
-        Badge(f"{label} {counts[label]}", kind=label)
-        for label in _MONITORING_ORDER
-        if counts.get(label)
-    ]
-    return badges or [html.Span("quiet", className="quiet-note")]
-
-
-def _monitoring_counts(summary: SweepSummary) -> html.Div:
-    return html.Div(
-        _monitoring_badges(
-            {label: getattr(summary, label) for label in _MONITORING_ORDER}
-        ),
-        className="monitoring-row",
-    )
-
-
-def _progress_list(progress: list[dict]) -> html.Div:
-    if not progress:
-        return html.Div()
-    return html.Div(
-        html.Ul(
-            [
-                html.Li(
-                    focus_button(
-                        f"{short_id(row['execution_id'])} · "
-                        f"{row['current']}/{row['total']} {row['unit']}",
-                        "execution",
-                        row["execution_id"],
-                    )
-                )
-                for row in progress
-            ],
-            className="progress-list",
-        )
-    )
-
-
-def _executions_table(executions: Sequence[ExecutionRecord], now_ns: int) -> html.Table:
-    """One row per execution: monitoring badge, focus control, short
-    host, and single-line timestamps (absolute time in the tooltip)."""
-    return components.DataTable(
-        ("Monitoring", "Execution", "Host", "Started", "Ended"),
-        [
-            (
-                Badge(record.monitoring or UNKNOWN),
-                focus_button(
-                    short_id(str(record.execution_id)),
-                    "execution",
-                    str(record.execution_id),
-                ),
-                components.short_host(record.hostname),
-                components.time_cell_compact(
-                    components.datetime_to_ns(record.started_at), now_ns
-                ),
-                (
-                    UNKNOWN
-                    if record.ended_at is None
-                    else components.time_cell_compact(
-                        components.datetime_to_ns(record.ended_at), now_ns
-                    )
-                ),
-            )
-            for record in executions
-        ],
-    )
-
-
-_FAMILY_GRID_COLUMNS: list[dict[str, Any]] = [
-    {"headerName": "Family root", "field": "root_short"},
-    {"headerName": "Current trial", "field": "current_short"},
-    {"headerName": "#", "field": "number"},
-    {"headerName": "State", "field": "state"},
-    {"headerName": "Objective", "field": "objective"},
-    {"headerName": "Params", "field": "params"},
-    {"headerName": "Retries", "field": "retries"},
+_OVERVIEW_COLUMNS: list[SortColumn] = [
+    SortColumn("name", "Sweep", "string"),
+    SortColumn("state", "Status", "string"),
+    SortColumn("trials", "Trials", "numeric"),
+    SortColumn("best_objective", "Best obj", "numeric"),
+    SortColumn("last_activity_ns", "Last activity", "ns"),
 ]
 
 
-def family_grid_row(family: FamilyRow) -> dict[str, object]:
-    """One AG Grid row dict for the trial-family grid."""
-    shown = ", ".join(f"{key}={value}" for key, value in family.params[:3])
-    hidden = len(family.params) - 3
-    return {
-        "root": family.root,
-        "root_short": short_id(family.root),
-        "current_trial": family.current_trial,
-        "current_short": short_id(family.current_trial),
-        "number": family.number,
-        "state": family.state,
-        "objective": components.objective_text(family.objective),
-        "params": f"{shown}, +{hidden}" if hidden > 0 else shown,
-        "retries": family.retry_count,
-        "generations": family.generations,
-    }
+_OVERVIEW_FILTERS: dict[str, tuple[str, Any]] = {
+    "failed": ("with failed executions", lambda s: bool(s.failed)),
+    "stale": ("interrupted", lambda s: s.state == "stale"),
+    "completed": ("completed", lambda s: s.state == "completed"),
+    "no-data": ("no trials yet", lambda s: s.state == "no-data"),
+}
 
 
-def lineage_chain(root: str | None, lineage: list[dict]) -> list[object]:
-    """Side-panel lineage for one family: ordered generations with
-    parent -> root -> index facts, exactly as stored."""
-    if not root:
-        return [html.P("Pick a family row to inspect its retry lineage.")]
-    entries = sorted(
-        (entry for entry in lineage if entry["root"] == root),
-        key=lambda entry: entry["index"],
+def parse_overview_url(search: str | None) -> OverviewPageUrl:
+    """The page state carried by the workspace URL's query string;
+    unknown values fall back to defaults."""
+    params = parse_qs((search or "").lstrip("?"))
+
+    def one(key: str) -> str | None:
+        values = params.get(key)
+        return values[0] if values else None
+
+    overview_filter = one("f")
+    if overview_filter not in _OVERVIEW_FILTERS:
+        overview_filter = None
+    limit = one("limit")
+    if limit not in _OVERVIEW_LIMITS:
+        limit = _DEFAULT_OVERVIEW_LIMIT
+    sort_col, _, sort_dir = (one("sort") or "").partition(":")
+    known = any(column.field == sort_col for column in _OVERVIEW_COLUMNS)
+    sort = (
+        [{"colId": sort_col, "sort": sort_dir}]
+        if known and sort_dir in ("asc", "desc")
+        else None
     )
-    if not entries:
-        return [html.P("No lineage facts for this family.")]
-    return [
-        html.P(
-            " → ".join(short_id(entry["trial_id"]) for entry in entries),
-            className="lineage-chain",
-        ),
-        components.DataTable(
-            ("Index", "Trial", "Parent", "Root"),
-            [
-                (
-                    entry["index"],
-                    short_id(entry["trial_id"]),
-                    short_id(entry["parent"]) if entry["parent"] else MISSING,
-                    short_id(entry["root"]),
-                )
-                for entry in entries
-            ],
-        ),
-    ]
-
-
-def curation_banners(overview: SweepSummary) -> list[html.Div]:
-    """Archived/invalid banners naming the state; invalid carries the
-    reason and its timestamp."""
-    banners = []
-    if overview.archived:
-        banners.append(
-            html.Div(
-                [
-                    Badge("archived", kind="archived"),
-                    " This sweep is archived — curation changes review "
-                    "visibility only; tracked facts and running work are "
-                    "untouched.",
-                ],
-                className="curation-banner",
-            )
-        )
-    if overview.invalid:
-        banners.append(
-            html.Div(
-                [
-                    Badge("invalid", kind="invalid"),
-                    " Marked scientifically invalid at "
-                    f"{components.absolute_time(overview.invalid_ns)} — "
-                    f"reason: {overview.invalid_reason}. The data stays "
-                    "queryable but must not be treated as valid science.",
-                ],
-                className="curation-banner curation-banner-invalid",
-            )
-        )
-    return banners
-
-
-def detail_curation(overview: SweepSummary) -> html.Div:
-    """Sweep-inspector banners plus the action row (refreshed after a
-    mutation so button availability follows the new state)."""
-    offered = curation_transitions(overview.archived, overview.invalid)
-    actions = html.Div(
-        [
-            html.Button(
-                "Archive",
-                id="detail-archive",
-                disabled=not offered["archive"],
-                className="action",
-            ),
-            html.Button(
-                "Mark this sweep invalid",
-                id="detail-invalid",
-                disabled=not offered["invalid"],
-                className="action",
-            ),
-            html.Button(
-                "Restore validity",
-                id="detail-restore-validity",
-                disabled=not offered["restore_validity"],
-                className="action",
-            ),
-            html.Button(
-                "Restore",
-                id="detail-restore",
-                disabled=not offered["restore"],
-                className="action",
-            ),
-        ],
-        className="action-bar",
-    )
-    return html.Div([*curation_banners(overview), actions])
-
-
-_PROGRESS_SHOWN = 10
-
-_LINEAGE_STORE_CAP = 1000
-
-_EXECUTION_ROW_ID: Any = "params.data.execution_id"
-
-_EXECUTION_GRID_COLUMNS: list[dict[str, Any]] = [
-    {
-        "headerName": "Monitoring",
-        "field": "monitoring",
-        "cellClass": {"function": "'cell-state state-' + (params.value || 'unknown')"},
-    },
-    {"headerName": "Execution", "field": "execution_short"},
-    {"headerName": "Host", "field": "host"},
-    {"headerName": "Started", "field": "started", "tooltipField": "started_at"},
-    {"headerName": "Ended", "field": "ended", "tooltipField": "ended_at"},
-]
-
-
-def _execution_grid_rows(
-    executions: Sequence[ExecutionRecord], now_ns: int
-) -> list[dict[str, Any]]:
-    """One virtualized grid row per execution: monitoring label, focus
-    target, host, and relative recency with absolute tooltips."""
-    started_ns = [components.datetime_to_ns(record.started_at) for record in executions]
-    ended_ns = [
-        None if record.ended_at is None else components.datetime_to_ns(record.ended_at)
-        for record in executions
-    ]
-    return [
-        {
-            "execution_id": str(record.execution_id),
-            "monitoring": record.monitoring or UNKNOWN,
-            "execution_short": short_id(str(record.execution_id)),
-            "host": components.short_host(record.hostname),
-            "started": components.relative_time(row_started, now_ns),
-            "started_at": components.absolute_time(row_started),
-            "ended": (
-                UNKNOWN
-                if row_ended is None
-                else components.relative_time(row_ended, now_ns)
-            ),
-            "ended_at": (
-                UNKNOWN if row_ended is None else components.absolute_time(row_ended)
-            ),
-        }
-        for record, row_started, row_ended in zip(
-            executions, started_ns, ended_ns, strict=True
-        )
-    ]
-
-
-def _lineage_store_rows(lineage: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Newest whole retry families up to the store cap; trimmed roots
-    report no lineage facts in the side panel."""
-    if len(lineage) <= _LINEAGE_STORE_CAP:
-        return lineage
-    trimmed = lineage[-_LINEAGE_STORE_CAP:]
-    head = trimmed[0]["root"]
-    for index, entry in enumerate(trimmed):
-        if entry["root"] != head:
-            return trimmed[index:]
-    return []
-
-
-def _sweep_sections(detail: SweepDetail, now_ns: int) -> list[Any]:
-    overview = detail.overview
-    return [
-        html.Div(
-            [
-                html.Div(detail_curation(overview), id="detail-curation"),
-                dcc.Input(
-                    id="detail-reason",
-                    type="text",
-                    placeholder="Reason (required for Mark invalid)",
-                    className="reason-input",
-                ),
-                html.Div(id="detail-message"),
-            ],
-            className="curation-section",
-        ),
-        html.Section(
-            [html.H3("Submissions & jobs"), _correlation_table(detail.jobs)],
-            className="section",
-        ),
-        html.Section(
-            [html.H3("Execution monitoring"), _monitoring_counts(overview)],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("Executions"),
-                AgGrid(
-                    id={"focus-executions": "grid"},
-                    rowData=_execution_grid_rows(detail.executions, now_ns),
-                    columnDefs=_EXECUTION_GRID_COLUMNS,
-                    defaultColDef={**_GRID_DEFAULTS, "minWidth": 90},
-                    dashGridOptions=components.grid_options(),
-                    getRowId=_EXECUTION_ROW_ID,
-                    className="ag-theme-alpine grid",
-                ),
-            ],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("In-flight progress"),
-                _progress_list(detail.progress[:_PROGRESS_SHOWN]),
-                *(
-                    [
-                        html.P(
-                            f"…and {len(detail.progress) - _PROGRESS_SHOWN} more "
-                            "in flight",
-                            className="hint",
-                        )
-                    ]
-                    if len(detail.progress) > _PROGRESS_SHOWN
-                    else []
-                ),
-            ],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("Trial families"),
-                html.Div(
-                    [
-                        AgGrid(
-                            id={"focus-family": "grid"},
-                            rowData=[
-                                family_grid_row(family) for family in detail.families
-                            ],
-                            columnDefs=_FAMILY_GRID_COLUMNS,
-                            defaultColDef={**_GRID_DEFAULTS, "minWidth": 90},
-                            dashGridOptions=components.grid_options(),
-                            getRowId=_TRIAL_ROW_ID,
-                            className="ag-theme-alpine grid",
-                        ),
-                        html.Div(
-                            [html.P("Pick a family row to inspect its retry lineage.")],
-                            id="family-lineage-panel",
-                            className="lineage-panel",
-                        ),
-                    ],
-                    className="family-layout",
-                ),
-            ],
-            className="section",
-        ),
-        dcc.Store(
-            id="family-lineage-store",
-            data={"lineage": _lineage_store_rows(detail.lineage)},
-        ),
-    ]
-
-
-def _trial_sections(detail: TrialDetail, now_ns: int) -> list[Any]:
-    context = detail.context
-    chain = sorted(
-        (
-            entry
-            for entry in detail.lineage
-            if entry["root"] == context["retry_root_trial_id"]
-        ),
-        key=lambda entry: entry["index"],
-    )
-    header_bits = [
-        html.Span(
-            " → ".join(short_id(entry["trial_id"]) for entry in chain)
-            or short_id(context["trial_id"]),
-            className="lineage-chain",
-        ),
-        html.Span(
-            f"retry index {context['retry_index']} · root "
-            f"{short_id(context['retry_root_trial_id'])}"
-        ),
-    ]
-    return [
-        html.P(header_bits, className="trial-header"),
-        html.Section(
-            [
-                html.H3("Optimizer trial state"),
-                html.P(
-                    [
-                        Badge(context["state"]),
-                        html.Span(
-                            "objective "
-                            + f"{components.objective_text(context['objective'])}"
-                        ),
-                        html.Span(f"number {context['number']}"),
-                        focus_button(
-                            f"sweep {context['sweep_name']}",
-                            "sweep",
-                            context["sweep_id"],
-                        ),
-                    ],
-                    className="fact-row",
-                ),
-            ],
-            className="section",
-            id="section-optimizer-state",
-        ),
-        html.Section(
-            [
-                html.H3("Params"),
-                components.DataTable(
-                    ("Kind", "Key", "Value"),
-                    [
-                        (record.kind, record.key, str(record.value))
-                        for record in detail.params
-                    ],
-                ),
-            ],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("Value catalog"),
-                components.DataTable(
-                    ("Key", "Kind", "Points", "Latest step", "Trials"),
-                    [
-                        (
-                            record.key,
-                            record.kind,
-                            record.n_points,
-                            record.latest_step,
-                            record.n_trials,
-                        )
-                        for record in detail.catalog
-                    ],
-                ),
-            ],
-            className="section",
-        ),
-        html.Section(
-            [html.H3("Executions"), _executions_table(detail.executions, now_ns)],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("Artifacts"),
-                artifacts.artifact_grid(detail.artifacts, now_ns),
-            ],
-            className="section",
-        ),
-    ]
-
-
-def _execution_sections(detail: ExecutionDetail, now_ns: int) -> list[Any]:
-    context = detail.context
-    timeline = components.DataTable(
-        ("Fact", "When"),
-        [
-            ("Started", time_cell(context["started_ns"], now_ns)),
-            (
-                "Last heartbeat",
-                (
-                    UNKNOWN
-                    if context["last_heartbeat_ns"] is None
-                    else time_cell(context["last_heartbeat_ns"], now_ns)
-                ),
-            ),
-            (
-                "Last observation",
-                (
-                    UNKNOWN
-                    if context["last_observation_ns"] is None
-                    else time_cell(context["last_observation_ns"], now_ns)
-                ),
-            ),
-            (
-                "Ended",
-                (
-                    UNKNOWN
-                    if context["ended_ns"] is None
-                    else time_cell(context["ended_ns"], now_ns)
-                ),
-            ),
-        ],
-    )
-    progress = context["progress"]
-    outcome_bits = [
-        Badge(context["monitoring"] or UNKNOWN),
-        html.Span(f"outcome {context['outcome'] or UNKNOWN}"),
-        html.Span(
-            f"exit {UNKNOWN if context['exit_code'] is None else context['exit_code']}"
-        ),
-    ]
-    if context["failure_summary"]:
-        outcome_bits.append(
-            html.Span(
-                f"{context['failure_kind'] or UNKNOWN}: {context['failure_summary']}",
-                className="failure-summary",
-            )
-        )
-    facts = html.Section(
-        [
-            html.H3("Execution facts"),
-            html.P(
-                [
-                    html.Span(f"host {context['hostname']}"),
-                    *outcome_bits,
-                    html.Span(
-                        "progress "
-                        + (
-                            f"{progress['current']}/{progress['total']} "
-                            f"{progress['unit']}"
-                            if progress
-                            else UNKNOWN
-                        )
-                    ),
-                ],
-                className="fact-row",
-            ),
-            html.H4("Timeline"),
-            timeline,
-            html.H4("Params"),
-            components.DataTable(
-                ("Kind", "Key", "Value"),
-                [
-                    (record.kind, record.key, str(record.value))
-                    for record in detail.params
-                ],
-            ),
-            html.H4("Resolved config"),
-            html.Pre(
-                json.dumps(detail.resolved_config, indent=2, sort_keys=True)
-                if detail.resolved_config is not None
-                else UNKNOWN,
-                className="config-json",
-            ),
-            html.H4("Provenance"),
-            components.DataTable(
-                ("Submission", "Backend", "Submitted", "Expected", "Git", "Config"),
-                [
-                    (
-                        short_id(str(record.submission_id)),
-                        record.backend,
-                        (
-                            MISSING
-                            if record.submitted_at_ns is None
-                            else components.relative_time(
-                                record.submitted_at_ns, now_ns
-                            )
-                        ),
-                        (
-                            MISSING
-                            if record.expected_trials is None
-                            else record.expected_trials
-                        ),
-                        record.git_hash or MISSING,
-                        record.config_source or MISSING,
-                    )
-                    for record in detail.provenance
-                ],
-            ),
-        ],
-        className="section",
-        id="section-execution-facts",
-    )
-    optimizer = html.Section(
-        [
-            html.H3("Optimizer trial state"),
-            html.P(
-                [
-                    Badge(context["trial_state"]),
-                    html.Span(
-                        f"objective {components.objective_text(context['objective'])}"
-                    ),
-                    html.Span(f"number {context['number']}"),
-                    html.Span(
-                        f"retry index {context['retry_index']} · root "
-                        f"{short_id(context['retry_root_trial_id'])}"
-                    ),
-                ],
-                className="fact-row",
-            ),
-            html.P(
-                [
-                    focus_button(
-                        f"trial {short_id(context['trial_id'])}",
-                        "trial",
-                        context["trial_id"],
-                    ),
-                    focus_button(
-                        f"sweep {context['sweep_name']}", "sweep", context["sweep_id"]
-                    ),
-                ],
-                className="fact-row",
-            ),
-        ],
-        className="section",
-        id="section-optimizer-state",
-    )
-    artifact_section = html.Section(
-        [
-            html.H3("Artifacts"),
-            artifacts.artifact_grid(detail.artifacts, now_ns),
-        ],
-        className="section",
-        id="section-execution-artifacts",
-    )
-    return [facts, artifact_section, optimizer]
-
-
-def inspector_placeholder() -> html.Div:
-    """No-focus inspector region; keeps the close control in the layout."""
-    return html.Div(
-        [
-            html.Button(
-                "✕",
-                id="inspector-close",
-                title="Close inspector",
-                style={"display": "none"},
-            ),
-            "Click a sweep, trial, or execution row to inspect it here.",
-        ],
-        className="inspector-hint inspector-placeholder",
-    )
-
-
-def _via_investigation(
-    service: DashboardService, project: str, via: str | None
-) -> InvestigationRecord | None:
-    """The investigation a ``via`` return path names, when it exists in
-    this store and belongs to the same project; anything else is an
-    unknown context and renders none."""
-    if not via:
-        return None
     try:
-        record = service.investigation_detail(str(via)).investigation
-    except (CurationRejectedError, CurationUnavailableError):
+        current = int(one("page") or "1")
+    except ValueError:
+        current = 1
+    return OverviewPageUrl(
+        scope_all=one("scope") == "all",
+        overview_filter=overview_filter,
+        limit=limit,
+        page=max(1, current),
+        sort=sort,
+    )
+
+
+def overview_href(project: str, url: OverviewPageUrl) -> str:
+    """The workspace URL carrying exactly this page state; defaults stay
+    out of the query string."""
+    params: list[str] = []
+    if url.scope_all:
+        params.append("scope=all")
+    if url.overview_filter:
+        params.append(f"f={url.overview_filter}")
+    if url.limit != _DEFAULT_OVERVIEW_LIMIT:
+        params.append(f"limit={url.limit}")
+    if url.page > 1:
+        params.append(f"page={url.page}")
+    if url.sort:
+        entry = url.sort[0]
+        params.append(f"sort={entry['colId']}:{entry['sort']}")
+    query = f"?{'&'.join(params)}" if params else ""
+    return f"{ROUTES_BASE}/project/{quote(project, safe='')}{query}"
+
+
+def overview_filter_passes(summary: SweepSummary, overview_filter: str | None) -> bool:
+    """Whether one sweep passes the active tile filter; everything
+    passes when no tile is active."""
+    if not overview_filter:
+        return True
+    test = _OVERVIEW_FILTERS.get(overview_filter)
+    return bool(test) and test[1](summary)
+
+
+def active_sweeps(summaries: Sequence[SweepSummary]) -> list[SweepSummary]:
+    """The Active scope: curated terminal sweeps stay out of discovery
+    until the All scope includes them; incomplete sweeps never drop."""
+    return [
+        summary
+        for summary in summaries
+        if summary.incomplete
+        or not hidden_curation(summary, include_archived=False, include_invalid=False)
+    ]
+
+
+def curation_badges(summary: SweepSummary) -> list[html.Span]:
+    """State badges for a curated sweep; a sweep can carry both."""
+    badges: list[html.Span] = []
+    if summary.invalid:
+        badges.append(html.Span("invalid", className="badge invalid"))
+    if summary.archived:
+        badges.append(html.Span("archived", className="badge archived"))
+    return badges
+
+
+def elided_prefix(names: Sequence[str]) -> str:
+    """The shared leading prefix of every name, trimmed back to a
+    meaningful boundary — the dimmed link prefix."""
+    if len(names) < 2:
+        return ""
+    prefix = names[0]
+    for name in names[1:]:
+        while prefix and not name.startswith(prefix):
+            prefix = prefix[:-1]
+    return prefix.rstrip("_-0123456789")
+
+
+def sweep_link(project: str, summary: SweepSummary, prefix: str) -> html.A:
+    """The sweep-name link: dimmed shared prefix, bold remainder."""
+    inner = (
+        summary.name[len(prefix) :]
+        if prefix and summary.name.startswith(prefix)
+        else summary.name
+    )
+    return html.A(
+        [
+            *([html.Span(prefix, className="pfx")] if prefix else []),
+            html.Span(inner, className="sfx"),
+        ],
+        href=(
+            f"{ROUTES_BASE}/project/{quote(project, safe='')}/sweep/{summary.sweep_id}"
+        ),
+        className="sweep-link",
+    )
+
+
+def failure_signal(summary: SweepSummary) -> html.Span | None:
+    """The name-cell diagnosis: systematic vs isolated failed executions,
+    then executions lost without a terminal event."""
+    parts: list[Component | str] = []
+    trials = summary.trials
+    if summary.failed:
+        noun = "trial" if trials == 1 else "trials"
+        if trials and summary.failed >= trials:
+            head = "the only" if trials == 1 else "all"
+            parts.append(
+                html.Span(
+                    f"{head} {trials} {noun} failed — systematic",
+                    className="crit-text",
+                )
+            )
+        else:
+            parts.append(
+                f"{summary.failed} failed execution"
+                f"{'s' if summary.failed != 1 else ''} across {trials} {noun}"
+                "— isolated"
+            )
+    if summary.stale:
+        parts.append(
+            html.Span(
+                f"{summary.stale} lost — no terminal event", className="warn-text"
+            )
+        )
+    if not parts:
         return None
-    return record if record.project == project else None
+    joined: list[Component | str] = []
+    for index, part in enumerate(parts):
+        if index:
+            joined.append(" \u00b7 ")
+        joined.append(part)
+    return html.Span(joined, className="diag")
 
 
-def sweep_hub_header(
+def best_objective_text(summary: SweepSummary) -> str:
+    """The Best obj cell; four significant digits like the prototype."""
+    if summary.best_objective is None:
+        return MISSING
+    return f"{summary.best_objective:.4g}"
+
+
+def overview_row(
+    project: str, summary: SweepSummary, prefix: str, now_ns: int
+) -> html.Tr:
+    """One table row: selection checkbox, name link with badges and
+    diagnosis, status, trials, best objective, last activity."""
+    diagnosis = failure_signal(summary)
+    return html.Tr(
+        [
+            html.Td(
+                dcc.Checklist(
+                    options=[{"label": "", "value": summary.sweep_id}],
+                    value=[],
+                    id={"sel-sweep": summary.sweep_id},
+                    inputClassName="sel-sweep",
+                ),
+                className="selbox",
+            ),
+            html.Td(
+                [
+                    sweep_link(project, summary, prefix),
+                    *curation_badges(summary),
+                    *([diagnosis] if diagnosis else []),
+                ]
+            ),
+            html.Td(page.status_dot(summary.state)),
+            html.Td(
+                f"{summary.trials_complete}/{summary.trials}"
+                if summary.trials
+                else MISSING,
+                className="num",
+            ),
+            html.Td(best_objective_text(summary), className="num"),
+            html.Td(
+                components.relative_time(summary.latest_submitted_ns, now_ns),
+                className="num",
+            ),
+        ],
+        className="sweep-row",
+    )
+
+
+def selection_bar() -> html.Div:
+    """The row-selection bar; the checkbox callback shows it, counts the
+    picked sweeps, and aims Create Investigation at the editor seed."""
+    return html.Div(
+        [
+            html.Span("", id="sel-count", className="num"),
+            html.A(
+                "Create Investigation",
+                id="sel-create",
+                className="btn-primary",
+                href="#",
+            ),
+            html.Button("Clear", id="sel-clear"),
+        ],
+        id="selbar",
+        className="bulkbar",
+        hidden=True,
+    )
+
+
+def _tile_href(project: str, filter_key: str) -> str:
+    return overview_href(project, OverviewPageUrl(overview_filter=filter_key))
+
+
+def overview_tiles(scoped: Sequence[SweepSummary], project: str) -> list[Any]:
+    """The prototype's four working tiles; every tile is a link that
+    filters the table and carries its own way back."""
+    failing = [summary for summary in scoped if summary.failed]
+    stale = sum(1 for summary in scoped if summary.state == "stale")
+    completed = sum(1 for summary in scoped if summary.state == "completed")
+    no_data = sum(1 for summary in scoped if summary.state == "no-data")
+    return [
+        page.tile(
+            sum(summary.failed for summary in failing),
+            f"failed executions \u00b7 {counted_sweeps(len(failing))}",
+            tone="crit" if failing else None,
+            href=_tile_href(project, "failed"),
+        ),
+        page.tile(
+            stale,
+            "interrupted runs",
+            tone="warn" if stale else None,
+            href=_tile_href(project, "stale"),
+        ),
+        page.tile(completed, "completed sweeps", href=_tile_href(project, "completed")),
+        page.tile(
+            no_data,
+            "sweeps with no trials yet",
+            href=_tile_href(project, "no-data"),
+        ),
+    ]
+
+
+def overview_page(
     service: DashboardService,
     project: str,
-    sweep_id: str,
-    sweep_name: str,
-    via: str | None,
-) -> list[Any]:
-    """Breadcrumb, back link, and the data-supported views row for a
-    sweep opened from an investigation: Series and Points narrow to this
-    member, Search opens over all members, Overview is the hub itself.
-    A sweep reached outside an investigation renders no hub."""
-    record = _via_investigation(service, project, via)
-    if record is None:
-        return []
-    series_supported = any(
-        entry["kind"] == "scalar" and entry["steps"]
-        for entry in service.analysis_value_keys(project, {"sweeps": [sweep_id]})
-    )
-    detail = service.sweep_detail(sweep_id)
-    points_supported = bool(detail and detail.overview.started)
-    views: list[Any] = [html.Span("Overview", className="on")]
-    if series_supported:
-        views.append(
-            html.A(
-                "Series",
-                href=analysis.investigation_view_href(
-                    project, str(record.id), "series", sweep_id
-                ),
-            )
-        )
-    if points_supported:
-        views.append(
-            html.A(
-                "Points",
-                href=analysis.investigation_view_href(
-                    project, str(record.id), "points", sweep_id
-                ),
-            )
-        )
-    views.append(
-        html.A(
-            "Search",
-            href=analysis.investigation_view_href(project, str(record.id), "search"),
-        )
-    )
-    return [
-        page.breadcrumbs(
-            [
-                (project, f"{ROUTES_BASE}/project/{quote(project, safe='')}"),
-                ("Investigations", investigations_index_href(project)),
-                record.name,
-                sweep_name,
-            ]
-        ),
-        html.Div(
-            [
-                html.Span("Views", className="annotate"),
-                html.Div(views, className="seg"),
-                html.A(
-                    f"Back to {record.name}",
-                    href=analysis.investigation_view_href(
-                        project, str(record.id), "compare"
-                    ),
-                    className="btn-link",
-                ),
-            ],
-            className="inv-views",
-        ),
-    ]
-
-
-def inspector_content(
-    service: DashboardService,
-    focus: dict[str, Any] | None,
-    now_ns: int,
-    project: str = "",
-    via: str | None = None,
+    *,
+    url: OverviewPageUrl | None = None,
+    now_ns: int | None = None,
 ) -> html.Div:
-    """The focused object's factual content; a missing id is named, not
-    hidden. A sweep focus opened from an investigation carries the hub:
-    the investigation breadcrumb, the back link, and the member-scoped
-    views row."""
-    if not focus:
-        return inspector_placeholder()
-    kind, object_id = focus.get("kind"), str(focus.get("id") or "")
-
-    if kind == "sweep":
-        detail = service.sweep_detail(object_id)
-        body = (
-            _sweep_sections(detail, now_ns)
-            if detail is not None
-            else [components.Empty(f"No sweep matches {object_id} in this store.")]
-        )
-        heading = (
-            f"Sweep {detail.overview.name} · {short_id(detail.overview.sweep_id)}"
-            if detail is not None
-            else f"Sweep {object_id}"
-        )
-        hub = sweep_hub_header(
-            service,
-            project,
-            object_id,
-            detail.overview.name if detail else object_id,
-            via,
-        )
-    elif kind == "trial":
-        detail = service.trial_detail(object_id)
-        body = (
-            _trial_sections(detail, now_ns)
-            if detail is not None
-            else [components.Empty(f"No trial matches {object_id} in this store.")]
-        )
-        heading = f"Trial {short_id(object_id)}"
-        hub = []
-    elif kind == "execution":
-        detail = service.execution_detail(object_id)
-        body = (
-            _execution_sections(detail, now_ns)
-            if detail is not None
-            else [components.Empty(f"No execution matches {object_id} in this store.")]
-        )
-        heading = f"Execution {short_id(object_id)}"
-        hub = []
+    """The project Overview per the approved prototype: heading, scope
+    line, operational tiles, and one Sweeps section — a single paginated
+    sortable table whose checkboxes feed Create Investigation."""
+    state = url or OverviewPageUrl()
+    now = time.time_ns() if now_ns is None else now_ns
+    summaries = service.sweep_overview(project)
+    active = active_sweeps(summaries)
+    visible = summaries if state.scope_all else active
+    curated_n = len(summaries) - len(active)
+    if state.scope_all:
+        scope_line = f"All sweeps — including {curated_n} archived/invalid"
+    elif curated_n:
+        scope_line = f"Active sweeps — hides {curated_n} archived/invalid"
     else:
-        return html.Div(
-            components.Empty(f"Unknown focus kind {kind!r}."),
-            className="inspector-body",
-        )
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.H3(heading, className="inspector-title"),
-                    html.Button("✕", id="inspector-close", title="Close inspector"),
-                ],
-                className="inspector-header",
-            ),
-            *hub,
-            html.Div(body, className="inspector-body"),
-        ],
-        className="inspector-panel",
+        scope_line = "Active sweeps"
+    activity = max(
+        (
+            summary.latest_submitted_ns
+            for summary in visible
+            if summary.latest_submitted_ns is not None
+        ),
+        default=None,
+    )
+    sub = html.P(
+        f"{scope_line} \u00b7 last activity "
+        + ("never" if activity is None else components.relative_time(activity, now)),
+        className="sub",
     )
 
+    def shell(*body: Any) -> html.Div:
+        return page.page_shell(
+            "Overview", project, html.H1("Overview"), *body, scope=scope_line
+        )
 
-def _badge_cell(field: str) -> dict[str, Any]:
-    """Column def rendering the field's value as a badge-styled cell."""
-    return {
-        "field": field,
-        "cellClass": {"function": "'cell-state state-' + (params.value || 'unknown')"},
-    }
-
-
-_OVERVIEW_SWEEP_COLUMNS: list[SortColumn] = [
-    SortColumn("name", "Sweep", "string"),
-    SortColumn("state", "State", "string", definition=_badge_cell("state")),
-    SortColumn("health", "Health", "string", definition=_badge_cell("health")),
-    SortColumn(
-        "monitoring",
-        "Monitoring",
-        "string",
-        definition={**components.clamped_column(), "maxWidth": 320},
-    ),
-    SortColumn("curation", "Curation", "string"),
-    SortColumn(
-        "expected_trials",
-        "Expected trials",
-        "numeric",
-        definition={"valueFormatter": {"function": "renderMissing(x)"}},
-    ),
-    SortColumn(
-        "last_activity_ns",
-        "Last activity",
-        "ns",
-        definition={"valueFormatter": {"function": "renderRelative(x)"}},
-    ),
-]
-
-
-def _monitoring_summary(summary: SweepSummary) -> str:
-    """Compact nonzero monitoring text for one overview grid row."""
-    parts = [
-        f"{label} {getattr(summary, label)}"
-        for label in _MONITORING_ORDER
-        if getattr(summary, label)
+    if not summaries:
+        return shell(components.Empty(f"No sweeps tracked for project {project} yet."))
+    if not visible:
+        return shell(
+            page.tiles(*overview_tiles(visible, project)),
+            components.Empty(
+                f"No current sweeps in project {project}; archived or invalid "
+                "sweeps stay hidden until the scope includes them."
+            ),
+        )
+    filtered = [
+        summary
+        for summary in visible
+        if overview_filter_passes(summary, state.overview_filter)
     ]
-    return " · ".join(parts) if parts else MISSING
+    ordered = sort_rows(
+        [
+            {
+                "summary": summary,
+                "name": summary.name,
+                "state": summary.state,
+                "trials": summary.trials,
+                "best_objective": summary.best_objective,
+                "last_activity_ns": summary.latest_submitted_ns,
+            }
+            for summary in filtered
+        ],
+        _OVERVIEW_COLUMNS,
+        state.sort,
+    )
+    size = len(filtered) if state.limit == "all" else int(state.limit)
+    total_pages = max(1, -(-len(filtered) // size)) if size else 1
+    current = min(state.page, total_pages)
+    start = 0 if state.limit == "all" else (current - 1) * size
+    page_rows = ordered[start : start + size]
+    shown_from = start + 1 if filtered else 0
+    shown_to = start + len(page_rows)
+    note = f"showing {shown_from}\u2013{shown_to} of {len(filtered)}"
+    if state.overview_filter:
+        note += f" (filtered from {len(visible)})"
+    active_sort = state.sort[0] if state.sort else None
 
+    def sorted_href(field: str) -> str:
+        direction = (
+            "desc"
+            if active_sort
+            and active_sort["colId"] == field
+            and active_sort["sort"] == "asc"
+            else "asc"
+        )
+        return overview_href(
+            project,
+            replace(state, sort=[{"colId": field, "sort": direction}], page=1),
+        )
 
-def overview_sweep_rows(scoped: Sequence[SweepSummary]) -> list[dict[str, Any]]:
-    """One overview-grid row per scoped sweep; stamps and counts stay
-    raw so the columns sort typed, and the grid formats at view time."""
-    return [
-        {
-            "sweep_id": summary.sweep_id,
-            "name": summary.name,
-            "state": summary.state,
-            "health": summary.health,
-            "monitoring": _monitoring_summary(summary),
-            "curation": sweep_curation(summary),
-            "expected_trials": summary.expected_trials,
-            "last_activity_ns": summary.latest_submitted_ns,
-        }
-        for summary in scoped
+    columns = [
+        html.Th(className="selbox"),
+        *(
+            page.head_cell(
+                column.header,
+                numeric=column.kind != "string",
+                sort_dir=(
+                    active_sort["sort"]
+                    if active_sort and active_sort["colId"] == column.field
+                    else None
+                ),
+                href=sorted_href(column.field),
+            )
+            for column in _OVERVIEW_COLUMNS
+        ),
     ]
+    scope_seg = page.segment(
+        [
+            (
+                f"Active ({len(active)})",
+                overview_href(
+                    project, OverviewPageUrl(overview_filter=state.overview_filter)
+                ),
+                not state.scope_all,
+            ),
+            (
+                f"All ({len(summaries)})",
+                overview_href(
+                    project,
+                    OverviewPageUrl(
+                        scope_all=True, overview_filter=state.overview_filter
+                    ),
+                ),
+                state.scope_all,
+            ),
+        ]
+    )
+    limit_seg = page.segment(
+        [
+            (
+                value,
+                overview_href(project, replace(state, limit=value, page=1)),
+                value == state.limit,
+            )
+            for value in _OVERVIEW_LIMITS
+        ]
+    )
+    prefix = elided_prefix([summary.name for summary in filtered])
+    body = [
+        sub,
+        page.tiles(*overview_tiles(visible, project)),
+        html.H2("Sweeps"),
+        selection_bar(),
+        page.limit_row(scope_seg, limit_seg, html.Span(note, className="annotate")),
+        *(
+            [
+                page.limit_row(
+                    page.filter_chip(
+                        f"{counted_sweeps(len(filtered))} "
+                        f"{_OVERVIEW_FILTERS[state.overview_filter][0]}",
+                        remove_href=overview_href(
+                            project, replace(state, overview_filter=None, page=1)
+                        ),
+                    )
+                )
+            ]
+            if state.overview_filter
+            else []
+        ),
+        page.pager(
+            current,
+            total_pages,
+            href=lambda target: overview_href(project, replace(state, page=target)),
+        ),
+        page.scroll_table(
+            columns,
+            [overview_row(project, row["summary"], prefix, now) for row in page_rows],
+            sortable=True,
+        ),
+    ]
+    return shell(*body)
+
+
+def overview_polls(
+    service: DashboardService, project: str, url: OverviewPageUrl
+) -> bool:
+    """Live while any sweep in the visible scope still has work."""
+    summaries = service.sweep_overview(project)
+    visible = summaries if url.scope_all else active_sweeps(summaries)
+    return any(summary.incomplete for summary in visible)
 
 
 def counted_sweeps(count: int) -> str:
@@ -1205,539 +548,9 @@ def counted_sweeps(count: int) -> str:
     return f"{count} sweep" if count == 1 else f"{count} sweeps"
 
 
-def overview_tiles(scoped: Sequence[SweepSummary]) -> list[dict[str, Any]]:
-    """Operational tiles for the scope: execution health first, then one
-    per observed sweep state. Only nonzero facts render a tile, and
-    every tile filters the sweep table — one uniform affordance."""
-    tiles: list[dict[str, Any]] = []
-    failing = [summary for summary in scoped if summary.failed]
-    if failing:
-        tiles.append(
-            {
-                "value": "failed",
-                "kind": "crit",
-                "count": sum(summary.failed for summary in failing),
-                "label": f"failed executions · {counted_sweeps(len(failing))}",
-            }
-        )
-    interrupted = [summary for summary in scoped if summary.stale]
-    if interrupted:
-        tiles.append(
-            {
-                "value": "stale",
-                "kind": "warn",
-                "count": sum(summary.stale for summary in interrupted),
-                "label": (
-                    f"interrupted executions · {counted_sweeps(len(interrupted))}"
-                ),
-            }
-        )
-    states = Counter(summary.state for summary in scoped)
-    for state, count in sorted(states.items()):
-        tiles.append(
-            {
-                "value": f"state:{state}",
-                "kind": None,
-                "count": count,
-                "label": _STATE_TILE_LABELS.get(
-                    state, f"{state} {counted_sweeps(count)}"
-                ),
-            }
-        )
-    return tiles
-
-
-def overview_tile_buttons(
-    tiles: list[dict[str, Any]], overview_filter: str | None
-) -> list[html.Button]:
-    """The tile row; the active filter's tile carries the ``on`` mark,
-    and clicking it again clears (as does the chip and the seg)."""
-    buttons = []
-    for tile in tiles:
-        classes = "tile"
-        if tile["kind"]:
-            classes += f" {tile['kind']}"
-        if tile["value"] == overview_filter:
-            classes += " on"
-        buttons.append(
-            html.Button(
-                [
-                    html.Div(str(tile["count"]), className="num"),
-                    html.Div(tile["label"], className="lbl"),
-                ],
-                id={"overview-tile": tile["value"]},
-                className=classes,
-            )
-        )
-    return buttons
-
-
-def overview_filter_matches(summary: SweepSummary, overview_filter: str | None) -> bool:
-    """Whether one sweep passes the active tile filter; everything
-    passes when no tile is active."""
-    if not overview_filter:
-        return True
-    if overview_filter == "failed":
-        return bool(summary.failed)
-    if overview_filter == "stale":
-        return bool(summary.stale)
-    if overview_filter.startswith("state:"):
-        return summary.state == overview_filter.removeprefix("state:")
-    return True
-
-
-def overview_filter_chip(filtered_count: int, overview_filter: str) -> html.Div:
-    """The visible active-filter chip; its × is the way back."""
-    label = _FILTER_CHIP_LABELS.get(
-        overview_filter, f"in state {overview_filter.removeprefix('state:')}"
-    )
-    return html.Div(
-        html.Span(
-            [
-                f"{counted_sweeps(filtered_count)} {label} ",
-                html.Button(
-                    "\u00d7",
-                    id={"overview-filter-clear": "chip"},
-                    title="Clear the filter",
-                ),
-            ],
-            className="chip",
-        ),
-        className="chip-row",
-    )
-
-
-def overview_scope_control(active_count: int, all_count: int, on_all: bool) -> html.Div:
-    """The Active/All seg control over the include flags: Active is the
-    default discovery scope, All is the project's exhaustive list."""
-    return html.Div(
-        [
-            html.Button(
-                f"Active ({active_count})",
-                id="overview-scope-active",
-                className="on" if not on_all else "",
-            ),
-            html.Button(
-                f"All ({all_count})",
-                id="overview-scope-all",
-                className="on" if on_all else "",
-            ),
-        ],
-        className="seg",
-    )
-
-
-def overview_actions_bar() -> html.Div:
-    """The row-selection action bar; a selection enables Create
-    Investigation with the picked sweeps as editor seeds."""
-    return html.Div(
-        [
-            html.Span("", id="overview-selection-count"),
-            html.Button(
-                "Create Investigation",
-                id="overview-create-investigation",
-                disabled=True,
-                className="btn-primary",
-            ),
-            html.Button("Clear", id="overview-clear-selection"),
-        ],
-        id="overview-bulkbar",
-        className="bulkbar",
-        style={"display": "none"},
-    )
-
-
-def overview_subline(
-    summaries: Sequence[SweepSummary], active_count: int, on_all: bool, now_ns: int
-) -> html.P:
-    """The one-line scope fact: which list is shown, what it hides, and
-    the scope's most recent activity."""
-    activity = max(
-        (
-            summary.latest_submitted_ns
-            for summary in summaries
-            if summary.latest_submitted_ns is not None
-        ),
-        default=None,
-    )
-    hidden = len(summaries) - active_count
-    if on_all:
-        scope = f"All sweeps — {len(summaries)}"
-    elif hidden:
-        scope = f"Active sweeps — hides {hidden} archived/invalid"
-    else:
-        scope = "Active sweeps"
-    return html.P(
-        f"{scope} · last activity "
-        + (UNKNOWN if activity is None else components.relative_time(activity, now_ns)),
-        className="overview-sub",
-    )
-
-
-def scoped_sweeps(
-    summaries: Sequence[SweepSummary], tray: dict[str, Any] | None
-) -> list[SweepSummary]:
-    """The scope document's sweeps as the overview shows them: picks
-    narrow the project, the include flags reveal curated terminal sweeps,
-    and incomplete or picked sweeps never drop."""
-    scope = tray or {}
-    picked = set(scope.get("sweeps") or [])
-    include_archived = bool(scope.get("include_archived"))
-    include_invalid = bool(scope.get("include_invalid"))
-    return [
-        summary
-        for summary in summaries
-        if (not picked or summary.sweep_id in picked)
-        and (
-            summary.incomplete
-            or summary.sweep_id in picked
-            or not hidden_curation(
-                summary,
-                include_archived=include_archived,
-                include_invalid=include_invalid,
-            )
-        )
-    ]
-
-
-def overview_tab(
-    service: DashboardService,
-    project: str | None,
-    tray: dict[str, Any] | None,
-    *,
-    overview_filter: str | None = None,
-    sort: list | None = None,
-) -> html.Div:
-    """The operational overview: every tile is a working filter over the
-    paginated sweep table, the Active/All control carries the project's
-    exhaustive list, and a row click inspects the sweep. Per-sweep depth
-    lives in the inspector; the include flags curate discovery
-    (jernerics-mqw, jernerics-g5rw.7)."""
-    if not project:
-        return html.Div(
-            components.Empty("Pick a project in the header to browse its sweeps.")
-        )
-    summaries = service.sweep_overview(project)
-    if not summaries:
-        return html.Div(
-            components.Empty(f"No sweeps tracked for project {project} yet.")
-        )
-    scoped = scoped_sweeps(summaries, tray)
-    if not scoped:
-        if (tray or {}).get("sweeps"):
-            return html.Div(
-                components.Empty(f"No picked sweeps remain in project {project}.")
-            )
-        return html.Div(
-            components.Empty(
-                f"No current sweeps in project {project}; archived or invalid "
-                "sweeps stay hidden until the scope includes them."
-            )
-        )
-    now = time.time_ns()
-    on_all = bool(
-        (tray or {}).get("include_archived") or (tray or {}).get("include_invalid")
-    )
-    active_count = len(scoped_sweeps(summaries, {}))
-    filtered = [
-        summary
-        for summary in scoped
-        if overview_filter_matches(summary, overview_filter)
-    ]
-    rows = sort_rows(overview_sweep_rows(filtered), _OVERVIEW_SWEEP_COLUMNS, sort)
-    return html.Div(
-        [
-            overview_subline(summaries, active_count, on_all, now),
-            html.Div(
-                overview_tile_buttons(overview_tiles(scoped), overview_filter),
-                className="tiles",
-            ),
-            overview_scope_control(active_count, len(summaries), on_all),
-            *(
-                [overview_filter_chip(len(filtered), overview_filter)]
-                if overview_filter
-                else []
-            ),
-            overview_actions_bar(),
-            html.Section(
-                [
-                    html.H3("Sweeps"),
-                    AgGrid(
-                        id={"overview-grid": "sweeps"},
-                        rowData=rows,
-                        columnDefs=sortable_columns(_OVERVIEW_SWEEP_COLUMNS, sort),
-                        defaultColDef=_GRID_DEFAULTS,
-                        dashGridOptions=components.grid_options(
-                            pagination=True,
-                            paginationPageSize=_OVERVIEW_PAGE_SIZE,
-                            rowSelection={
-                                "mode": "multiRow",
-                                "checkboxes": True,
-                                "headerCheckboxSelection": True,
-                                "enableClickSelection": False,
-                            },
-                        ),
-                        getRowId=_SWEEP_ROW_ID,
-                        className="ag-theme-alpine grid",
-                    ),
-                    html.P(
-                        "Checkboxes pick sweeps for Create Investigation; a row "
-                        "click inspects that sweep in the inspector. Tiles filter "
-                        "the table; Active/All chooses between current sweeps and "
-                        "every sweep of the project.",
-                        className="hint",
-                    ),
-                ],
-                className="section overview-sweeps",
-            ),
-        ]
-    )
-
-
-def investigation_coverage_text(row: InvestigationRow) -> str:
-    """The one-line coverage summary: with outcome / incomplete / invalid."""
-    incomplete = row.member_count - row.completed
-    return (
-        f"{row.with_outcome} with outcome · {incomplete} incomplete · "
-        f"{row.invalid} invalid"
-    )
-
-
-INVESTIGATION_VIEW_LABELS: dict[str, str] = {
-    "compare": "Compare",
-    "series": "Series",
-    "points": "Points",
-    "search": "Search",
-    "python": "Python",
-}
-
-
 def investigations_index_href(project: str) -> str:
     """The investigations index URL for one project."""
     return f"{ROUTES_BASE}/project/{quote(project, safe='')}/investigations"
-
-
-def _editor_url(project: str, investigation_id: str | None) -> str:
-    """The member editor URL: ``/new`` for a create, ``/<id>/edit`` otherwise."""
-    base = f"{ROUTES_BASE}/project/{quote(project, safe='')}/investigation"
-    if investigation_id is None:
-        return f"{base}/new"
-    return f"{base}/{investigation_id}/edit"
-
-
-def sweep_page_url(project: str, sweep_id: str, via: str | None = None) -> str:
-    """The sweep page URL; ``?via=`` names the investigation that
-    linked here so the sweep page can offer the way back."""
-    url = f"{ROUTES_BASE}/project/{quote(project, safe='')}/sweep/{sweep_id}"
-    return f"{url}?via={via}" if via else url
-
-
-def investigation_search(
-    view: str = "compare",
-    member: str | None = None,
-    include_invalid: bool = False,
-    q: str | None = None,
-) -> str:
-    """The plain query string of an investigation page; Compare is the
-    default and never names itself."""
-    params: list[str] = []
-    if view != "compare":
-        params.append(f"view={view}")
-    if member:
-        params.append(f"member={quote(member, safe='')}")
-    if include_invalid:
-        params.append("include-invalid=1")
-    if q:
-        params.append(f"q={quote(q, safe='')}")
-    return f"?{'&'.join(params)}" if params else ""
-
-
-def investigation_url(
-    project: str,
-    investigation_id: str,
-    view: str = "compare",
-    member: str | None = None,
-    include_invalid: bool = False,
-    q: str | None = None,
-) -> str:
-    """One investigation page URL."""
-    base = (
-        f"{ROUTES_BASE}/project/{quote(project, safe='')}"
-        f"/investigation/{investigation_id}"
-    )
-    return base + investigation_search(view, member, include_invalid, q)
-
-
-def investigation_query(search: str | None) -> dict[str, Any]:
-    """The plain query state of an investigation page: the active view
-    (unknown names fall back to Compare), the requested member scope
-    (callers resolve it against the membership), the Compare
-    include-invalid flag, and the Search filter text."""
-    params = parse_qs((search or "").lstrip("?"))
-
-    def first(key: str) -> str:
-        return (params.get(key) or [""])[0]
-
-    view = first("view")
-    return {
-        "view": view if view in INVESTIGATION_VIEW_LABELS else "compare",
-        "member": first("member") or None,
-        "include_invalid": first("include-invalid") == "1",
-        "q": first("q"),
-    }
-
-
-def _rel(ns: int | None, now_ns: int) -> str:
-    """The coarse relative age the tables show."""
-    if not ns:
-        return "never"
-    delta = max(0, (now_ns - ns) // 1_000_000_000)
-    if delta < 90:
-        return f"{delta}s ago"
-    if delta < 5400:
-        return f"{delta // 60}m ago"
-    if delta < 172800:
-        return f"{delta // 3600}h ago"
-    return f"{delta // 86400}d ago"
-
-
-def _fraction(done: int, total: int | None) -> str:
-    if total:
-        return f"{done}/{total}"
-    return str(done) if done else MISSING
-
-
-def _meta_strip(cells: Sequence[tuple[str, Any]]) -> html.Div:
-    """The fact strip: label/value pairs in a meta grid."""
-    return html.Div(
-        [html.Div([html.Span(label), html.B(value)]) for label, value in cells],
-        className="meta-grid",
-    )
-
-
-def _curation_badges(*flags: tuple[bool, str]) -> list[html.Span]:
-    """The invalid/archived badge spans for the flags that hold."""
-    return [html.Span(name, className=f"badge {name}") for flag, name in flags if flag]
-
-
-def investigations_index_page(
-    service: DashboardService, project: str, now_ns: int
-) -> html.Div:
-    """The Investigations index: one row per investigation with its
-    real coverage facts, and the project's Unorganized sweeps."""
-    try:
-        index_rows = service.investigations_index(project)
-        unorganized = service.unorganized(project)
-    except CurationUnavailableError as error:
-        return page.page_shell(
-            "Investigations",
-            project,
-            components.Empty(str(error)),
-            scope="Project",
-        )
-    head = [
-        page.head_cell("Investigation"),
-        page.head_cell("Factor"),
-        page.head_cell("Outcome"),
-        page.head_cell("Members", numeric=True),
-        page.head_cell("Coverage"),
-        page.head_cell("Last activity", numeric=True),
-        page.head_cell(""),
-    ]
-    rows = [
-        html.Tr(
-            [
-                html.Td(
-                    html.A(
-                        html.Span(row.name, className="sfx"),
-                        href=investigation_url(project, row.investigation_id),
-                        className="sweep-link",
-                    )
-                ),
-                html.Td(row.factor),
-                html.Td(row.outcome),
-                html.Td(str(row.member_count), className="num"),
-                html.Td(investigation_coverage_text(row)),
-                html.Td(_rel(row.last_activity_ns, now_ns), className="num"),
-                html.Td(
-                    html.A(
-                        "Edit members",
-                        href=_editor_url(project, row.investigation_id),
-                    )
-                ),
-            ]
-        )
-        for row in index_rows
-    ]
-    unorganized_rows = [
-        html.Tr(
-            [
-                html.Td(
-                    html.A(summary.name, href=sweep_page_url(project, summary.sweep_id))
-                ),
-                html.Td(summary.state),
-                html.Td(
-                    _fraction(summary.succeeded, summary.expected_trials),
-                    className="num",
-                ),
-                html.Td(_rel(summary.latest_submitted_ns, now_ns), className="num"),
-            ]
-        )
-        for summary in unorganized
-    ]
-    body: list[Any] = [
-        html.H1("Investigations"),
-        html.P(
-            f"Cross-sweep questions over {project} · membership is server-persisted",
-            className="sub",
-        ),
-        html.Div(
-            html.A(
-                "New Investigation",
-                href=_editor_url(project, None),
-                className="btn btn-primary",
-            ),
-            className="actions",
-        ),
-        html.Section(
-            (
-                [html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])]
-                if index_rows
-                else [
-                    components.Empty(
-                        "No investigations yet — pick sweeps in Overview and "
-                        "use Create Investigation, or start a new one."
-                    )
-                ]
-            ),
-            className="section investigations-index",
-        ),
-        html.H2("Unorganized"),
-        html.P(
-            f"{counted_sweeps(len(unorganized))} not in any Investigation",
-            className="sub",
-        ),
-    ]
-    if unorganized:
-        body.append(
-            html.Details(
-                [
-                    html.Summary("Show list"),
-                    page.scroll_table(
-                        [
-                            page.head_cell("Sweep"),
-                            page.head_cell("Status"),
-                            page.head_cell("Trials", numeric=True),
-                            page.head_cell("Last activity", numeric=True),
-                        ],
-                        unorganized_rows,
-                        sortable=True,
-                    ),
-                ],
-                className="failgroup",
-            )
-        )
-    return page.page_shell("Investigations", project, *body, scope="Project")
 
 
 def investigation_crumb(
@@ -1759,94 +572,6 @@ def investigation_crumb(
     if member_label:
         crumbs.append(member_label)
     return page.breadcrumbs(crumbs)
-
-
-def _inv_nav_row(
-    project: str,
-    investigation_id: str,
-    view: str,
-    member: str | None,
-    include_invalid: bool,
-    q: str,
-) -> html.Div:
-    """The view switcher with its Python and Edit actions; Compare
-    never carries a member scope, the filter text stays on Search."""
-    views = [
-        (
-            INVESTIGATION_VIEW_LABELS[name],
-            investigation_url(
-                project,
-                investigation_id,
-                view=name,
-                member=member if name != "compare" else None,
-                include_invalid=include_invalid,
-                q=q if name == "search" else None,
-            ),
-        )
-        for name in INVESTIGATION_VIEWS
-    ]
-    return page.inv_nav(
-        INVESTIGATION_VIEW_LABELS[view],
-        views,
-        python_href=investigation_url(
-            project, investigation_id, view="python", member=member
-        ),
-        edit_href=_editor_url(project, investigation_id),
-    )
-
-
-def _scope_note_row(member_label: str | None, drop_href: str) -> html.Div:
-    """The member-scope line: the visible scope fact plus the one-click
-    way back to the full cohort (hidden while unscoped)."""
-    return page.limit_row(
-        html.Span(
-            f"Scoped to member {member_label}" if member_label else "",
-            id="inv-member-note",
-            className="annotate",
-        ),
-        html.A(
-            "All members",
-            href=drop_href,
-            className="btn",
-            id="inv-member-clear",
-            style={} if member_label else {"display": "none"},
-        ),
-    )
-
-
-def python_body(record: InvestigationRecord, member: str | None = None) -> list[Any]:
-    """The Open in Python view: the exact effective Selection as an
-    opaque token plus the runnable handoff snippet."""
-    selection = materialize_selection(record)
-    if member:
-        selection = Selection(project=record.project, sweeps=(UUID(member),))
-    token = encode_selection(selection)
-    snippet = analysis.python_snippet(token, record.project, "http://localhost:8000")
-    style = {"whiteSpace": "pre-wrap", "overflowX": "auto"}
-    return [
-        html.Div(
-            [
-                html.Span("Copy the token or the snippet:", className="annotate"),
-                dcc.Clipboard(content=token, title="Copy selection token"),
-                dcc.Clipboard(content=snippet, title="Copy runnable snippet"),
-            ],
-            className="actions",
-        ),
-        html.Section(
-            html.Pre(token, className="config-json", style=style),
-            className="section",
-        ),
-        html.Section(
-            html.Pre(snippet, className="config-json", style=style),
-            className="section",
-        ),
-        html.P(
-            "The token decodes to the exact effective membership via "
-            "jernerics_schema.decode_selection; point TrackingClient at "
-            "your server.",
-            className="annotate",
-        ),
-    ]
 
 
 def coverage_strip(doc: CompareDocument) -> html.Div:
@@ -1874,81 +599,6 @@ def coverage_strip(doc: CompareDocument) -> html.Div:
         ],
         className="coverage-strip",
     )
-
-
-def _sig_text(value: float | None) -> str:
-    return MISSING if value is None else f"{value:.4g}"
-
-
-def _matched_table(doc: CompareDocument, labels: dict[str, str]) -> html.Table:
-    """Signatures matched by two or more analyzable members; one
-    numeric column per member, missing stays missing."""
-    head = [page.head_cell("Signature")] + [
-        page.head_cell(labels.get(sweep_id, short_id(sweep_id)), numeric=True)
-        for sweep_id in doc.analyzable
-    ]
-    rows = []
-    for row in doc.signatures:
-        if row.matched < 2:
-            continue
-        chip = (
-            [html.Span("common", className="count-badge neutral")] if row.common else []
-        )
-        rows.append(
-            html.Tr(
-                [html.Td([row.label, *chip], className="mono")]
-                + [
-                    html.Td(_sig_text(row.values.get(sweep_id)), className="num")
-                    for sweep_id in doc.analyzable
-                ]
-            )
-        )
-    return html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])
-
-
-def _members_table(
-    doc: CompareDocument, project: str, investigation_id: str
-) -> html.Table:
-    """The member inventory: factor, the sweep link (carrying the
-    ``?via=`` return path), status, completed, and usable trials."""
-    rows = [
-        html.Tr(
-            [
-                html.Td(member.factor_value or MISSING),
-                html.Td(
-                    [
-                        html.A(
-                            member.name,
-                            href=sweep_page_url(
-                                project, member.sweep_id, investigation_id
-                            ),
-                        ),
-                        *_curation_badges(
-                            (member.invalid, "invalid"), (member.archived, "archived")
-                        ),
-                    ]
-                ),
-                html.Td(member.state),
-                html.Td(
-                    _fraction(member.completed, member.expected_trials),
-                    className="num",
-                ),
-                html.Td(
-                    _fraction(member.usable, member.expected_trials),
-                    className="num",
-                ),
-            ]
-        )
-        for member in doc.members
-    ]
-    head = [
-        page.head_cell("Factor"),
-        page.head_cell("Sweep"),
-        page.head_cell("Status"),
-        page.head_cell("Completed", numeric=True),
-        page.head_cell("Usable trials", numeric=True),
-    ]
-    return html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])
 
 
 def compare_empty_state(doc: CompareDocument, include_invalid: bool) -> html.Section:
@@ -1983,144 +633,6 @@ def compare_empty_state(doc: CompareDocument, include_invalid: bool) -> html.Sec
         ),
         className="section",
     )
-
-
-def compare_body(
-    doc: CompareDocument,
-    project: str,
-    outcome: str,
-    investigation_id: str,
-    include_invalid: bool,
-) -> list[Any]:
-    """The Compare view for one analysis set: the coverage strip, the
-    include-invalid toggle, the honest empty states, the charts over
-    the common signatures, the matched-signature table, and the member
-    inventory. No analyzable members or no global overlap each render
-    their honest state instead of a manufactured ranking."""
-    members = {member.sweep_id: member for member in doc.members}
-    labels = {
-        sweep_id: member.factor_value or member.name
-        for sweep_id, member in members.items()
-    }
-    common = [row for row in doc.signatures if row.common]
-    invalid = sum(1 for member in doc.members if member.invalid)
-    body: list[Any] = [coverage_strip(doc)]
-    if invalid:
-        body.append(
-            page.limit_row(
-                html.Label(
-                    [
-                        dcc.Checklist(
-                            id="inv-include-invalid",
-                            options=[
-                                {
-                                    "label": " Include invalid members in analysis",
-                                    "value": "invalid",
-                                }
-                            ],
-                            value=["invalid"] if include_invalid else [],
-                            className="include-toggle",
-                        ),
-                        html.Span(
-                            f"{invalid} members marked invalid",
-                            className="annotate",
-                        ),
-                    ]
-                )
-            )
-        )
-    if not doc.analyzable:
-        body.append(compare_empty_state(doc, include_invalid))
-    elif not common:
-        body.append(
-            html.Section(
-                html.P(
-                    "No sampled signature is completed by all "
-                    f"{len(doc.analyzable)} analyzable members — no global "
-                    "overlap. Pairwise matches are listed below; no ranking "
-                    "is manufactured."
-                ),
-                className="section",
-            )
-        )
-    else:
-        column_labels = [row.label for row in common]
-        row_labels = [labels.get(sweep_id, sweep_id) for sweep_id in doc.analyzable]
-        values = [
-            [row.values.get(sweep_id) for row in common] for sweep_id in doc.analyzable
-        ]
-        medians = []
-        matched_counts = []
-        for sweep_id in doc.analyzable:
-            pooled = [
-                row.values.get(sweep_id)
-                for row in common
-                if row.values.get(sweep_id) is not None
-            ]
-            medians.append(sum(pooled) / len(pooled) if pooled else 0.0)
-            matched_counts.append(len(pooled))
-        keys = ", ".join(doc.signature_keys) if doc.signature_keys else "none observed"
-        body.extend(
-            [
-                html.Section(
-                    [
-                        html.H2("Outcome heatmap"),
-                        html.P(
-                            "factor by exact sampled signature "
-                            f"({keys}) — no imputation, no outliers "
-                            "suppressed.",
-                            className="annotate",
-                        ),
-                        dcc.Graph(
-                            figure=figures.compare_heatmap(
-                                row_labels, column_labels, values
-                            ),
-                            config={"displayModeBar": False},
-                        ),
-                    ],
-                    className="section compare-heatmap",
-                ),
-                html.Section(
-                    [
-                        html.H2("Median over common signatures"),
-                        dcc.Graph(
-                            figure=figures.compare_ranking(
-                                row_labels, medians, matched_counts
-                            ),
-                            config={"displayModeBar": False},
-                        ),
-                    ],
-                    className="section compare-ranking",
-                ),
-            ]
-        )
-    shared = [row for row in doc.signatures if row.matched >= 2]
-    if shared:
-        common_count = sum(1 for row in shared if row.common)
-        body.append(
-            html.Section(
-                [
-                    html.H2(f"Matched comparison ({outcome})"),
-                    html.P(
-                        f"{len(shared)} signatures matched by ≥2 analyzable "
-                        f"members · {common_count} common to all "
-                        f"{len(doc.analyzable)} · medians pool "
-                        "matched trials; no imputation, no outliers "
-                        "suppressed.",
-                        className="annotate",
-                    ),
-                    _matched_table(doc, labels),
-                ],
-                className="section compare-matched",
-            )
-        )
-    body.append(
-        html.Section(
-            [html.H2("Members"), _members_table(doc, project, investigation_id)],
-            className="section compare-members",
-        )
-    )
-    return body
 
 
 def investigation_page(
@@ -2275,132 +787,6 @@ def investigation_page(
         *body,
         wide=wide,
         scope="Investigation",
-    )
-
-
-def series_body(
-    service: DashboardService,
-    project: str,
-    record: InvestigationRecord,
-    tray: dict[str, Any],
-    member_label: str | None,
-    drop_href: str,
-) -> list[Any]:
-    """The Series view: the fact strip, the member-scope line, and the
-    sweep-scope Series machinery over the investigation scope."""
-    now = time.time_ns()
-    doc = analysis.default_view_state()
-    snapshot = analysis.series_snapshot(service, project, tray, doc, now)
-    panels, _payload, key_options, color_options, facet_options, filters, status = (
-        analysis.render_series_outputs(doc, snapshot)
-    )
-    panels, figure = analysis.extract_series_figure(panels)
-    return [
-        _meta_strip(
-            [
-                ("Members", len(tray["sweeps"])),
-                ("Trials", len(snapshot["trials"])),
-                ("Factor", record.factor),
-                ("Outcome", record.outcome),
-            ]
-        ),
-        _scope_note_row(member_label, drop_href),
-        series_tab(
-            doc,
-            panels,
-            figure,
-            key_options,
-            color_options,
-            facet_options,
-            filters,
-            status,
-            analysis.updated_ago(now),
-        ),
-    ]
-
-
-def points_body(
-    service: DashboardService,
-    project: str,
-    record: InvestigationRecord,
-    tray: dict[str, Any],
-    member_label: str | None,
-    drop_href: str,
-) -> list[Any]:
-    """The Points view: the fact strip, the member-scope line, and the
-    trials × final-scalars table with its params → outcome plot."""
-    return [
-        _meta_strip(
-            [
-                ("Members", len(tray["sweeps"])),
-                ("Factor", record.factor),
-                ("Outcome", record.outcome),
-            ]
-        ),
-        _scope_note_row(member_label, drop_href),
-        analysis.points_tab(service, project, tray, record.outcome),
-    ]
-
-
-def _editor_table(
-    summaries: Sequence[SweepSummary],
-    picked: Sequence[str],
-    project: str,
-    now_ns: int,
-) -> html.Div:
-    """The project sweep table with a working checkbox per row; the
-    boxes start at the saved membership."""
-    saved = set(picked)
-    rows = []
-    for summary in sorted(summaries, key=lambda row: row.name.casefold()):
-        sweep_id = str(summary.sweep_id)
-        rows.append(
-            html.Tr(
-                [
-                    html.Td(
-                        dcc.Checklist(
-                            id={"inv-edit-pick": sweep_id},
-                            options=[{"label": "", "value": sweep_id}],
-                            value=[sweep_id] if sweep_id in saved else [],
-                            className="pick",
-                        ),
-                        className="selbox",
-                    ),
-                    html.Td(
-                        [
-                            html.A(
-                                summary.name,
-                                href=sweep_page_url(project, sweep_id),
-                            ),
-                            *_curation_badges(
-                                (summary.invalid, "invalid"),
-                                (summary.archived, "archived"),
-                            ),
-                        ]
-                    ),
-                    html.Td(page.status_dot(summary.state)),
-                    html.Td(
-                        _fraction(summary.succeeded, summary.expected_trials),
-                        className="num",
-                    ),
-                    html.Td(
-                        _rel(summary.latest_submitted_ns, now_ns),
-                        className="num",
-                    ),
-                ],
-                id={"inv-edit-row": sweep_id},
-            )
-        )
-    return page.scroll_table(
-        [
-            html.Th("", className="selbox"),
-            page.head_cell("Sweep"),
-            page.head_cell("Status"),
-            page.head_cell("Trials", numeric=True),
-            page.head_cell("Last activity", numeric=True),
-        ],
-        rows,
-        sortable=True,
     )
 
 
@@ -2858,6 +1244,674 @@ def search_rows(
     return rows, len(shown), len(ordered)
 
 
+def investigation_coverage_text(row: InvestigationRow) -> str:
+    """The one-line coverage summary: with outcome / incomplete / invalid."""
+    incomplete = row.member_count - row.completed
+    return (
+        f"{row.with_outcome} with outcome · {incomplete} incomplete · "
+        f"{row.invalid} invalid"
+    )
+
+
+INVESTIGATION_VIEW_LABELS: dict[str, str] = {
+    "compare": "Compare",
+    "series": "Series",
+    "points": "Points",
+    "search": "Search",
+    "python": "Python",
+}
+
+
+def _editor_url(project: str, investigation_id: str | None) -> str:
+    """The member editor URL: ``/new`` for a create, ``/<id>/edit`` otherwise."""
+    base = f"{ROUTES_BASE}/project/{quote(project, safe='')}/investigation"
+    if investigation_id is None:
+        return f"{base}/new"
+    return f"{base}/{investigation_id}/edit"
+
+
+def sweep_page_url(project: str, sweep_id: str, via: str | None = None) -> str:
+    """The sweep page URL; ``?via=`` names the investigation that
+    linked here so the sweep page can offer the way back."""
+    url = f"{ROUTES_BASE}/project/{quote(project, safe='')}/sweep/{sweep_id}"
+    return f"{url}?via={via}" if via else url
+
+
+def investigation_search(
+    view: str = "compare",
+    member: str | None = None,
+    include_invalid: bool = False,
+    q: str | None = None,
+) -> str:
+    """The plain query string of an investigation page; Compare is the
+    default and never names itself."""
+    params: list[str] = []
+    if view != "compare":
+        params.append(f"view={view}")
+    if member:
+        params.append(f"member={quote(member, safe='')}")
+    if include_invalid:
+        params.append("include-invalid=1")
+    if q:
+        params.append(f"q={quote(q, safe='')}")
+    return f"?{'&'.join(params)}" if params else ""
+
+
+def investigation_url(
+    project: str,
+    investigation_id: str,
+    view: str = "compare",
+    member: str | None = None,
+    include_invalid: bool = False,
+    q: str | None = None,
+) -> str:
+    """One investigation page URL."""
+    base = (
+        f"{ROUTES_BASE}/project/{quote(project, safe='')}"
+        f"/investigation/{investigation_id}"
+    )
+    return base + investigation_search(view, member, include_invalid, q)
+
+
+def investigation_query(search: str | None) -> dict[str, Any]:
+    """The plain query state of an investigation page: the active view
+    (unknown names fall back to Compare), the requested member scope
+    (callers resolve it against the membership), the Compare
+    include-invalid flag, and the Search filter text."""
+    params = parse_qs((search or "").lstrip("?"))
+
+    def first(key: str) -> str:
+        return (params.get(key) or [""])[0]
+
+    view = first("view")
+    return {
+        "view": view if view in INVESTIGATION_VIEW_LABELS else "compare",
+        "member": first("member") or None,
+        "include_invalid": first("include-invalid") == "1",
+        "q": first("q"),
+    }
+
+
+def _rel(ns: int | None, now_ns: int) -> str:
+    """The coarse relative age the tables show."""
+    if not ns:
+        return "never"
+    delta = max(0, (now_ns - ns) // 1_000_000_000)
+    if delta < 90:
+        return f"{delta}s ago"
+    if delta < 5400:
+        return f"{delta // 60}m ago"
+    if delta < 172800:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
+
+
+def _fraction(done: int, total: int | None) -> str:
+    if total:
+        return f"{done}/{total}"
+    return str(done) if done else MISSING
+
+
+def _meta_strip(cells: Sequence[tuple[str, Any]]) -> html.Div:
+    """The fact strip: label/value pairs in a meta grid."""
+    return html.Div(
+        [html.Div([html.Span(label), html.B(value)]) for label, value in cells],
+        className="meta-grid",
+    )
+
+
+def _curation_badges(*flags: tuple[bool, str]) -> list[html.Span]:
+    """The invalid/archived badge spans for the flags that hold."""
+    return [html.Span(name, className=f"badge {name}") for flag, name in flags if flag]
+
+
+def investigations_index_page(
+    service: DashboardService, project: str, now_ns: int
+) -> html.Div:
+    """The Investigations index: one row per investigation with its
+    real coverage facts, and the project's Unorganized sweeps."""
+    try:
+        index_rows = service.investigations_index(project)
+        unorganized = service.unorganized(project)
+    except CurationUnavailableError as error:
+        return page.page_shell(
+            "Investigations",
+            project,
+            components.Empty(str(error)),
+            scope="Project",
+        )
+    head = [
+        page.head_cell("Investigation"),
+        page.head_cell("Factor"),
+        page.head_cell("Outcome"),
+        page.head_cell("Members", numeric=True),
+        page.head_cell("Coverage"),
+        page.head_cell("Last activity", numeric=True),
+        page.head_cell(""),
+    ]
+    rows = [
+        html.Tr(
+            [
+                html.Td(
+                    html.A(
+                        html.Span(row.name, className="sfx"),
+                        href=investigation_url(project, row.investigation_id),
+                        className="sweep-link",
+                    )
+                ),
+                html.Td(row.factor),
+                html.Td(row.outcome),
+                html.Td(str(row.member_count), className="num"),
+                html.Td(investigation_coverage_text(row)),
+                html.Td(_rel(row.last_activity_ns, now_ns), className="num"),
+                html.Td(
+                    html.A(
+                        "Edit members",
+                        href=_editor_url(project, row.investigation_id),
+                    )
+                ),
+            ]
+        )
+        for row in index_rows
+    ]
+    unorganized_rows = [
+        html.Tr(
+            [
+                html.Td(
+                    html.A(summary.name, href=sweep_page_url(project, summary.sweep_id))
+                ),
+                html.Td(summary.state),
+                html.Td(
+                    _fraction(summary.succeeded, summary.expected_trials),
+                    className="num",
+                ),
+                html.Td(_rel(summary.latest_submitted_ns, now_ns), className="num"),
+            ]
+        )
+        for summary in unorganized
+    ]
+    body: list[Any] = [
+        html.H1("Investigations"),
+        html.P(
+            f"Cross-sweep questions over {project} · membership is server-persisted",
+            className="sub",
+        ),
+        html.Div(
+            html.A(
+                "New Investigation",
+                href=_editor_url(project, None),
+                className="btn btn-primary",
+            ),
+            className="actions",
+        ),
+        html.Section(
+            (
+                [html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])]
+                if index_rows
+                else [
+                    components.Empty(
+                        "No investigations yet — pick sweeps in Overview and "
+                        "use Create Investigation, or start a new one."
+                    )
+                ]
+            ),
+            className="section investigations-index",
+        ),
+        html.H2("Unorganized"),
+        html.P(
+            f"{counted_sweeps(len(unorganized))} not in any Investigation",
+            className="sub",
+        ),
+    ]
+    if unorganized:
+        body.append(
+            html.Details(
+                [
+                    html.Summary("Show list"),
+                    page.scroll_table(
+                        [
+                            page.head_cell("Sweep"),
+                            page.head_cell("Status"),
+                            page.head_cell("Trials", numeric=True),
+                            page.head_cell("Last activity", numeric=True),
+                        ],
+                        unorganized_rows,
+                        sortable=True,
+                    ),
+                ],
+                className="failgroup",
+            )
+        )
+    return page.page_shell("Investigations", project, *body, scope="Project")
+
+
+def _inv_nav_row(
+    project: str,
+    investigation_id: str,
+    view: str,
+    member: str | None,
+    include_invalid: bool,
+    q: str,
+) -> html.Div:
+    """The view switcher with its Python and Edit actions; Compare
+    never carries a member scope, the filter text stays on Search."""
+    views = [
+        (
+            INVESTIGATION_VIEW_LABELS[name],
+            investigation_url(
+                project,
+                investigation_id,
+                view=name,
+                member=member if name != "compare" else None,
+                include_invalid=include_invalid,
+                q=q if name == "search" else None,
+            ),
+        )
+        for name in INVESTIGATION_VIEWS
+    ]
+    return page.inv_nav(
+        INVESTIGATION_VIEW_LABELS[view],
+        views,
+        python_href=investigation_url(
+            project, investigation_id, view="python", member=member
+        ),
+        edit_href=_editor_url(project, investigation_id),
+    )
+
+
+def _scope_note_row(member_label: str | None, drop_href: str) -> html.Div:
+    """The member-scope line: the visible scope fact plus the one-click
+    way back to the full cohort (hidden while unscoped)."""
+    return page.limit_row(
+        html.Span(
+            f"Scoped to member {member_label}" if member_label else "",
+            id="inv-member-note",
+            className="annotate",
+        ),
+        html.A(
+            "All members",
+            href=drop_href,
+            className="btn",
+            id="inv-member-clear",
+            style={} if member_label else {"display": "none"},
+        ),
+    )
+
+
+def python_body(record: InvestigationRecord, member: str | None = None) -> list[Any]:
+    """The Open in Python view: the exact effective Selection as an
+    opaque token plus the runnable handoff snippet."""
+    selection = materialize_selection(record)
+    if member:
+        selection = Selection(project=record.project, sweeps=(UUID(member),))
+    token = encode_selection(selection)
+    snippet = analysis.python_snippet(token, record.project, "http://localhost:8000")
+    style = {"whiteSpace": "pre-wrap", "overflowX": "auto"}
+    return [
+        html.Div(
+            [
+                html.Span("Copy the token or the snippet:", className="annotate"),
+                dcc.Clipboard(content=token, title="Copy selection token"),
+                dcc.Clipboard(content=snippet, title="Copy runnable snippet"),
+            ],
+            className="actions",
+        ),
+        html.Section(
+            html.Pre(token, className="config-json", style=style),
+            className="section",
+        ),
+        html.Section(
+            html.Pre(snippet, className="config-json", style=style),
+            className="section",
+        ),
+        html.P(
+            "The token decodes to the exact effective membership via "
+            "jernerics_schema.decode_selection; point TrackingClient at "
+            "your server.",
+            className="annotate",
+        ),
+    ]
+
+
+def _sig_text(value: float | None) -> str:
+    return MISSING if value is None else f"{value:.4g}"
+
+
+def _matched_table(doc: CompareDocument, labels: dict[str, str]) -> html.Table:
+    """Signatures matched by two or more analyzable members; one
+    numeric column per member, missing stays missing."""
+    head = [page.head_cell("Signature")] + [
+        page.head_cell(labels.get(sweep_id, short_id(sweep_id)), numeric=True)
+        for sweep_id in doc.analyzable
+    ]
+    rows = []
+    for row in doc.signatures:
+        if row.matched < 2:
+            continue
+        chip = (
+            [html.Span("common", className="count-badge neutral")] if row.common else []
+        )
+        rows.append(
+            html.Tr(
+                [html.Td([row.label, *chip], className="mono")]
+                + [
+                    html.Td(_sig_text(row.values.get(sweep_id)), className="num")
+                    for sweep_id in doc.analyzable
+                ]
+            )
+        )
+    return html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])
+
+
+def _members_table(
+    doc: CompareDocument, project: str, investigation_id: str
+) -> html.Table:
+    """The member inventory: factor, the sweep link (carrying the
+    ``?via=`` return path), status, completed, and usable trials."""
+    rows = [
+        html.Tr(
+            [
+                html.Td(member.factor_value or MISSING),
+                html.Td(
+                    [
+                        html.A(
+                            member.name,
+                            href=sweep_page_url(
+                                project, member.sweep_id, investigation_id
+                            ),
+                        ),
+                        *_curation_badges(
+                            (member.invalid, "invalid"), (member.archived, "archived")
+                        ),
+                    ]
+                ),
+                html.Td(member.state),
+                html.Td(
+                    _fraction(member.completed, member.expected_trials),
+                    className="num",
+                ),
+                html.Td(
+                    _fraction(member.usable, member.expected_trials),
+                    className="num",
+                ),
+            ]
+        )
+        for member in doc.members
+    ]
+    head = [
+        page.head_cell("Factor"),
+        page.head_cell("Sweep"),
+        page.head_cell("Status"),
+        page.head_cell("Completed", numeric=True),
+        page.head_cell("Usable trials", numeric=True),
+    ]
+    return html.Table([html.Thead(html.Tr(head)), html.Tbody(rows)])
+
+
+def compare_body(
+    doc: CompareDocument,
+    project: str,
+    outcome: str,
+    investigation_id: str,
+    include_invalid: bool,
+) -> list[Any]:
+    """The Compare view for one analysis set: the coverage strip, the
+    include-invalid toggle, the honest empty states, the charts over
+    the common signatures, the matched-signature table, and the member
+    inventory. No analyzable members or no global overlap each render
+    their honest state instead of a manufactured ranking."""
+    members = {member.sweep_id: member for member in doc.members}
+    labels = {
+        sweep_id: member.factor_value or member.name
+        for sweep_id, member in members.items()
+    }
+    common = [row for row in doc.signatures if row.common]
+    invalid = sum(1 for member in doc.members if member.invalid)
+    body: list[Any] = [coverage_strip(doc)]
+    if invalid:
+        body.append(
+            page.limit_row(
+                html.Label(
+                    [
+                        dcc.Checklist(
+                            id="inv-include-invalid",
+                            options=[
+                                {
+                                    "label": " Include invalid members in analysis",
+                                    "value": "invalid",
+                                }
+                            ],
+                            value=["invalid"] if include_invalid else [],
+                            className="include-toggle",
+                        ),
+                        html.Span(
+                            f"{invalid} members marked invalid",
+                            className="annotate",
+                        ),
+                    ]
+                )
+            )
+        )
+    if not doc.analyzable:
+        body.append(compare_empty_state(doc, include_invalid))
+    elif not common:
+        body.append(
+            html.Section(
+                html.P(
+                    "No sampled signature is completed by all "
+                    f"{len(doc.analyzable)} analyzable members — no global "
+                    "overlap. Pairwise matches are listed below; no ranking "
+                    "is manufactured."
+                ),
+                className="section",
+            )
+        )
+    else:
+        column_labels = [row.label for row in common]
+        row_labels = [labels.get(sweep_id, sweep_id) for sweep_id in doc.analyzable]
+        values = [
+            [row.values.get(sweep_id) for row in common] for sweep_id in doc.analyzable
+        ]
+        medians = []
+        matched_counts = []
+        for sweep_id in doc.analyzable:
+            pooled = [
+                row.values.get(sweep_id)
+                for row in common
+                if row.values.get(sweep_id) is not None
+            ]
+            medians.append(sum(pooled) / len(pooled) if pooled else 0.0)
+            matched_counts.append(len(pooled))
+        keys = ", ".join(doc.signature_keys) if doc.signature_keys else "none observed"
+        body.extend(
+            [
+                html.Section(
+                    [
+                        html.H2("Outcome heatmap"),
+                        html.P(
+                            "factor by exact sampled signature "
+                            f"({keys}) — no imputation, no outliers "
+                            "suppressed.",
+                            className="annotate",
+                        ),
+                        dcc.Graph(
+                            figure=figures.compare_heatmap(
+                                row_labels, column_labels, values
+                            ),
+                            config={"displayModeBar": False},
+                        ),
+                    ],
+                    className="section compare-heatmap",
+                ),
+                html.Section(
+                    [
+                        html.H2("Median over common signatures"),
+                        dcc.Graph(
+                            figure=figures.compare_ranking(
+                                row_labels, medians, matched_counts
+                            ),
+                            config={"displayModeBar": False},
+                        ),
+                    ],
+                    className="section compare-ranking",
+                ),
+            ]
+        )
+    shared = [row for row in doc.signatures if row.matched >= 2]
+    if shared:
+        common_count = sum(1 for row in shared if row.common)
+        body.append(
+            html.Section(
+                [
+                    html.H2(f"Matched comparison ({outcome})"),
+                    html.P(
+                        f"{len(shared)} signatures matched by ≥2 analyzable "
+                        f"members · {common_count} common to all "
+                        f"{len(doc.analyzable)} · medians pool "
+                        "matched trials; no imputation, no outliers "
+                        "suppressed.",
+                        className="annotate",
+                    ),
+                    _matched_table(doc, labels),
+                ],
+                className="section compare-matched",
+            )
+        )
+    body.append(
+        html.Section(
+            [html.H2("Members"), _members_table(doc, project, investigation_id)],
+            className="section compare-members",
+        )
+    )
+    return body
+
+
+def series_body(
+    service: DashboardService,
+    project: str,
+    record: InvestigationRecord,
+    tray: dict[str, Any],
+    member_label: str | None,
+    drop_href: str,
+) -> list[Any]:
+    """The Series view: the fact strip, the member-scope line, and the
+    sweep-scope Series machinery over the investigation scope."""
+    now = time.time_ns()
+    doc = analysis.default_view_state()
+    snapshot = analysis.series_snapshot(service, project, tray, doc, now)
+    panels, _payload, key_options, color_options, facet_options, filters, status = (
+        analysis.render_series_outputs(doc, snapshot)
+    )
+    panels, figure = analysis.extract_series_figure(panels)
+    return [
+        _meta_strip(
+            [
+                ("Members", len(tray["sweeps"])),
+                ("Trials", len(snapshot["trials"])),
+                ("Factor", record.factor),
+                ("Outcome", record.outcome),
+            ]
+        ),
+        _scope_note_row(member_label, drop_href),
+        series_tab(
+            doc,
+            panels,
+            figure,
+            key_options,
+            color_options,
+            facet_options,
+            filters,
+            status,
+            analysis.updated_ago(now),
+        ),
+    ]
+
+
+def points_body(
+    service: DashboardService,
+    project: str,
+    record: InvestigationRecord,
+    tray: dict[str, Any],
+    member_label: str | None,
+    drop_href: str,
+) -> list[Any]:
+    """The Points view: the fact strip, the member-scope line, and the
+    trials × final-scalars table with its params → outcome plot."""
+    return [
+        _meta_strip(
+            [
+                ("Members", len(tray["sweeps"])),
+                ("Factor", record.factor),
+                ("Outcome", record.outcome),
+            ]
+        ),
+        _scope_note_row(member_label, drop_href),
+        analysis.points_tab(service, project, tray, record.outcome),
+    ]
+
+
+def _editor_table(
+    summaries: Sequence[SweepSummary],
+    picked: Sequence[str],
+    project: str,
+    now_ns: int,
+) -> html.Div:
+    """The project sweep table with a working checkbox per row; the
+    boxes start at the saved membership."""
+    saved = set(picked)
+    rows = []
+    for summary in sorted(summaries, key=lambda row: row.name.casefold()):
+        sweep_id = str(summary.sweep_id)
+        rows.append(
+            html.Tr(
+                [
+                    html.Td(
+                        dcc.Checklist(
+                            id={"inv-edit-pick": sweep_id},
+                            options=[{"label": "", "value": sweep_id}],
+                            value=[sweep_id] if sweep_id in saved else [],
+                            className="pick",
+                        ),
+                        className="selbox",
+                    ),
+                    html.Td(
+                        [
+                            html.A(
+                                summary.name,
+                                href=sweep_page_url(project, sweep_id),
+                            ),
+                            *_curation_badges(
+                                (summary.invalid, "invalid"),
+                                (summary.archived, "archived"),
+                            ),
+                        ]
+                    ),
+                    html.Td(page.status_dot(summary.state)),
+                    html.Td(
+                        _fraction(summary.succeeded, summary.expected_trials),
+                        className="num",
+                    ),
+                    html.Td(
+                        _rel(summary.latest_submitted_ns, now_ns),
+                        className="num",
+                    ),
+                ],
+                id={"inv-edit-row": sweep_id},
+            )
+        )
+    return page.scroll_table(
+        [
+            html.Th("", className="selbox"),
+            page.head_cell("Sweep"),
+            page.head_cell("Status"),
+            page.head_cell("Trials", numeric=True),
+            page.head_cell("Last activity", numeric=True),
+        ],
+        rows,
+        sortable=True,
+    )
+
+
 def search_body(
     service: DashboardService,
     project: str,
@@ -2915,167 +1969,87 @@ def search_body(
     ]
 
 
-def workspace_page(
+def _via_investigation(
+    service: DashboardService, project: str, via: str | None
+) -> InvestigationRecord | None:
+    """The investigation a ``via`` return path names, when it exists in
+    this store and belongs to the same project; anything else is an
+    unknown context and renders none."""
+    if not via:
+        return None
+    try:
+        record = service.investigation_detail(str(via)).investigation
+    except (CurationRejectedError, CurationUnavailableError):
+        return None
+    return record if record.project == project else None
+
+
+def sweep_hub_header(
+    service: DashboardService,
     project: str,
-    *,
-    sort: list | None = None,
-    quick: str = "",
-    filters: dict | None = None,
-) -> html.Div:
-    """The stable workspace: scope browser, tabbed canvas, inspector.
-
-    Mounted once per project navigation; every data region updates through
-    its own callback so scope, tab, settings, and focus survive refreshes
-    and history without remounting children.
-    """
-    return html.Div(
-        [
-            html.H2(f"Project {project}"),
-            html.Div(id={"analysis-error": "page"}),
-            dcc.Store(id="inspector-render-store"),
-            dcc.Store(id="sweep-browser-facts-store"),
-            dcc.Store(id="trial-browser-facts-store"),
-            dcc.Store(id="scroll-restore-store"),
-            html.Div(
-                [
-                    html.Details(
-                        [
-                            html.Summary("Browse scope"),
-                            html.Div(id="analysis-scope-bar", className="scope-bar"),
-                            dcc.Checklist(
-                                id="analysis-include",
-                                options=[
-                                    {
-                                        "label": " include archived sweeps",
-                                        "value": "archived",
-                                    },
-                                    {
-                                        "label": " include invalid sweeps",
-                                        "value": "invalid",
-                                    },
-                                ],
-                                value=[],
-                                className="include-toggle",
-                            ),
-                            dcc.Input(
-                                id="workspace-quick",
-                                value=quick,
-                                type="search",
-                                placeholder="Search sweeps…",
-                                className="quick-filter",
-                            ),
-                            AgGrid(
-                                id="sweep-grid",
-                                rowData=[],
-                                columnDefs=browser_sweep_columns(sort),
-                                defaultColDef=_GRID_DEFAULTS,
-                                dashGridOptions=components.grid_options(
-                                    rowSelection={"mode": "multiRow"},
-                                    quickFilterText=quick,
-                                ),
-                                getRowId=_SWEEP_ROW_ID,
-                                filterModel=filters,
-                                className="ag-theme-alpine grid",
-                            ),
-                            html.Div(
-                                "", id="workspace-curation-note", className="hint"
-                            ),
-                            curation_panel(),
-                            AgGrid(
-                                id="analysis-family-grid",
-                                rowData=[],
-                                columnDefs=[],
-                                defaultColDef=_GRID_DEFAULTS,
-                                dashGridOptions=components.grid_options(
-                                    rowSelection={"mode": "multiRow"},
-                                    rowClassRules={
-                                        "row-hover-emphasis": (
-                                            "params.data && params.data._hovered"
-                                        )
-                                    },
-                                ),
-                                getRowId=_TRIAL_ROW_ID,
-                                className="ag-theme-alpine grid trial-browser",
-                            ),
-                            dcc.Checklist(
-                                id="analysis-expand",
-                                options=[
-                                    {
-                                        "label": " include retry families — expand "
-                                        "picked roots to every generation",
-                                        "value": "expand",
-                                    }
-                                ],
-                                value=[],
-                                className="expand-toggle",
-                            ),
-                            html.P(
-                                "Sweep checkboxes edit the scope; a row click "
-                                "inspects that sweep. Trial checkboxes pick "
-                                "retry roots.",
-                                className="hint",
-                            ),
-                        ],
-                        id="scope-browser",
-                        className="scope-browser",
-                        open=True,
-                    ),
-                    html.Div(
-                        [
-                            html.Div(
-                                [
-                                    dcc.Tabs(
-                                        id={"analysis-tabs": "canvas"},
-                                        value="overview",
-                                        children=[
-                                            dcc.Tab(label="Overview", value="overview"),
-                                        ],
-                                    ),
-                                    html.A(
-                                        "Investigations",
-                                        href=page.tab_href("Investigations", project),
-                                        className="workspace-tab-link",
-                                    ),
-                                    html.A(
-                                        "Exceptions",
-                                        href=page.tab_href("Exceptions", project),
-                                        className="workspace-tab-link",
-                                    ),
-                                ],
-                                className="workspace-tab-row",
-                            ),
-                            html.Div(
-                                id="workspace-overview", style={"display": "block"}
-                            ),
-                        ],
-                        className="workspace-canvas",
-                    ),
-                    html.Aside(
-                        id="inspector",
-                        className="inspector",
-                        children=inspector_placeholder(),
-                    ),
-                ],
-                className="workspace-main",
-            ),
-        ],
-        className="page workspace",
+    sweep_id: str,
+    sweep_name: str,
+    via: str | None,
+) -> list[Any]:
+    """Breadcrumb, back link, and the data-supported views row for a
+    sweep opened from an investigation: Series and Points narrow to this
+    member, Search opens over all members, Overview is the hub itself.
+    A sweep reached outside an investigation renders no hub."""
+    record = _via_investigation(service, project, via)
+    if record is None:
+        return []
+    series_supported = any(
+        entry["kind"] == "scalar" and entry["steps"]
+        for entry in service.analysis_value_keys(project, {"sweeps": [sweep_id]})
     )
-
-
-def focus_incomplete(service: DashboardService, focus: dict[str, Any] | None) -> bool:
-    """Whether the focused object still has work in flight."""
-    if not focus:
-        return False
-    kind, object_id = focus.get("kind"), str(focus.get("id") or "")
-    if kind == "sweep":
-        return service.sweep_incomplete(object_id)
-    if kind == "trial":
-        detail = service.trial_detail(object_id)
-        return detail is not None and any(
-            record.ended_at is None for record in detail.executions
+    detail = service.sweep_detail(sweep_id)
+    points_supported = bool(detail and detail.overview.started)
+    views: list[Any] = [html.Span("Overview", className="on")]
+    if series_supported:
+        views.append(
+            html.A(
+                "Series",
+                href=analysis.investigation_view_href(
+                    project, str(record.id), "series", sweep_id
+                ),
+            )
         )
-    if kind == "execution":
-        detail = service.execution_detail(object_id)
-        return detail is not None and detail.context["ended_ns"] is None
-    return False
+    if points_supported:
+        views.append(
+            html.A(
+                "Points",
+                href=analysis.investigation_view_href(
+                    project, str(record.id), "points", sweep_id
+                ),
+            )
+        )
+    views.append(
+        html.A(
+            "Search",
+            href=analysis.investigation_view_href(project, str(record.id), "search"),
+        )
+    )
+    return [
+        page.breadcrumbs(
+            [
+                (project, f"{ROUTES_BASE}/project/{quote(project, safe='')}"),
+                ("Investigations", investigations_index_href(project)),
+                record.name,
+                sweep_name,
+            ]
+        ),
+        html.Div(
+            [
+                html.Span("Views", className="annotate"),
+                html.Div(views, className="seg"),
+                html.A(
+                    f"Back to {record.name}",
+                    href=analysis.investigation_view_href(
+                        project, str(record.id), "compare"
+                    ),
+                    className="btn-link",
+                ),
+            ],
+            className="inv-views",
+        ),
+    ]

@@ -10,23 +10,12 @@ from jernerics_schema import (
     PROTOCOL_VERSION,
     ExecutionEndEvent,
     ExecutionStartEvent,
-    FlatContext,
     IngestRequest,
-    Selection,
     SweepSnapshotEvent,
     TrialSnapshotEvent,
     TrialState,
-    ValueEvent,
-    encode_selection,
 )
 from jernerics_server.dashboard import callbacks, workspace
-from jernerics_server.dashboard.analysis import (
-    default_scope_state,
-    default_view_state,
-    encode_view_state,
-    expand_values,
-    include_values,
-)
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
 from jernerics_server.dashboard.service import DashboardService
@@ -42,8 +31,6 @@ WORKSPACE = "/dashboard/project/lab"
 
 SWEEP_A = uuid.UUID("aa100000-0000-4000-8000-000000000000")
 SWEEP_B = uuid.UUID("aa110000-0000-4000-8000-000000000000")
-ROOT_A = uuid.UUID("cc200000-0000-4000-8000-000000000000")
-ROOT_B = uuid.UUID("cc210000-0000-4000-8000-000000000000")
 TRIAL_A = uuid.UUID("cc100000-0000-4000-8000-000000000000")
 EXEC_A = uuid.UUID("dd100000-0000-4000-8000-000000000000")
 EXEC_B = uuid.UUID("dd200000-0000-4000-8000-000000000000")
@@ -77,8 +64,6 @@ def _seed_events() -> list:
             number=1,
             state=TrialState.COMPLETED,
             retry_root_trial_id=TRIAL_A,
-            objective=0.5,
-            params=FlatContext({"lr": 0.1}),
         ),
         _event(
             ExecutionStartEvent,
@@ -88,7 +73,6 @@ def _seed_events() -> list:
             hostname="node00",
             started_at=_BASE - timedelta(seconds=985),
         ),
-        _event(ValueEvent, 980, trial_id=TRIAL_A, key="loss", step=0, value=0.9),
         _event(
             ExecutionEndEvent,
             975,
@@ -185,20 +169,6 @@ def _outputs_of(key: str) -> set[str]:
     return {part.split("@")[0] for part in stripped.split("...") if part}
 
 
-def _callback_key(callback_map, wanted: set[str], input_ids: set[str]) -> str:
-    """The callback writing exactly ``wanted`` from ``input_ids`` inputs;
-    single-output store writers collide on outputs alone."""
-    return next(
-        key
-        for key in callback_map
-        if _outputs_of(key) == wanted
-        and {spec["id"] for spec in callback_map[key]["inputs"]} == input_ids
-    )
-
-
-_WILDCARD_IDS = {"analysis-tabs": "canvas"}
-
-
 def _dispatch(
     client, callback_map, wanted: set[str], inputs, state=(), changed=None, key=None
 ):
@@ -212,21 +182,7 @@ def _dispatch(
     for spec in specs:
         prop = spec.rsplit(".", 1)[1]
         raw = spec.rsplit(".", 1)[0]
-        if raw.startswith("{"):
-            wildcard = json.loads(raw)
-            outputs.append(
-                {
-                    "id": {
-                        name: _WILDCARD_IDS.get(name, values[0])
-                        if values == ["ALL"]
-                        else values
-                        for name, values in wildcard.items()
-                    },
-                    "property": prop,
-                }
-            )
-        else:
-            outputs.append({"id": raw, "property": prop})
+        outputs.append({"id": raw, "property": prop})
     response = client.post(
         "/dashboard/_dash-update-component",
         json={
@@ -242,188 +198,191 @@ def _dispatch(
     return response, payload
 
 
-_VIEW_INPUT = {"id": "view-store", "property": "data", "value": None}
-_TICK_INPUT = {"id": "poll", "property": "n_intervals", "value": 1}
-_TAB_INPUT = {
-    "id": {"analysis-tabs": "canvas"},
-    "property": "value",
-    "value": "overview",
+_ROUTER_OUTPUTS = {
+    "page-container.children",
+    "poll.disabled",
+    "view-store.data",
+    "route-store.data",
+    "overview-digest-store.data",
 }
-_PROJECT_STATE = {"id": "project-store", "property": "data", "value": PROJECT}
 
-
-def _digest_state(doc):
-    return {"id": "overview-digest-store", "property": "data", "value": doc}
-
-
-_OVERVIEW_OUTPUTS = {"workspace-overview.children"}
-_TRACKER_OUTPUTS = {"overview-digest-store.data"}
+_VIEW_INPUT = {"id": "view-store", "property": "data", "value": None}
 
 
 class TestOverviewPollCascade:
-    """jernerics-haj: the overview region must stop re-shipping its 9KB
-    tree on every poll tick when the server data did not change."""
+    """The overview page re-renders on a poll tick only when a stored
+    fact in the visible scope changed; relative time never counts."""
 
-    def _fire(self, client, cmap, outputs, digest_doc, changed):
-        state = [_PROJECT_STATE, _digest_state(digest_doc)]
-        if outputs == _OVERVIEW_OUTPUTS:
-            # _render_overview reads the per-project browser controls for
-            # the persisted overview sort.
-            state.append({"id": "workspace-store", "property": "data", "value": None})
+    def _fire(self, client, cmap, *, tick, digest, search=None, pathname=WORKSPACE):
+        inputs = [
+            {"id": "url", "property": "pathname", "value": pathname},
+            {"id": "poll", "property": "n_intervals", "value": 1 if tick else 0},
+        ]
         return _dispatch(
             client,
             cmap,
-            outputs,
-            inputs=[_VIEW_INPUT, _TICK_INPUT, _TAB_INPUT],
-            state=state,
-            changed=changed,
-        )
-
-    def test_unchanged_tick_ships_nothing(self, authed, callback_map):
-        client, _store = authed
-        response, tracked = self._fire(
-            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
-        )
-        assert response.status_code == 200
-        digest = tracked["overview-digest-store"]["data"]["digest"]
-        response, rendered = self._fire(
-            client, callback_map, _OVERVIEW_OUTPUTS, None, ["view-store.data"]
-        )
-        assert response.status_code == 200
-        assert rendered["workspace-overview"]["children"]
-        # the next tick, with nothing changed server-side, ships no tree
-        for outputs in (_TRACKER_OUTPUTS, _OVERVIEW_OUTPUTS):
-            tick = self._fire(
-                client, callback_map, outputs, {"digest": digest}, ["poll.n_intervals"]
-            )
-            assert tick[0].status_code == 204
-
-    def test_changed_data_advances_digest_and_re_renders(self, authed, callback_map):
-        client, store = authed
-        _response, tracked = self._fire(
-            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
-        )
-        stale = tracked["overview-digest-store"]["data"]
-        _ingest_sweep(store, SWEEP_B, "beta")
-        _response, tracked = self._fire(
-            client,
-            callback_map,
-            _TRACKER_OUTPUTS,
-            stale,
-            ["poll.n_intervals"],
-        )
-        fresh = tracked["overview-digest-store"]["data"]
-        response, _rendered = self._fire(
-            client, callback_map, _OVERVIEW_OUTPUTS, stale, ["poll.n_intervals"]
-        )
-        assert response.status_code == 200
-        assert "beta" in response.text
-
-    def test_page_render_voids_digest_but_a_tick_does_not(self, authed, callback_map):
-        client, _store = authed
-        wanted = {
-            "page-container.children",
-            "poll.disabled",
-            "view-store.data",
-            "route-store.data",
-            "overview-digest-store.data",
-        }
-        inputs = [
-            {"id": "url", "property": "pathname", "value": WORKSPACE},
-            {"id": "url", "property": "search", "value": None},
-            {"id": "poll", "property": "n_intervals", "value": 0},
-        ]
-        response, page = _dispatch(
-            client,
-            callback_map,
-            wanted,
+            _ROUTER_OUTPUTS,
             inputs=inputs,
             state=[
-                {"id": "workspace-store", "property": "data", "value": None},
-                {"id": "view-store", "property": "data", "value": None},
-                {"id": "route-store", "property": "data", "value": None},
-                {"id": "url", "property": "search", "value": None},
+                _VIEW_INPUT,
+                {
+                    "id": "route-store",
+                    "property": "data",
+                    "value": pathname if tick else None,
+                },
+                {"id": "overview-digest-store", "property": "data", "value": digest},
+                {"id": "url", "property": "search", "value": search},
             ],
-            changed=["url.pathname"],
+            changed=["poll.n_intervals"] if tick else ["url.pathname"],
         )
+
+    @staticmethod
+    def _html(response) -> str:
+        return response.text.replace("\\u002f", "/").replace("\\/", "/")
+
+    def test_render_mounts_the_page_and_voids_the_digest(self, authed, callback_map):
+        client, _store = authed
+        response, page = self._fire(client, callback_map, tick=False, digest=None)
         assert response.status_code == 200
         assert page["overview-digest-store"]["data"] is None
         assert page["route-store"]["data"] == WORKSPACE
-        _response, tick = _dispatch(
-            client,
-            callback_map,
-            wanted,
-            inputs=[
-                {"id": "url", "property": "pathname", "value": WORKSPACE},
-                {"id": "url", "property": "search", "value": None},
-                {"id": "poll", "property": "n_intervals", "value": 1},
-            ],
-            state=[
-                {"id": "workspace-store", "property": "data", "value": None},
-                {"id": "view-store", "property": "data", "value": None},
-                {"id": "route-store", "property": "data", "value": WORKSPACE},
-                {"id": "url", "property": "search", "value": None},
-            ],
-            changed=["poll.n_intervals"],
-        )
-        # a tick never touches the page, the digest, or the route
-        assert set(tick) == {"poll"}
+        # the seeded sweep is terminal: nothing polls
+        assert page["poll"]["disabled"] is True
+        assert "Overview" in self._html(response)
+
+    def test_tick_establishes_digest_then_a_static_tick_ships_nothing(
+        self, authed, callback_map
+    ):
+        client, _store = authed
+        response, _page = self._fire(client, callback_map, tick=False, digest=None)
+        assert response.status_code == 200
+        # first tick: the stored digest is void (None), so the page re-ships
+        response, page = self._fire(client, callback_map, tick=True, digest=None)
+        assert response.status_code == 200
+        digest_doc = page["overview-digest-store"]["data"]
+        assert digest_doc and digest_doc["digest"]
+        assert set(page) >= {"page-container", "poll"}
+        # the next tick, with nothing changed server-side, ships nothing
+        tick = self._fire(client, callback_map, tick=True, digest=digest_doc)
+        assert tick[0].status_code == 204
+
+    def test_changed_data_advances_digest_and_re_renders(self, authed, callback_map):
+        client, store = authed
+        self._fire(client, callback_map, tick=False, digest=None)
+        _response, page = self._fire(client, callback_map, tick=True, digest=None)
+        stale = page["overview-digest-store"]["data"]
+        _ingest_sweep(store, SWEEP_B, "beta")
+        response, _page = self._fire(client, callback_map, tick=True, digest=stale)
+        assert response.status_code == 200
+        assert "beta" in self._html(response)
 
     def test_wall_clock_advance_alone_keeps_the_digest(self, authed, callback_map):
         """jernerics-l4k root cause: relative-time churn must not move
         the digest — a tick two minutes later ships nothing."""
         client, _store = authed
-        _response, tracked = self._fire(
-            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
-        )
-        digest = tracked["overview-digest-store"]["data"]["digest"]
+        self._fire(client, callback_map, tick=False, digest=None)
+        _response, page = self._fire(client, callback_map, tick=True, digest=None)
+        stale = page["overview-digest-store"]["data"]
         later = time.time_ns() + 120_000_000_000
         with mock.patch("time.time_ns", return_value=later):
-            for outputs in (_TRACKER_OUTPUTS, _OVERVIEW_OUTPUTS):
-                tick = self._fire(
-                    client,
-                    callback_map,
-                    outputs,
-                    {"digest": digest},
-                    ["poll.n_intervals"],
-                )
-                assert tick[0].status_code == 204
+            tick = self._fire(client, callback_map, tick=True, digest=stale)
+        assert tick[0].status_code == 204
 
     def test_unchanged_tick_builds_no_tree(self, authed, callback_map, monkeypatch):
         client, _store = authed
         builds = []
-        real = workspace.overview_tab
+        real = workspace.overview_page
 
         def spy(*args, **kwargs):
             builds.append(args)
             return real(*args, **kwargs)
 
-        monkeypatch.setattr(workspace, "overview_tab", spy)
-        _response, tracked = self._fire(
-            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
-        )
-        digest = tracked["overview-digest-store"]["data"]["digest"]
-        _response, rendered = self._fire(
-            client, callback_map, _OVERVIEW_OUTPUTS, None, ["view-store.data"]
-        )
-        assert rendered["workspace-overview"]["children"]
+        monkeypatch.setattr(workspace, "overview_page", spy)
+        self._fire(client, callback_map, tick=False, digest=None)
         assert len(builds) == 1
-        for outputs in (_TRACKER_OUTPUTS, _OVERVIEW_OUTPUTS):
-            tick = self._fire(
-                client, callback_map, outputs, {"digest": digest}, ["poll.n_intervals"]
-            )
-            assert tick[0].status_code == 204
-        assert len(builds) == 1
+        _response, page = self._fire(client, callback_map, tick=True, digest=None)
+        digest_doc = page["overview-digest-store"]["data"]
+        assert len(builds) == 2
+        tick = self._fire(client, callback_map, tick=True, digest=digest_doc)
+        assert tick[0].status_code == 204
+        assert len(builds) == 2
 
-    def test_new_execution_advances_the_overview_digest(self, authed, callback_map):
+    def test_work_in_flight_keeps_the_poll_alive(self, authed, callback_map):
         client, store = authed
-        _response, tracked = self._fire(
-            client, callback_map, _TRACKER_OUTPUTS, None, ["view-store.data"]
-        )
-        stale = tracked["overview-digest-store"]["data"]
         _start_execution(store, EXEC_B, 10)
-        response, _rendered = self._fire(
-            client, callback_map, _OVERVIEW_OUTPUTS, stale, ["poll.n_intervals"]
+        response, page = self._fire(client, callback_map, tick=False, digest=None)
+        assert response.status_code == 200
+        assert page["poll"]["disabled"] is False
+
+    def test_search_parameters_drive_the_rendered_scope(self, authed, callback_map):
+        client, store = authed
+        store.archive_sweep(str(SWEEP_A))
+        response, _page = self._fire(client, callback_map, tick=False, digest=None)
+        text = self._html(response)
+        assert "Active sweeps" in text
+        assert "hides 1 archived/invalid" in text
+        response, _page = self._fire(
+            client, callback_map, tick=False, digest=None, search="?scope=all"
+        )
+        text = self._html(response)
+        assert "All sweeps" in text
+        assert "including 1 archived/invalid" in text
+
+
+class TestGatePolling:
+    """The interval gate re-evaluates on navigation, search, and view
+    edits, writes the facts it decided from, and skips unchanged
+    store-write dispatches."""
+
+    _GATE_OUTPUTS = {"poll.disabled", "poll-gate-facts-store.data"}
+
+    def _gate(self, client, cmap, *, search="", facts=None, changed=None):
+        inputs = [
+            {"id": "url", "property": "pathname", "value": WORKSPACE},
+            {"id": "url", "property": "search", "value": search},
+            _VIEW_INPUT,
+        ]
+        return _dispatch(
+            client,
+            cmap,
+            self._GATE_OUTPUTS,
+            inputs=inputs,
+            state=[
+                {"id": "project-store", "property": "data", "value": PROJECT},
+                {"id": "poll-gate-facts-store", "property": "data", "value": facts},
+            ],
+            changed=changed or ["url.search"],
+        )
+
+    def test_gate_disables_when_the_scope_is_terminal(self, authed, callback_map):
+        client, _store = authed
+        response, payload = self._gate(client, callback_map)
+        assert response.status_code == 200
+        assert payload["poll"]["disabled"] is True
+        assert payload["poll-gate-facts-store"]["data"]["search"] == ""
+
+    def test_gate_enables_while_work_is_in_flight(self, authed, callback_map):
+        client, store = authed
+        _start_execution(store, EXEC_B, 10)
+        response, payload = self._gate(client, callback_map)
+        assert response.status_code == 200
+        assert payload["poll"]["disabled"] is False
+
+    def test_unchanged_facts_on_a_store_write_skip_the_gate(self, authed, callback_map):
+        client, _store = authed
+        _response, payload = self._gate(client, callback_map)
+        facts = payload["poll-gate-facts-store"]["data"]
+        again = self._gate(
+            client, callback_map, facts=facts, changed=["view-store.data"]
+        )
+        assert again[0].status_code == 204
+
+    def test_a_search_change_re_evaluates(self, authed, callback_map):
+        client, _store = authed
+        _response, payload = self._gate(client, callback_map)
+        facts = payload["poll-gate-facts-store"]["data"]
+        response, _payload = self._gate(
+            client, callback_map, search="?scope=all", facts=facts
         )
         assert response.status_code == 200
 
@@ -435,11 +394,21 @@ class TestOverviewFactsPure:
     def test_facts_carry_no_relative_time_and_digest_is_stable(self, authed):
         _client, store = authed
         service = DashboardService(QueryService(store))
-        facts = callbacks.overview_facts(service, PROJECT, None)
+        facts = callbacks.overview_facts(service, PROJECT)
         assert "ago" not in json.dumps(facts, default=str)
         assert callbacks._content_digest(facts) == callbacks._content_digest(
-            callbacks.overview_facts(service, PROJECT, None)
+            callbacks.overview_facts(service, PROJECT)
         )
+
+    def test_scope_all_and_active_scopes_differ(self, authed):
+        _client, store = authed
+        store.archive_sweep(str(SWEEP_A))
+        service = DashboardService(QueryService(store))
+        active = callbacks.overview_facts(service, PROJECT)
+        everything = callbacks.overview_facts(service, PROJECT, scope_all=True)
+        assert len(active["sweeps"]) == 0
+        assert len(everything["sweeps"]) == 1
+        assert everything["sweeps"][0][-1] is False
 
 
 class TestPickerNavigationMirrorGuard:
@@ -499,6 +468,30 @@ class TestPickerNavigationMirrorGuard:
         assert payload["url"]["pathname"] == "/dashboard/"
 
 
+class TestScrollRestoreWiring:
+    """The g5rw.9 Series view's Refresh button captures and restores
+    scroll through the refresh-state store; the old workspace re-render
+    input is gone with the deleted region callbacks."""
+
+    def test_refresh_state_still_drives_the_restore(self, callback_map):
+        restores = [
+            specs
+            for key, specs in callback_map.items()
+            if any(out.startswith("scroll-restore-store") for out in _outputs_of(key))
+            and any(
+                "analysis-refresh-store" in str(dep["id"]) for dep in specs["inputs"]
+            )
+        ]
+        assert len(restores) == 1
+        inputs = {
+            dep["id"]
+            if isinstance(dep["id"], str)
+            else json.dumps(dep["id"], sort_keys=True)
+            for dep in restores[0]["inputs"]
+        }
+        assert inputs == {'{"analysis-refresh-store":["ALL"]}'}
+
+
 class TestPageChromeSwap:
     """New-shell pages render their own topbar, so the chrome swap hides
     the legacy nav for them and restores it for legacy pages."""
@@ -523,472 +516,3 @@ class TestPageChromeSwap:
         response, payload = self._swap(client, callback_map, WORKSPACE)
         assert response.status_code == 200
         assert payload["nav"]["style"] == {}
-
-
-class TestSweepsBrowserTickGuard:
-    """The sweeps loader's digest guard (unchanged rows on a poll tick
-    ship nothing) pinned so it cannot regress silently. jernerics-2se:
-    the scope now lives in the view doc — an unchanged scope on a tick
-    must ship nothing, and an unrelated view edit (focus) must not
-    re-ship the grid either."""
-
-    _WANTED = {
-        "sweep-grid.rowData",
-        "sweep-grid.selectedRows",
-        "workspace-curation-note.children",
-        "sweep-browser-facts-store.data",
-    }
-
-    def _fire(self, client, callback_map, view_doc, facts, changed):
-        return _dispatch(
-            client,
-            callback_map,
-            self._WANTED,
-            inputs=[
-                _PROJECT_STATE,
-                {"id": "view-store", "property": "data", "value": view_doc},
-                _TICK_INPUT,
-            ],
-            state=[
-                {"id": "sweep-grid", "property": "selectedRows", "value": None},
-                {
-                    "id": "sweep-browser-facts-store",
-                    "property": "data",
-                    "value": facts,
-                },
-            ],
-            changed=changed,
-        )
-
-    def test_unchanged_rows_tick_is_skipped(self, authed, callback_map):
-        client, _store = authed
-        response, loaded = self._fire(client, callback_map, None, None, None)
-        assert response.status_code == 200
-        facts = loaded["sweep-browser-facts-store"]["data"]
-        assert facts["digest"]
-        tick = self._fire(
-            client,
-            callback_map,
-            None,
-            facts,
-            ["poll.n_intervals"],
-        )
-        assert tick[0].status_code == 204
-
-    def test_unchanged_scope_on_a_tick_ships_nothing(self, authed, callback_map):
-        """jernerics-2se regression: the sweep picks hydrate into the
-        view doc; a poll tick carrying the same scope ships nothing."""
-        client, _store = authed
-        sweep_id = str(SWEEP_A)
-        doc = default_view_state()
-        doc["scope"]["sweeps"] = [sweep_id]
-        response, loaded = self._fire(
-            client, callback_map, doc, None, ["view-store.data"]
-        )
-        assert response.status_code == 200
-        facts = loaded["sweep-browser-facts-store"]["data"]
-        assert facts["sweeps"] == [sweep_id]
-        picked = [row["sweep_id"] for row in loaded["sweep-grid"]["selectedRows"]]
-        assert picked == [sweep_id]
-        # a tick re-fires with the identical doc: the digest guard skips
-        tick = self._fire(client, callback_map, doc, facts, ["poll.n_intervals"])
-        assert tick[0].status_code == 204
-        # an identical scope re-write through the store is skipped too
-        again = self._fire(client, callback_map, doc, facts, ["view-store.data"])
-        assert again[0].status_code == 204
-
-
-class TestInspectorPollCascade:
-    """The per-tick inspector re-render rebuilt the focus controls,
-    re-firing the focus editor (the double view-store writer) on every
-    tick; identical content must ship nothing."""
-
-    def _fire(self, client, cmap, view_doc, rendered):
-        return _dispatch(
-            client,
-            cmap,
-            {"inspector.children", "inspector-render-store.data"},
-            inputs=[
-                {"id": "view-store", "property": "data", "value": view_doc},
-                _TICK_INPUT,
-            ],
-            state=[
-                _PROJECT_STATE,
-                {"id": "inspector-render-store", "property": "data", "value": rendered},
-            ],
-        )
-
-    def test_focused_renders_then_static_tick_ships_nothing(self, authed, callback_map):
-        client, _store = authed
-        focused = {"focus": {"kind": "sweep", "id": str(SWEEP_A)}}
-        response, payload = self._fire(client, callback_map, focused, None)
-        assert response.status_code == 200
-        assert "alpha" in response.text
-        rendered = payload["inspector-render-store"]["data"]
-        assert rendered["focus"] == focused["focus"]
-        tick = self._fire(client, callback_map, focused, rendered)
-        assert tick[0].status_code == 204
-
-    def test_unfocused_placeholder_tick_ships_nothing(self, authed, callback_map):
-        client, _store = authed
-        response, payload = self._fire(client, callback_map, None, None)
-        assert response.status_code == 200
-        rendered = payload["inspector-render-store"]["data"]
-        tick = self._fire(client, callback_map, None, rendered)
-        assert tick[0].status_code == 204
-
-
-class TestInspectorFactsGuard:
-    """jernerics-g6t: the inspector tick digest covers canonical facts
-    computed before any tree build, so an unchanged tick runs no sweep
-    detail, builds no tree, and ships nothing — while a real fact change
-    (a new execution) still re-renders."""
-
-    def _fire(self, client, cmap, view_doc, rendered):
-        return _dispatch(
-            client,
-            cmap,
-            {"inspector.children", "inspector-render-store.data"},
-            inputs=[
-                {"id": "view-store", "property": "data", "value": view_doc},
-                _TICK_INPUT,
-            ],
-            state=[
-                _PROJECT_STATE,
-                {"id": "inspector-render-store", "property": "data", "value": rendered},
-            ],
-        )
-
-    def _focused(self) -> dict:
-        return {"focus": {"kind": "sweep", "id": str(SWEEP_A)}}
-
-    def test_facts_carry_no_relative_time_and_digest_is_stable(self, authed):
-        _client, store = authed
-        service = DashboardService(QueryService(store))
-        facts = callbacks.inspector_facts(service, self._focused()["focus"])
-        assert "ago" not in json.dumps(facts, default=str)
-        assert callbacks._content_digest(facts) == callbacks._content_digest(
-            callbacks.inspector_facts(service, self._focused()["focus"])
-        )
-
-    def test_unchanged_tick_builds_no_tree_and_ships_nothing(
-        self, authed, callback_map, monkeypatch
-    ):
-        client, _store = authed
-        builds = []
-        real = workspace.inspector_content
-
-        def spy(*args, **kwargs):
-            builds.append(args)
-            return real(*args, **kwargs)
-
-        monkeypatch.setattr(workspace, "inspector_content", spy)
-        response, payload = self._fire(client, callback_map, self._focused(), None)
-        assert response.status_code == 200
-        rendered = payload["inspector-render-store"]["data"]
-        assert len(builds) == 1
-        tick = self._fire(client, callback_map, self._focused(), rendered)
-        assert tick[0].status_code == 204
-        assert len(builds) == 1
-
-    def test_wall_clock_advance_alone_keeps_the_digest(self, authed, callback_map):
-        client, _store = authed
-        focused = self._focused()
-        _response, payload = self._fire(client, callback_map, focused, None)
-        rendered = payload["inspector-render-store"]["data"]
-        later = time.time_ns() + 120_000_000_000
-        with mock.patch("time.time_ns", return_value=later):
-            tick = self._fire(client, callback_map, focused, rendered)
-        assert tick[0].status_code == 204
-
-    def test_sweep_tick_never_invokes_sweep_detail(self, authed, callback_map):
-        client, _store = authed
-        focused = self._focused()
-        _response, payload = self._fire(client, callback_map, focused, None)
-        assert payload["inspector-render-store"]["data"]
-        rendered = payload["inspector-render-store"]["data"]
-        with mock.patch.object(DashboardService, "sweep_detail") as spy:
-            tick = self._fire(client, callback_map, focused, rendered)
-            assert tick[0].status_code == 204
-            assert spy.call_count == 0
-
-    def test_new_execution_rebuilds_the_inspector(self, authed, callback_map):
-        client, store = authed
-        focused = self._focused()
-        _response, payload = self._fire(client, callback_map, focused, None)
-        rendered = payload["inspector-render-store"]["data"]
-        _start_execution(store, EXEC_B, 10)
-        response, payload = self._fire(client, callback_map, focused, rendered)
-        assert response.status_code == 200
-        assert "dd200000" in response.text
-        assert payload["inspector-render-store"]["data"]["digest"] != rendered["digest"]
-
-    def test_sweep_inspector_renders_executions_through_the_grid(
-        self, authed, callback_map
-    ):
-        client, _store = authed
-        response, _payload = self._fire(client, callback_map, self._focused(), None)
-        assert response.status_code == 200
-        assert "focus-executions" in response.text
-
-
-class TestExecutionsGridFocus:
-    """The sweep inspector's executions grid focuses an execution on row
-    click, replacing the plain table's per-row focus buttons."""
-
-    _EDIT_INPUT_IDS = {
-        '{"focus-object":["ALL"]}',
-        "inspector-close",
-        "sweep-grid",
-        '{"overview-grid":["ALL"]}',
-        '{"focus-family":["ALL"]}',
-        "analysis-family-grid",
-        '{"focus-executions":["ALL"]}',
-    }
-
-    def _click(self, client, cmap, click):
-        key = _callback_key(cmap, {"view-store.data"}, self._EDIT_INPUT_IDS)
-        return _dispatch(
-            client,
-            cmap,
-            {"view-store.data"},
-            inputs=[
-                {
-                    "id": {"focus-object": "sweep:aaaaaaaa"},
-                    "property": "n_clicks",
-                    "value": None,
-                },
-                {"id": "inspector-close", "property": "n_clicks", "value": None},
-                {"id": "sweep-grid", "property": "cellClicked", "value": None},
-                {
-                    "id": {"overview-grid": "sweeps"},
-                    "property": "cellClicked",
-                    "value": None,
-                },
-                {
-                    "id": "analysis-family-grid",
-                    "property": "cellClicked",
-                    "value": None,
-                },
-                {
-                    "id": {"focus-family": "grid"},
-                    "property": "cellClicked",
-                    "value": None,
-                },
-                {
-                    "id": {"focus-executions": "grid"},
-                    "property": "cellClicked",
-                    "value": click,
-                },
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-            changed=['{"focus-executions": "grid"}.cellClicked'],
-            key=key,
-        )
-
-    def test_row_click_focuses_the_execution(self, authed, callback_map):
-        client, _store = authed
-        response, payload = self._click(client, callback_map, {"rowId": str(EXEC_A)})
-        assert response.status_code == 200
-        assert payload["view-store"]["data"]["focus"] == {
-            "kind": "execution",
-            "id": str(EXEC_A),
-        }
-
-    def test_click_without_a_row_id_is_skipped(self, authed, callback_map):
-        client, _store = authed
-        response, _payload = self._click(client, callback_map, {"rowId": ""})
-        assert response.status_code == 204
-
-
-class TestScrollRestoreWiring:
-    """jernerics-l4k: saved scroll restores after a genuine overview
-    re-render."""
-
-    def test_overview_re_renders_trigger_the_restore(self, callback_map):
-        restores = [
-            specs
-            for key, specs in callback_map.items()
-            if "scroll-restore-store.data" in _outputs_of(key)
-            and any(spec["id"] == "workspace-overview" for spec in specs["inputs"])
-        ]
-        assert len(restores) == 1
-        inputs = {
-            dep["id"]
-            if isinstance(dep["id"], str)
-            else json.dumps(dep["id"], sort_keys=True)
-            for dep in restores[0]["inputs"]
-        }
-        # The g5rw.9 Series view restored the Refresh button's scroll
-        # capture: its refresh-state store rides the same restore.
-        assert inputs == {'{"analysis-refresh-store":["ALL"]}', "workspace-overview"}
-
-
-_HYDRATION_OUTPUTS = {
-    "analysis-message-store.data",
-    "view-store.data",
-}
-_TRAY_EDIT_OUTPUTS = {"view-store.data"}
-_INCLUDE_EDIT_OUTPUTS = {"view-store.data"}
-_MERGED_SYNC_OUTPUTS = {
-    '{"analysis-tabs":["ALL"]}.value',
-    "analysis-include.value",
-    "analysis-expand.value",
-}
-
-
-class TestHydrationCanonicalEcho:
-    """jernerics-haj: hydration writes the canonical view doc, so the
-    control-sync -> edit-callback echo finds the store already in the
-    form it would compute and ships nothing — the load cascade's lap-2
-    store writes and the region re-renders they drag along."""
-
-    def _hydrate(self, client, cmap, search, view):
-        return _dispatch(
-            client,
-            cmap,
-            _HYDRATION_OUTPUTS,
-            inputs=[
-                {"id": "url", "property": "pathname", "value": WORKSPACE},
-                {"id": "url", "property": "search", "value": search},
-                _PROJECT_STATE,
-            ],
-            state=[{"id": "view-store", "property": "data", "value": view}],
-            changed=["url.search"],
-        )
-
-    def test_tray_echo_after_hydration_ships_nothing(self, authed, callback_map):
-        client, _store = authed
-        token = encode_selection(
-            Selection(
-                project=PROJECT,
-                sweeps=(SWEEP_B, SWEEP_A, SWEEP_B),
-                retry_roots=(ROOT_B, ROOT_A, ROOT_B),
-            )
-        )
-        response, payload = self._hydrate(
-            client, callback_map, f"?sel={token}", default_view_state()
-        )
-        assert response.status_code == 200
-        doc = payload["view-store"]["data"]
-        assert doc["scope"]["sweeps"] == sorted({str(SWEEP_A), str(SWEEP_B)})
-        assert doc["scope"]["families"] == sorted({str(ROOT_A), str(ROOT_B)})
-        echo = _dispatch(
-            client,
-            callback_map,
-            _TRAY_EDIT_OUTPUTS,
-            inputs=[
-                {
-                    "id": "analysis-family-grid",
-                    "property": "selectedRows",
-                    "value": [{"root": str(ROOT_B)}, {"root": str(ROOT_A)}],
-                },
-                {
-                    "id": "analysis-expand",
-                    "property": "value",
-                    "value": expand_values(doc),
-                },
-            ],
-            state=[{"id": "view-store", "property": "data", "value": doc}],
-            changed=["analysis-family-grid.selectedRows", "analysis-expand.value"],
-            key=_callback_key(
-                callback_map,
-                _TRAY_EDIT_OUTPUTS,
-                {"analysis-family-grid", "analysis-expand"},
-            ),
-        )
-        assert echo[0].status_code == 204
-
-    def test_include_echo_after_hydration_ships_nothing(self, authed, callback_map):
-        client, _store = authed
-        doc = default_view_state()
-        doc["scope"]["include_archived"] = True
-        doc["scope"]["include_invalid"] = True
-        response, payload = self._hydrate(
-            client, callback_map, f"?view={encode_view_state(doc)}", None
-        )
-        assert response.status_code == 200
-        assert payload["view-store"]["data"] == doc
-        echo = _dispatch(
-            client,
-            callback_map,
-            _INCLUDE_EDIT_OUTPUTS,
-            inputs=[
-                {
-                    "id": "analysis-include",
-                    "property": "value",
-                    "value": include_values(doc),
-                }
-            ],
-            state=[{"id": "view-store", "property": "data", "value": doc}],
-            changed=["analysis-include.value"],
-            key=_callback_key(
-                callback_map, _INCLUDE_EDIT_OUTPUTS, {"analysis-include"}
-            ),
-        )
-        assert echo[0].status_code == 204
-
-    def test_rehydrating_the_hydrated_scope_rewrites_nothing(
-        self, authed, callback_map
-    ):
-        client, _store = authed
-        token = encode_selection(
-            Selection(project=PROJECT, retry_roots=(ROOT_A, ROOT_B))
-        )
-        _response, payload = self._hydrate(client, callback_map, f"?sel={token}", None)
-        doc = payload["view-store"]["data"]
-        again, payload = self._hydrate(client, callback_map, f"?sel={token}", doc)
-        assert again.status_code == 200
-        assert "view-store" not in payload
-
-
-class TestMergedControlSync:
-    """The three control syncs merged into one callback: one POST per
-    store change, producing the include/expand/tab values the separate
-    syncs wrote for the same store states."""
-
-    def _sync(self, client, cmap, doc):
-        return _dispatch(
-            client,
-            cmap,
-            _MERGED_SYNC_OUTPUTS,
-            inputs=[{"id": "view-store", "property": "data", "value": doc}],
-            changed=["view-store.data"],
-        )
-
-    def test_defaults_match_the_separate_syncs(self, authed, callback_map):
-        client, _store = authed
-        response, payload = self._sync(client, callback_map, None)
-        assert response.status_code == 200
-        tabs_key = next(
-            key for key in payload if key.lstrip("{").startswith('"analysis-tabs"')
-        )
-        assert payload[tabs_key]["value"] == ["overview"]
-        assert payload["analysis-include"]["value"] == []
-        assert payload["analysis-expand"]["value"] == []
-
-    def test_hydrated_state_matches_the_separate_syncs(self, authed, callback_map):
-        client, _store = authed
-        doc = default_view_state() | {
-            "active": "investigations",
-            "scope": default_scope_state() | {"include_archived": True, "expand": True},
-        }
-        response, payload = self._sync(client, callback_map, doc)
-        assert response.status_code == 200
-        tabs_key = next(
-            key for key in payload if key.lstrip("{").startswith('"analysis-tabs"')
-        )
-        assert payload[tabs_key]["value"] == ["investigations"]
-        assert payload["analysis-include"]["value"] == ["archived"]
-        assert payload["analysis-expand"]["value"] == ["expand"]
-
-    def test_one_writer_for_all_control_values(self, callback_map):
-        writers = [
-            key
-            for key in callback_map
-            if _outputs_of(key) & {"analysis-include.value", "analysis-expand.value"}
-        ]
-        assert len(writers) == 1
-        assert _outputs_of(writers[0]) == _MERGED_SYNC_OUTPUTS
-        inputs = {spec["id"] for spec in callback_map[writers[0]]["inputs"]}
-        assert "view-store" in inputs

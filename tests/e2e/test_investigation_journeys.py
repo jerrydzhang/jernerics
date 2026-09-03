@@ -36,7 +36,6 @@ from jernerics_schema import (
 from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
     investigation_scope_state,
-    investigation_view_href,
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.callbacks import page_content
@@ -748,55 +747,21 @@ class TestDashboardJourney:
     def test_sweep_opened_from_the_investigation_returns_via_the_hub(
         self, world, saved
     ):
+        """The member sweep link carries the investigation return path
+        (?via=); the sweep hub page consuming it lands with R4
+        (jernerics-zj9b) — this journey pins the link contract."""
         investigation_id = saved["url"]["pathname"].rsplit("/", 1)[1]
         sgd = world.sweep_ids[ROBERTS_SGD]
-        # the member inventory links straight to the sweep page and
-        # carries the investigation return path
-        page, _polls = page_content(_inv_url(investigation_id), world.service)
+        path, search = _view_url(investigation_id, "compare", None)
+        page, _polls = page_content(path, world.service, search=search)
         via_link = next(
             node
             for node in _components(page)
             if isinstance(node, html.A)
-            and node.href
+            and getattr(node, "href", None)
             and node.href.endswith(f"/sweep/{sgd}?via={investigation_id}")
         )
         assert via_link.children == ROBERTS_SGD
-
-        hub = workspace.inspector_content(
-            world.service,
-            {"kind": "sweep", "id": sgd},
-            time.time_ns(),
-            project=PROJECT,
-            via=investigation_id,
-        )
-        text = _page_text(hub)
-        assert PROJECT in text and "Investigations" in text
-        assert MAIN_INV in text and ROBERTS_SGD in text
-        links = {
-            node.children: node.href
-            for node in _components(hub)
-            if isinstance(node, html.A) and node.href
-        }
-        assert links[f"Back to {MAIN_INV}"] == investigation_view_href(
-            PROJECT, investigation_id, "compare"
-        )
-        assert links["Series"] == investigation_view_href(
-            PROJECT, investigation_id, "series", sgd
-        )
-        assert links["Points"] == investigation_view_href(
-            PROJECT, investigation_id, "points", sgd
-        )
-        assert links["Search"] == investigation_view_href(
-            PROJECT, investigation_id, "search"
-        )
-
-        plain = workspace.inspector_content(
-            world.service,
-            {"kind": "sweep", "id": sgd},
-            time.time_ns(),
-            project=PROJECT,
-        )
-        assert f"Back to {MAIN_INV}" not in _page_text(plain)
 
     def test_open_in_python_token_decodes_to_the_materialized_selection(
         self, world, saved

@@ -846,22 +846,22 @@ def synced_search(
     url_navigated: bool,
 ) -> str | None:
     """The URL search after a navigation or a view edit; ``None`` leaves
-    it alone. Navigations may only drop the workspace parameters —
-    minting on navigation would let a stale document clobber a freshly
-    opened deep link before hydration lands, and the editor and
-    investigation pages keep their own queries. View edits mint on the
-    workspace page; the scope rides the document, so no separate
-    ``?sel=`` is minted anymore. Investigation pages own their plain
-    query string (view, member, filters); their state never mints."""
+    it alone. Navigations may only drop stale workspace-codec tokens
+    (``?view=``/``?sel=``) — minting on navigation would let a stale
+    document clobber a freshly opened deep link before hydration lands.
+    Every page owns its own query string now (workspace: scope/filter/
+    limit/page; investigation: view/member params; editor: sweeps seed);
+    their state never mints, and the workspace page owns its search
+    parameters outright, so a ``view=`` write there would clobber them."""
     if url_navigated:
         kind = parse_route(pathname).kind
-        if kind in ("workspace", "investigation", "investigation-edit"):
+        # The investigation pages use ``view`` as their own parameter, so
+        # the codec-token drop must never touch their navigation.
+        if kind == "investigation":
             return None
-        # Other pages (exceptions, sweep) carry their own query state;
-        # navigation may only drop the workspace parameters, never theirs.
         remaining = _drop_workspace_params(current_search or "")
         return remaining if remaining != (current_search or "") else None
-    if parse_route(pathname).kind != "workspace":
+    if parse_route(pathname).kind != "investigation":
         return None
     return search_from_state(view_doc, current_search)
 

@@ -1050,7 +1050,11 @@ class QueryService:
             "FROM executions e JOIN trials t ON e.trial_id = t.trial_id "
             "JOIN sel ON t.sweep_id = sel.sweep_id) x GROUP BY x.sweep_id), "
             "trial_states AS ("
-            "SELECT t.sweep_id AS sweep_id, COUNT(*) AS trials, "
+            "SELECT t.sweep_id AS sweep_id, "
+            "COUNT(*) AS trials, "
+            "SUM(t.state = 'completed') AS trials_complete, "
+            "MIN(CASE WHEN t.state = 'completed' THEN t.objective END) "
+            "AS best_objective, "
             "SUM(t.state = 'waiting') AS waiting, "
             "SUM(t.state = 'running') AS running "
             "FROM trials t JOIN sel ON t.sweep_id = sel.sweep_id "
@@ -1062,7 +1066,8 @@ class QueryService:
             "COALESCE(m.n_stale, 0), COALESCE(m.n_unknown, 0), "
             "COALESCE(m.n_succeeded, 0), COALESCE(m.n_failed, 0), "
             "COALESCE(ts.waiting, 0), COALESCE(ts.running, 0), "
-            "COALESCE(ts.trials, 0), "
+            "COALESCE(ts.trials, 0), COALESCE(ts.trials_complete, 0), "
+            "ts.best_objective, "
             "sel.archived_ns, sel.invalid_ns, sel.invalid_reason "
             "FROM sel LEFT JOIN latest_sub ls ON ls.sweep_id = sel.sweep_id "
             "LEFT JOIN jobs j ON j.sweep_id = sel.sweep_id "
@@ -1093,6 +1098,8 @@ class QueryService:
                         "waiting_trials",
                         "running_trials",
                         "trials",
+                        "trials_complete",
+                        "best_objective",
                         "archived_ns",
                         "invalid_ns",
                         "invalid_reason",

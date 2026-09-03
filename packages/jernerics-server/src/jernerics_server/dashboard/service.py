@@ -108,6 +108,8 @@ class SweepSummary:
     waiting_trials: int
     running_trials: int
     trials: int
+    trials_complete: int
+    best_objective: float | None
     archived_ns: int | None
     invalid_ns: int | None
     invalid_reason: str | None
@@ -424,6 +426,8 @@ class DashboardService:
                 waiting_trials=row["waiting_trials"],
                 running_trials=row["running_trials"],
                 trials=row["trials"],
+                trials_complete=row["trials_complete"],
+                best_objective=row["best_objective"],
                 archived_ns=row["archived_ns"],
                 invalid_ns=row["invalid_ns"],
                 invalid_reason=row["invalid_reason"],
