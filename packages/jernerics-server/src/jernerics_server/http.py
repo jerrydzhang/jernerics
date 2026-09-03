@@ -1,7 +1,7 @@
 import hashlib
 import os
 import uuid as uuid_lib
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ from jernerics_schema import (
     IngestError,
     IngestRequest,
     IngestResponse,
+    InvestigationRecord,
     JobResourcesQuery,
     LineageQuery,
     ProjectsQuery,
@@ -29,8 +30,18 @@ from pydantic import BaseModel
 from starlette.responses import FileResponse
 
 from .ingest import IngestService, IngestServiceError
+from .investigations import InvestigationService
 from .queries import QueryService, QueryServiceError
-from .store import QueryNotAuthorizedError, QueryResourceLimitError, Store
+from .store import (
+    CrossProjectSweepError,
+    InvestigationConflictError,
+    InvestigationNotFoundError,
+    QueryNotAuthorizedError,
+    QueryResourceLimitError,
+    Store,
+    StoreError,
+    SweepNotFoundError,
+)
 
 _READ_ONLY_KEYWORDS = {"SELECT", "WITH", "VALUES", "EXPLAIN", "SHOW", "DESCRIBE"}
 MAX_ROWS = 10_000
@@ -53,9 +64,9 @@ def _records_response(
     return JSONResponse(content={"records": dumped, "next_token": next_token})
 
 
-def _structured_error(code: str, detail: str) -> JSONResponse:
+def _structured_error(code: str, detail: str, status_code: int = 400) -> JSONResponse:
     return JSONResponse(
-        status_code=400,
+        status_code=status_code,
         content=QueryErrorResponse(
             error=QueryErrorBody(code=code, detail=detail)
         ).model_dump(mode="json"),
@@ -66,9 +77,68 @@ def _query_error(e: QueryServiceError) -> JSONResponse:
     return _structured_error(e.code, str(e))
 
 
+_INVESTIGATION_ERRORS: tuple[tuple[type[StoreError], int, str], ...] = (
+    (InvestigationNotFoundError, 404, "investigation_not_found"),
+    (InvestigationConflictError, 409, "investigation_conflict"),
+    (SweepNotFoundError, 404, "sweep_not_found"),
+    (CrossProjectSweepError, 422, "cross_project_sweep"),
+)
+
+
+def _investigation_error(e: StoreError) -> JSONResponse:
+    for error_type, status, code in _INVESTIGATION_ERRORS:
+        if isinstance(e, error_type):
+            return _structured_error(code, str(e), status_code=status)
+    raise e
+
+
+def _investigation_mutation(
+    mutate: Callable[[], InvestigationRecord],
+) -> JSONResponse:
+    try:
+        record = mutate()
+    except StoreError as e:
+        return _investigation_error(e)
+    return JSONResponse(content=record.model_dump(mode="json"))
+
+
 class QueryRequest(BaseModel):
     sql: str
     params: list | None = None
+
+
+class InvestigationsListRequest(BaseModel):
+    project: str
+    include_archived: bool = False
+
+
+class InvestigationGetRequest(BaseModel):
+    investigation_id: str | None = None
+    project: str | None = None
+    name: str | None = None
+
+
+class InvestigationCreateRequest(BaseModel):
+    project: str
+    name: str
+    factor: str
+    outcome: str
+    replicate_factor: str | None = None
+    members: list[str] = []
+
+
+class InvestigationMembersRequest(BaseModel):
+    investigation_id: str
+    sweep_ids: list[str] = []
+
+
+class InvestigationIdRequest(BaseModel):
+    investigation_id: str
+
+
+class InvestigationPreviewRequest(BaseModel):
+    project: str
+    sweep_ids: list[str] = []
 
 
 _EMPTY_PROJECTS_QUERY = ProjectsQuery()
@@ -180,6 +250,7 @@ def create_app(
         heartbeat_stale_s=heartbeat_stale_s,
         artifacts_root=Path(artifacts_root) if artifacts_root is not None else None,
     )
+    investigation_service = InvestigationService(store)
     dashboard_ctx = None
     artifact_get_deps: list = []
     if dashboard:
@@ -517,6 +588,86 @@ def create_app(
                     "Cache-Control": "private, max-age=31536000, immutable",
                 },
             )
+
+    @app.post("/investigations", response_model=None, dependencies=deps)
+    def investigations_list(req: InvestigationsListRequest) -> JSONResponse:
+        return _records_response(
+            investigation_service.list_for_project(
+                req.project, include_archived=req.include_archived
+            )
+        )
+
+    @app.post("/investigations/get", response_model=None, dependencies=deps)
+    def investigations_get(req: InvestigationGetRequest) -> JSONResponse:
+        try:
+            if req.investigation_id is not None:
+                detail = investigation_service.detail(req.investigation_id)
+            elif req.project is not None and req.name is not None:
+                detail = investigation_service.detail_by_name(req.project, req.name)
+            else:
+                return _structured_error(
+                    "invalid_request",
+                    "pass either investigation_id or project and name",
+                )
+        except InvestigationNotFoundError as e:
+            return _investigation_error(e)
+        return JSONResponse(content=detail.model_dump(mode="json"))
+
+    @app.post("/investigations/create", response_model=None, dependencies=deps)
+    def investigations_create(req: InvestigationCreateRequest) -> JSONResponse:
+        return _investigation_mutation(
+            lambda: investigation_service.create(
+                req.project,
+                req.name,
+                req.factor,
+                req.outcome,
+                replicate_factor=req.replicate_factor,
+                members=req.members,
+            )
+        )
+
+    @app.post("/investigations/members/set", response_model=None, dependencies=deps)
+    def investigations_members_set(req: InvestigationMembersRequest) -> JSONResponse:
+        return _investigation_mutation(
+            lambda: investigation_service.set_members(
+                req.investigation_id, req.sweep_ids
+            )
+        )
+
+    @app.post("/investigations/members/add", response_model=None, dependencies=deps)
+    def investigations_members_add(req: InvestigationMembersRequest) -> JSONResponse:
+        return _investigation_mutation(
+            lambda: investigation_service.add_members(
+                req.investigation_id, req.sweep_ids
+            )
+        )
+
+    @app.post("/investigations/members/remove", response_model=None, dependencies=deps)
+    def investigations_members_remove(
+        req: InvestigationMembersRequest,
+    ) -> JSONResponse:
+        return _investigation_mutation(
+            lambda: investigation_service.remove_members(
+                req.investigation_id, req.sweep_ids
+            )
+        )
+
+    @app.post("/investigations/archive", response_model=None, dependencies=deps)
+    def investigations_archive(req: InvestigationIdRequest) -> JSONResponse:
+        return _investigation_mutation(
+            lambda: investigation_service.archive(req.investigation_id)
+        )
+
+    @app.post("/investigations/restore", response_model=None, dependencies=deps)
+    def investigations_restore(req: InvestigationIdRequest) -> JSONResponse:
+        return _investigation_mutation(
+            lambda: investigation_service.restore(req.investigation_id)
+        )
+
+    @app.post("/investigations/preview", response_model=None, dependencies=deps)
+    def investigations_preview(req: InvestigationPreviewRequest) -> JSONResponse:
+        preview = investigation_service.preview(req.project, req.sweep_ids)
+        return JSONResponse(content=preview.model_dump(mode="json"))
 
     @app.get("/api/health", response_model=None, dependencies=deps)
     def health() -> JSONResponse:
