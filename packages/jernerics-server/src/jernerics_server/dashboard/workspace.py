@@ -3,12 +3,14 @@ import time
 from collections import Counter
 from collections.abc import Sequence
 from typing import Any
+from uuid import UUID
 
 from dash import dcc, html
 from dash_ag_grid import AgGrid
 from jernerics_schema import (
     ExecutionRecord,
     InvestigationRecord,
+    Selection,
     encode_selection,
     materialize_selection,
 )
@@ -19,6 +21,7 @@ from .render import SortColumn, sort_rows, sortable_columns
 from .routes import ROUTES_BASE
 from .service import (
     CompareDocument,
+    CurationRejectedError,
     CurationUnavailableError,
     DashboardService,
     ExecutionDetail,
@@ -33,6 +36,8 @@ from .service import (
 
 FOCUS_KINDS = ("sweep", "trial", "execution")
 
+INVESTIGATION_VIEWS = analysis.INVESTIGATION_VIEWS
+"""Re-exported view vocabulary; the ``view=`` codec owns the names."""
 
 _INCOMPLETE_TRIAL_STATES = ("waiting", "running")
 
@@ -975,11 +980,96 @@ def inspector_placeholder() -> html.Div:
     )
 
 
+def _via_investigation(
+    service: DashboardService, project: str, via: str | None
+) -> InvestigationRecord | None:
+    """The investigation a ``via`` return path names, when it exists in
+    this store and belongs to the same project; anything else is an
+    unknown context and renders none."""
+    if not via:
+        return None
+    try:
+        record = service.investigation_detail(str(via)).investigation
+    except (CurationRejectedError, CurationUnavailableError):
+        return None
+    return record if record.project == project else None
+
+
+def sweep_hub_header(
+    service: DashboardService,
+    project: str,
+    sweep_id: str,
+    sweep_name: str,
+    via: str | None,
+) -> list[Any]:
+    """Breadcrumb, back link, and the data-supported views row for a
+    sweep opened from an investigation: Series and Points narrow to this
+    member, Search opens over all members, Overview is the hub itself.
+    A sweep reached outside an investigation renders no hub."""
+    record = _via_investigation(service, project, via)
+    if record is None:
+        return []
+    series_supported = any(
+        entry["kind"] == "scalar" and entry["steps"]
+        for entry in service.analysis_value_keys(project, {"sweeps": [sweep_id]})
+    )
+    detail = service.sweep_detail(sweep_id)
+    points_supported = bool(detail and detail.overview.started)
+    views: list[Any] = [html.Span("Overview", className="on")]
+    if series_supported:
+        views.append(
+            html.A(
+                "Series",
+                href=analysis.investigation_view_href(
+                    project, str(record.id), "series", sweep_id
+                ),
+            )
+        )
+    if points_supported:
+        views.append(
+            html.A(
+                "Points",
+                href=analysis.investigation_view_href(
+                    project, str(record.id), "points", sweep_id
+                ),
+            )
+        )
+    views.append(
+        html.A(
+            "Search",
+            href=analysis.investigation_view_href(project, str(record.id), "search"),
+        )
+    )
+    return [
+        investigation_crumb(project, record.name, sweep_name),
+        html.Div(
+            [
+                html.Span("Views", className="annotate"),
+                html.Div(views, className="seg"),
+                html.A(
+                    f"Back to {record.name}",
+                    href=analysis.investigation_view_href(
+                        project, str(record.id), "compare"
+                    ),
+                    className="btn-link",
+                ),
+            ],
+            className="inv-views",
+        ),
+    ]
+
+
 def inspector_content(
-    service: DashboardService, focus: dict[str, Any] | None, now_ns: int
+    service: DashboardService,
+    focus: dict[str, Any] | None,
+    now_ns: int,
+    project: str = "",
+    via: str | None = None,
 ) -> html.Div:
     """The focused object's factual content; a missing id is named, not
-    hidden."""
+    hidden. A sweep focus opened from an investigation carries the hub:
+    the investigation breadcrumb, the back link, and the member-scoped
+    views row."""
     if not focus:
         return inspector_placeholder()
     kind, object_id = focus.get("kind"), str(focus.get("id") or "")
@@ -996,6 +1086,13 @@ def inspector_content(
             if detail is not None
             else f"Sweep {object_id}"
         )
+        hub = sweep_hub_header(
+            service,
+            project,
+            object_id,
+            detail.overview.name if detail else object_id,
+            via,
+        )
     elif kind == "trial":
         detail = service.trial_detail(object_id)
         body = (
@@ -1004,6 +1101,7 @@ def inspector_content(
             else [components.Empty(f"No trial matches {object_id} in this store.")]
         )
         heading = f"Trial {short_id(object_id)}"
+        hub = []
     elif kind == "execution":
         detail = service.execution_detail(object_id)
         body = (
@@ -1012,6 +1110,7 @@ def inspector_content(
             else [components.Empty(f"No execution matches {object_id} in this store.")]
         )
         heading = f"Execution {short_id(object_id)}"
+        hub = []
     else:
         return html.Div(
             components.Empty(f"Unknown focus kind {kind!r}."),
@@ -1026,6 +1125,7 @@ def inspector_content(
                 ],
                 className="inspector-header",
             ),
+            *hub,
             html.Div(body, className="inspector-body"),
         ],
         className="inspector-panel",
@@ -1719,21 +1819,11 @@ def exceptions_tab(
     )
 
 
-INVESTIGATION_VIEWS = ("compare", "series", "points", "search")
-"""The Investigation workspace's view row; Series, Points, and Search
-are placeholders until jernerics-g5rw.9 mounts their content."""
-
 _INVESTIGATION_VIEW_TITLES = {
     "compare": "Compare",
     "series": "Series",
     "points": "Points",
     "search": "Search",
-}
-
-_INVESTIGATION_PLACEHOLDERS = {
-    "series": "Series at Investigation scope lands with jernerics-g5rw.9.",
-    "points": "Points at Investigation scope lands with jernerics-g5rw.9.",
-    "search": "Search over the members lands with jernerics-g5rw.9.",
 }
 
 
@@ -1744,10 +1834,15 @@ def investigations_index_href(project: str) -> str:
 
 
 def investigation_crumb(
-    project: str, name: str, view_label: str | None = None
+    project: str,
+    name: str,
+    view_label: str | None = None,
+    member_label: str | None = None,
 ) -> html.Div:
-    """``project › Investigations › name › view``; the trailing view
-    label is omitted on pages that are their own destination."""
+    """``project › Investigations › name › view › member``; the trailing
+    view and member labels are omitted on pages that are their own
+    destination. The member label is a live region: the member-scope
+    callback rewrites it without a page remount."""
     parts: list[Any] = [
         html.A(project, href=f"{ROUTES_BASE}/project/{project}"),
         html.Span(className="dim"),
@@ -1758,12 +1853,20 @@ def investigation_crumb(
     if view_label:
         parts.append(html.Span(className="dim"))
         parts.append(html.Span(view_label))
+    parts.append(
+        html.Span(
+            [html.Span(className="dim"), html.Span(member_label)]
+            if member_label
+            else [],
+            id={"inv-crumb-member": "scope"},
+        )
+    )
     return html.Div(parts, className="crumb")
 
 
-def _views_row() -> list[Any]:
-    """The view switcher: Compare on, the rest placeholders until
-    jernerics-g5rw.9; a clientside callback flips the ``on`` mark."""
+def _views_row(active: str) -> list[Any]:
+    """The view switcher; a clientside callback flips the ``on`` mark,
+    the view callback carries the state into the URL."""
     return [
         html.Span("Investigation views", className="annotate"),
         html.Div(
@@ -1771,7 +1874,7 @@ def _views_row() -> list[Any]:
                 html.Button(
                     _INVESTIGATION_VIEW_TITLES[view],
                     id={"inv-view": view},
-                    className="on" if view == "compare" else "",
+                    className="on" if view == active else "",
                 )
                 for view in INVESTIGATION_VIEWS
             ],
@@ -1780,39 +1883,71 @@ def _views_row() -> list[Any]:
     ]
 
 
-def open_in_python(record: InvestigationRecord) -> html.Details:
-    """The effective membership as an encoded Selection token plus the
-    runnable handoff snippet — a plain disclosure, no callback."""
-    token = encode_selection(materialize_selection(record))
+def member_scope_row(member_label: str | None) -> html.Div:
+    """The member-scope line: the visible scope fact plus the one-click
+    way back to the full cohort (hidden while unscoped)."""
+    return html.Div(
+        [
+            html.Span(
+                f"Scoped to member {member_label}" if member_label else "",
+                id={"inv-member-note": "scope"},
+                className="annotate",
+            ),
+            html.Button(
+                "All members",
+                id={"inv-member-clear": "scope"},
+                n_clicks=0,
+                style={} if member_label else {"display": "none"},
+            ),
+        ],
+        className="member-row",
+    )
+
+
+def python_panel(record: InvestigationRecord, member: str | None = None) -> list:
+    """The effective membership (the one member when narrowed) as an
+    encoded Selection token plus the runnable handoff snippet."""
+    selection = materialize_selection(record)
+    if member:
+        selection = Selection(project=record.project, sweeps=(UUID(member),))
+    token = encode_selection(selection)
     snippet = analysis.python_snippet(token, record.project, "http://localhost:8000")
     pre_style = {"whiteSpace": "pre", "overflowX": "auto"}
+    return [
+        html.P(
+            "The token decodes to the exact effective membership via "
+            "jernerics_schema.decode_selection; point TrackingClient at "
+            "your server.",
+            className="hint",
+        ),
+        html.Div(
+            [
+                html.Pre(token, className="config-json", style=pre_style),
+                dcc.Clipboard(content=token),
+            ],
+            className="snippet-row",
+        ),
+        html.Div(
+            [
+                html.Pre(snippet, className="config-json", style=pre_style),
+                dcc.Clipboard(content=snippet),
+            ],
+            className="snippet-row",
+        ),
+    ]
+
+
+def open_in_python(
+    record: InvestigationRecord, member: str | None = None
+) -> html.Details:
+    """The Open in Python disclosure; the token content is a live region
+    the member-scope callback re-renders."""
     return html.Details(
         [
             html.Summary("Open in Python", className="btn-primary"),
             html.Div(
-                [
-                    html.P(
-                        "The token decodes to the investigation's exact "
-                        "membership via jernerics_schema.decode_selection; "
-                        "point TrackingClient at your server.",
-                        className="hint",
-                    ),
-                    html.Div(
-                        [
-                            html.Pre(token, className="config-json", style=pre_style),
-                            dcc.Clipboard(content=token),
-                        ],
-                        className="snippet-row",
-                    ),
-                    html.Div(
-                        [
-                            html.Pre(snippet, className="config-json", style=pre_style),
-                            dcc.Clipboard(content=snippet),
-                        ],
-                        className="snippet-row",
-                    ),
-                ],
-                className="py-panel",
+                python_panel(record, member),
+                id={"inv-python": "content"},
             ),
         ],
         className="py-details",
@@ -2087,58 +2222,95 @@ def compare_children(
 
 
 def investigation_page(
-    service: DashboardService, project: str, investigation_id: str
+    service: DashboardService,
+    project: str,
+    investigation_id: str,
+    search: str | None = None,
 ) -> html.Div:
     """The Investigation workspace: breadcrumb, header naming the
-    investigation, the view row, the Open in Python / Edit members
-    actions, and the Compare view (default; the only mounted view
-    until jernerics-g5rw.9)."""
+    investigation, the view row, the member-scope line, the Open in
+    Python / Edit members actions, and every view's region — Compare
+    content, the Series tray, the Points set, and the member Search.
+    The ``?view=`` document carries the active view and the member
+    scope; an unknown member falls back to all members."""
     if not project or not investigation_id:
         return html.Div(components.Empty("No investigation requested."))
     detail = service.investigation_detail(investigation_id)
     record = detail.investigation
-    doc = service.investigation_compare(investigation_id)
-    invalid = sum(1 for member in doc.members if member.invalid)
-    compare_view = html.Div(
-        [
-            coverage_strip(doc),
-            *(
-                [
-                    dcc.Checklist(
-                        id={"inv-compare-toggle": "include"},
-                        options=[
-                            {
-                                "label": " include invalid members in analysis",
-                                "value": "invalid",
-                            }
-                        ],
-                        value=[],
-                        className="include-toggle",
-                    ),
-                ]
-                if invalid
-                else []
-            ),
-            html.Div(
-                compare_children(doc, project, record.outcome, False),
-                id={"inv-compare": "content"},
-            ),
-        ],
-        id={"inv-region": "compare"},
-        style={"display": "block"},
+    decoded, error = analysis.decoded_view_param(search)
+    doc = decoded or analysis.default_view_state()
+    tray, scoped = analysis.investigation_scope_state(
+        record.members, doc["inv"]["member"]
     )
-    regions = [compare_view] + [
+    active = doc["inv"]["view"]
+    member_label = None
+    if scoped:
+        focused = service.sweep_detail(scoped)
+        member_label = focused.overview.name if focused else short_id(scoped)
+    compare = service.investigation_compare(investigation_id)
+    invalid = sum(1 for member in compare.members if member.invalid)
+    display = {"display": "block"}
+    hidden = {"display": "none"}
+    regions = [
         html.Div(
-            components.Empty(_INVESTIGATION_PLACEHOLDERS[view]),
-            id={"inv-region": view},
-            style={"display": "none"},
-        )
-        for view in INVESTIGATION_VIEWS
-        if view != "compare"
+            [
+                coverage_strip(compare),
+                *(
+                    [
+                        dcc.Checklist(
+                            id={"inv-compare-toggle": "include"},
+                            options=[
+                                {
+                                    "label": " include invalid members in analysis",
+                                    "value": "invalid",
+                                }
+                            ],
+                            value=[],
+                            className="include-toggle",
+                        ),
+                    ]
+                    if invalid
+                    else []
+                ),
+                html.Div(
+                    compare_children(compare, project, record.outcome, False),
+                    id={"inv-compare": "content"},
+                ),
+            ],
+            id={"inv-region": "compare"},
+            style=display if active == "compare" else hidden,
+        ),
+        html.Div(
+            _series_region(service, project, tray, doc),
+            id={"inv-region": "series"},
+            style=display if active == "series" else hidden,
+        ),
+        html.Div(
+            analysis.points_tab(service, project, tray, record.outcome),
+            id={"inv-region": "points"},
+            style=display if active == "points" else hidden,
+        ),
+        html.Div(
+            search_region(
+                service,
+                project,
+                investigation_id,
+                record.members,
+                scoped,
+            ),
+            id={"inv-region": "search"},
+            style=display if active == "search" else hidden,
+        ),
     ]
     return html.Div(
         [
-            investigation_crumb(project, record.name, "Compare"),
+            *([components.Error(error)] if error else []),
+            investigation_crumb(
+                project,
+                record.name,
+                _INVESTIGATION_VIEW_TITLES[active],
+                member_label,
+            ),
             html.H2(record.name),
             html.P(
                 [
@@ -2149,8 +2321,9 @@ def investigation_page(
             ),
             html.Div(
                 [
-                    *_views_row(),
-                    open_in_python(record),
+                    *_views_row(active),
+                    member_scope_row(member_label),
+                    open_in_python(record, scoped),
                     html.A(
                         "Edit members",
                         href=f"{ROUTES_BASE}/project/{project}/investigation/"
@@ -2160,9 +2333,37 @@ def investigation_page(
                 ],
                 className="inv-views",
             ),
+            html.Div(id={"analysis-error": "page"}),
             *regions,
         ],
         className="page investigation",
+    )
+
+
+def _series_region(
+    service: DashboardService,
+    project: str,
+    tray: dict[str, Any],
+    doc: dict[str, Any],
+) -> html.Div:
+    """The Series tray over the investigation scope: the sweep-scope
+    Series components, initialized from the page's view document."""
+    now = time.time_ns()
+    snapshot = analysis.series_snapshot(service, project, tray, doc, now)
+    panels, _payload, key_options, color_options, facet_options, filters, status = (
+        analysis.render_series_outputs(doc, snapshot)
+    )
+    panels, figure = analysis.extract_series_figure(panels)
+    return series_tab(
+        doc,
+        panels,
+        figure,
+        key_options,
+        color_options,
+        facet_options,
+        filters,
+        status,
+        analysis.updated_ago(now),
     )
 
 
@@ -2487,7 +2688,22 @@ def _editor_body(
     ]
 
 
-def _series_tab() -> html.Div:
+def series_tab(
+    doc: dict[str, Any],
+    panels: list[Any],
+    figure: Any,
+    key_options: list[dict[str, str]],
+    color_options: list[dict[str, Any]],
+    facet_options: list[dict[str, str]],
+    filters: list[Any],
+    status: str,
+    updated: str,
+) -> html.Div:
+    """The Series tray over the investigation scope: per-metric
+    visibility, median+IQR band vs raw traces, and focus as
+    highlight-only — the same trajectory semantics as the sweep-scope
+    Series, mounted with the page's current state."""
+    series = doc["series"]
     return html.Div(
         [
             html.Div(
@@ -2497,6 +2713,8 @@ def _series_tab() -> html.Div:
                         placeholder="Value keys…",
                         multi=True,
                         searchable=True,
+                        options=key_options,
+                        value=list(series["keys"]),
                     ),
                     dcc.RadioItems(
                         id="analysis-mode",
@@ -2504,13 +2722,20 @@ def _series_tab() -> html.Div:
                             {"label": " Stacked", "value": "stacked"},
                             {"label": " Overlay", "value": "overlay"},
                         ],
-                        value="stacked",
+                        value=series["mode"],
                         inline=True,
                     ),
-                    dcc.Dropdown(id="analysis-color", placeholder="Color by…"),
+                    dcc.Dropdown(
+                        id="analysis-color",
+                        placeholder="Color by…",
+                        options=color_options,
+                        value=series["color"],
+                    ),
                     dcc.Dropdown(
                         id="analysis-facet",
                         placeholder="Facet rows…",
+                        options=facet_options,
+                        value=series["facet"],
                     ),
                     dcc.RadioItems(
                         id="analysis-reduction",
@@ -2518,7 +2743,7 @@ def _series_tab() -> html.Div:
                             {"label": f" {name}", "value": name}
                             for name in analysis.ANALYSIS_REDUCTIONS
                         ],
-                        value="none",
+                        value=series["reduction"],
                         inline=True,
                     ),
                 ],
@@ -2533,10 +2758,14 @@ def _series_tab() -> html.Div:
                             {"label": " Highlighted only", "value": "highlighted"},
                             {"label": " Median + IQR", "value": "median_iqr"},
                         ],
-                        value="all",
+                        value=series["trial_display"],
                         inline=True,
                     ),
-                    html.Button("Refresh", id="analysis-refresh", n_clicks=0),
+                    html.Button(
+                        "Refresh",
+                        id={"analysis-refresh": "series"},
+                        n_clicks=0,
+                    ),
                     dcc.Checklist(
                         id="analysis-auto-refresh",
                         options=[
@@ -2545,11 +2774,19 @@ def _series_tab() -> html.Div:
                                 "value": "auto",
                             }
                         ],
-                        value=[],
+                        value=["auto"] if doc["auto_refresh"] else [],
                         inline=True,
                     ),
-                    html.Span(id="analysis-series-status", className="series-status"),
-                    html.Span(id="analysis-updated", className="series-updated"),
+                    html.Span(
+                        id="analysis-series-status",
+                        className="series-status",
+                        children=status,
+                    ),
+                    html.Span(
+                        id="analysis-updated",
+                        className="series-updated",
+                        children=updated,
+                    ),
                 ],
                 className="series-toolbar",
             ),
@@ -2575,32 +2812,116 @@ def _series_tab() -> html.Div:
                 ],
                 className="hint",
             ),
-            html.Div(id="analysis-context-filters", className="context-filters"),
-            html.Div(id="analysis-series-panels"),
-            dcc.Graph(id="analysis-series-figure", clear_on_unhover=True),
-            dcc.Store(id="analysis-series-figure-store"),
+            html.Div(
+                filters,
+                id="analysis-context-filters",
+                className="context-filters",
+            ),
+            html.Div(panels, id="analysis-series-panels"),
+            dcc.Graph(
+                id="analysis-series-figure",
+                figure=figure,
+                clear_on_unhover=True,
+            ),
+            dcc.Store(id="analysis-series-figure-store", data=figure),
             dcc.Store(id="analysis-series-data"),
-            dcc.Store(id="analysis-refresh-store"),
+            dcc.Store(id={"analysis-refresh-store": "series"}),
         ]
     )
 
 
-def _optuna_tab() -> html.Div:
+_SEARCH_COLUMNS: list[SortColumn] = [
+    SortColumn(
+        "name",
+        "Sweep",
+        "string",
+        definition={"cellRenderer": {"function": "renderLinkCell(params)"}},
+    ),
+    SortColumn("state", "State", "string"),
+    SortColumn("completed", "Completed", "numeric"),
+    SortColumn(
+        "expected_trials",
+        "Expected trials",
+        "numeric",
+        definition={"valueFormatter": {"function": "renderMissing(x)"}},
+    ),
+    SortColumn(
+        "last_activity_ns",
+        "Last activity",
+        "ns",
+        definition={"valueFormatter": {"function": "renderRelative(x)"}},
+    ),
+]
+
+
+def search_rows(summaries: Sequence[SweepSummary]) -> list[dict[str, Any]]:
+    """One Search row per member sweep; the link opens the sweep hub."""
+    return [
+        {
+            "sweep_id": summary.sweep_id,
+            "name": summary.name,
+            "link_label": summary.name,
+            "state": summary.state,
+            "completed": summary.succeeded,
+            "expected_trials": summary.expected_trials,
+            "last_activity_ns": summary.latest_submitted_ns,
+        }
+        for summary in sorted(summaries, key=lambda row: row.name.casefold())
+    ]
+
+
+def search_region(
+    service: DashboardService,
+    project: str,
+    investigation_id: str,
+    members: Sequence[Any] | None,
+    member: str | None = None,
+) -> html.Div:
+    """The minimal member filter: a debounced name filter over the
+    member sweeps only (the scoped member alone when narrowed); a
+    sweep's link opens the hub carrying the investigation return
+    path."""
+    member_ids = {str(sweep) for sweep in members or ()}
+    if member and member in member_ids:
+        member_ids = {member}
+    rows = search_rows(
+        [
+            summary
+            for summary in service.sweep_overview(project)
+            if summary.sweep_id in member_ids
+        ]
+    )
     return html.Div(
         [
             html.P(
-                "One figure set per selected sweep; contour needs two numeric params.",
+                "Search covers the investigation's members only; the "
+                "project's other sweeps are out of scope here.",
                 className="hint",
             ),
             html.Div(
                 [
-                    dcc.Dropdown(id="analysis-contour-x", placeholder="Contour x…"),
-                    dcc.Dropdown(id="analysis-contour-y", placeholder="Contour y…"),
+                    dcc.Input(
+                        id="inv-search-q",
+                        type="search",
+                        placeholder="Filter member sweeps…",
+                        className="quick-filter",
+                        debounce=True,
+                    ),
+                    html.Span(id="inv-search-note", className="series-status"),
                 ],
                 className="analysis-controls",
             ),
-            html.Div(id="analysis-optuna"),
-        ]
+            AgGrid(
+                id="inv-search-grid",
+                rowData=rows,
+                columnDefs=sortable_columns(_SEARCH_COLUMNS),
+                defaultColDef=_GRID_DEFAULTS,
+                dashGridOptions=components.grid_options(),
+                getRowId=_SWEEP_ROW_ID,
+                className="ag-theme-alpine grid",
+            ),
+        ],
+        className="section",
     )
 
 
@@ -2620,7 +2941,7 @@ def workspace_page(
     return html.Div(
         [
             html.H2(f"Project {project}"),
-            html.Div(id="analysis-error"),
+            html.Div(id={"analysis-error": "page"}),
             dcc.Store(id="inspector-render-store"),
             dcc.Store(id="sweep-browser-facts-store"),
             dcc.Store(id="trial-browser-facts-store"),
@@ -2712,7 +3033,7 @@ def workspace_page(
                     html.Div(
                         [
                             dcc.Tabs(
-                                id="analysis-tabs",
+                                id={"analysis-tabs": "canvas"},
                                 value="overview",
                                 children=[
                                     dcc.Tab(label="Overview", value="overview"),

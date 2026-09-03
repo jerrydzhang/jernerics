@@ -196,6 +196,9 @@ def _callback_key(callback_map, wanted: set[str], input_ids: set[str]) -> str:
     )
 
 
+_WILDCARD_IDS = {"analysis-tabs": "canvas"}
+
+
 def _dispatch(
     client, callback_map, wanted: set[str], inputs, state=(), changed=None, key=None
 ):
@@ -205,9 +208,25 @@ def _dispatch(
         for part in key.removeprefix("..").removesuffix("..").split("...")
         if part
     ]
-    outputs = [
-        {"id": spec.split(".")[0], "property": spec.split(".")[1]} for spec in specs
-    ]
+    outputs = []
+    for spec in specs:
+        prop = spec.rsplit(".", 1)[1]
+        raw = spec.rsplit(".", 1)[0]
+        if raw.startswith("{"):
+            wildcard = json.loads(raw)
+            outputs.append(
+                {
+                    "id": {
+                        name: _WILDCARD_IDS.get(name, values[0])
+                        if values == ["ALL"]
+                        else values
+                        for name, values in wildcard.items()
+                    },
+                    "property": prop,
+                }
+            )
+        else:
+            outputs.append({"id": raw, "property": prop})
     response = client.post(
         "/dashboard/_dash-update-component",
         json={
@@ -225,7 +244,11 @@ def _dispatch(
 
 _VIEW_INPUT = {"id": "view-store", "property": "data", "value": None}
 _TICK_INPUT = {"id": "poll", "property": "n_intervals", "value": 1}
-_TAB_INPUT = {"id": "analysis-tabs", "property": "value", "value": "overview"}
+_TAB_INPUT = {
+    "id": {"analysis-tabs": "canvas"},
+    "property": "value",
+    "value": "overview",
+}
 _PROJECT_STATE = {"id": "project-store", "property": "data", "value": PROJECT}
 
 
@@ -748,8 +771,15 @@ class TestScrollRestoreWiring:
             and any(spec["id"] == "workspace-overview" for spec in specs["inputs"])
         ]
         assert len(restores) == 1
-        inputs = {spec["id"] for spec in restores[0]["inputs"]}
-        assert inputs == {"workspace-overview"}
+        inputs = {
+            dep["id"]
+            if isinstance(dep["id"], str)
+            else json.dumps(dep["id"], sort_keys=True)
+            for dep in restores[0]["inputs"]
+        }
+        # The g5rw.9 Series view restored the Refresh button's scroll
+        # capture: its refresh-state store rides the same restore.
+        assert inputs == {'{"analysis-refresh-store":["ALL"]}', "workspace-overview"}
 
 
 _HYDRATION_OUTPUTS = {
@@ -759,7 +789,7 @@ _HYDRATION_OUTPUTS = {
 _TRAY_EDIT_OUTPUTS = {"view-store.data"}
 _INCLUDE_EDIT_OUTPUTS = {"view-store.data"}
 _MERGED_SYNC_OUTPUTS = {
-    "analysis-tabs.value",
+    '{"analysis-tabs":["ALL"]}.value',
     "analysis-include.value",
     "analysis-expand.value",
 }
@@ -888,7 +918,10 @@ class TestMergedControlSync:
         client, _store = authed
         response, payload = self._sync(client, callback_map, None)
         assert response.status_code == 200
-        assert payload["analysis-tabs"]["value"] == "overview"
+        tabs_key = next(
+            key for key in payload if key.lstrip("{").startswith('"analysis-tabs"')
+        )
+        assert payload[tabs_key]["value"] == ["overview"]
         assert payload["analysis-include"]["value"] == []
         assert payload["analysis-expand"]["value"] == []
 
@@ -900,7 +933,10 @@ class TestMergedControlSync:
         }
         response, payload = self._sync(client, callback_map, doc)
         assert response.status_code == 200
-        assert payload["analysis-tabs"]["value"] == "investigations"
+        tabs_key = next(
+            key for key in payload if key.lstrip("{").startswith('"analysis-tabs"')
+        )
+        assert payload[tabs_key]["value"] == ["investigations"]
         assert payload["analysis-include"]["value"] == ["archived"]
         assert payload["analysis-expand"]["value"] == ["expand"]
 

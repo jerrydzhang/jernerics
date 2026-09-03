@@ -20,22 +20,21 @@ import json
 import math
 from collections.abc import Sequence
 from typing import Any
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote
 
 from dash import dcc, html, no_update
 from dash_ag_grid import AgGrid
-from jernerics_schema import Selection, SelectionTokenError, encode_selection
+from jernerics_schema import Selection, SelectionTokenError
 
 from . import components, figures
 from .components import (
     MISSING,
     Empty,
     Error,
-    clamp_text,
-    clamped_column,
     relative_time,
     short_id,
 )
+from .render import SortColumn, sortable_columns
 from .routes import ROUTES_BASE, parse_route
 from .selection_tokens import decode_selection_token
 from .service import ANALYSIS_REDUCTIONS, DashboardService
@@ -68,6 +67,11 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "minWidth": 100,
 }
 _ANALYSIS_VIEWS = ("overview", "investigations", "exceptions")
+INVESTIGATION_VIEWS = ("compare", "series", "points", "search")
+"""The Investigation workspace's view row."""
+
+_INV_DEFAULT: dict[str, Any] = {"view": "compare", "member": None}
+
 _SERIES_MODES = ("stacked", "overlay")
 _TRIAL_DISPLAYS = ("all", "highlighted", "median_iqr")
 _AXIS_SCALES = ("linear", "log")
@@ -90,6 +94,11 @@ def default_scope_state() -> dict[str, Any]:
     return {**EMPTY_TRAY, "include_archived": False, "include_invalid": False}
 
 
+def default_inv_state() -> dict[str, Any]:
+    """The investigation workspace's state: Compare over all members."""
+    return dict(_INV_DEFAULT)
+
+
 def default_view_state() -> dict[str, Any]:
     """The v2 view document with every control at its default."""
     return {
@@ -99,7 +108,9 @@ def default_view_state() -> dict[str, Any]:
         "overview_filter": None,
         "scope": default_scope_state(),
         "focus": None,
+        "via": None,
         "highlighted_trials": [],
+        "inv": default_inv_state(),
         "series": {
             "keys": [],
             "mode": "stacked",
@@ -293,6 +304,8 @@ def decode_view_state(raw: str) -> dict[str, Any]:
         payload.get("highlighted_trials", []), "highlighted_trials"
     )
     doc["focus"] = decode_focus(payload.get("focus"))
+    doc["via"] = _optional_key(payload.get("via"), "via")
+    doc["inv"] = _decode_inv(payload.get("inv", {}))
     auto_refresh = payload.get("auto_refresh", False)
     _require(isinstance(auto_refresh, bool), "auto_refresh must be a boolean")
     doc["auto_refresh"] = auto_refresh
@@ -307,6 +320,19 @@ def decode_view_state(raw: str) -> dict[str, Any]:
         optuna.get("contour_y"), "optuna.contour_y"
     )
     return doc
+
+
+def _decode_inv(value: Any) -> dict[str, Any]:
+    """A validated investigation-workspace group: the active view and
+    the optional member sweep the analysis is narrowed to; unknown
+    fields are dropped and missing fields take defaults."""
+    _require(isinstance(value, dict), "inv must be an object")
+    state = default_inv_state()
+    view = value.get("view", state["view"])
+    _require(view in INVESTIGATION_VIEWS, f"unsupported investigation view {view!r}")
+    state["view"] = view
+    state["member"] = _optional_key(value.get("member"), "inv.member")
+    return state
 
 
 def encode_view_state(doc: dict[str, Any]) -> str:
@@ -355,11 +381,14 @@ def edited_view(
     current: dict[str, Any] | None, changes: dict[str, Any]
 ) -> dict[str, Any]:
     """The one door for view-doc writes: ``changes`` applied over
-    ``current`` (defaults when absent); the current ``focus`` survives
-    every edit except one that names it (jernerics-gk6)."""
+    ``current`` (defaults when absent); the current ``focus`` and the
+    investigation ``via`` survive every edit except one that names them
+    (jernerics-gk6)."""
     doc = {**(current or default_view_state()), **changes}
     if "focus" not in changes:
         doc["focus"] = (current or {}).get("focus")
+    if "via" not in changes:
+        doc["via"] = (current or {}).get("via")
     return doc
 
 
@@ -382,15 +411,16 @@ def hydrate_view(
     current: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """(doc, error) for a URL carrying ``?view=``. ``None`` means leave
-    the view store alone (off the workspace route, or already showing
+    the view store alone (off a hydratable route, or already showing
     this state). No parameter means defaults; a malformed or unsupported
     document yields defaults plus a visible error. The inspector focus
     survives both — only a parameter that names one, or an explicit
     focus edit, moves it (jernerics-gk6). The scope survives a
     parameter-less URL only while a ``?sel=`` token owns the hydration
     (its dimensions land over the current scope); a plain navigation
-    resets it."""
-    if parse_route(pathname).kind != "workspace":
+    resets it. The investigation ``via`` never survives a URL: only a
+    document that names one carries it."""
+    if parse_route(pathname).kind not in ("workspace", "investigation"):
         return None, None
     raw = _view_param(search)
     if raw is not None:
@@ -403,9 +433,12 @@ def hydrate_view(
                 if key != "focus"
             }
             return canonical_view(edited_view(current, changes)), str(error)
-        changes = {key: value for key, value in decoded.items() if key != "focus"}
+        changes = {
+            key: value for key, value in decoded.items() if key not in ("focus", "via")
+        }
         if decoded["focus"] is not None:
             changes["focus"] = decoded["focus"]
+        changes["via"] = decoded["via"]
     else:
         changes = {
             key: value
@@ -559,14 +592,24 @@ _CONTROL_IDS = {
 
 
 def edited_fields(triggered: Any) -> set[str]:
-    """View-doc fields named by the triggered callback inputs."""
-    return {
-        field
-        for field in (
-            _CONTROL_IDS.get(str(prop).split(".", 1)[0]) for prop in triggered
-        )
-        if field
-    }
+    """View-doc fields named by the triggered callback inputs. Triggered
+    prop ids may carry a plain string id or a resolved pattern id (the
+    JSON of the dict plus ``.prop``); both map through the same table."""
+    fields = set()
+    for prop in triggered:
+        control = str(prop).split(".", 1)[0]
+        if control.startswith("{"):
+            try:
+                resolved = json.loads(control)
+            except ValueError:
+                continue
+            control = (
+                str(next(iter(resolved))) if isinstance(resolved, dict) else control
+            )
+        field = _CONTROL_IDS.get(control)
+        if field:
+            fields.add(field)
+    return fields
 
 
 def family_picker_rows(
@@ -813,18 +856,76 @@ def synced_search(
     """The URL search after a navigation or a view edit; ``None`` leaves
     it alone. Navigations may only drop the workspace parameters —
     minting on navigation would let a stale document clobber a freshly
-    opened deep link before hydration lands, and only the editor page
-    keeps its own query (its ``?sweeps=`` seed). View edits mint, and
-    only on the workspace page; the scope rides the document, so no
-    separate ``?sel=`` is minted anymore."""
+    opened deep link before hydration lands, and the editor and
+    investigation pages keep their own queries. View edits mint on the
+    workspace and investigation pages; the scope rides the document, so
+    no separate ``?sel=`` is minted anymore."""
     if url_navigated:
         kind = parse_route(pathname).kind
-        if current_search and kind not in ("workspace", "investigation-edit"):
+        if current_search and kind not in (
+            "workspace",
+            "investigation",
+            "investigation-edit",
+        ):
             return ""
         return None
-    if parse_route(pathname).kind != "workspace":
+    if parse_route(pathname).kind not in ("workspace", "investigation"):
         return None
     return search_from_state(view_doc, current_search)
+
+
+def view_from_inv(
+    current: dict[str, Any] | None,
+    *,
+    view: str | None = None,
+    member: str | None = None,
+) -> dict[str, Any]:
+    """View doc after an investigation-workspace edit: the named view
+    (an unknown name falls back to Compare) and member scope — ``member
+    =None`` clears it. The comparison never inherits a member scope:
+    switching to Compare is how the scope visibly drops."""
+    doc = current or default_view_state()
+    state = dict(doc.get("inv") or default_inv_state())
+    if view is not None:
+        state["view"] = view if view in INVESTIGATION_VIEWS else "compare"
+        if state["view"] == "compare":
+            state["member"] = None
+    if member is not None:
+        state["member"] = member or None
+    return edited_view(doc, {"inv": state})
+
+
+def investigation_scope_state(
+    members: Sequence[Any] | None, member: str | None
+) -> tuple[dict[str, Any], str | None]:
+    """(scope group, resolved member) for the analysis over an
+    investigation's members; an unknown member falls back to all
+    members. The scope sweeps are exactly the materialized membership."""
+    picked = sorted({str(sweep) for sweep in members or ()})
+    scoped = member if member in picked else None
+    if scoped:
+        picked = [scoped]
+    return {**default_scope_state(), "sweeps": picked}, scoped
+
+
+def workspace_focus_href(project: str, kind: str, object_id: str) -> str:
+    """Workspace URL whose view document focuses one object (the
+    artifact viewer's back-links)."""
+    doc = dict(default_view_state(), focus={"kind": kind, "id": object_id})
+    return f"{ROUTES_BASE}/project/{project}?view={encode_view_state(doc)}"
+
+
+def investigation_view_href(
+    project: str,
+    investigation_id: str,
+    view: str,
+    member: str | None = None,
+) -> str:
+    """Investigation page URL showing one view, optionally narrowed to
+    one member sweep (the sweep hub's Series/Points links)."""
+    doc = view_from_inv(default_view_state(), view=view, member=member or "")
+    target = f"{ROUTES_BASE}/project/{project}/investigation/{investigation_id}"
+    return f"{target}?view={encode_view_state(doc)}"
 
 
 def view_query(view_doc: dict[str, Any] | None) -> str:
@@ -833,6 +934,19 @@ def view_query(view_doc: dict[str, Any] | None) -> str:
     if not view_doc or view_doc == default_view_state():
         return ""
     return f"view={encode_view_state(view_doc)}"
+
+
+def decoded_view_param(search: str | None) -> tuple[dict[str, Any] | None, str | None]:
+    """(doc, error) decoded from the ``?view=`` parameter alone — the
+    page-render twin of :func:`hydrate_view`'s decode. A ``None`` doc
+    means no parameter was present or it was malformed."""
+    raw = _view_param(search)
+    if raw is None:
+        return None, None
+    try:
+        return decode_view_state(raw), None
+    except ViewStateError as error:
+        return None, str(error)
 
 
 def _query_search(fragments: list[str]) -> str:
@@ -856,13 +970,6 @@ def search_from_state(
         except ViewStateError:
             return None
     return target
-
-
-def workspace_focus_href(project: str, kind: str, object_id: str) -> str:
-    """Workspace URL whose view document focuses one object (the
-    artifact viewer's back-links)."""
-    doc = dict(default_view_state(), focus={"kind": kind, "id": object_id})
-    return f"{ROUTES_BASE}/project/{project}?view={encode_view_state(doc)}"
 
 
 def _pick_project_first() -> html.Div:
@@ -1592,240 +1699,237 @@ def moved_keys(
     return edited_view(doc, {"series": series})
 
 
-def _format_payload(payload: Any) -> str:
-    if isinstance(payload, dict | list):
-        return json.dumps(payload, indent=2, sort_keys=True)
-    if payload is None:
+def _scalar_text(value: Any) -> str:
+    """One final scalar as deterministic cell text."""
+    if value is None:
         return MISSING
-    if isinstance(payload, bool):
-        return "true" if payload else "false"
-    return str(payload)
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int | float):
+        return figures.value_text(value)
+    if isinstance(value, dict | list):
+        return json.dumps(value, sort_keys=True)
+    return str(value)
 
 
-def _key_header(key: str, detail: str) -> dict[str, str]:
-    """Header text for one possibly long key: clamped label, full key
-    in the header tooltip (jernerics-l8f)."""
+def _raw_number(value: Any) -> float | None:
+    """The numeric sort key for one final scalar; ``None`` sorts last."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _numeric_dim(label: str, values: list[Any]) -> dict[str, Any]:
+    """Parcoords dimension over possibly-missing numeric observations."""
+    vals = [
+        float(value) if _raw_number(value) is not None else math.nan for value in values
+    ]
+    return {"label": label, "values": vals, "range": figures.padded_range(vals)}
+
+
+def _label_dim(label: str, labels: Sequence[str]) -> dict[str, Any]:
+    """Categorical parcoords dimension with one tick per distinct label."""
+    ordered = sorted(set(labels))
+    codes = {text: index for index, text in enumerate(ordered)}
+    vals = [float(codes[text]) if text in codes else math.nan for text in labels]
     return {
-        "headerName": f"{clamp_text(key)} · {detail}",
-        "headerTooltip": f"{key} · {detail}",
+        "label": label,
+        "values": vals,
+        "range": figures.padded_range(vals),
+        "tickvals": list(range(len(ordered))),
+        "ticktext": ordered,
     }
 
 
-def _cell(payloads: list[Any] | None) -> str:
-    """All logged payloads for one (trial, key); missing cells render as
-    the em dash marker."""
-    if not payloads:
-        return MISSING
-    return "\n---\n".join(_format_payload(payload) for payload in payloads)
+def points_scalar_keys(
+    service: DashboardService, project: str | None, tray: dict[str, Any] | None
+) -> list[str]:
+    """Scalar value keys under the scope — the Points view's final-scalar
+    columns; a key's final value is its last logged payload, stepped or
+    not."""
+    if not project or service is None:
+        return []
+    return sorted(
+        {
+            entry["key"]
+            for entry in service.analysis_value_keys(project, tray)
+            if entry["kind"] == "scalar"
+        }
+    )
+
+
+def points_view_data(
+    trials: list[dict[str, Any]],
+    keys: Sequence[str],
+    finals: dict[str, dict[str, Any]],
+    outcome: str,
+) -> dict[str, Any]:
+    """(rows, value-key facts, parcoords dims, line identities) for the
+    Points view: one row per trial with its final scalars, and the
+    params → outcome dimensions over the same set. Line order equals row
+    order; a dimension's range always covers every line."""
+    ordered = sorted(trials, key=lambda row: (row["sweep_id"], row["number"]))
+    numeric = set(figures.numeric_param_keys(ordered))
+    varying = [key for key in varying_param_keys(ordered) if key in numeric][
+        : figures.MAX_PARAM_DIMS
+    ]
+    facts = [
+        {
+            "key": key,
+            "numeric": all(
+                _raw_number(finals.get(str(trial["trial_id"]), {}).get(key)) is not None
+                for trial in ordered
+                if key in finals.get(str(trial["trial_id"]), {})
+            ),
+        }
+        for key in keys
+    ]
+    rows = []
+    for trial in ordered:
+        trial_id = str(trial["trial_id"])
+        per_trial = finals.get(trial_id) or {}
+        rows.append(
+            {
+                "tk": trial_id,
+                "sweep": trial.get("sweep_name") or trial["sweep_id"],
+                "number": trial["number"],
+                "state": trial.get("state") or MISSING,
+                **{key: _scalar_text(per_trial.get(key)) for key in keys},
+                **{f"{key}_raw": _raw_number(per_trial.get(key)) for key in keys},
+            }
+        )
+    dims = [
+        _numeric_dim(
+            key,
+            [(trial.get("params") or {}).get(key) for trial in ordered],
+        )
+        for key in varying
+    ]
+    dims.append(_label_dim("sweep", [str(row["sweep"]) for row in rows]))
+    outcome_dim = _numeric_dim(
+        f"{outcome} (final)",
+        [finals.get(str(row["tk"]), {}).get(outcome) for row in rows],
+    )
+    dims.append(outcome_dim)
+    return {
+        "rows": rows,
+        "keys": facts,
+        "dims": dims,
+        "tks": [str(row["tk"]) for row in rows],
+        "with_outcome": sum(
+            1 for value in outcome_dim["values"] if not math.isnan(value)
+        ),
+    }
 
 
 def points_tab(
-    service: DashboardService, project: str | None, tray: dict[str, Any] | None
+    service: DashboardService,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    outcome: str,
 ) -> html.Div:
-    """AG Grid tables: non-step scalar/JSON point values and param
-    comparison, with per-column presence counts and "—" for missing."""
+    """Trials × final scalars with the params → outcome parallel
+    coordinates. Selection is client-side state: the table hides
+    non-selected rows ("X of Y trials shown"), the parcoords keeps every
+    line plotted — brushes fade natively, a selection recolors context
+    gray — and axes never rescale."""
     if not project:
         return _pick_project_first()
-    data = service.analysis_points(project, tray)
-    if not data["trials"]:
-        return html.Div(Empty("The tray is empty — pick sweeps or families first."))
-    labels = [
-        f"#{trial['number']} {short_id(trial['trial_id'])}" for trial in data["trials"]
+    trials = service.analysis_trials(project, tray)
+    if not trials:
+        return html.Div(
+            Empty("No trials under this scope — every member is empty or excluded.")
+        )
+    view = points_view_data(
+        trials,
+        points_scalar_keys(service, project, tray),
+        service.analysis_finals(project, tray),
+        outcome,
+    )
+    columns: list[SortColumn] = [
+        SortColumn("sweep", "Sweep", "string"),
+        SortColumn("number", "Trial", "numeric"),
+        SortColumn("state", "State", "string"),
+        *[
+            SortColumn(
+                entry["key"],
+                entry["key"],
+                "numeric" if entry["numeric"] else "string",
+                sort_field=f"{entry['key']}_raw" if entry["numeric"] else None,
+                definition={"valueFormatter": {"function": "renderMissing(x)"}},
+            )
+            for entry in view["keys"]
+        ],
     ]
-    value_columns: list[dict[str, Any]] = [
-        {"headerName": "Trial", "field": "trial", "pinned": "left"}
-    ]
-    for entry in data["value_keys"]:
-        present = sum(
-            1
-            for trial in data["trials"]
-            if entry["key"] in data["values"].get(trial["trial_id"], {})
-        )
-        value_columns.append(
-            {
-                **_key_header(
-                    entry["key"], f"{entry['kind']} · {present}/{len(labels)}"
-                ),
-                "field": entry["key"],
-                **clamped_column(),
-            }
-        )
-    value_rows = []
-    for trial, label in zip(data["trials"], labels, strict=True):
-        payloads = data["values"].get(trial["trial_id"], {})
-        value_rows.append(
-            {
-                "trial": label,
-                **{
-                    entry["key"]: _cell(payloads.get(entry["key"]))
-                    for entry in data["value_keys"]
-                },
-            }
-        )
-    param_columns: list[dict[str, Any]] = [
-        {"headerName": "Trial", "field": "trial", "pinned": "left"}
-    ]
-    for key in data["param_keys"]:
-        present = sum(1 for per_trial in data["params"].values() if key in per_trial)
-        param_columns.append(
-            {
-                **_key_header(key, f"{present}/{len(labels)}"),
-                "field": key,
-                **clamped_column(),
-            }
-        )
-    param_rows = []
-    for trial, label in zip(data["trials"], labels, strict=True):
-        per_trial = data["params"].get(trial["trial_id"], {})
-        param_rows.append(
-            {
-                "trial": label,
-                **{
-                    key: (
-                        _format_payload(per_trial[key]) if key in per_trial else MISSING
-                    )
-                    for key in data["param_keys"]
-                },
-            }
-        )
+    plotted = len(view["dims"]) > 1 and view["with_outcome"]
     return html.Div(
         [
             html.Section(
                 [
-                    html.H3("Point values (non-step keys)"),
+                    html.H3("Trials · final scalars"),
                     html.P(
-                        "Long values clamp; click a clamped cell to open the full "
-                        "payload.",
+                        "The last logged value of each scalar key is the "
+                        "trial's final scalar. Click rows or brush the plot "
+                        "to select; selected rows stay, the rest hide.",
                         className="hint",
                     ),
-                    AgGrid(
-                        rowData=value_rows,
-                        columnDefs=value_columns,
-                        defaultColDef=_GRID_DEFAULTS,
-                        dashGridOptions=components.grid_options(),
-                        className="ag-theme-alpine grid",
-                    ),
-                ],
-                className="section",
-            ),
-            html.Section(
-                [
-                    html.H3("Params"),
-                    html.P(
-                        "Long values clamp; click a clamped cell to open the full "
-                        "value.",
-                        className="hint",
-                    ),
-                    AgGrid(
-                        rowData=param_rows,
-                        columnDefs=param_columns,
-                        defaultColDef=_GRID_DEFAULTS,
-                        dashGridOptions=components.grid_options(),
-                        className="ag-theme-alpine grid",
-                    ),
-                ],
-                className="section",
-            ),
-        ]
-    )
-
-
-def optuna_tab_content(
-    service: DashboardService,
-    project: str | None,
-    tray: dict[str, Any] | None,
-    x_param: str | None,
-    y_param: str | None,
-) -> tuple[html.Div, list[dict[str, str]], list[dict[str, str]]]:
-    """(container, contour-x options, contour-y options): one figure set
-    per selected sweep, built from canonical trial snapshots."""
-    if not project:
-        return _pick_project_first(), [], []
-    rows = service.analysis_trials(project, tray)
-    if not rows:
-        return (
-            html.Div(Empty("The tray is empty — pick sweeps or families first.")),
-            [],
-            [],
-        )
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    names: dict[str, str] = {}
-    for row in rows:
-        grouped.setdefault(row["sweep_id"], []).append(row)
-        names[row["sweep_id"]] = row["sweep_name"]
-    sections = []
-    for sweep_id in sorted(grouped):
-        sweep_rows = grouped[sweep_id]
-        numeric = figures.numeric_param_keys(sweep_rows)
-        if len(numeric) >= 2:
-            chosen_x = x_param if x_param in numeric else numeric[0]
-            chosen_y = y_param if y_param in numeric else numeric[1]
-            contour: Any = dcc.Graph(
-                figure=figures.contour_figure(sweep_rows, chosen_x, chosen_y)
-            )
-            contour_title = f"Contour · {chosen_x} x {chosen_y}"
-        else:
-            contour = Empty(
-                f"Contour needs at least two numeric sampled params; sweep "
-                f"{names[sweep_id]} has {len(numeric)}."
-            )
-            contour_title = "Contour"
-        sections.append(
-            html.Section(
-                [
-                    html.H3(f"Sweep {names[sweep_id]} · {short_id(sweep_id)}"),
                     html.Div(
                         [
-                            html.Div(
-                                [
-                                    html.H4("Optimization history"),
-                                    dcc.Graph(
-                                        figure=figures.optimization_history(sweep_rows)
-                                    ),
-                                ]
-                            ),
-                            html.Div(
-                                [
-                                    html.H4("Parallel coordinates"),
-                                    dcc.Graph(
-                                        figure=figures.parallel_coordinates(sweep_rows)
-                                    ),
-                                ],
-                                className="figure-wide",
-                            ),
-                            html.Div(
-                                [
-                                    html.H4("Slice"),
-                                    dcc.Graph(figure=figures.slice_figure(sweep_rows)),
-                                ]
-                            ),
-                            html.Div([html.H4(contour_title), contour]),
-                            html.Div(
-                                [
-                                    html.H4("Timeline"),
-                                    dcc.Graph(
-                                        figure=figures.trial_timeline(sweep_rows)
-                                    ),
-                                ],
-                                className="figure-wide",
+                            html.Span(id="inv-points-note", className="series-status"),
+                            html.Button(
+                                "Clear selection",
+                                id="inv-points-clear",
+                                n_clicks=0,
+                                style={"display": "none"},
                             ),
                         ],
-                        className="figure-grid",
+                        className="sel-note-row",
+                    ),
+                    AgGrid(
+                        id="inv-points-grid",
+                        rowData=view["rows"],
+                        columnDefs=sortable_columns(columns),
+                        defaultColDef=_GRID_DEFAULTS,
+                        dashGridOptions=components.grid_options(
+                            rowSelection={
+                                "mode": "multiRow",
+                                "checkboxes": True,
+                                "headerCheckboxSelection": True,
+                                "enableClickSelection": True,
+                            },
+                        ),
+                        getRowId="params.data.tk",
+                        className="ag-theme-alpine grid",
                     ),
                 ],
                 className="section",
-            )
-        )
-    options = [{"label": key, "value": key} for key in figures.numeric_param_keys(rows)]
-    return html.Div(sections), options, options
-
-
-def origin_from_href(href: str | None) -> str:
-    """The browser origin (``scheme://netloc``) a snippet points at."""
-    parts = urlparse(href or "")
-    if not parts.netloc:
-        return "http://localhost:8000"
-    return f"{parts.scheme or 'http'}://{parts.netloc}"
+            ),
+            html.Section(
+                [
+                    html.H3(f"Params → {outcome} (final)"),
+                    *(
+                        [
+                            dcc.Graph(
+                                id="inv-points-figure",
+                                figure=figures.points_parcoords(view["dims"]),
+                            )
+                        ]
+                        if plotted
+                        else [
+                            Empty(
+                                "No params → outcome plot: the outcome has no "
+                                "numeric final values under this scope."
+                            )
+                        ]
+                    ),
+                ],
+                className="section",
+            ),
+            dcc.Store(id="inv-points-data", data={"tks": view["tks"]}),
+            dcc.Store(id="inv-points-sel", data={"tks": []}),
+            dcc.Store(id="inv-points-echo"),
+        ]
+    )
 
 
 def python_snippet(token: str, project: str, base_url: str) -> str:
@@ -1837,63 +1941,6 @@ def python_snippet(token: str, project: str, base_url: str) -> str:
         f'client = TrackingClient("{base_url}")\n'
         f'selection = decode_selection("{token}")\n'
         f'records = client.project("{project}").values(selection)\n'
-    )
-
-
-def python_tab(
-    service: DashboardService,
-    project: str | None,
-    tray: dict[str, Any] | None,
-    base_url: str,
-) -> html.Div:
-    """The current selection as a URL token plus a copyable snippet — no
-    embedded editor."""
-    if not project:
-        return _pick_project_first()
-    selection = service.analysis_selection(project, tray)
-    token = encode_selection(selection)
-    snippet = python_snippet(token, project, base_url)
-    pre_style = {"whiteSpace": "pre", "overflowX": "auto"}
-    return html.Div(
-        [
-            html.Section(
-                [
-                    html.H3("Selection token"),
-                    html.P(
-                        "The token the URL carries as ?sel=… — minted by "
-                        "the shared jernerics-schema codec, so the client "
-                        "and dashboard parse the same token.",
-                        className="hint",
-                    ),
-                    html.Div(
-                        [
-                            html.Pre(token, className="config-json", style=pre_style),
-                            dcc.Clipboard(content=token),
-                        ],
-                        className="snippet-row",
-                    ),
-                ],
-                className="section",
-            ),
-            html.Section(
-                [
-                    html.H3("Continue in Python"),
-                    html.P(
-                        "Point TrackingClient at your tracking server and go; "
-                        "decode_selection returns the typed Selection.",
-                        className="hint",
-                    ),
-                    html.Div(
-                        [
-                            html.Pre(snippet, className="config-json", style=pre_style),
-                            dcc.Clipboard(content=snippet),
-                        ],
-                        className="snippet-row",
-                    ),
-                ],
-                className="section",
-            ),
-        ]
     )
 
 
@@ -2134,7 +2181,7 @@ def auto_refresh_flip(
     return edited_view(view_doc, {"auto_refresh": False})
 
 
-def _extract_series_figure(panels: list[Any]) -> tuple[list[Any], Any]:
+def extract_series_figure(panels: list[Any]) -> tuple[list[Any], Any]:
     """(panels without the embedded graph, its figure): the callback
     writes the figure to the layout-level graph, so Plotly's uirevision
     keeps user zoom across refreshes instead of losing a replaced div."""
@@ -2203,7 +2250,7 @@ def series_view_outputs(
     panels, _payload, key_options, color_options, facet_options, filters, status = (
         render_series_outputs(doc, snapshot)
     )
-    panels, figure = _extract_series_figure(panels)
+    panels, figure = extract_series_figure(panels)
     return (
         panels,
         persist,

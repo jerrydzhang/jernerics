@@ -37,9 +37,7 @@ from jernerics_schema import (
 )
 from jernerics_server.dashboard import layout
 from jernerics_server.dashboard.analysis import (
-    origin_from_href,
     python_snippet,
-    python_tab,
     tray_summary,
 )
 from jernerics_server.dashboard.callbacks import (
@@ -2588,37 +2586,6 @@ class TestPythonHandoffSnippet:
         ]
         assert client_lines == [f'client = TrackingClient("{base_url}")']
 
-    def test_tab_points_the_client_at_the_browser_origin(self, service):
-        tray = {"sweeps": [str(SWEEP_A)], "trials": [], "families": []}
-        page = python_tab(service, "ops", tray, "http://127.0.0.1:8899")
-        snippet = _find_pres(page)[1].children
-        assert snippet is not None
-        assert 'TrackingClient("http://127.0.0.1:8899")' in snippet
-
-    def test_tab_pres_keep_statements_on_one_copyable_line(self, service):
-        tray = {"sweeps": [str(SWEEP_A)], "trials": [], "families": []}
-        page = python_tab(service, "ops", tray, "http://127.0.0.1:8899")
-        pres = _find_pres(page)
-        assert len(pres) == 2
-        for pre in pres:
-            style = dict(getattr(pre, "style", None) or {})
-            assert style["whiteSpace"] == "pre"
-            assert style["overflowX"] == "auto"
-
-
-class TestOriginFromHref:
-    def test_derives_the_scheme_and_netloc(self):
-        href = "http://127.0.0.1:8899/dashboard/project/lab?view=x"
-        assert origin_from_href(href) == "http://127.0.0.1:8899"
-        assert origin_from_href("https://tracks.example.com/") == (
-            "https://tracks.example.com"
-        )
-
-    def test_blank_or_relative_hrefs_fall_back_to_local_host(self):
-        assert origin_from_href(None) == "http://localhost:8000"
-        assert origin_from_href("") == "http://localhost:8000"
-        assert origin_from_href("/dashboard/project/lab") == "http://localhost:8000"
-
 
 class TestMountedTrayCallbacks:
     """The registered shell callbacks, driven through Dash's
@@ -2898,7 +2865,10 @@ class TestOverviewControlsWiring:
         tab_callbacks = [
             key
             for key in callback_map
-            if any(dep["id"] == "analysis-tabs" for dep in callback_map[key]["inputs"])
+            if any(
+                dep["id"] == {"analysis-tabs": "canvas"}
+                for dep in callback_map[key]["inputs"]
+            )
             and (
                 "workspace-investigations.children" in key_outputs(key)
                 or "workspace-exceptions.children" in key_outputs(key)

@@ -15,11 +15,11 @@ from typing import Any, Literal
 from uuid import UUID
 
 import dash
-from dash import ALL, Input, Output, State, no_update
+from dash import ALL, Input, Output, State, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import analysis, artifacts, components, layout, workspace
-from .components import Error
+from . import analysis, artifacts, components, figures, layout, workspace
+from .components import Error, short_id
 from .routes import ROUTES_BASE, parse_route
 from .service import (
     CurationRejectedError,
@@ -28,12 +28,25 @@ from .service import (
 )
 
 
+def overlay_axis_control(triggered: Any) -> str | None:
+    """Which overlay axis control fired: the control name after the
+    static ``analysis-overlay-`` prefix, else ``None``."""
+    prop = next((str(prop) for prop in triggered or ()), "")
+    control = prop.rsplit(".", 1)[0].removeprefix("analysis-overlay-")
+    return control if control in {"scale", "range", "min", "max", "reset"} else None
+
+
 def _json_default(value: Any) -> Any:
     """JSON stand-in for otherwise unserializable values; Dash component
     trees serialize through their plotly JSON, everything else by str."""
     if hasattr(value, "to_plotly_json"):
         return value.to_plotly_json()
     return str(value)
+
+
+def _figure_payload(figure: Any) -> Any:
+    """Store-safe form of a plotly figure (the store needs plain JSON)."""
+    return figure.to_plotly_json() if hasattr(figure, "to_plotly_json") else figure
 
 
 def _content_digest(*parts: Any) -> str:
@@ -58,6 +71,19 @@ def pattern_trigger(context: Any) -> tuple[str | None, str]:
         return None, ""
     control, metric = next(iter(resolved.items()))
     return str(metric), str(control)
+
+
+def pattern_input_value(
+    inputs_list: Any, entry: int, pattern_key: str, metric: str
+) -> Any:
+    """The current value of one ALL-pattern input, located by its
+    resolved component id (ALL inputs arrive as lists)."""
+    items = inputs_list[entry] if isinstance(inputs_list, list) else []
+    for item in items or []:
+        component_id = item.get("id") if isinstance(item, dict) else None
+        if isinstance(component_id, dict) and component_id.get(pattern_key) == metric:
+            return item.get("value")
+    return None
 
 
 def page_content(
@@ -98,7 +124,10 @@ def page_content(
         investigation_id = spec.sub_id or ""
         try:
             page = workspace.investigation_page(
-                service, spec.object_id or "", investigation_id
+                service,
+                spec.object_id or "",
+                investigation_id,
+                search=search,
             )
         except CurationUnavailableError as error:
             return components.Empty(str(error)), False
@@ -565,6 +594,36 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 no_update,
                 no_update,
             )
+        if ticked and kind == "investigation":
+            # A tick must never remount an investigation page (that
+            # would reset every region); its views own their refresh
+            # through the poll input inside their callbacks. The tick
+            # still owns the auto-refresh flip: once the member scope
+            # turned terminal, the persisted intent clears.
+            doc = view_doc or analysis.default_view_state()
+            polls = (
+                bool(doc.get("auto_refresh"))
+                and doc.get("inv", {}).get("view") == "series"
+            )
+            if polls:
+                try:
+                    tray, _scoped = analysis.investigation_scope_state(
+                        service.investigation_detail(
+                            parse_route(pathname).sub_id or ""
+                        ).investigation.members,
+                        doc["inv"].get("member"),
+                    )
+                    polls = service.analysis_scope_incomplete(project or "", tray)
+                except CurationRejectedError:
+                    polls = False
+            flip = analysis.auto_refresh_flip(view_doc, polls)
+            return (
+                no_update,
+                not polls,
+                no_update if flip is None else flip,
+                no_update,
+                no_update,
+            )
         page, polls = page_content(
             pathname,
             service,
@@ -600,6 +659,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             "scope": analysis.scope_dims(doc.get("scope")),
             "auto_refresh": doc.get("auto_refresh"),
             "focus": doc.get("focus"),
+            "inv": doc.get("inv"),
         }
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
         if (
@@ -608,9 +668,32 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             and (facts or {}).get("scope") == desired["scope"]
             and (facts or {}).get("auto_refresh") == desired["auto_refresh"]
             and (facts or {}).get("focus") == desired["focus"]
+            and (facts or {}).get("inv") == desired["inv"]
         ):
             raise PreventUpdate
-        if parse_route(pathname).kind != "workspace":
+        kind = parse_route(pathname).kind
+        if kind == "investigation":
+            # The investigation Series view polls only while its own
+            # auto-refresh intent is on and the member scope still has
+            # incomplete work.
+            if not (project and doc.get("auto_refresh")):
+                return True, desired
+            spec = parse_route(pathname)
+            try:
+                members = service.investigation_detail(
+                    spec.sub_id or ""
+                ).investigation.members
+            except CurationRejectedError:
+                return True, desired
+            tray, _scoped = analysis.investigation_scope_state(
+                members,
+                (doc.get("inv") or {}).get("member"),
+            )
+            return (
+                not service.analysis_scope_incomplete(project, tray),
+                desired,
+            )
+        if kind != "workspace":
             raise PreventUpdate
         scope_open = bool(project) and service.analysis_scope_incomplete(
             project, doc.get("scope")
@@ -636,7 +719,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("workspace-overview", "style"),
         Output("workspace-investigations", "style"),
         Output("workspace-exceptions", "style"),
-        Input("analysis-tabs", "value"),
+        Input({"analysis-tabs": ALL}, "value"),
     )
 
     @app.callback(
@@ -1185,7 +1268,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     def _render_inspector(
         view_doc: dict | None,
         _tick: int | None,
-        _project: str,
+        project: str,
         rendered: dict | None,
     ):
         # Unrelated view edits with the same focus render nothing; a
@@ -1203,7 +1286,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         digest = _content_digest(inspector_facts(service, focus))
         if digest == (rendered or {}).get("digest"):
             raise PreventUpdate
-        children = workspace.inspector_content(service, focus, time.time_ns())
+        children = workspace.inspector_content(
+            service,
+            focus,
+            time.time_ns(),
+            project=project or "",
+            via=str((view_doc or {}).get("via") or ""),
+        )
         return children, {"focus": focus, "digest": digest}
 
     @app.callback(
@@ -1265,14 +1354,14 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("overview-digest-store", "data"),
         Input("view-store", "data"),
         Input("poll", "n_intervals"),
-        Input("analysis-tabs", "value"),
+        Input({"analysis-tabs": ALL}, "value"),
         State("project-store", "data"),
         State("overview-digest-store", "data"),
     )
     def _track_overview_digest(
         view_doc: dict | None,
         _tick: int | None,
-        tab: str | None,
+        tabs: list | None,
         project: str | None,
         digest_doc: dict | None,
     ):
@@ -1285,6 +1374,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             (view_doc or {}).get("scope"),
             (view_doc or {}).get("overview_filter"),
         )
+        tab = (tabs or [None])[0]
         if digest == (digest_doc or {}).get("digest"):
             raise PreventUpdate
         return {"digest": digest}
@@ -1293,7 +1383,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("workspace-overview", "children"),
         Input("view-store", "data"),
         Input("poll", "n_intervals"),
-        Input("analysis-tabs", "value"),
+        Input({"analysis-tabs": ALL}, "value"),
         State("project-store", "data"),
         State("overview-digest-store", "data"),
         State("workspace-store", "data"),
@@ -1301,12 +1391,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     def _render_overview(
         view_doc: dict | None,
         _tick: int | None,
-        tab: str | None,
+        tabs: list | None,
         project: str | None,
         digest_doc: dict | None,
         workspace_doc: dict | None,
     ):
         doc = view_doc or analysis.default_view_state()
+        tab = (tabs or [None])[0]
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
         _facts, digest = overview_content(
             service,
@@ -1443,12 +1534,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("workspace-investigations", "children"),
         Input("view-store", "data"),
-        Input("analysis-tabs", "value"),
+        Input({"analysis-tabs": ALL}, "value"),
         State("project-store", "data"),
     )
     def _render_investigations(
-        view_doc: dict | None, tab: str | None, project: str | None
+        view_doc: dict | None, tabs: list | None, project: str | None
     ):
+        tab = (tabs or [None])[0]
         if tab != "investigations":
             raise PreventUpdate
         return workspace.investigations_tab(service, project)
@@ -1456,10 +1548,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("workspace-exceptions", "children"),
         Input("view-store", "data"),
-        Input("analysis-tabs", "value"),
+        Input({"analysis-tabs": ALL}, "value"),
         State("project-store", "data"),
     )
-    def _render_exceptions(view_doc: dict | None, tab: str | None, project: str | None):
+    def _render_exceptions(
+        view_doc: dict | None, tabs: list | None, project: str | None
+    ):
+        tab = (tabs or [None])[0]
         if tab != "exceptions":
             raise PreventUpdate
         return workspace.exceptions_tab(
@@ -1467,29 +1562,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         )
 
     # -- Investigation workspace and member editor (jernerics-g5rw.8) ----
-
-    app.clientside_callback(
-        """
-        function(clicks) {
-            const views = ["compare", "series", "points", "search"];
-            let active = "compare";
-            (clicks || []).forEach((value, index) => {
-                if (value !== null && value !== undefined && views[index]) {
-                    active = views[index];
-                }
-            });
-            const out = [];
-            views.forEach((view) => out.push(view === active ? "on" : ""));
-            views.forEach((view) => out.push(
-                {display: view === active ? "block" : "none"}
-            ));
-            return out;
-        }
-        """,
-        Output({"inv-view": ALL}, "className"),
-        Output({"inv-region": ALL}, "style"),
-        Input({"inv-view": ALL}, "n_clicks"),
-    )
 
     @app.callback(
         Output("url", "pathname", allow_duplicate=True),
@@ -1499,8 +1571,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
     def _open_member_sweep(click: dict | None, pathname: str | None):
-        # A row click on the member inventory inspects that sweep in the
-        # workspace (the same affordance the overview grid offers).
+        # A row click on the member inventory opens the sweep hub in the
+        # workspace: the sweep's overview with the investigation
+        # breadcrumb and back link (the ``?via=`` return path).
         spec = parse_route(pathname)
         if spec.kind != "investigation" or not isinstance(click, dict):
             raise PreventUpdate
@@ -1511,6 +1584,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         doc = analysis.with_focus(
             analysis.default_view_state(), {"kind": "sweep", "id": str(row_id)}
         )
+        doc = analysis.edited_view(doc, {"via": str(spec.sub_id or "")})
         return (
             f"{ROUTES_BASE}/project/{project}",
             f"?view={analysis.encode_view_state(doc)}",
@@ -1539,6 +1613,771 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 include_invalid,
             )
         ]
+
+    # -- Investigation views, member scope, and analysis regions ----------
+
+    def _inv_context(
+        pathname: str | None, view_doc: dict | None
+    ) -> tuple[Any, dict[str, Any] | None]:
+        """(investigation record, resolved scope group) for the page a
+        URL names; the member-scope resolution folds an unknown member
+        back to the full membership."""
+        spec = parse_route(pathname)
+        if spec.kind != "investigation" or not spec.sub_id:
+            return None, None
+        try:
+            record = service.investigation_detail(spec.sub_id).investigation
+        except CurationRejectedError:
+            return None, None
+        doc = view_doc or analysis.default_view_state()
+        tray, _scoped = analysis.investigation_scope_state(
+            record.members, (doc.get("inv") or {}).get("member")
+        )
+        return record, tray
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input({"inv-view": ALL}, "n_clicks"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_inv_view(_clicks: list | None, current: dict | None):
+        # The edit carries the switch into the view document so the URL
+        # follows. Compare visibly drops a member scope: a one-member
+        # scope must never pose as the full comparison.
+        if not pressed_props(dash.callback_context):
+            raise PreventUpdate
+        view, control = pattern_trigger(dash.callback_context)
+        if control != "inv-view" or view not in analysis.INVESTIGATION_VIEWS:
+            raise PreventUpdate
+        doc = analysis.view_from_inv(current, view=str(view))
+        if doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output({"inv-view": ALL}, "className"),
+        Output({"inv-region": ALL}, "style"),
+        Input("view-store", "data"),
+    )
+    def _sync_inv_regions(view_doc: dict | None):
+        # Button marks and region visibility follow the view document
+        # alone, in INVESTIGATION_VIEWS order — the order the DOM mounts
+        # them. The outputs stay one pattern family: mixing the shell's
+        # store write into the same dispatch is what corrupted it.
+        active = (view_doc or {}).get("inv", {}).get("view") or "compare"
+        return (
+            ["on" if name == active else "" for name in analysis.INVESTIGATION_VIEWS],
+            [
+                {"display": "block" if name == active else "none"}
+                for name in analysis.INVESTIGATION_VIEWS
+            ],
+        )
+
+    app.clientside_callback(
+        """
+        function(styles) {
+            // A region shown after loading hidden renders its plotly
+            // figures at a stale size; a resize event makes dcc.Graph
+            // re-measure.
+            window.dispatchEvent(new Event("resize"));
+            return window.dash_clientside.no_update;
+        }
+        """,
+        Output("inv-points-echo", "data"),
+        Input({"inv-region": ALL}, "style"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input({"inv-member-clear": ALL}, "n_clicks"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _clear_inv_member(_clicks: int | None, current: dict | None):
+        if not pressed_props(dash.callback_context):
+            raise PreventUpdate
+        doc = analysis.view_from_inv(current, member="")
+        if doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output({"inv-member-note": ALL}, "children"),
+        Output({"inv-member-clear": ALL}, "style"),
+        Output({"inv-crumb-member": ALL}, "children"),
+        Output({"inv-python": ALL}, "children"),
+        Input("view-store", "data"),
+        State("url", "pathname"),
+    )
+    def _sync_member_scope(view_doc: dict | None, pathname: str | None):
+        # The member-scope surfaces ride one store write; the shell's
+        # python panel content and the crumb live region update without
+        # remounting the page. Off the investigation route nothing here
+        # is mounted, so the pattern outputs are the only safe writers.
+        spec = parse_route(pathname)
+        if spec.kind != "investigation" or not spec.sub_id:
+            raise PreventUpdate
+        try:
+            record = service.investigation_detail(spec.sub_id).investigation
+        except CurationRejectedError:
+            raise PreventUpdate from None
+        doc = view_doc or analysis.default_view_state()
+        _tray, scoped = analysis.investigation_scope_state(
+            record.members, (doc.get("inv") or {}).get("member")
+        )
+        label = None
+        if scoped:
+            focused = service.sweep_detail(scoped)
+            label = focused.overview.name if focused else short_id(scoped)
+        crumb = [html.Span(className="dim"), html.Span(label)] if label else []
+        return (
+            [f"Scoped to member {label}" if label else ""],
+            [{} if label else {"display": "none"}],
+            [crumb],
+            [workspace.python_panel(record, scoped)],
+        )
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input("analysis-key", "value"),
+        Input("analysis-mode", "value"),
+        Input("analysis-reduction", "value"),
+        Input("analysis-display", "value"),
+        Input("analysis-auto-refresh", "value"),
+        Input("analysis-color", "value"),
+        Input("analysis-facet", "value"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_inv_view_state(
+        keys: list | None,
+        mode: str | None,
+        reduction: str | None,
+        display: str | None,
+        auto_flags: list | None,
+        color: str | None,
+        facet: str | None,
+        current: dict | None,
+    ):
+        # The investigation Series controls have no analysis-tabs/contour
+        # siblings, so the workspace control-edit callback never wires
+        # here (a missing input unwires the whole callback); this variant
+        # carries the same edits without them.
+        edited = analysis.edited_fields(dash.callback_context.triggered_prop_ids)
+        if not edited or len(edited) > 2:
+            raise PreventUpdate
+        doc = analysis.view_from_controls(
+            current,
+            active=None,
+            keys=keys,
+            mode=mode,
+            reduction=reduction,
+            color=color,
+            facet=facet,
+            contour_x=None,
+            contour_y=None,
+            trial_display=display,
+            auto_refresh="auto" in (auto_flags or []),
+            edited=edited,
+        )
+        if doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output("analysis-key", "value"),
+        Output("analysis-mode", "value"),
+        Output("analysis-reduction", "value"),
+        Output("analysis-color", "value"),
+        Output("analysis-facet", "value"),
+        Output("analysis-display", "value"),
+        Output("analysis-auto-refresh", "value"),
+        Input("view-store", "data"),
+        Input("analysis-key", "options"),
+        Input("analysis-color", "options"),
+        Input("analysis-facet", "options"),
+    )
+    def _sync_inv_controls(
+        doc: dict | None,
+        key_options: list | None,
+        color_options: list | None,
+        facet_options: list | None,
+    ):
+        # Control values ride with their options so a value written
+        # before its options exist is not dropped and echoed back as a
+        # spurious clear. Dropdown values arrive only once their options
+        # carry them (analysis.control_values gates each one).
+        values = analysis.control_values(
+            doc,
+            {
+                "keys": analysis.loaded_option_values(key_options),
+                "color": analysis.loaded_option_values(color_options),
+                "facet": analysis.loaded_option_values(facet_options),
+            },
+        )
+        return (
+            values[1],
+            values[2],
+            values[3],
+            values[4],
+            values[5],
+            values[8],
+            values[9],
+        )
+
+    @app.callback(
+        Output("analysis-series-data", "data"),
+        Output("analysis-updated", "children"),
+        Output({"analysis-refresh-store": ALL}, "data"),
+        Input("view-store", "data"),
+        Input({"analysis-refresh": ALL}, "n_clicks"),
+        Input("poll", "n_intervals"),
+        State("url", "pathname"),
+        State("analysis-series-data", "data"),
+        prevent_initial_call=True,
+    )
+    def _load_inv_series_snapshot(
+        view_doc: dict | None,
+        _clicks: int | None,
+        _tick: int | None,
+        pathname: str | None,
+        snapshot: dict | None,
+    ):
+        # Only the investigation's scope, a manual refresh, an enabled
+        # poll, or a series-view activation fetch series data; a usable
+        # snapshot renders from the store instead. Outputs stay
+        # page-local: jernerics-8c9 forbids mixing the shell's view
+        # store into a callback the shell can fire, so the
+        # auto-refresh flip lives in the router callback instead.
+        doc = view_doc or analysis.default_view_state()
+        if (doc.get("inv") or {}).get("view") != "series":
+            raise PreventUpdate
+        record, tray = _inv_context(pathname, view_doc)
+        if record is None:
+            raise PreventUpdate
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        if "view-store.data" in triggered and "poll.n_intervals" not in triggered:
+            usable, _missing = analysis.snapshot_status(
+                snapshot,
+                analysis.scope_fingerprint(record.project, tray),
+                doc["series"]["reduction"],
+                doc["series"]["keys"],
+            )
+            if usable:
+                raise PreventUpdate
+        now = time.time_ns()
+        try:
+            data, updated, state = analysis.series_data_outputs(
+                service, record.project, tray, doc, now
+            )
+        except Exception as error:
+            data, updated, state = analysis.series_data_failure(error, now)
+        # The pattern-ALL store output takes one entry per mounted store.
+        return data, updated, [state]
+
+    @app.callback(
+        Output("analysis-series-panels", "children"),
+        Output("analysis-series-data", "data", allow_duplicate=True),
+        Output("analysis-key", "options"),
+        Output("analysis-color", "options"),
+        Output("analysis-facet", "options"),
+        Output("analysis-context-filters", "children"),
+        Output("analysis-series-status", "children"),
+        Output("analysis-series-figure-store", "data"),
+        Output("analysis-series-figure", "figure"),
+        Input("view-store", "data"),
+        Input("analysis-series-data", "data"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _render_inv_series(
+        view_doc: dict | None,
+        snapshot: dict | None,
+        pathname: str | None,
+    ):
+        # Presentation rebuilds from the stored snapshot: view-only
+        # edits issue zero reads, added keys fetch only the missing
+        # ones, scope/reduction changes rebuild.
+        doc = view_doc or analysis.default_view_state()
+        if (doc.get("inv") or {}).get("view") != "series":
+            raise PreventUpdate
+        record, tray = _inv_context(pathname, view_doc)
+        if record is None:
+            raise PreventUpdate
+        if snapshot is None:
+            raise PreventUpdate
+        try:
+            (
+                panels,
+                persist,
+                key_options,
+                color_options,
+                facet_options,
+                filters,
+                status,
+                figure,
+            ) = analysis.series_view_outputs(
+                service,
+                record.project,
+                tray,
+                doc,
+                snapshot,
+                time.time_ns(),
+            )
+        except Exception as error:
+            failure = analysis.series_view_failure(error)
+            return (*failure[:7], no_update, failure[7])
+        return (
+            panels,
+            persist,
+            key_options,
+            color_options,
+            facet_options,
+            filters,
+            status,
+            _figure_payload(figure),
+            figure,
+        )
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Output({"axis-note": dash.ALL}, "children"),
+        Input({"axis-scale": dash.ALL}, "value"),
+        Input({"axis-range": dash.ALL}, "value"),
+        Input({"axis-min": dash.ALL}, "value"),
+        Input({"axis-max": dash.ALL}, "value"),
+        Input({"axis-reset": dash.ALL}, "n_clicks"),
+        State("view-store", "data"),
+        State("analysis-series-data", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_inv_axis_state(
+        _scales: list,
+        _ranges: list,
+        _lows: list,
+        _highs: list,
+        _resets: list,
+        current: dict | None,
+        data: dict | None,
+    ):
+        # ALL (not MATCH): dash's dropdown children extend the pattern
+        # id and break single-value MATCH resolution; values are read
+        # from inputs_list by resolved id.
+        inputs = dash.callback_context.inputs_list
+        metric, control = pattern_trigger(dash.callback_context)
+        field = control.removeprefix("axis-") if control else ""
+        if not metric or field not in {"scale", "range", "min", "max", "reset"}:
+            raise PreventUpdate
+        doc, note = analysis.axis_state_edit(
+            current,
+            metric=metric,
+            control=field,
+            scale=pattern_input_value(inputs, 0, "axis-scale", metric),
+            range_mode=pattern_input_value(inputs, 1, "axis-range", metric),
+            low=pattern_input_value(inputs, 2, "axis-min", metric),
+            high=pattern_input_value(inputs, 3, "axis-max", metric),
+            data=data,
+        )
+        if doc is None and note is None:
+            raise PreventUpdate
+        notes = analysis.panel_notes(current, data)
+        if (current or analysis.default_view_state())["series"]["mode"] == "stacked":
+            keys = (current or analysis.default_view_state())["series"]["keys"]
+            if metric in keys:
+                notes[keys.index(metric)] = note or notes[keys.index(metric)]
+        return no_update if doc is None else doc, notes
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Output("analysis-overlay-note", "children"),
+        Input("analysis-overlay-scale", "value"),
+        Input("analysis-overlay-range", "value"),
+        Input("analysis-overlay-min", "value"),
+        Input("analysis-overlay-max", "value"),
+        Input("analysis-overlay-reset", "n_clicks"),
+        State("view-store", "data"),
+        State("analysis-series-data", "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_inv_overlay_axis(
+        scale: str | None,
+        range_mode: str | None,
+        low: Any,
+        high: Any,
+        _reset: int | None,
+        current: dict | None,
+        data: dict | None,
+    ):
+        control = overlay_axis_control(dash.callback_context.triggered)
+        if control is None:
+            raise PreventUpdate
+        doc, note = analysis.axis_state_edit(
+            current,
+            metric=None,
+            control=control,
+            scale=scale,
+            range_mode=range_mode,
+            low=low,
+            high=high,
+            data=data,
+        )
+        if doc is None and note is None:
+            raise PreventUpdate
+        return no_update if doc is None else doc, note
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input({"panel-move-up": dash.ALL}, "n_clicks"),
+        Input({"panel-move-down": dash.ALL}, "n_clicks"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _move_inv_series_key(_ups: list, _downs: list, current: dict | None):
+        metric, control = pattern_trigger(dash.callback_context)
+        if metric is None or control not in ("panel-move-up", "panel-move-down"):
+            raise PreventUpdate
+        doc = analysis.moved_keys(current, metric, control.removeprefix("panel-move-"))
+        if doc is None:
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input("analysis-series-figure", "clickData"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _focus_inv_trace(click: dict | None, current: dict | None):
+        # A trace click highlights and focuses that trial — focus is
+        # highlight-only here; nothing mutates membership.
+        doc = analysis.view_from_trace_click(current, click)
+        if doc is None or doc == (current or {}):
+            raise PreventUpdate
+        return doc
+
+    @app.callback(
+        Output({"analysis-error": ALL}, "children", allow_duplicate=True),
+        Input({"analysis-refresh-store": ALL}, "data"),
+        prevent_initial_call=True,
+    )
+    def _show_inv_refresh_error(states: list | None):
+        # Only failures reach the page error region; recovery shows in
+        # the status line and the next navigation rewrites the store.
+        state = (states or [None])[0]
+        error = (state or {}).get("error") or ""
+        if not error:
+            raise PreventUpdate
+        return [Error(error)]
+
+    app.clientside_callback(
+        """
+        function(figure, relayout) {
+            if (!figure || !figure.data) {
+                return window.dash_clientside.no_update;
+            }
+            if (!relayout) {
+                return figure;
+            }
+            const ends = {};
+            for (const [key, value] of Object.entries(relayout)) {
+                const dot = key.indexOf(".");
+                if (dot < 0) continue;
+                const axis = key.slice(0, dot);
+                const rest = key.slice(dot + 1);
+                if (!/^[xy]axis[0-9]*$/.test(axis)) continue;
+                if (rest === "range" && Array.isArray(value)
+                        && value.length === 2) {
+                    ends[axis] = [value[0], value[1]];
+                } else if (rest === "range[0]" || rest === "range[1]") {
+                    const slot = ends[axis] || [null, null];
+                    slot[rest === "range[0]" ? 0 : 1] = value;
+                    ends[axis] = slot;
+                }
+            }
+            const layout = Object.assign({}, figure.layout);
+            let touched = false;
+            for (const [axis, pair] of Object.entries(ends)) {
+                if (pair[0] === null || pair[1] === null) continue;
+                if (!(axis in layout)) continue;
+                layout[axis] = Object.assign({}, layout[axis], {
+                    range: pair, autorange: false,
+                });
+                touched = true;
+            }
+            return touched ? Object.assign({}, figure, {layout}) : figure;
+        }
+        """,
+        Output("analysis-series-figure", "figure", allow_duplicate=True),
+        Input("analysis-series-figure-store", "data"),
+        State("analysis-series-figure", "relayoutData"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(hover, figure) {
+            const no = window.dash_clientside.no_update;
+            const trial = hover && hover.points && hover.points.length
+                ? String(hover.points[0].customdata) : null;
+            if (!figure || !figure.data) {
+                return no;
+            }
+            const data = figure.data.map((trace) => {
+                const mine = trace.customdata && trial
+                    && String(trace.customdata[0]) === trial;
+                const opacity = trial ? (mine ? 1 : 0.15) : null;
+                const width = trial && mine ? 4 : 2;
+                if (trace.opacity === opacity && trace.line
+                        && trace.line.width === width) {
+                    return trace;
+                }
+                return Object.assign({}, trace, {
+                    opacity,
+                    line: Object.assign({}, trace.line, {width}),
+                });
+            });
+            return Object.assign({}, figure, {data});
+        }
+        """,
+        Output("analysis-series-figure", "figure", allow_duplicate=True),
+        Input("analysis-series-figure", "hoverData"),
+        State("analysis-series-figure", "figure"),
+        prevent_initial_call=True,
+    )
+
+    # -- Points: native brush + row-click selection -----------------------
+
+    app.clientside_callback(
+        """
+        function(restyle, data) {
+            const no = window.dash_clientside.no_update;
+            if (!restyle || !data || !data.tks || !data.tks.length) {
+                return no;
+            }
+            // Only a restyle that carries a brush acts; the selection
+            // recolor's own line.color restyle must not clear a
+            // row-click selection.
+            if (!JSON.stringify(restyle).includes("constraintrange")) {
+                return no;
+            }
+            const host = document.getElementById("inv-points-figure");
+            const gd = host && (host.querySelector(".js-plotly-plot") || host);
+            const full = gd && gd._fullData && gd._fullData[0];
+            const dims = (full && full.dimensions) || [];
+            if (!dims.length) {
+                return no;
+            }
+            const cons = [];
+            dims.forEach((dim) => {
+                let cr = dim ? dim.constraintrange : null;
+                if (cr === undefined || cr === null) return;
+                if (!Array.isArray(cr)) cr = [cr];
+                const ranges = cr.length && Array.isArray(cr[0]) ? cr : [cr];
+                ranges.forEach((r) => {
+                    if (Array.isArray(r) && r.length >= 2) {
+                        cons.push([Math.min(r[0], r[1]), Math.max(r[0], r[1])]);
+                    }
+                });
+            });
+            const tks = [];
+            (full.dimensions[0].values || []).forEach((_, line) => {
+                const inside = dims.every((dim) => {
+                    if (!dim.constraintrange) return true;
+                    let cr = dim.constraintrange;
+                    if (!Array.isArray(cr)) cr = [cr];
+                    const ranges = cr.length && Array.isArray(cr[0])
+                        ? cr : [cr];
+                    const v = dim.values[line];
+                    if (v !== v) return false;
+                    return ranges.some((r) => {
+                        if (!Array.isArray(r) || r.length < 2) return false;
+                        return v >= Math.min(r[0], r[1])
+                            && v <= Math.max(r[0], r[1]);
+                    });
+                });
+                if (inside) tks.push(data.tks[line]);
+            });
+            tks.sort();
+            return {tks: tks};
+        }
+        """,
+        Output("inv-points-sel", "data"),
+        Input("inv-points-figure", "restyleData"),
+        State("inv-points-data", "data"),
+        prevent_initial_call=True,
+    )
+
+    app.clientside_callback(
+        """
+        function(rows, data) {
+            const no = window.dash_clientside.no_update;
+            if (rows === undefined || rows === null) {
+                return no;
+            }
+            const tks = (rows || [])
+                .map((row) => row && row.tk)
+                .filter(Boolean)
+                .sort();
+            return {tks: tks};
+        }
+        """,
+        Output("inv-points-sel", "data", allow_duplicate=True),
+        Input("inv-points-grid", "selectedRows"),
+        State("inv-points-data", "data"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("inv-points-grid", "rowData"),
+        Output("inv-points-note", "children"),
+        Output("inv-points-clear", "style"),
+        Output("inv-points-figure", "figure", allow_duplicate=True),
+        Output("inv-points-data", "data", allow_duplicate=True),
+        Output("inv-points-sel", "data", allow_duplicate=True),
+        Input("inv-points-sel", "data"),
+        Input("view-store", "data"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _filter_points_rows(
+        selection: dict | None,
+        view_doc: dict | None,
+        pathname: str | None,
+    ):
+        # The table HIDES non-selected rows while the parcoords keeps
+        # every line plotted — brushes fade natively, a selection only
+        # recolors lines; axes never rescale. A scope change (member
+        # flip) rebuilds the whole set and drops the selection.
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        scope_changed = "view-store.data" in triggered
+        record, tray = _inv_context(pathname, view_doc)
+        if record is None:
+            raise PreventUpdate
+        view = analysis.points_view_data(
+            service.analysis_trials(record.project, tray),
+            analysis.points_scalar_keys(service, record.project, tray),
+            service.analysis_finals(record.project, tray),
+            record.outcome,
+        )
+        picked = sorted(str(tk) for tk in (selection or {}).get("tks") or [])
+        if scope_changed:
+            picked = []
+        rows = view["rows"]
+        if picked:
+            keep = set(picked)
+            rows = [row for row in rows if row["tk"] in keep]
+        note = f"{len(rows)} of {len(view['rows'])} trials shown" if picked else ""
+        figure = figures.points_parcoords(view["dims"]) if scope_changed else no_update
+        line_data = {"tks": view["tks"]} if scope_changed else no_update
+        reset = {"tks": []} if scope_changed else no_update
+        return (
+            rows,
+            note,
+            {} if picked else {"display": "none"},
+            figure,
+            line_data,
+            reset,
+        )
+
+    app.clientside_callback(
+        """
+        function(selection, data) {
+            const no = window.dash_clientside.no_update;
+            const host = document.getElementById("inv-points-figure");
+            const gd = host && (host.querySelector(".js-plotly-plot") || host);
+            if (!gd || !window.Plotly || !data || !data.tks
+                    || !data.tks.length) {
+                return no;
+            }
+            const VIRIDIS = ['#440154', '#482878', '#3e4989', '#31688e',
+                '#26828e', '#1f9e89', '#35b779', '#6ece58', '#b5de2b',
+                '#fde725'];
+            const sel = new Set((selection && selection.tks) || []);
+            const n = data.tks.length;
+            let color;
+            let colorscale = "Viridis";
+            if (sel.size) {
+                const stops = [[0, "#ececec"]];
+                VIRIDIS.forEach((c, k) => {
+                    stops.push([(k + 1) / VIRIDIS.length, c]);
+                });
+                colorscale = stops;
+                const rank = new Map();
+                data.tks.forEach((tk) => {
+                    if (sel.has(tk)) {
+                        rank.set(tk, ((rank.size + 1) / sel.size) * n);
+                    }
+                });
+                color = data.tks.map((tk) => rank.get(tk) || 0);
+            } else {
+                color = data.tks.map((_, i) => i);
+            }
+            Plotly.restyle(gd, {
+                "line.color": [color],
+                "line.colorscale": [colorscale],
+                "line.showscale": [false],
+            });
+            return no;
+        }
+        """,
+        Output("inv-points-echo", "data"),
+        Input("inv-points-sel", "data"),
+        State("inv-points-data", "data"),
+        prevent_initial_call=True,
+    )
+
+    @app.callback(
+        Output("inv-points-sel", "data", allow_duplicate=True),
+        Output("inv-points-grid", "selectedRows"),
+        Input("inv-points-clear", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def _clear_points_selection(_clicks: int | None):
+        # Clearing restores every table row and drops the recolor: the
+        # selection store empties and the grid's own selection resets.
+        if not pressed_props(dash.callback_context):
+            raise PreventUpdate
+        return {"tks": []}, []
+
+    # -- Search: the member filter ----------------------------------------
+
+    @app.callback(
+        Output("inv-search-grid", "rowData"),
+        Output("inv-search-note", "children"),
+        Input("inv-search-q", "value"),
+        Input("view-store", "data"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _filter_inv_search(
+        query: str | None,
+        view_doc: dict | None,
+        pathname: str | None,
+    ):
+        # The member scope rides the view document, so a member flip
+        # re-narrows the rows exactly like a typed filter does.
+        record, _tray = _inv_context(pathname, view_doc)
+        if record is None:
+            raise PreventUpdate
+        member_ids = {str(m) for m in record.members}
+        scoped = (view_doc or {}).get("inv", {}).get("member")
+        if scoped and str(scoped) in member_ids:
+            member_ids = {str(scoped)}
+        rows = workspace.search_rows(
+            [
+                summary
+                for summary in service.sweep_overview(record.project)
+                if summary.sweep_id in member_ids
+            ]
+        )
+        needle = str(query or "").strip().casefold()
+        shown = [
+            row for row in rows if not needle or needle in str(row["name"]).casefold()
+        ]
+        note = f"{len(shown)} of {len(rows)} member sweeps"
+        return shown, note
 
     @app.callback(
         Output({"inv-edit-preview": ALL}, "children"),
@@ -1861,22 +2700,23 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return doc
 
     @app.callback(
-        Output("analysis-error", "children"),
+        Output({"analysis-error": ALL}, "children"),
         Input("analysis-message-store", "data"),
     )
     def _show_analysis_message(message: str | None):
-        return Error(message) if message else ""
+        # One entry per matched pattern component; a clear stays an event.
+        return [Error(message)] if message else [no_update]
 
     @app.callback(
         Output("view-store", "data", allow_duplicate=True),
-        Input("analysis-tabs", "value"),
+        Input({"analysis-tabs": ALL}, "value"),
         State("view-store", "data"),
         prevent_initial_call=True,
     )
-    def _edit_view_state(active: str | None, current: dict | None):
+    def _edit_view_state(active: list | None, current: dict | None):
         doc = analysis.view_from_controls(
             current,
-            active=active,
+            active=(active or [None])[0],
             keys=None,
             mode=None,
             reduction=None,
@@ -1893,7 +2733,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return doc
 
     @app.callback(
-        Output("analysis-tabs", "value"),
+        Output({"analysis-tabs": ALL}, "value"),
         Output("analysis-include", "value"),
         Output("analysis-expand", "value"),
         Input("view-store", "data"),
@@ -1903,7 +2743,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         # write is one sync POST; the analysis pickers return with the
         # sweep-scope views (jernerics-g5rw.9).
         return (
-            analysis.control_values(doc, {})[0],
+            [analysis.control_values(doc, {})[0]],
             analysis.include_values(doc),
             analysis.expand_values(doc),
         )
@@ -1936,14 +2776,14 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         }
         """,
         Output("scroll-restore-store", "data"),
-        Input("analysis-refresh", "n_clicks"),
+        Input({"analysis-refresh": ALL}, "n_clicks"),
         Input("poll", "n_intervals"),
         prevent_initial_call=True,
     )
 
     app.clientside_callback(
         """
-        function(overviewRendered, state) {
+        function(refreshState, overviewRendered, state) {
             if (!state || !state.grids) {
                 return window.dash_clientside.no_update;
             }
@@ -1963,6 +2803,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         }
         """,
         Output("scroll-restore-store", "data", allow_duplicate=True),
+        Input({"analysis-refresh-store": ALL}, "data"),
         Input("workspace-overview", "children"),
         State("scroll-restore-store", "data"),
         prevent_initial_call=True,

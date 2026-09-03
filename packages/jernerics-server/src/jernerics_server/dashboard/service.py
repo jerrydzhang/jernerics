@@ -1399,6 +1399,34 @@ class DashboardService:
             )
         return [{"key": key, "series": per_key[key]} for key in wanted]
 
+    def analysis_finals(
+        self, project: str | None, tray: dict[str, Any] | None
+    ) -> dict[str, dict[str, Any]]:
+        """Per trial, the last logged value of every scalar key — the
+        trial's final scalars, stepped or not. Later recorded values win
+        within a step, retry generations included."""
+        if not project:
+            return {}
+        selection = self.analysis_selection(project, tray)
+        keys = tuple(
+            record.key
+            for record in self.queries.value_catalog(selection)
+            if record.kind == "scalar"
+        )
+        finals: dict[str, dict[str, tuple[int, Any]]] = {}
+        for record in self._follow_values(selection, keys):
+            payload = (
+                record.observation if record.observation is not None else record.value
+            )
+            per_trial = finals.setdefault(str(record.trial_id), {})
+            current = per_trial.get(record.key)
+            if current is None or record.step >= current[0]:
+                per_trial[record.key] = (record.step, payload)
+        return {
+            trial_id: {key: payload for key, (_, payload) in per_trial.items()}
+            for trial_id, per_trial in finals.items()
+        }
+
     def analysis_points(
         self, project: str | None, tray: dict[str, Any] | None
     ) -> dict[str, Any]:

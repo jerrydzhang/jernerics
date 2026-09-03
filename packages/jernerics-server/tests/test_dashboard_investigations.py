@@ -4,10 +4,12 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from urllib.parse import unquote
 
 import pytest
 from dash import dcc, html
 from dash.development.base_component import Component
+from dash_ag_grid import AgGrid
 from fastapi.testclient import TestClient
 from jernerics_schema import (
     PROTOCOL_VERSION,
@@ -24,12 +26,20 @@ from jernerics_schema import (
     encode_selection,
     materialize_selection,
 )
-from jernerics_server.dashboard import workspace
+from jernerics_server.dashboard import analysis, workspace
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
+    decode_view_state,
     default_scope_state,
+    default_view_state,
+    encode_view_state,
+    hydrate_view,
+    investigation_scope_state,
+    points_tab,
     seed_sweeps_from_search,
+    synced_search,
     tray_from_selection,
+    view_from_inv,
 )
 from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.components import MISSING
@@ -697,7 +707,7 @@ class TestInvestigationWorkspacePage:
         hrefs = [node.href for node in _walk_anchors(page)]
         assert f"{ROUTES_BASE}/project/{CMP}" in hrefs
 
-    def test_views_row_mounts_compare_plus_honest_placeholders(self, cmp_service, sig):
+    def test_views_row_mounts_all_view_regions(self, cmp_service, sig):
         page = workspace.investigation_page(cmp_service, CMP, sig.compare)
         buttons = [
             node
@@ -720,7 +730,14 @@ class TestInvestigationWorkspacePage:
         assert regions["compare"].style == {"display": "block"}
         for view in ("series", "points", "search"):
             assert regions[view].style == {"display": "none"}
-            assert "jernerics-g5rw.9" in str(regions[view])
+        ids = {
+            node.id
+            for node in _walk_children(page)
+            if isinstance(getattr(node, "id", None), str)
+        }
+        assert "analysis-key" in ids
+        assert "inv-points-grid" in ids
+        assert "inv-search-grid" in ids
 
     def test_open_in_python_exports_the_member_selection_token(self, cmp_service, sig):
         page = workspace.investigation_page(cmp_service, CMP, sig.compare)
@@ -1215,3 +1232,230 @@ def _text(node) -> str:
     if isinstance(node, (list, tuple)):
         return "".join(_text(child) for child in node)
     return "" if node is None else str(node)
+
+
+def _inv_page(
+    cmp_service,
+    investigation_id: str,
+    view: str | None = None,
+    member: str | None = None,
+):
+    """The investigation page for one ``?view=`` document (member scope
+    included), plus the decoded state the URL carries."""
+    doc = default_view_state()
+    if view is not None or member is not None:
+        doc["inv"] = {
+            **doc["inv"],
+            "view": view or "compare",
+            "member": member,
+        }
+    return workspace.investigation_page(
+        cmp_service,
+        CMP,
+        investigation_id,
+        search=f"?view={encode_view_state(doc)}",
+    )
+
+
+def _string_id_node(page, node_id: str):
+    return next(
+        (node for node in _walk_children(page) if getattr(node, "id", None) == node_id),
+        None,
+    )
+
+
+class TestMemberScopeAndViews:
+    """jernerics-g5rw.9: member scope rides the ``view=`` codec with an
+    unknown-member fallback, the sweep hub gates its views on real data
+    and carries the via return path, and Open in Python exports the
+    exact effective membership."""
+
+    def test_member_scope_round_trips_through_the_view_codec(self, cmp_service, sig):
+        doc = default_view_state()
+        doc["inv"] = {"view": "series", "member": str(CS2)}
+        hydrated, error = hydrate_view(
+            f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}",
+            f"?view={encode_view_state(doc)}",
+            None,
+        )
+        assert error is None
+        assert hydrated is not None
+        assert hydrated["inv"] == {"view": "series", "member": str(CS2)}
+        # A workspace navigation without a view document resets it.
+        plain, _error = hydrate_view(
+            f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}", None, doc
+        )
+        assert plain is not None
+        assert plain["inv"] == {"view": "compare", "member": None}
+        assert plain["via"] is None
+
+    def test_page_renders_the_scoped_member_fact_and_controls(self, cmp_service, sig):
+        page = _inv_page(cmp_service, sig.compare, view="series", member=str(CS2))
+        crumb = _first_pattern(page, "inv-crumb-member")
+        assert _text(crumb) == "cmp_f02"
+        note = _first_pattern(page, "inv-member-note")
+        assert _text(note) == "Scoped to member cmp_f02"
+        clear = _first_pattern(page, "inv-member-clear")
+        assert clear.style == {}
+        python_clip = _first_pattern(page, "inv-python").children[1].children[0]
+        selection = decode_selection_token(python_clip.children)
+        assert selection.sweeps == (CS2,)
+
+    def test_unknown_member_falls_back_to_all_members(self, cmp_service, sig):
+        tray, scoped = investigation_scope_state([str(CS1), str(CS2)], "deadbeef")
+        assert scoped is None
+        assert tray["sweeps"] == sorted({str(CS1), str(CS2)})
+        page = _inv_page(cmp_service, sig.compare, view="points", member="deadbeef")
+        crumb = _first_pattern(page, "inv-crumb-member")
+        assert _text(crumb) == ""
+        note = _first_pattern(page, "inv-member-note")
+        assert _text(note) == ""
+        clipboards = [
+            node for node in _walk_children(page) if isinstance(node, dcc.Clipboard)
+        ]
+        selection = decode_selection_token(clipboards[0].content)
+        assert set(selection.sweeps or ()) == {CS1, CS2, CS3}
+
+    def test_compare_drops_member_scope_and_the_url_follows(self):
+        doc = default_view_state()
+        doc["inv"] = {"view": "series", "member": str(CS2)}
+        doc = view_from_inv(doc, view="compare")
+        assert doc["inv"] == {"view": "compare", "member": None}
+        scoped_url = "?view=" + encode_view_state(
+            {"v": 2, "inv": {"view": "series", "member": str(CS2)}}
+        )
+        search = synced_search(
+            f"{ROUTES_BASE}/project/{CMP}/investigation/inv1",
+            doc,
+            scoped_url,
+            url_navigated=False,
+        )
+        assert search == "" or "member" not in (search or "")
+        # Series and member edits mint the investigation URL.
+        doc = view_from_inv(doc, view="search", member=str(CS1))
+        minted = synced_search(
+            f"{ROUTES_BASE}/project/{CMP}/investigation/inv1",
+            doc,
+            "",
+            url_navigated=False,
+        )
+        assert minted == f"?view={encode_view_state(doc)}"
+
+    def test_page_regions_follow_the_url_view(self, cmp_service, sig):
+        page = _inv_page(cmp_service, sig.compare, view="points", member=str(CS2))
+        regions = {
+            node.id["inv-region"]: node.style
+            for node in _pattern_nodes(page, "inv-region")
+        }
+        assert regions == {
+            "compare": {"display": "none"},
+            "series": {"display": "none"},
+            "points": {"display": "block"},
+            "search": {"display": "none"},
+        }
+        buttons = {
+            node.id["inv-view"]: node.className
+            for node in _pattern_nodes(page, "inv-view")
+        }
+        assert buttons["points"] == "on"
+        assert buttons["compare"] == ""
+
+    def test_points_table_carries_the_member_trials(self, cmp_service, sig):
+        tray, _scoped = investigation_scope_state([str(CS1), str(CS2), str(CS3)], None)
+        grid = next(
+            node
+            for node in _walk_children(points_tab(cmp_service, CMP, tray, OUTCOME))
+            if isinstance(node, AgGrid)
+        )
+        assert {row["tk"] for row in grid.rowData} == {
+            str(CT1),
+            str(CT2),
+            str(CT3),
+            str(CT4),
+        }
+
+    def test_sweep_hub_gates_views_on_real_data(self, cmp_service, sig):
+        # cmp members carry the outcome at step 0 only — no step series,
+        # so Series is unsupported; every member has trials, so Points
+        # renders; Search always opens over all members.
+        hub = workspace.sweep_hub_header(
+            cmp_service, CMP, str(CS1), "cmp_f01", sig.compare
+        )
+        crumb, views = hub
+        assert _text(crumb) == f"{CMP}Investigationssig-comparecmp_f01"
+        labels = [
+            node.children
+            for node in _walk_children(views)
+            if isinstance(node, (html.A, html.Span))
+            and node.children in {"Overview", "Series", "Points", "Search"}
+        ]
+        assert labels == ["Overview", "Points", "Search"]
+        links = {
+            node.children: node.href
+            for node in _walk_children(views)
+            if isinstance(node, html.A)
+        }
+        points_href = links["Points"]
+        assert f"/investigation/{sig.compare}" in points_href
+        assert (
+            str(CS1)
+            in decode_view_state(unquote(points_href.split("view=")[1]))["inv"][
+                "member"
+            ]
+        )
+        search_doc = decode_view_state(unquote(links["Search"].split("view=")[1]))
+        assert search_doc["inv"] == {"view": "search", "member": None}
+        back = _text(views).count("Back to sig-compare")
+        assert back == 1
+
+    def test_sweep_hub_renders_nothing_without_a_via(self, cmp_service, sig):
+        assert (
+            workspace.sweep_hub_header(cmp_service, CMP, str(CS1), "cmp_f01", None)
+            == []
+        )
+        assert (
+            workspace.sweep_hub_header(
+                cmp_service, CMP, str(CS1), "cmp_f01", "no-such-inv"
+            )
+            == []
+        )
+        foreign = workspace.investigation_page(cmp_service, CMP, sig.compare)
+        assert _pattern_nodes(foreign, "inv-region")  # sanity: page builds
+
+    def test_via_return_path_survives_its_own_url_only(self, cmp_service, sig):
+        doc = analysis.edited_view(
+            default_view_state(),
+            {"focus": {"kind": "sweep", "id": str(CS1)}, "via": sig.compare},
+        )
+        hydrated, error = hydrate_view(
+            f"{ROUTES_BASE}/project/{CMP}", f"?view={encode_view_state(doc)}", None
+        )
+        assert error is None
+        assert hydrated is not None
+        assert hydrated["via"] == sig.compare
+        assert hydrated["focus"] == {"kind": "sweep", "id": str(CS1)}
+        # A document that does not name a via clears it.
+        stripped, _error = hydrate_view(
+            f"{ROUTES_BASE}/project/{CMP}",
+            f"?view={encode_view_state(default_view_state())}",
+            doc,
+        )
+        assert stripped is not None
+        assert stripped["via"] is None
+
+    def test_python_token_exports_the_scoped_member_set(self, cmp_service, sig):
+        record = cmp_service.investigation_detail(sig.compare).investigation
+        scoped = workspace.open_in_python(record, member=str(CS2))
+        clipboards = [
+            node for node in _walk_children(scoped) if isinstance(node, dcc.Clipboard)
+        ]
+        assert decode_selection_token(clipboards[0].content).sweeps == (CS2,)
+        full = workspace.open_in_python(record)
+        clipboards = [
+            node for node in _walk_children(full) if isinstance(node, dcc.Clipboard)
+        ]
+        assert set(decode_selection_token(clipboards[0].content).sweeps or ()) == {
+            CS1,
+            CS2,
+            CS3,
+        }
