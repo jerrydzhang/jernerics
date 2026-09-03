@@ -694,6 +694,15 @@ def _sel_param(search: str | None) -> str | None:
     return values[0] if values else None
 
 
+def seed_sweeps_from_search(search: str | None) -> list[str]:
+    """The editor route's ``?sweeps=`` CSV as sorted-unique sweep ids.
+    Unknown parts are kept, not dropped — the preview names them."""
+    values = parse_qs((search or "").lstrip("?")).get("sweeps")
+    if not values:
+        return []
+    return sorted({part for part in values[0].split(",") if part})
+
+
 def hydrate_tray(
     service: DashboardService,
     project: str | None,

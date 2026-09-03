@@ -12,9 +12,11 @@ rows) are internal presentation shapes — plain frozen dataclasses here,
 never schema-package wire models.
 """
 
+import re
+import statistics
 import uuid
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from jernerics_schema import (
@@ -30,6 +32,7 @@ from jernerics_schema import (
 
 from jernerics_server.investigations import (
     InvestigationDetail,
+    InvestigationPreview,
     InvestigationRecord,
     InvestigationService,
 )
@@ -270,6 +273,45 @@ class InvestigationRow:
     completed: int
     invalid: int
     last_activity_ns: int | None
+
+
+@dataclass(frozen=True)
+class CompareMember:
+    """One member sweep of an investigation's Compare view."""
+
+    sweep_id: str
+    name: str
+    factor_value: str | None
+    state: str
+    invalid: bool
+    archived: bool
+    completed: int
+    expected_trials: int | None
+    usable: int
+
+
+@dataclass(frozen=True)
+class SignatureRow:
+    """One sampled signature matched across the analysis set: the
+    median outcome each analyzable member produced on it."""
+
+    label: str
+    values: dict[str, float | None] = field(default_factory=dict)
+    matched: int = 0
+    common: bool = False
+
+
+@dataclass(frozen=True)
+class CompareDocument:
+    """Everything the Compare view shows, derived from live tracking
+    facts: member rows, the analysis set, and the exact-signature
+    matches between analyzable members."""
+
+    members: list[CompareMember] = field(default_factory=list)
+    signature_keys: tuple[str, ...] = ()
+    analyzable: tuple[str, ...] = ()
+    excluded_data_bearing: int = 0
+    signatures: tuple[SignatureRow, ...] = ()
 
 
 def _format_param(value: Any) -> str:
@@ -603,6 +645,185 @@ class DashboardService:
         except StoreError as error:
             raise CurationRejectedError(_curation_error(error)) from error
 
+    def investigation_preview(
+        self, project: str, sweep_ids: Sequence[str]
+    ) -> InvestigationPreview:
+        """The shared deterministic member preview (factors, outcomes,
+        warnings) — the same contract the HTTP route serves."""
+        return self._investigations().preview(project, sweep_ids)
+
+    def investigation_compare(
+        self, investigation_id: str, *, include_invalid: bool = False
+    ) -> CompareDocument:
+        """The Compare view's facts: member rows with derived factor
+        values, the analysis set, and every sampled signature matched
+        by two or more analyzable members. Invalid members are outside
+        the analysis set unless ``include_invalid``; matching is exact
+        on the full sampled-parameter signature — no imputation, no
+        outlier suppression, and a missing overlap is simply missing."""
+        detail = self.investigation_detail(investigation_id)
+        record = detail.investigation
+        member_ids = [str(sweep) for sweep in record.members]
+        selection = materialize_selection(record)
+        trials = self.queries.trial_numbers_objectives(selection)
+        sweep_of_trial = {str(row["trial_id"]): str(row["sweep_id"]) for row in trials}
+        factor_values = self._member_factor_values(
+            record.factor, selection, sweep_of_trial
+        )
+        outcome_of_trial = self._trial_outcomes(selection, record.outcome)
+        sampled_keys: set[str] = set()
+        signatures_of_trial: dict[str, tuple[tuple[str, str], ...]] = {}
+        for row in self._follow_params(selection, kinds=("sampled",)):
+            trial = str(row.trial_id)
+            signatures_of_trial.setdefault(trial, ())
+            signatures_of_trial[trial] = (
+                *signatures_of_trial[trial],
+                (row.key, _format_param(row.value)),
+            )
+            sampled_keys.add(row.key)
+        signatures_of_trial = {
+            trial: tuple(sorted(items)) for trial, items in signatures_of_trial.items()
+        }
+        members = self._compare_members(
+            record,
+            member_ids,
+            sweep_of_trial,
+            outcome_of_trial,
+            factor_values,
+        )
+        analysis_set = [
+            member
+            for member in members
+            if member.usable > 0 and (include_invalid or not member.invalid)
+        ]
+        by_sweep = {member.sweep_id: member for member in analysis_set}
+        matches: dict[tuple[tuple[str, str], ...], dict[str, list[float]]] = {}
+        for row in trials:
+            if row["state"] != "completed":
+                continue
+            sweep = str(row["sweep_id"])
+            trial = str(row["trial_id"])
+            signature = signatures_of_trial.get(trial)
+            outcome = outcome_of_trial.get(trial)
+            if sweep not in by_sweep or not signature or outcome is None:
+                continue
+            matches.setdefault(signature, {}).setdefault(sweep, []).append(outcome)
+        rows = [
+            SignatureRow(
+                label=" · ".join(f"{key}={value}" for key, value in signature),
+                values={
+                    member.sweep_id: (
+                        statistics.median(hit)
+                        if (hit := sweeps.get(member.sweep_id)) is not None
+                        else None
+                    )
+                    for member in analysis_set
+                },
+                matched=len(sweeps),
+                common=len(sweeps) == len(analysis_set),
+            )
+            for signature, sweeps in matches.items()
+        ]
+        rows.sort(key=lambda row: (-row.matched, row.label))
+        return CompareDocument(
+            members=members,
+            signature_keys=tuple(sorted(sampled_keys)),
+            analyzable=tuple(member.sweep_id for member in analysis_set),
+            excluded_data_bearing=sum(
+                1 for member in members if member.invalid and member.usable > 0
+            ),
+            signatures=tuple(rows),
+        )
+
+    def _compare_members(
+        self,
+        record: InvestigationRecord,
+        member_ids: list[str],
+        sweep_of_trial: dict[str, str],
+        outcome_of_trial: dict[str, float],
+        factor_values: dict[str, str | None],
+    ) -> list[CompareMember]:
+        summaries = {
+            summary.sweep_id: summary
+            for summary in self.sweep_overview(record.project, member_ids)
+        }
+        members: list[CompareMember] = []
+        for sweep_id in sorted(member_ids, key=lambda sid: (sid not in summaries, sid)):
+            summary = summaries.get(sweep_id)
+            if summary is None:
+                continue
+            usable = sum(
+                1
+                for trial, sweep in sweep_of_trial.items()
+                if sweep == sweep_id and trial in outcome_of_trial
+            )
+            members.append(
+                CompareMember(
+                    sweep_id=sweep_id,
+                    name=summary.name,
+                    factor_value=factor_values.get(sweep_id),
+                    state=summary.state,
+                    invalid=summary.invalid,
+                    archived=summary.archived,
+                    completed=summary.succeeded,
+                    expected_trials=summary.expected_trials,
+                    usable=usable,
+                )
+            )
+        members.sort(key=lambda member: member.name.casefold())
+        return members
+
+    def _member_factor_values(
+        self,
+        factor: str,
+        selection: Selection,
+        sweep_of_trial: dict[str, str],
+    ) -> dict[str, str | None]:
+        """Each member's value of the comparison factor: a manual param
+        named ``factor`` first, then the submission config source, then
+        a name token; members carrying none stay missing."""
+        names = self._sweep_names(selection.project)
+        carried: dict[str, set[str]] = {}
+        for row in self._follow_params(selection, kinds=("manual",)):
+            if row.key != factor:
+                continue
+            sweep = sweep_of_trial.get(str(row.trial_id))
+            if sweep is not None:
+                carried.setdefault(sweep, set()).add(_format_param(row.value))
+        for row in self.queries.provenance(selection):
+            if row.config_source:
+                carried.setdefault(str(row.sweep_id), set()).add(row.config_source)
+        for sweep_id, name in names.items():
+            for token in re.split(r"[^0-9A-Za-z]+", name):
+                if (
+                    token
+                    and not token.isdigit()
+                    and token.casefold() == factor.casefold()
+                ):
+                    carried.setdefault(sweep_id, set()).add(token)
+        return {
+            sweep: " / ".join(sorted(values_))
+            for sweep, values_ in carried.items()
+            if values_
+        }
+
+    def _trial_outcomes(self, selection: Selection, outcome: str) -> dict[str, float]:
+        """Each trial's outcome value: the median over its executions'
+        final-step observations — retried executions contribute their
+        own final, nothing is dropped or imputed."""
+        finals: dict[str, list[float]] = {}
+        per_execution: dict[tuple[str, str], dict[int, list[float]]] = {}
+        for row in self._follow_values(selection, (outcome,)):
+            execution = str(row.execution_id) if row.execution_id else ""
+            steps = per_execution.setdefault((str(row.trial_id), execution), {})
+            value = row.value
+            if isinstance(value, int | float) and not isinstance(value, bool):
+                steps.setdefault(row.step, []).append(float(value))
+        for (trial, _execution), steps in per_execution.items():
+            last = steps[max(steps)]
+            finals.setdefault(trial, []).append(statistics.median(last))
+        return {trial: statistics.median(values) for trial, values in finals.items()}
+
     def sweep_curation_state(self, sweep_id: str) -> SweepSummary | None:
         """One sweep's overview row — archived/invalid facts without the
         full detail; None when the id names no sweep."""
@@ -933,10 +1154,12 @@ class DashboardService:
             selection,
         )
 
-    def _follow_params(self, selection: Selection) -> list[TrialParamRecord]:
+    def _follow_params(
+        self, selection: Selection, kinds: tuple[str, ...] = ()
+    ) -> list[TrialParamRecord]:
         return self._follow_pages(
             lambda sel, page, token: self.queries.trial_params(
-                sel, page=page, page_token=token
+                sel, kinds=kinds or None, page=page, page_token=token
             ),
             selection,
         )

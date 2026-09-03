@@ -1454,14 +1454,12 @@ class TestRoutesServe:
             assert response.status_code == 200, url
             assert "react-entry-point" in response.text
 
-    def test_investigation_stub_pages_name_the_arriving_work(self, service):
+    def test_investigation_pages_without_a_store_stay_honest(self, service):
         page, polls = page_content("/dashboard/project/ops/investigation/new", service)
-        rendered = str(page)
-        assert "New investigation" in rendered
-        assert "jernerics-g5rw.8" in rendered
+        assert "no write store" in str(page)
         assert polls is False
         page, _ = page_content("/dashboard/project/ops/investigation/abc-123", service)
-        assert "The investigation workspace arrives" in str(page)
+        assert "no write store" in str(page)
 
 
 class TestServiceCurationMutations:

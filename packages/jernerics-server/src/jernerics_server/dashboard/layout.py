@@ -148,48 +148,10 @@ def project_page(catalog: list[ProjectSummary], now_ns: int) -> html.Div:
     )
 
 
-def investigation_stub_page(
-    kind: str, project: str, investigation_id: str | None
-) -> html.Div:
-    """The stable investigation URL targets; jernerics-g5rw.8 fills the
-    workspace and member editor views these pages reserve."""
-    if kind == "investigation-edit":
-        title = (
-            "New investigation"
-            if investigation_id is None
-            else "Edit investigation members"
-        )
-        arriving = "The member editor arrives with jernerics-g5rw.8."
-    else:
-        title = "Investigation"
-        arriving = "The investigation workspace arrives with jernerics-g5rw.8."
-    return html.Div(
-        [
-            html.H2(title),
-            html.P(
-                [
-                    html.Span(f"project {project}"),
-                    *(
-                        [html.Span(f"investigation {investigation_id}")]
-                        if investigation_id is not None
-                        else []
-                    ),
-                ],
-                className="fact-row",
-            ),
-            components.Empty(arriving),
-            html.P(
-                html.A(f"Back to {project}", href=f"{ROUTES_BASE}/project/{project}"),
-                className="hint",
-            ),
-        ],
-        className="page",
-    )
-
-
 _KIND_LABELS = {
     "workspace": "Project",
     "artifact": "Artifact",
+    "investigation": "Investigation",
 }
 
 

@@ -937,3 +937,58 @@ def trial_timeline(trials: list[dict[str, Any]]) -> go.Figure:
         margin={**_STUDY_FIG_MARGIN, "l": 110},
     )
     return figure
+
+
+def compare_heatmap(
+    row_labels: list[str], column_labels: list[str], values: list[list[float | None]]
+) -> go.Figure:
+    """Factor-value x sampled-signature outcome grid; a signature a
+    member never completed stays blank — no interpolation."""
+    figure = go.Figure()
+    if not row_labels or not column_labels:
+        figure.update_layout(
+            title="no sampled signature is common to every analyzable member",
+            margin=_STUDY_FIG_MARGIN,
+        )
+        return figure
+    figure.add_trace(
+        go.Heatmap(
+            z=[
+                [math.nan if value is None else value for value in row]
+                for row in values
+            ],
+            x=column_labels,
+            y=row_labels,
+            colorbar={"title": "outcome"},
+            hovertemplate="%{y} · %{x}<br>outcome %{z:.4g}<extra></extra>",
+        )
+    )
+    figure.update_layout(
+        margin={"l": 60, "r": 12, "t": 8, "b": 60},
+    )
+    return figure
+
+
+def compare_ranking(
+    labels: list[str], medians: list[float], matched: list[int]
+) -> go.Figure:
+    """Per-factor-value median over the common signatures' outcomes,
+    the bar text naming how many signatures each median pools."""
+    figure = go.Figure()
+    if not labels:
+        figure.update_layout(
+            title="no common signatures to rank",
+            margin=_STUDY_FIG_MARGIN,
+        )
+        return figure
+    figure.add_trace(
+        go.Bar(
+            x=labels,
+            y=medians,
+            text=[f"{count} matched" for count in matched],
+            marker={"color": "#2563eb"},
+            hovertemplate="%{x} · median %{y:.4g}<extra></extra>",
+        )
+    )
+    figure.update_layout(margin={"l": 60, "r": 12, "t": 8, "b": 32})
+    return figure
