@@ -387,14 +387,30 @@ class TestEmptyStore:
 
 class TestRoutesAndPages:
     def test_parse_route_covers_every_shell_route(self):
-        assert parse_route("/dashboard").kind == "project"
-        assert parse_route("/dashboard/").kind == "project"
-        assert parse_route("/dashboard/project/ops").kind == "workspace"
         assert parse_route("/dashboard/project/ops").object_id == "ops"
+        new = parse_route("/dashboard/project/ops/investigation/new")
+        assert (new.kind, new.object_id, new.sub_id) == (
+            "investigation-edit",
+            "ops",
+            None,
+        )
+        shown = parse_route("/dashboard/project/ops/investigation/inv-1")
+        assert (shown.kind, shown.object_id, shown.sub_id) == (
+            "investigation",
+            "ops",
+            "inv-1",
+        )
+        edited = parse_route("/dashboard/project/ops/investigation/inv-1/edit")
+        assert (edited.kind, edited.object_id, edited.sub_id) == (
+            "investigation-edit",
+            "ops",
+            "inv-1",
+        )
         spec = parse_route("/dashboard/artifact-view/0123456789abcdef0123456789abcdef")
         assert spec.kind == "artifact"
         assert spec.object_id == "0123456789abcdef0123456789abcdef"
         assert parse_route("/dashboard/whatever").kind == "not-found"
+        assert parse_route("/dashboard/project/ops/extra").kind == "not-found"
 
     def test_removed_detail_routes_are_not_found(self):
         for kind in ("sweep", "trial", "execution", "analysis"):

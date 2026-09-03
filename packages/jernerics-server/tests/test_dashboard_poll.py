@@ -242,12 +242,17 @@ class TestOverviewPollCascade:
     tree on every poll tick when the server data did not change."""
 
     def _fire(self, client, cmap, outputs, digest_doc, changed):
+        state = [_PROJECT_STATE, _digest_state(digest_doc)]
+        if outputs == _OVERVIEW_OUTPUTS:
+            # _render_overview reads the per-project browser controls for
+            # the persisted overview sort.
+            state.append({"id": "workspace-store", "property": "data", "value": None})
         return _dispatch(
             client,
             cmap,
             outputs,
             inputs=[_VIEW_INPUT, _TICK_INPUT, _TAB_INPUT],
-            state=[_PROJECT_STATE, _digest_state(digest_doc)],
+            state=state,
             changed=changed,
         )
 
@@ -753,15 +758,6 @@ _TRAY_EDIT_OUTPUTS = {"view-store.data"}
 _INCLUDE_EDIT_OUTPUTS = {"view-store.data"}
 _MERGED_SYNC_OUTPUTS = {
     "analysis-tabs.value",
-    "analysis-key.value",
-    "analysis-mode.value",
-    "analysis-reduction.value",
-    "analysis-color.value",
-    "analysis-facet.value",
-    "analysis-contour-x.value",
-    "analysis-contour-y.value",
-    "analysis-display.value",
-    "analysis-auto-refresh.value",
     "analysis-include.value",
     "analysis-expand.value",
 }
@@ -877,19 +873,12 @@ class TestMergedControlSync:
     store change, producing the include/expand/tab values the separate
     syncs wrote for the same store states."""
 
-    def _sync(self, client, cmap, doc, key_options=None):
+    def _sync(self, client, cmap, doc):
         return _dispatch(
             client,
             cmap,
             _MERGED_SYNC_OUTPUTS,
-            inputs=[
-                {"id": "view-store", "property": "data", "value": doc},
-                {"id": "analysis-key", "property": "options", "value": key_options},
-                {"id": "analysis-color", "property": "options", "value": None},
-                {"id": "analysis-facet", "property": "options", "value": None},
-                {"id": "analysis-contour-x", "property": "options", "value": None},
-                {"id": "analysis-contour-y", "property": "options", "value": None},
-            ],
+            inputs=[{"id": "view-store", "property": "data", "value": doc}],
             changed=["view-store.data"],
         )
 
@@ -898,37 +887,20 @@ class TestMergedControlSync:
         response, payload = self._sync(client, callback_map, None)
         assert response.status_code == 200
         assert payload["analysis-tabs"]["value"] == "overview"
-        assert payload["analysis-key"]["value"] == []
-        assert payload["analysis-mode"]["value"] == "stacked"
-        assert payload["analysis-reduction"]["value"] == "none"
-        assert payload["analysis-color"]["value"] is None
-        assert payload["analysis-auto-refresh"]["value"] == []
         assert payload["analysis-include"]["value"] == []
         assert payload["analysis-expand"]["value"] == []
 
     def test_hydrated_state_matches_the_separate_syncs(self, authed, callback_map):
         client, _store = authed
         doc = default_view_state() | {
-            "active": "series",
-            "series": default_view_state()["series"] | {"keys": ["k1"]},
+            "active": "investigations",
             "scope": default_scope_state() | {"include_archived": True, "expand": True},
         }
-        response, payload = self._sync(
-            client, callback_map, doc, key_options=[{"value": "k1"}]
-        )
-        assert response.status_code == 200
-        assert payload["analysis-tabs"]["value"] == "series"
-        assert payload["analysis-key"]["value"] == ["k1"]
-        assert payload["analysis-include"]["value"] == ["archived"]
-        assert payload["analysis-expand"]["value"] == ["expand"]
-
-    def test_unloaded_key_options_hold_the_write(self, authed, callback_map):
-        client, _store = authed
-        doc = default_view_state()
-        doc["series"]["keys"] = ["k1"]
         response, payload = self._sync(client, callback_map, doc)
         assert response.status_code == 200
-        assert "analysis-key" not in payload
+        assert payload["analysis-tabs"]["value"] == "investigations"
+        assert payload["analysis-include"]["value"] == ["archived"]
+        assert payload["analysis-expand"]["value"] == ["expand"]
 
     def test_one_writer_for_all_control_values(self, callback_map):
         writers = [

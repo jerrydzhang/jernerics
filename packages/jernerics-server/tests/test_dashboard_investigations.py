@@ -22,12 +22,14 @@ from jernerics_server.dashboard.analysis import (
     default_scope_state,
     tray_from_selection,
 )
+from jernerics_server.dashboard.routes import ROUTES_BASE
 from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import (
     CurationRejectedError,
     CurationUnavailableError,
     DashboardService,
 )
+from jernerics_server.dashboard.workspace import investigations_tab
 from jernerics_server.ingest import IngestService
 from jernerics_server.investigations import InvestigationService
 from jernerics_server.queries import QueryService
@@ -336,3 +338,110 @@ class TestInvestigationsUnavailable:
             service.investigations_index(LAB)
         with pytest.raises(CurationUnavailableError):
             service.create_investigation(LAB, "alpha-compare", "lr", OUTCOME)
+
+
+class TestInvestigationsTab:
+    """The Investigations index renders the DashboardService facts with
+    the shared sortable-table helper (jernerics-g5rw.7)."""
+
+    def test_no_project_guards(self, service):
+        rendered = str(investigations_tab(service, None))
+        assert "Pick a project in the header" in rendered
+
+    def test_reads_need_a_store(self, store):
+        read_only = DashboardService(QueryService(store))
+        rendered = str(investigations_tab(read_only, LAB))
+        assert "no write store" in rendered
+
+    def test_index_rows_match_service_facts(self, service, compare):
+        tab = investigations_tab(service, LAB)
+        grid = next(
+            node
+            for node in _walk_ag_grids(tab)
+            if getattr(node, "id", None) == "investigations-grid"
+        )
+        assert {column["field"] for column in grid.columnDefs} == {
+            "name",
+            "factor",
+            "outcome",
+            "member_count",
+            "coverage",
+            "last_activity_ns",
+            "edit_members",
+        }
+        rows = {row["investigation_id"]: row for row in grid.rowData}
+        service_rows = {
+            row.investigation_id: row for row in service.investigations_index(LAB)
+        }
+        assert set(rows) == set(service_rows)
+        for investigation_id, row in rows.items():
+            facts = service_rows[investigation_id]
+            assert row["name"] == facts.name
+            assert row["factor"] == facts.factor
+            assert row["outcome"] == facts.outcome
+            assert row["member_count"] == facts.member_count
+            assert row["coverage"] == (
+                f"{facts.with_outcome} with outcome · "
+                f"{facts.member_count - facts.completed} incomplete · "
+                f"{facts.invalid} invalid"
+            )
+            assert row["last_activity_ns"] == facts.last_activity_ns
+            assert row["edit_href"] == (
+                f"{ROUTES_BASE}/project/{LAB}/investigation/{investigation_id}/edit"
+            )
+            assert row["link_href"] == (
+                f"{ROUTES_BASE}/project/{LAB}/investigation/{investigation_id}"
+            )
+
+    def test_archived_investigations_stay_off_the_default_index(self, service, compare):
+        tab = investigations_tab(service, LAB)
+        grid = next(
+            node
+            for node in _walk_ag_grids(tab)
+            if getattr(node, "id", None) == "investigations-grid"
+        )
+        assert len(grid.rowData) == 2  # gamma-empty is archived
+
+    def test_unorganized_lists_sweeps_in_no_investigation(self, service, compare):
+        tab = investigations_tab(service, LAB)
+        grid = next(
+            node
+            for node in _walk_ag_grids(tab)
+            if getattr(node, "id", None) == "unorganized-grid"
+        )
+        unorganized = {row["sweep_id"] for row in grid.rowData}
+        assert unorganized == {str(LONE_SWEEP)}  # the lab sweep in no investigation
+        for row in grid.rowData:
+            assert row["link_href"].startswith(f"{ROUTES_BASE}/project/{LAB}")
+        rendered = str(tab)
+        assert "Unorganized" in rendered
+        assert "1 sweep not in any Investigation" in rendered
+
+    def test_new_investigation_action_targets_the_editor_route(self, service, compare):
+        tab = investigations_tab(service, LAB)
+        link = next(
+            node for node in _walk_anchors(tab) if node.children == "New Investigation"
+        )
+        assert link.href == f"{ROUTES_BASE}/project/{LAB}/investigation/new"
+
+
+def _walk_ag_grids(component):
+    from dash_ag_grid import AgGrid
+
+    return [node for node in _walk_children(component) if isinstance(node, AgGrid)]
+
+
+def _walk_anchors(component):
+    from dash import html
+
+    return [node for node in _walk_children(component) if isinstance(node, html.A)]
+
+
+def _walk_children(node):
+    yield node
+    children = getattr(node, "children", None)
+    if isinstance(children, (list, tuple)):
+        for child in children:
+            yield from _walk_children(child)
+    elif children is not None and hasattr(children, "children"):
+        yield from _walk_children(children)
