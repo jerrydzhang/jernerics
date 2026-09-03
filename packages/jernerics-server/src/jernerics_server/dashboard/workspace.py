@@ -2053,3 +2053,13 @@ def sweep_hub_header(
             className="inv-views",
         ),
     ]
+
+
+def curation_transitions(archived: bool, invalid: bool) -> dict[str, bool]:
+    """Which curation actions are valid transitions for one sweep."""
+    return {
+        "archive": not archived,
+        "invalid": not invalid,
+        "restore_validity": invalid,
+        "restore": archived and not invalid,
+    }

@@ -427,6 +427,18 @@ class TestRoutesAndPages:
         assert "Nothing here yet" in rendered
         assert polls is False
 
+    def test_unknown_sweep_renders_missing_object(self, tmp_path):
+        client = _build(tmp_path)
+        service = _ctx(client).service
+        page, polls = page_content(
+            "/dashboard/project/ops/sweep/0123456789abcdef0123456789abcdef",
+            service,
+        )
+        rendered = str(page)
+        assert "0123456789abcdef" in rendered
+        assert "Nothing here yet" in rendered
+        assert polls is False
+
     def test_workspace_route_parses(self):
         spec = parse_route("/dashboard/project/ops")
         assert spec.kind == "workspace"

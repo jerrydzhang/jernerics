@@ -35,6 +35,7 @@ from jernerics_schema import (
     TrialState,
 )
 from jernerics_server.dashboard import artifacts
+from jernerics_server.dashboard import sweep as sweep_page
 from jernerics_server.dashboard.artifacts import (
     TEXT_CAP,
     _json_tree,
@@ -210,15 +211,21 @@ def _seed_events() -> list:
     return events
 
 
-def _walk(component: Component):
+def _walk(component):
+    if isinstance(component, list | tuple):
+        for item in component:
+            yield from _walk(item)
+        return
+    if isinstance(component, str):
+        yield component
+        return
     yield component
     children = getattr(component, "children", None)
-    if isinstance(children, Component):
+    if isinstance(children, Component | str):
         yield from _walk(children)
     elif isinstance(children, list | tuple):
         for child in children:
-            if isinstance(child, Component):
-                yield from _walk(child)
+            yield from _walk(child)
 
 
 def _find(page: Any, cls: type, comp_id: str | None = None) -> list:
@@ -274,11 +281,46 @@ class TestVersionList:
         assert all(row.available for row in rows)
         assert rows[0].sha256 != rows[1].sha256
 
+    def test_sweep_page_chips_list_every_artifact_with_links(self, env):
+        data = sweep_page.collect(env.service, str(SWEEP), None)
+        assert data is not None
+        body = sweep_page.render(data, PROJECT, str(SWEEP), 0, set())
+        links = {
+            getattr(node, "href", None): (
+                node.children,
+                getattr(node, "title", None),
+            )
+            for node in _walk(body)
+            if isinstance(node, html.A)
+            and "/artifact-view/" in str(getattr(node, "href", None))
+        }
+        by_key = {}
+        for href, (key, filename) in links.items():
+            by_key.setdefault(key, []).append((href, filename))
+        assert set(by_key) >= {
+            "model",
+            "inspection.json",
+            "big",
+            "plot",
+            "pending.bin",
+            "custom",
+            "stdout",
+            "stderr",
+        }
+        assert [href for href, _ in by_key["model"]] == [
+            viewer_href(str(MODEL_V1)),
+            viewer_href(str(MODEL_V2)),
+        ]
+        assert by_key["model"][0][1] == "model.bin"
+        assert by_key["pending.bin"][0][1] == "pending.bin"
 
-class TestCellTextSelection:
-    """jernerics-eqn: the listing and rows grids carry
-    enableCellTextSelection + ensureDomOrder so identifiers (ids,
-    sha256) stay copyable, without dropping existing options."""
+    def test_version_facts_stay_on_the_service_rows(self, env):
+        rows = env.service.trial_artifacts(str(TRIAL))
+        models = [row for row in rows if row.key == "model"]
+        assert [row.version for row in models] == [1, 2]
+        assert all(row.available for row in models)
+        pending = next(row for row in rows if row.key == "pending.bin")
+        assert pending.available is False
 
     def test_rows_grid_keeps_quick_filter_and_carries_the_pair(self, env):
         page, _ = page_content(

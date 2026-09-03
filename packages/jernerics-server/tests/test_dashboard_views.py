@@ -525,6 +525,8 @@ def mutable_client(tmp_path) -> tuple[Store, TestClient]:
 
 
 def _cls(node) -> str | None:
+    if not hasattr(node, "to_plotly_json"):
+        return None
     props = node.to_plotly_json().get("props", {})
     return props.get("class_name", props.get("className"))
 
@@ -532,12 +534,11 @@ def _cls(node) -> str | None:
 def _walk(component: Component):
     yield component
     children = getattr(component, "children", None)
-    if isinstance(children, Component):
+    if isinstance(children, Component | str):
         yield from _walk(children)
     elif isinstance(children, list | tuple):
         for child in children:
-            if isinstance(child, Component):
-                yield from _walk(child)
+            yield from _walk(child)
 
 
 NOW = 0

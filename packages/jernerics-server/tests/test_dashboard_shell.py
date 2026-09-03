@@ -98,7 +98,7 @@ class TestShellRoutes:
             "inv-1",
         )
 
-    def test_exceptions_page_renders_and_sweep_stays_pending(self, tmp_path):
+    def test_exceptions_page_renders_and_unknown_sweep_is_missing(self, tmp_path):
         service = _service(tmp_path)
         exceptions_page, polls = page_content(
             "/dashboard/project/ops/exceptions", service
@@ -107,7 +107,7 @@ class TestShellRoutes:
         assert getattr(exceptions_page, "className", None) == "np"
         assert polls is False
         sweep_page, polls = page_content("/dashboard/project/ops/sweep/sw-1", service)
-        assert "Not found" in _text(sweep_page)
+        assert "No sweep matches sw-1" in _text(sweep_page)
         assert polls is False
 
 

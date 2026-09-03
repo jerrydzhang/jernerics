@@ -43,7 +43,10 @@ from jernerics.post_hook import PipelineResult, run_pipeline
 from jernerics.retry import RetryContext
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import ship_events_file
-from jernerics_schema import SweepSnapshotEvent, sweep_id_for
+from jernerics_schema import (
+    SweepSnapshotEvent,
+    sweep_id_for,
+)
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.artifacts import raw_href, viewer_href
 from jernerics_server.dashboard.auth import COOKIE_NAME
@@ -296,6 +299,9 @@ def _page_text(page: Component) -> str:
     chunks: list[str] = []
 
     def collect(node: object) -> None:
+        if isinstance(node, str):
+            chunks.append(node)
+            return
         children = getattr(node, "children", None)
         if isinstance(children, str | int | float):
             chunks.append(str(children))
@@ -387,17 +393,41 @@ class TestLinkGraphJourney:
             for href in _page_hrefs(page):
                 spec = parse_route(href.split("?", 1)[0])
                 if spec.kind == "not-found":
-                    # The Investigations index is a tab target ahead of
-                    # its page (it renders not-found for now).
-                    assert href.endswith("/investigations"), href
+                    # Raw artifact downloads are HTTP-layer routes, not
+                    # pages; the Investigations index was a tab target
+                    # ahead of its page during the cutover.
+                    assert href.split("?", 1)[0].endswith(
+                        (
+                            "/investigations",
+                            f"{ROUTES_BASE}/artifact/{href.rsplit('/', 1)[-1]}",
+                        )
+                    ) or href.startswith(f"{ROUTES_BASE}/artifact/"), href
                 else:
                     assert spec.kind in canonical, href
 
-    def test_artifact_viewer_links_back_into_the_project(self, scenario):
+    def test_sweep_page_reaches_every_object_kind(self, scenario):
+        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
+        trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
+        execution_id = _rows(scenario.db_path, "SELECT execution_id FROM executions")[
+            0
+        ][0]
         artifact_id = _rows(
             scenario.db_path,
             "SELECT artifact_id FROM artifacts WHERE key = 'model'",
         )[0][0]
+
+        page, polls = page_content(
+            f"{ROUTES_BASE}/project/{PROJECT}/sweep/{sweep_id}", scenario.service
+        )
+        rendered = _page_text(page)
+        assert SWEEP in rendered  # the sweep names itself; ids ride the rows
+        # Trials identify by number and params; executions carry ids and
+        # artifacts link to the viewer.
+        assert "#0" in rendered and "mode" in rendered
+        assert short_id(execution_id) in rendered
+        assert viewer_href(artifact_id) in _page_hrefs(page)
+        assert polls is False
+
         viewer, _polls = page_content(viewer_href(artifact_id), scenario.service)
         assert short_id(artifact_id) in _page_text(viewer)
         back_links = [
@@ -653,64 +683,3 @@ class TestMountedDashboardHttp:
         referenced = {dep["id"] for dep in owner["inputs"]}
         referenced |= {dep["id"] for dep in owner.get("state", [])}
         assert referenced <= shell_ids
-
-
-class TestArtifactRowClickNavigation:
-    """The artifact listing's row-click navigation, over the mounted
-    server. In the browser, dash-ag-grid evaluates getRowId only when it
-    is the registered-function form (an inline JS string is inert
-    without dangerously_allow_code) and fires cellClicked with the
-    evaluated row id; _open_artifact must then map only real UUIDs to
-    the viewer URL."""
-
-    @staticmethod
-    def _cell_clicked(base_url: str, row_id: str | None) -> httpx.Response:
-        """POST the _dash-update-component payload a real cellClicked
-        event produces."""
-        return httpx.post(
-            f"{base_url}{ROUTES_BASE}/_dash-update-component",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            json={
-                "output": "url.pathname",
-                "outputs": {"id": "url", "property": "pathname"},
-                "inputs": [
-                    {
-                        "id": "artifact-grid",
-                        "property": "cellClicked",
-                        "value": {"rowId": row_id},
-                    }
-                ],
-                "changedPropIds": ["artifact-grid.cellClicked"],
-            },
-        )
-
-    def test_row_id_expressions_resolve_through_the_registered_asset(self, scenario):
-        # dash-ag-grid evaluates a getRowId expression only when it is
-        # the registered asset-function form (an inline JS string is
-        # inert without dangerously_allow_code); the mounted app ships
-        # that asset on every page the grids mount on.
-        index = httpx.get(
-            f"{scenario.base_url}{ROUTES_BASE}/",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-        )
-        assert "assets/dashAgGridFunctions.js" in index.text
-
-    def test_cell_clicked_with_artifact_uuid_navigates_to_viewer(self, scenario):
-        artifact_id = _rows(
-            scenario.db_path, "SELECT artifact_id FROM artifacts WHERE key = 'model'"
-        )[0][0]
-        response = self._cell_clicked(scenario.base_url, artifact_id)
-        assert response.status_code == 200
-        assert response.json()["response"]["url"]["pathname"] == viewer_href(
-            artifact_id
-        )
-
-        shuffled = self._cell_clicked(scenario.base_url, artifact_id.upper())
-        assert shuffled.json()["response"]["url"]["pathname"] == viewer_href(
-            artifact_id
-        )
-
-    def test_cell_clicked_with_non_uuid_row_id_never_navigates(self, scenario):
-        for row_id in ("undefined", "", "../admin", None):
-            response = self._cell_clicked(scenario.base_url, row_id)
-            assert response.status_code == 204, row_id

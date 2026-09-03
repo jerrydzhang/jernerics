@@ -1,6 +1,7 @@
 """DashboardService investigation reads, scope materialization, writes."""
 
 import json
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -26,6 +27,7 @@ from jernerics_schema import (
     materialize_selection,
 )
 from jernerics_server.dashboard import analysis, workspace
+from jernerics_server.dashboard import sweep as sweep_page
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
     default_scope_state,
@@ -1292,6 +1294,16 @@ def _first_pattern(component, key: str):
     return nodes[0] if nodes else None
 
 
+def _sweep_hub(data, compare):
+    """(crumb, views row) of the rendered sweep page body."""
+    body = sweep_page.render(data, CMP, str(CS1), time.time_ns(), set())
+    crumb = next(node for node in body if getattr(node, "className", None) == "crumb")
+    views = next(
+        node for node in body if getattr(node, "className", None) == "limit-row"
+    )
+    return crumb, views
+
+
 def _text(node) -> str:
     """Every scalar leaf concatenated — assertions read facts, not reprs."""
     if isinstance(node, Component):
@@ -1408,7 +1420,7 @@ class TestMemberScopeAndViews:
             "Search": None,
         }
 
-    def test_sweep_hub_gates_views_on_real_data(self, cmp_service, sig):
+    def test_sweep_page_gates_views_on_real_data(self, cmp_service, sig):
         # cmp members carry the outcome at step 0 only — no step series,
         # so Series is unsupported; every member has trials, so Points
         # renders; Search always opens over all members.
@@ -1428,7 +1440,7 @@ class TestMemberScopeAndViews:
         links = {
             node.children: node.href
             for node in _walk_children(views)
-            if isinstance(node, html.A)
+            if isinstance(node, html.A) and node.href
         }
         points_href = links["Points"]
         assert f"/investigation/{sig.compare}" in points_href

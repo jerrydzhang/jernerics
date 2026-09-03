@@ -13,7 +13,6 @@ import hashlib
 import json
 import time
 from typing import Any
-from uuid import UUID
 
 import dash
 from dash import ALL, Input, Output, State, no_update
@@ -26,6 +25,7 @@ from . import (
     exceptions,
     layout,
     page,
+    sweep,
     workspace,
 )
 from .components import Error
@@ -157,6 +157,21 @@ def page_content(
         except CurationRejectedError:
             return layout.missing_object_page("investigation", spec.sub_id or ""), False
         return page, False
+    if spec.kind == "sweep":
+        sweep_id = spec.sub_id or ""
+        found = sweep.page(
+            service,
+            spec.object_id or "",
+            sweep_id,
+            sweep.via_from_search(search),
+            now,
+            picked_families=set(
+                ((view_doc or {}).get("scope") or {}).get("families") or ()
+            ),
+        )
+        if found is None:
+            return layout.missing_object_page("sweep", sweep_id), False
+        return found, service.sweep_incomplete(sweep_id)
     if spec.kind == "artifact":
         view = service.artifact_view(spec.object_id or "")
         if view is None:
@@ -260,6 +275,11 @@ _CURATION_VERBS = {
     "restore_validity": "Restored validity of",
     "restore": "Restored",
 }
+
+
+def triggered_action(triggered: set[str], mapping: dict[str, str]) -> str | None:
+    """The action name for the one triggered control, if any."""
+    return next((action for prop, action in mapping.items() if prop in triggered), None)
 
 
 def run_curation(
@@ -397,6 +417,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 no_update,
                 no_update,
             )
+        if ticked and kind == "sweep":
+            polls = service.sweep_incomplete(spec.sub_id or "")
+            return no_update, not polls, no_update, no_update, no_update
         page, polls = page_content(pathname, service, view_doc=view_doc, search=search)
         # A rendered page remounts the overview, so its content digest
         # from the previous mount is void.
@@ -428,7 +451,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             "search": search or "",
             "scope": analysis.scope_dims(doc.get("scope")),
             "auto_refresh": doc.get("auto_refresh"),
-            "focus": doc.get("focus"),
             "inv": doc.get("inv"),
         }
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
@@ -439,7 +461,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             and (facts or {}).get("search") == desired["search"]
             and (facts or {}).get("scope") == desired["scope"]
             and (facts or {}).get("auto_refresh") == desired["auto_refresh"]
-            and (facts or {}).get("focus") == desired["focus"]
             and (facts or {}).get("inv") == desired["inv"]
         ):
             raise PreventUpdate
@@ -465,6 +486,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 not service.analysis_scope_incomplete(project, tray),
                 desired,
             )
+        if kind == "sweep":
+            sweep_id = parse_route(pathname).sub_id or ""
+            return (not service.sweep_incomplete(sweep_id), desired)
         if kind != "workspace":
             raise PreventUpdate
         url = workspace.parse_overview_url(search)
@@ -617,6 +641,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             "investigations",
             "investigation",
             "investigation-edit",
+            "investigation",
+            "investigation-edit",
+            "sweep",
         ):
             if spec.object_id == current:
                 raise PreventUpdate
@@ -1676,20 +1703,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
 
-    # -- Artifact listing and viewer (jernerics-h5d.14) ------------------
-
-    @app.callback(
-        Output("url", "pathname"),
-        Input("artifact-grid", "cellClicked"),
-        prevent_initial_call=True,
-    )
-    def _open_artifact(click: dict | None):
-        row_id = click.get("rowId") if isinstance(click, dict) else None
-        try:
-            artifact_id = UUID(str(row_id))
-        except ValueError:
-            raise PreventUpdate from None
-        return artifacts.viewer_href(str(artifact_id))
+    # -- Artifact viewer (jernerics-h5d.14) -------------------------------
 
     @app.callback(
         Output("artifact-rows-grid", "dashGridOptions"),
@@ -1820,3 +1834,132 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             for item in row_ids or []
         ]
         return classes, styles
+
+    SWEEP_ACTIONS = {
+        "sweep-archive.n_clicks": "archive",
+        "sweep-invalid.n_clicks": "invalid",
+        "sweep-restore-validity.n_clicks": "restore_validity",
+        "sweep-restore.n_clicks": "restore",
+    }
+
+    # -- ported at merge: sweep page (R4) --
+    @app.callback(
+        Output("sweep-page-body", "children"),
+        Output("sweep-page-facts-store", "data"),
+        Input("poll", "n_intervals"),
+        State("url", "pathname"),
+        State("url", "search"),
+        State("view-store", "data"),
+        State("sweep-page-facts-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _refresh_sweep_page(
+        _tick: int | None,
+        pathname: str | None,
+        search: str | None,
+        view_doc: dict | None,
+        facts: dict | None,
+    ):
+        spec = parse_route(pathname)
+        if spec.kind != "sweep":
+            raise PreventUpdate
+        sweep_id = spec.sub_id or ""
+        # Facts before trees: the cheap overview gate skips the full
+        # sweep read on every unchanged tick.
+        cheap = _content_digest(service.sweep_facts(sweep_id))
+        if cheap == (facts or {}).get("cheap"):
+            raise PreventUpdate
+        data = sweep.collect(service, sweep_id, sweep.via_from_search(search))
+        if data is None:
+            raise PreventUpdate
+        fresh = sweep.digest(data)
+        if fresh == (facts or {}).get("digest"):
+            return no_update, {"digest": fresh, "cheap": cheap}
+        picked = set(((view_doc or {}).get("scope") or {}).get("families") or ())
+        body = sweep.render(
+            data, spec.object_id or "", sweep_id, time.time_ns(), picked
+        )
+        return body, {"digest": fresh, "cheap": cheap}
+
+    # -- ported at merge: sweep page (R4) --
+    @app.callback(
+        Output("sweep-message", "children"),
+        Output("sweep-page-body", "children", allow_duplicate=True),
+        Output("sweep-page-facts-store", "data", allow_duplicate=True),
+        Input("sweep-archive", "n_clicks"),
+        Input("sweep-invalid", "n_clicks"),
+        Input("sweep-restore-validity", "n_clicks"),
+        Input("sweep-restore", "n_clicks"),
+        State("sweep-reason", "value"),
+        State("url", "pathname"),
+        State("url", "search"),
+        State("view-store", "data"),
+        prevent_initial_call=True,
+    )
+    def _curate_from_sweep_page(
+        _archive: int,
+        _invalid: int,
+        _validity: int,
+        _restore: int,
+        reason: str | None,
+        pathname: str | None,
+        search: str | None,
+        view_doc: dict | None,
+    ):
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        action = triggered_action(triggered, SWEEP_ACTIONS)
+        spec = parse_route(pathname)
+        if action is None or spec.kind != "sweep":
+            raise PreventUpdate
+        sweep_id = spec.sub_id or ""
+        ok, report = apply_curation(service, action, [sweep_id], reason or "")
+        data = sweep.collect(service, sweep_id, sweep.via_from_search(search))
+        if data is None:
+            return workspace.action_message(ok, report), no_update, no_update
+        picked = set(((view_doc or {}).get("scope") or {}).get("families") or ())
+        body = sweep.render(
+            data, spec.object_id or "", sweep_id, time.time_ns(), picked
+        )
+        return (
+            workspace.action_message(ok, report),
+            body,
+            {
+                "digest": sweep.digest(data),
+                "cheap": _content_digest(service.sweep_facts(sweep_id)),
+            },
+        )
+
+    # -- ported at merge: sweep page (R4) --
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input({"sweep-trial-pick": dash.ALL}, "value"),
+        State("view-store", "data"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _pick_retry_roots(
+        values: list,
+        current: dict | None,
+        pathname: str | None,
+    ):
+        # Trial checkboxes on the sweep page are the retry-root picker's
+        # permanent home: checking merges this sweep's roots into the
+        # scope's families; unchecking drops exactly this sweep's roots.
+        spec = parse_route(pathname)
+        if spec.kind != "sweep" or not spec.object_id:
+            raise PreventUpdate
+        checked = {str(entry[0]) for entry in values or [] if entry}
+        roots = {
+            str(row["root"])
+            for row in service.analysis_families(spec.object_id, [spec.sub_id or ""])
+        }
+        scope = dict(
+            (current or analysis.default_view_state()).get("scope")
+            or analysis.default_scope_state()
+        )
+        merged = sorted((set(scope.get("families") or []) - roots) | checked)
+        if merged == sorted(str(v) for v in scope.get("families") or []):
+            raise PreventUpdate
+        scope["families"] = merged
+        # A pattern-input callback returns its single output as a tuple.
+        return (analysis.edited_view(current, {"scope": scope}),)

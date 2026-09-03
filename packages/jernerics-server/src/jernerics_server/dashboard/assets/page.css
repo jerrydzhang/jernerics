@@ -970,3 +970,6 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.np .trial-toggle {
+  cursor: pointer;
+}
