@@ -1183,7 +1183,9 @@ def overview_filter_chip(filtered_count: int, overview_filter: str) -> html.Div:
             [
                 f"{_counted_sweeps(filtered_count)} {label} ",
                 html.Button(
-                    "\u00d7", id="overview-filter-clear", title="Clear the filter"
+                    "\u00d7",
+                    id={"overview-filter-clear": "chip"},
+                    title="Clear the filter",
                 ),
             ],
             className="chip",
@@ -1461,7 +1463,7 @@ def overview_tab(
                 [
                     html.H3("Sweeps"),
                     AgGrid(
-                        id="overview-sweep-grid",
+                        id={"overview-grid": "sweeps"},
                         rowData=rows,
                         columnDefs=sortable_columns(_OVERVIEW_SWEEP_COLUMNS, sort),
                         defaultColDef=_GRID_DEFAULTS,

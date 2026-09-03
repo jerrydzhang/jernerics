@@ -117,6 +117,17 @@ def is_initial() -> bool:
     return not dash.callback_context.triggered
 
 
+def pressed_props(context: Any) -> set[str]:
+    """Prop ids of the controls a user actually pressed: a re-render
+    remounts controls and re-fires their callbacks with click counts of
+    None, which must never act (jernerics-gk6)."""
+    return {
+        str(_event_field(event, "prop_id"))
+        for event in context.triggered or ()
+        if _event_field(event, "value")
+    }
+
+
 def investigation_new_href(project: str, sweep_ids: list[str]) -> tuple[str, str]:
     """The editor URL target seeding a new investigation with the
     picked sweeps; jernerics-g5rw.8 consumes the ``?sweeps=`` token.
@@ -469,13 +480,9 @@ def focus_from_trigger(events: Any) -> dict[str, str] | Literal[""] | None:
         value = _event_field(event, "value")
         if text.startswith("inspector-close."):
             return None if value else ""
-        if text.startswith(
-            (
-                "sweep-grid.",
-                "overview-sweep-grid.",
-                "analysis-family-grid.",
-            )
-        ) or ('"focus-family"' in text):
+        if text.startswith(("sweep-grid.", "analysis-family-grid.")) or (
+            '"overview-grid"' in text or '"focus-family"' in text
+        ):
             continue
         if ".cellClicked" not in text and ".n_clicks" not in text:
             continue
@@ -760,9 +767,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output("workspace-store", "data"),
+        Input("workspace-quick", "value"),
         Input("sweep-grid", "filterModel"),
         Input("sweep-grid", "columnState"),
-        Input("overview-sweep-grid", "columnState"),
+        Input({"overview-grid": dash.ALL}, "columnState"),
         State("project-store", "data"),
         State("workspace-store", "data"),
         prevent_initial_call=True,
@@ -783,8 +791,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             fields["filters"] = filters or None
         if "sweep-grid.columnState" in triggered:
             fields["sort"] = sort_from_columns(columns)
-        if "overview-sweep-grid.columnState" in triggered:
-            fields["overview_sort"] = sort_from_columns(overview_columns)
+        if any('"overview-grid"' in text for text in triggered):
+            overview_state = next(
+                (state for state in overview_columns or [] if state is not None),
+                None,
+            )
+            fields["overview_sort"] = sort_from_columns(overview_state)
         updated = remember_workspace(current, project, **fields)
         if updated is None:
             raise PreventUpdate
@@ -854,14 +866,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input("view-store", "data"),
         Input("project-store", "data"),
         Input("poll", "n_intervals"),
-        State("analysis-series-data", "data"),
         State("trial-browser-facts-store", "data"),
     )
     def _load_browser_families(
         view_doc: dict | None,
         project: str | None,
         _tick: int | None,
-        series_data: dict | None,
         facts: dict | None,
     ):
         # The trial browser consumes the scope, the color choice, and
@@ -876,7 +886,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if "view-store.data" in triggered and desired == stored:
             raise PreventUpdate
         columns, rows, selected = analysis.browser_trial_outputs(
-            service, project, doc.get("scope"), view_doc, series_data
+            service, project, doc.get("scope"), view_doc
         )
         selected = analysis.mounted_selection(selected, initial=is_initial())
         digest = _content_digest(columns, rows, selected)
@@ -1184,7 +1194,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input({"focus-object": dash.ALL}, "n_clicks"),
         Input("inspector-close", "n_clicks"),
         Input("sweep-grid", "cellClicked"),
-        Input("overview-sweep-grid", "cellClicked"),
+        Input({"overview-grid": dash.ALL}, "cellClicked"),
         Input({"focus-family": dash.ALL}, "cellClicked"),
         Input("analysis-family-grid", "cellClicked"),
         Input({"focus-executions": dash.ALL}, "cellClicked"),
@@ -1195,7 +1205,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         _buttons: Any,
         _close: int | None,
         sweep_click: dict | None,
-        overview_click: dict | None,
+        overview_clicks: list,
         family_clicks: list,
         browser_family_click: dict | None,
         executions_click: dict | None,
@@ -1207,8 +1217,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             kind = None
             if text.startswith("sweep-grid."):
                 click, kind = sweep_click, "sweep"
-            elif text.startswith("overview-sweep-grid."):
-                click, kind = overview_click, "sweep"
+            elif '"overview-grid"' in text:
+                click = next((c for c in reversed(overview_clicks) if c), None)
+                kind = "sweep"
             elif text.startswith("analysis-family-grid."):
                 click, kind = browser_family_click, "trial"
             elif '"focus-family"' in text:
@@ -1279,13 +1290,19 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         workspace_doc: dict | None,
     ):
         doc = view_doc or analysis.default_view_state()
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
         _facts, digest = overview_content(
             service,
             project,
             (view_doc or {}).get("scope"),
             doc.get("overview_filter"),
         )
-        if digest == (digest_doc or {}).get("digest"):
+        # A view edit must always re-render: the digest mirror may have
+        # already advanced to this dispatch's digest, and the gate is
+        # only here to throttle poll ticks (jernerics-haj).
+        if "view-store.data" not in triggered and digest == (digest_doc or {}).get(
+            "digest"
+        ):
             raise PreventUpdate
         sort = workspace_state(workspace_doc, project).get("overview_sort")
         return workspace.overview_tab(
@@ -1301,14 +1318,23 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("view-store", "data", allow_duplicate=True),
         Input({"overview-tile": dash.ALL}, "n_clicks"),
-        Input("overview-filter-clear", "n_clicks"),
+        Input({"overview-filter-clear": dash.ALL}, "n_clicks"),
         State("view-store", "data"),
         prevent_initial_call=True,
     )
-    def _edit_overview_filter(_tiles: list, _clear: int | None, current: dict | None):
+    def _edit_overview_filter(_tiles: list, _clear: list, current: dict | None):
         # A tile click sets its filter; clicking the active tile (or the
         # chip's ×) clears it — every tile state has a one-click way back.
+        # Remounts re-fire the pattern inputs with click counts of None;
+        # only a real press acts.
+        if not pressed_props(dash.callback_context):
+            raise PreventUpdate
         value, control = pattern_trigger(dash.callback_context)
+        if control == "overview-filter-clear":
+            doc = analysis.edited_view(current, {"overview_filter": None})
+            if doc == (current or {}):
+                raise PreventUpdate
+            return doc
         if control != "overview-tile" or value is None:
             raise PreventUpdate
         active = (current or {}).get("overview_filter")
@@ -1331,11 +1357,13 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     ):
         # The seg control drives the same include flags as the Browse
         # toggles: Active is default discovery, All is every sweep.
-        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        # Overview re-renders remount the buttons, re-firing this with
+        # click counts of None — only a real press acts.
+        pressed = pressed_props(dash.callback_context)
+        if not pressed:
+            raise PreventUpdate
         values = (
-            ["archived", "invalid"]
-            if "overview-scope-all.n_clicks" in triggered
-            else []
+            ["archived", "invalid"] if "overview-scope-all.n_clicks" in pressed else []
         )
         doc = analysis.view_from_include(current, values)
         if doc == (current or {}):
@@ -1346,11 +1374,16 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("overview-selection-count", "children"),
         Output("overview-create-investigation", "disabled"),
         Output("overview-bulkbar", "style"),
-        Input("overview-sweep-grid", "selectedRows"),
+        Input({"overview-grid": dash.ALL}, "selectedRows"),
         prevent_initial_call=True,
     )
-    def _offer_overview_actions(rows: list[dict] | None):
-        picked = len(rows or [])
+    def _offer_overview_actions(rows: list):
+        picked_rows = next(
+            (entry for entry in reversed(rows or []) if entry is not None), None
+        )
+        if picked_rows is None:
+            raise PreventUpdate
+        picked = len(picked_rows)
         return (
             f"{picked} sweeps selected" if picked else "",
             picked == 0,
@@ -1358,7 +1391,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         )
 
     @app.callback(
-        Output("overview-sweep-grid", "selectedRows", allow_duplicate=True),
+        Output({"overview-grid": dash.ALL}, "selectedRows", allow_duplicate=True),
         Input("overview-clear-selection", "n_clicks"),
         prevent_initial_call=True,
     )
@@ -1369,19 +1402,24 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("url", "pathname", allow_duplicate=True),
         Output("url", "search", allow_duplicate=True),
         Input("overview-create-investigation", "n_clicks"),
-        State("overview-sweep-grid", "selectedRows"),
+        State({"overview-grid": dash.ALL}, "selectedRows"),
         State("project-store", "data"),
         prevent_initial_call=True,
     )
     def _create_investigation_from_selection(
         _clicks: int | None,
-        rows: list[dict] | None,
+        rows: list,
         project: str | None,
     ):
         # The editor route (jernerics-g5rw.8) reads the ?sweeps= seed.
-        if not project or not rows:
+        picked_rows = next(
+            (entry for entry in reversed(rows or []) if entry is not None), []
+        )
+        if not project or not picked_rows:
             raise PreventUpdate
-        return investigation_new_href(project, [str(row["sweep_id"]) for row in rows])
+        return investigation_new_href(
+            project, [str(row["sweep_id"]) for row in picked_rows]
+        )
 
     # -- Investigations and Exceptions tabs ------------------------------
 
@@ -1598,7 +1636,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     app.clientside_callback(
         """
-        function(refresh, overviewRendered, state) {
+        function(overviewRendered, state) {
             if (!state || !state.grids) {
                 return window.dash_clientside.no_update;
             }
@@ -1618,7 +1656,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         }
         """,
         Output("scroll-restore-store", "data", allow_duplicate=True),
-        Input("analysis-refresh-store", "data"),
         Input("workspace-overview", "children"),
         State("scroll-restore-store", "data"),
         prevent_initial_call=True,

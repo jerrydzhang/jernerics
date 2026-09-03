@@ -673,7 +673,7 @@ class TestExecutionsGridFocus:
         '{"focus-object":["ALL"]}',
         "inspector-close",
         "sweep-grid",
-        "overview-sweep-grid",
+        '{"overview-grid":["ALL"]}',
         '{"focus-family":["ALL"]}',
         "analysis-family-grid",
         '{"focus-executions":["ALL"]}',
@@ -694,7 +694,7 @@ class TestExecutionsGridFocus:
                 {"id": "inspector-close", "property": "n_clicks", "value": None},
                 {"id": "sweep-grid", "property": "cellClicked", "value": None},
                 {
-                    "id": "overview-sweep-grid",
+                    "id": {"overview-grid": "sweeps"},
                     "property": "cellClicked",
                     "value": None,
                 },
@@ -736,18 +736,18 @@ class TestExecutionsGridFocus:
 
 class TestScrollRestoreWiring:
     """jernerics-l4k: saved scroll restores after a genuine overview
-    re-render, not only after the manual refresh button."""
+    re-render."""
 
     def test_overview_re_renders_trigger_the_restore(self, callback_map):
         restores = [
             specs
             for key, specs in callback_map.items()
             if "scroll-restore-store.data" in _outputs_of(key)
-            and any(spec["id"] == "analysis-refresh-store" for spec in specs["inputs"])
+            and any(spec["id"] == "workspace-overview" for spec in specs["inputs"])
         ]
         assert len(restores) == 1
         inputs = {spec["id"] for spec in restores[0]["inputs"]}
-        assert "workspace-overview" in inputs
+        assert inputs == {"workspace-overview"}
 
 
 _HYDRATION_OUTPUTS = {

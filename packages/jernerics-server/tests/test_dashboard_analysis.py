@@ -4317,8 +4317,7 @@ class TestWorkspaceChurnGates:
         restore = [
             spec
             for spec in capture
-            if {dep["id"] for dep in spec["inputs"]}
-            == {"analysis-refresh-store", "workspace-overview"}
+            if {dep["id"] for dep in spec["inputs"]} == {"workspace-overview"}
         ]
         assert len(restore) == 1
         assert {dep["id"] for dep in restore[0].get("state", [])} == {
