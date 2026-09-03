@@ -2012,6 +2012,10 @@ def _compare_member_rows(doc: CompareDocument, project: str) -> list[dict[str, A
                 project, "sweep", member.sweep_id
             ),
             "link_label": member.name,
+            "state": member.state,
+            "expected_trials": member.expected_trials,
+            "completed": member.completed,
+            "usable": member.usable,
             "curation": (
                 " ".join(
                     name
@@ -2854,12 +2858,26 @@ _SEARCH_COLUMNS: list[SortColumn] = [
 ]
 
 
-def search_rows(summaries: Sequence[SweepSummary]) -> list[dict[str, Any]]:
-    """One Search row per member sweep; the link opens the sweep hub."""
+def search_rows(
+    summaries: Sequence[SweepSummary],
+    project: str,
+    investigation_id: str,
+) -> list[dict[str, Any]]:
+    """One Search row per member sweep; the link opens the sweep hub
+    carrying the investigation return path."""
+
+    def hub_href(sweep_id: str) -> str:
+        doc = analysis.with_focus(
+            analysis.default_view_state(), {"kind": "sweep", "id": sweep_id}
+        )
+        doc = analysis.edited_view(doc, {"via": investigation_id})
+        return f"{ROUTES_BASE}/project/{project}?view={analysis.encode_view_state(doc)}"
+
     return [
         {
             "sweep_id": summary.sweep_id,
             "name": summary.name,
+            "link_href": hub_href(summary.sweep_id),
             "link_label": summary.name,
             "state": summary.state,
             "completed": summary.succeeded,
@@ -2889,7 +2907,9 @@ def search_region(
             summary
             for summary in service.sweep_overview(project)
             if summary.sweep_id in member_ids
-        ]
+        ],
+        project,
+        investigation_id,
     )
     return html.Div(
         [
