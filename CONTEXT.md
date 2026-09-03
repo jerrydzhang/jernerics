@@ -76,6 +76,10 @@ One deployment of a sweep to a backend: which backend, scheduler state, expected
 **Selection**:
 The typed scope every domain read is pinned to: a project plus optional sweep/trial/retry-root/execution ids. Encodable as an opaque token (`encode_selection`) so a dashboard URL can hand the exact same scope to a notebook or script.
 
+**Investigation**:
+A saved analytical question over an explicit set of sweeps: server-owned organizational metadata, never tracked facts. Membership is many-to-many — a sweep may belong to several — and implies no lineage. Project-scoped, with a stable id and a name unique per project. Deliberately distinct: a Sweep is the search that runs, a Trial is one run in it, a Selection is an ephemeral scope — materializing an Investigation yields a Selection. Managed via `jernerics investigation ...`.
+_Avoid_: study (user-facing), folder, tag collection, journal
+
 **Observability CLI**:
 The read surface over tracked data: `runs` (list trials with derived monitoring), `summary` (one trial's lineage, params, values, artifacts, executions), `diff` (compare two trials), `trace` (one value key's step series), `query` (raw SQL escape hatch), plus `replay`. All commands support `--json` for agent consumption.
 
@@ -89,7 +93,7 @@ A tracked value with a float payload, logged over steps (loss, lr, grad_norm, to
 A tracked value carrying an arbitrary JSON object payload, bounded to 64 KiB encoded — anything larger belongs in an artifact, not a value.
 
 **Dashboard**:
-The web UI mounted on the tracking server (`/dashboard/...`): live operational monitoring, sweep/trial/execution pages, artifact and stored-log viewers, cross-sweep analysis, and a continue-in-Python selection handoff. Tracking facts, artifacts, and scheduler state are read-only there; its only writes are sweep-curation metadata — `archived` (organizational visibility) and `invalid` (results not normally trustworthy; requires a reason and shows data warnings in analysis). Browser login exchanges the API key for a signed session cookie. The CLI handles quick check-ins; the dashboard handles the rest.
+The web UI mounted on the tracking server (`/dashboard/...`): live operational monitoring, sweep/trial/execution pages, artifact and stored-log viewers, cross-sweep analysis, and a continue-in-Python selection handoff. Tracking facts, artifacts, and scheduler state are read-only there; its only writes are sweep-curation metadata — `archived` (organizational visibility) and `invalid` (results not normally trustworthy; requires a reason and shows data warnings in analysis) — plus Investigation membership. Browser login exchanges the API key for a signed session cookie. The CLI handles quick check-ins; the dashboard handles the rest.
 
 **Tracking server**:
 A single HTTP process. Ingests tagged events (`POST /ingest`), serves typed domain reads (`/sweeps`, `/trials`, `/values`, ...), raw SQL (`POST /query`), and stores/serves immutable artifact blobs (`PUT`/`GET /artifact/{id}`) on its own disk. Owns the SQLite file exclusively. Authenticated via a bearer API key in the `Authorization` header. No external object storage — artifacts live on the server's disk.
