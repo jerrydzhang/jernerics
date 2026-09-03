@@ -461,6 +461,20 @@ class TestPickerNavigationMirrorGuard:
         response, _payload = self._navigate(client, callback_map, PROJECT, WORKSPACE)
         assert response.status_code == 204
 
+    def test_sweep_route_is_not_hijacked(self, authed, callback_map):
+        client, _store = authed
+        response, _payload = self._navigate(
+            client, callback_map, PROJECT, f"{WORKSPACE}/sweep/lone-sweep"
+        )
+        assert response.status_code == 204
+
+    def test_exceptions_route_is_not_hijacked(self, authed, callback_map):
+        client, _store = authed
+        response, _payload = self._navigate(
+            client, callback_map, PROJECT, f"{WORKSPACE}/exceptions"
+        )
+        assert response.status_code == 204
+
     def test_new_project_still_navigates_and_clears_the_scope_url(
         self, authed, callback_map
     ):

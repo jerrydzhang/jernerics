@@ -749,7 +749,16 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         # project; that adoption must not hijack the viewer route. The
         # investigation pages mirror their project the same way.
         rendered = parse_route(rendered_route)
-        if rendered.kind in ("artifact", "investigation", "investigation-edit"):
+        # The sweep and exceptions pages mirror their project the same
+        # way (rewrite epic jernerics-xjxa): a mirrored picker value
+        # must not hijack their routes either.
+        if rendered.kind in (
+            "artifact",
+            "investigation",
+            "investigation-edit",
+            "sweep",
+            "exceptions",
+        ):
             raise PreventUpdate
         # A genuine project switch starts a fresh scope: the previous
         # project's ?view= must not ride along, or its hydration would
