@@ -207,6 +207,7 @@ class TestCommandTree:
             "job",
             "backend",
             "tracking",
+            "investigation",
         ]
 
     def test_groups_expose_locked_subcommands(self):
@@ -217,6 +218,15 @@ class TestCommandTree:
             "job": ["list", "cancel", "logs", "wait", "resources"],
             "backend": ["build", "clean"],
             "tracking": ["replay", "runs", "summary", "diff", "trace", "query"],
+            "investigation": [
+                "list",
+                "show",
+                "preview",
+                "create",
+                "members",
+                "archive",
+                "restore",
+            ],
         }
         actual = {}
         for info in app.registered_groups:
