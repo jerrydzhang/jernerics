@@ -53,7 +53,16 @@ class PageSpec:
     polls: bool = False
 
 
-NEW_SHELL_KINDS: frozenset[PageKind] = frozenset({"project", "artifact", "exceptions"})
+NEW_SHELL_KINDS: frozenset[PageKind] = frozenset(
+    {
+        "project",
+        "artifact",
+        "exceptions",
+        "investigations",
+        "investigation",
+        "investigation-edit",
+    }
+)
 """Kinds whose pages render the new-shell chrome themselves, so the
 legacy nav hides for them. Grows as cutover rounds land their pages;
 dies with the demolition task."""
