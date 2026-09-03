@@ -1161,7 +1161,7 @@ class TestOverviewTab:
     def test_no_project_and_empty_scope_guards(self, service):
         rendered = str(overview_tab(service, None, None))
         assert "Pick a project in the header" in rendered
-        assert "overview-sweep-grid" not in rendered
+        assert "overview-grid" not in rendered
         rendered = str(overview_tab(service, "ghost", None))
         assert "No sweeps tracked for project ghost yet." in rendered
         rendered = str(overview_tab(service, "ops", {"sweeps": [str(uuid.uuid4())]}))
@@ -1173,7 +1173,7 @@ class TestOverviewTab:
 
         monkeypatch.setattr(DashboardService, "sweep_detail", forbidden)
         overview = overview_tab(service, "ops", {"sweeps": []})
-        assert "overview-sweep-grid" in str(overview)
+        assert "overview-grid" in str(overview)
 
     def test_overview_is_tiles_plus_one_grid_section(self, service):
         overview = overview_tab(service, "ops", {"sweeps": []})
@@ -1220,7 +1220,7 @@ class TestOverviewTab:
         overview = overview_tab(
             service, "ops", {"sweeps": []}, overview_filter="failed"
         )
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_A)]
         rendered = str(overview)
         assert "1 sweep with failed executions" in rendered
@@ -1228,12 +1228,12 @@ class TestOverviewTab:
         overview = overview_tab(
             service, "ops", {"sweeps": []}, overview_filter="state:completed"
         )
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
         overview = overview_tab(
             service, "ops", {"sweeps": []}, overview_filter="state:ghost"
         )
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert grid.rowData == []
         assert "0 sweeps in state ghost" in str(overview)
         plain = str(overview_tab(service, "ops", {"sweeps": []}))
@@ -1267,7 +1267,7 @@ class TestOverviewTab:
 
     def test_grid_rows_carry_raw_typed_facts_and_stable_ids(self, service):
         overview = overview_tab(service, "ops", {"sweeps": []})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert grid.getRowId == "params.data.sweep_id"
         options = grid.dashGridOptions
         assert options["enableCellTextSelection"] is True
@@ -1312,7 +1312,7 @@ class TestOverviewTab:
             {"sweeps": []},
             sort=[{"colId": "expected_trials", "sort": "desc"}],
         )
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert [row["expected_trials"] for row in grid.rowData] == [8, 1]
         columns = {column["field"]: column for column in grid.columnDefs}
         assert columns["expected_trials"]["sort"] == "desc"
@@ -1337,7 +1337,7 @@ class TestOverviewTab:
         """jernerics-l8f: the monitoring cell shares the clamped-cell
         policy; the full summary stays in rowData for title/popover."""
         overview = overview_tab(service, "ops", {"sweeps": []})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         monitoring = next(
             column for column in grid.columnDefs if column["field"] == "monitoring"
         )
@@ -1353,7 +1353,7 @@ class TestOverviewTab:
         store, service = store_and_service
         store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
         overview = overview_tab(service, "ops", {"sweeps": [str(SWEEP_B)]})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
         assert grid.rowData[0]["curation"] == "invalid"
 
@@ -1369,7 +1369,7 @@ class TestOverviewCurationVisibility:
         store, service = store_and_service
         store.archive_sweep(str(SWEEP_B))
         overview = overview_tab(service, "ops", {"sweeps": []})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_A)]
         rendered = str(overview)
         assert "Active sweeps — hides 1 archived/invalid" in rendered
@@ -1381,7 +1381,7 @@ class TestOverviewCurationVisibility:
         overview = overview_tab(
             service, "ops", {"sweeps": [], "include_archived": True}
         )
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert {row["sweep_id"] for row in grid.rowData} == {
             str(SWEEP_A),
             str(SWEEP_B),
@@ -1392,10 +1392,10 @@ class TestOverviewCurationVisibility:
         store, service = store_and_service
         store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
         overview = overview_tab(service, "ops", {"sweeps": []})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_A)]
         overview = overview_tab(service, "ops", {"sweeps": [], "include_invalid": True})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert {row["sweep_id"] for row in grid.rowData} == {
             str(SWEEP_A),
             str(SWEEP_B),
@@ -1406,7 +1406,7 @@ class TestOverviewCurationVisibility:
         store.archive_sweep(str(SWEEP_A))
         store.mark_sweep_invalid(str(SWEEP_A), "still running")
         overview = overview_tab(service, "ops", {"sweeps": []})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert [row["sweep_id"] for row in grid.rowData] == [
             str(SWEEP_A),
             str(SWEEP_B),
@@ -1417,7 +1417,7 @@ class TestOverviewCurationVisibility:
         store, service = store_and_service
         store.archive_sweep(str(SWEEP_B))
         overview = overview_tab(service, "ops", {"sweeps": [str(SWEEP_B)]})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
         assert "Active (1)" in str(overview)
 
@@ -2794,7 +2794,7 @@ class TestSortableTableInfrastructure:
 
     def test_overview_grid_uses_the_shared_helper(self, service):
         overview = overview_tab(service, "ops", {"sweeps": []})
-        grid = _grid(overview, "overview-sweep-grid")
+        grid = _grid(overview, {"overview-grid": "sweeps"})
         comparators = {
             column["field"]: column.get("comparator") for column in grid.columnDefs
         }
@@ -2854,9 +2854,9 @@ class TestOverviewControlsWiring:
         ]
         state = [
             {
-                "id": "overview-sweep-grid",
+                "id": {"overview-grid": "sweeps"},
                 "property": "selectedRows",
-                "value": [{"sweep_id": str(SWEEP_B)}, {"sweep_id": str(SWEEP_A)}],
+                "value": [[{"sweep_id": str(SWEEP_B)}, {"sweep_id": str(SWEEP_A)}]],
             },
             {"id": "project-store", "property": "data", "value": "ops"},
         ]
@@ -2891,7 +2891,7 @@ class TestOverviewControlsWiring:
         assert tile_keys
         assert self._key_with_input(callback_map, "overview-scope-active")
         assert self._key_with_input(callback_map, "overview-scope-all")
-        assert self._key_with_input(callback_map, "overview-filter-clear")
+        assert self._key_with_input(callback_map, '{"overview-filter-clear":["ALL"]}')
 
         def key_outputs(key):
             stripped = key.removeprefix("..").removesuffix("..")
@@ -2906,3 +2906,116 @@ class TestOverviewControlsWiring:
                 or "workspace-exceptions.children" in key_outputs(key)
             )
         ]
+
+    def _post_view_edit(self, client, key, inputs, state, changed):
+        # The exact envelope the browser sends: hashed output property
+        # for a duplicate output, canonical compact changed ids.
+        return client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": key,
+                "outputs": {
+                    "id": "view-store",
+                    "property": key.split(".", 1)[1],
+                },
+                "inputs": inputs,
+                "state": state,
+                "changedPropIds": changed,
+            },
+        )
+
+    def _view_edit_key(self, client, input_ids):
+        callback_map = self._callback_map(client)
+
+        def outputs_of(key):
+            stripped = key.removeprefix("..").removesuffix("..")
+            return {part.split("@")[0] for part in stripped.split("...") if part}
+
+        return next(
+            key
+            for key, spec in callback_map.items()
+            if outputs_of(key) == {"view-store.data"}
+            and {dep["id"] for dep in spec["inputs"]} == input_ids
+        )
+
+    def test_scope_seg_ignores_remount_echoes(self, mutable_client):
+        # Overview re-renders remount the seg buttons; their n_clicks
+        # change without a press and must not flip the discovery scope.
+        _store, client = mutable_client
+        key = self._view_edit_key(
+            client, {"overview-scope-active", "overview-scope-all"}
+        )
+        response = self._post_view_edit(
+            client,
+            key,
+            inputs=[
+                {"id": "overview-scope-active", "property": "n_clicks"},
+                {"id": "overview-scope-all", "property": "n_clicks"},
+            ],
+            state=[{"id": "view-store", "property": "data", "value": None}],
+            changed=[
+                "overview-scope-active.n_clicks",
+                "overview-scope-all.n_clicks",
+            ],
+        )
+        assert response.status_code == 204
+
+    def test_tile_press_sets_and_chip_press_clears_the_filter(self, mutable_client):
+        _store, client = mutable_client
+        key = self._view_edit_key(
+            client,
+            {
+                '{"overview-tile":["ALL"]}',
+                '{"overview-filter-clear":["ALL"]}',
+            },
+        )
+        store_state = [{"id": "view-store", "property": "data", "value": None}]
+        # Wildcard inputs travel grouped per pattern, one list of
+        # resolved matches per Input — an empty list is zero matches.
+        response = self._post_view_edit(
+            client,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"overview-tile": "state:completed"},
+                        "property": "n_clicks",
+                        "value": 1,
+                    }
+                ],
+                [],
+            ],
+            state=store_state,
+            changed=['{"overview-tile":"state:completed"}.n_clicks'],
+        )
+        assert response.status_code == 200
+        doc = response.json()["response"]["view-store"]["data"]
+        assert doc["overview_filter"] == "state:completed"
+        response = self._post_view_edit(
+            client,
+            key,
+            inputs=[
+                [],
+                [
+                    {
+                        "id": {"overview-filter-clear": "chip"},
+                        "property": "n_clicks",
+                        "value": 1,
+                    }
+                ],
+            ],
+            state=[
+                {
+                    "id": "view-store",
+                    "property": "data",
+                    "value": {
+                        "v": 2,
+                        "overview_filter": "state:completed",
+                    },
+                }
+            ],
+            changed=['{"overview-filter-clear":"chip"}.n_clicks'],
+        )
+        assert response.status_code == 200
+        doc = response.json()["response"]["view-store"]["data"]
+        assert doc["overview_filter"] is None
