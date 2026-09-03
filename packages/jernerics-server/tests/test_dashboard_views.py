@@ -1,4 +1,4 @@
-"""Workspace browser, inspector, and curation coverage.
+"""Overview browser and curation coverage.
 
 Callback-layer coverage over a seeded v3 store: the orchestrator
 browser-drives the mounted dashboard after merge, so these tests assert

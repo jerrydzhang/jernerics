@@ -23,6 +23,7 @@ from jernerics_schema import (
     TrialSnapshotEvent,
     TrialState,
     ValueEvent,
+    decode_selection,
     encode_selection,
     materialize_selection,
 )
@@ -30,18 +31,12 @@ from jernerics_server.dashboard import analysis, workspace
 from jernerics_server.dashboard import sweep as sweep_page
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
-    default_scope_state,
-    default_view_state,
-    encode_view_state,
-    hydrate_view,
     investigation_scope_state,
     points_tab,
     seed_sweeps_from_search,
-    tray_from_selection,
 )
 from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.routes import ROUTES_BASE
-from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import (
     CurationRejectedError,
     CurationUnavailableError,
@@ -277,40 +272,46 @@ class TestInvestigationScope:
         )
 
     def test_scope_group_holds_members_as_tray_sweeps(self, service, compare):
-        scope = service.investigation_scope(compare)
-        assert scope["sweeps"] == sorted(
+        record = service.investigation_detail(compare).investigation
+        tray, _scoped = analysis.investigation_scope_state(record.members, None)
+        assert tray["sweeps"] == sorted(
             str(sweep_id) for sweep_id in (VAL_SWEEP, INC_SWEEP, BAD_SWEEP)
         )
-        assert scope["trials"] == []
-        assert scope["families"] == []
-        assert scope["executions"] == []
-        assert scope["expand"] is False
-        assert scope["include_archived"] is False
-        assert scope["include_invalid"] is False
-        assert set(scope) == set(default_scope_state())
+        assert tray["trials"] == []
+        assert tray["families"] == []
+        assert tray["executions"] == []
+        assert tray["expand"] is False
 
     def test_url_token_round_trips_to_the_same_scope(self, service, shared, compare):
         record = shared.detail(compare).investigation
         token = encode_selection(materialize_selection(record))
-        selection = decode_selection_token(token, project=LAB)
-        tray = tray_from_selection(selection)
-        scope = service.investigation_scope(compare)
-        assert {key: scope[key] for key in EMPTY_TRAY} == tray
+        selection = decode_selection(token)
+        tray, _scoped = analysis.investigation_scope_state(
+            service.investigation_detail(compare).investigation.members, None
+        )
+        assert {key: tray[key] for key in EMPTY_TRAY} == {
+            "sweeps": sorted(str(s) for s in (selection.sweeps or ())),
+            "trials": [],
+            "families": [],
+            "executions": [],
+            "expand": False,
+        }
 
-    def test_member_index_narrows_to_one_sweep(self, service, compare):
-        scope = service.investigation_scope(compare, member_index=1)
-        assert scope["sweeps"] == [str(INC_SWEEP)]
-        assert scope["trials"] == []
-        assert service.investigation_scope(compare, member_index=0)["sweeps"] == [
-            str(VAL_SWEEP)
-        ]
+    def test_known_member_narrows_to_one_sweep(self, service, compare):
+        record = service.investigation_detail(compare).investigation
+        tray, scoped = analysis.investigation_scope_state(
+            record.members, str(INC_SWEEP)
+        )
+        assert scoped == str(INC_SWEEP)
+        assert tray["sweeps"] == [str(INC_SWEEP)]
 
-    def test_out_of_range_member_index_is_an_error(self, service, shared, compare):
-        with pytest.raises(IndexError, match="member index 3"):
-            service.investigation_scope(compare, member_index=3)
-        empty = str(shared.detail_by_name(LAB, "gamma-empty").investigation.id)
-        with pytest.raises(IndexError, match="member index 0"):
-            service.investigation_scope(empty, member_index=0)
+    def test_unknown_member_folds_back_to_the_full_cohort(self, service, compare):
+        record = service.investigation_detail(compare).investigation
+        tray, scoped = analysis.investigation_scope_state(record.members, "ghost")
+        assert scoped is None
+        assert tray["sweeps"] == sorted(
+            str(sweep_id) for sweep_id in (VAL_SWEEP, INC_SWEEP, BAD_SWEEP)
+        )
 
 
 class TestInvestigationWrites:
@@ -758,7 +759,7 @@ class TestInvestigationWorkspacePage:
         clipboards = [
             node for node in _walk_children(page) if isinstance(node, dcc.Clipboard)
         ]
-        selection = decode_selection_token(clipboards[0].content)
+        selection = decode_selection(clipboards[0].content)
         assert selection.project == CMP
         assert set(selection.sweeps or ()) == {CS1, CS2, CS3}
 
@@ -1386,7 +1387,7 @@ class TestMemberScopeAndViews:
         clipboards = [
             node for node in _walk_children(python) if isinstance(node, dcc.Clipboard)
         ]
-        selection = decode_selection_token(clipboards[0].content)
+        selection = decode_selection(clipboards[0].content)
         assert set(selection.sweeps or ()) == {CS1, CS2, CS3}
 
     def test_compare_nav_never_carries_a_member_scope(self, cmp_service, sig):
@@ -1434,39 +1435,18 @@ class TestMemberScopeAndViews:
             str(CT4),
         }
 
-    def test_via_return_path_survives_its_own_url_only(self, cmp_service, sig):
-        doc = analysis.edited_view(
-            default_view_state(),
-            {"focus": {"kind": "sweep", "id": str(CS1)}, "via": sig.compare},
-        )
-        hydrated, error = hydrate_view(
-            f"{ROUTES_BASE}/project/{CMP}", f"?view={encode_view_state(doc)}", None
-        )
-        assert error is None
-        assert hydrated is not None
-        assert hydrated["via"] == sig.compare
-        assert hydrated["focus"] == {"kind": "sweep", "id": str(CS1)}
-        # A document that does not name a via clears it.
-        stripped, _error = hydrate_view(
-            f"{ROUTES_BASE}/project/{CMP}",
-            f"?view={encode_view_state(default_view_state())}",
-            doc,
-        )
-        assert stripped is not None
-        assert stripped["via"] is None
-
     def test_python_token_exports_the_scoped_member_set(self, cmp_service, sig):
         record = cmp_service.investigation_detail(sig.compare).investigation
         scoped = html.Div(workspace.python_body(record, member=str(CS2)))
         clipboards = [
             node for node in _walk_children(scoped) if isinstance(node, dcc.Clipboard)
         ]
-        assert decode_selection_token(clipboards[0].content).sweeps == (CS2,)
+        assert decode_selection(clipboards[0].content).sweeps == (CS2,)
         full = html.Div(workspace.python_body(record))
         clipboards = [
             node for node in _walk_children(full) if isinstance(node, dcc.Clipboard)
         ]
-        assert set(decode_selection_token(clipboards[0].content).sweeps or ()) == {
+        assert set(decode_selection(clipboards[0].content).sweeps or ()) == {
             CS1,
             CS2,
             CS3,

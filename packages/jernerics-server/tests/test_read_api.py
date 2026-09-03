@@ -26,7 +26,6 @@ from jernerics_schema import (
     IngestRequest,
     JobResourceEvent,
     ManualParamEvent,
-    Selection,
     SubmissionSnapshotEvent,
     SubmissionState,
     SweepSnapshotEvent,
@@ -39,7 +38,6 @@ from jernerics_server import http as http_module
 from jernerics_server import store as store_module
 from jernerics_server.http import MAX_ROWS, create_app
 from jernerics_server.ingest import IngestService
-from jernerics_server.queries import QueryService
 from jernerics_server.store import Store
 
 PROJECT = "read-api"
@@ -575,16 +573,6 @@ class TestValues:
             },
         ).json()
         assert [r["step"] for r in body["records"]] == [0, 1, 2]
-
-    def test_value_series_execution_ids_filter(self, scenario):
-        service = QueryService(scenario.store)
-        records, next_token = service.value_series(
-            Selection(project=PROJECT),
-            "loss",
-            execution_ids=(scenario.ex_ended,),
-        )
-        assert next_token is None
-        assert [(r.key, r.step, r.value) for r in records] == [("loss", 0, 0.5)]
 
 
 class TestKeysetPagination:

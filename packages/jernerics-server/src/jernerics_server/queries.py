@@ -602,32 +602,6 @@ class QueryService:
             ),
         )
 
-    def value_series(
-        self,
-        selection: Selection,
-        key: str,
-        *,
-        execution_ids: tuple[uuid.UUID, ...] | None = None,
-        page: Page | None = None,
-        page_token: str | None = None,
-    ) -> tuple[list[ValueRecord], str | None]:
-        page = page or Page()
-        where, params = self._value_where(selection, (key,), None, None, False)
-        if execution_ids:
-            params.extend(_ids(execution_ids))
-            where += f" AND v.execution_id IN ({_placeholders(len(execution_ids))})"
-        return self._fetch_values(
-            where,
-            params,
-            page,
-            page_token,
-            _echo(
-                selection,
-                key=key,
-                execution_ids=_ids(execution_ids) if execution_ids else None,
-            ),
-        )
-
     def _value_where(
         self,
         selection: Selection,

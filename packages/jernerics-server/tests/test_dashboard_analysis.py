@@ -1,11 +1,10 @@
-"""Cross-sweep analysis views (jernerics-h5d.13).
+"""Investigation series and shared view-doc state (jernerics-h5d.13).
 
-Callback-layer coverage over a heterogeneous three-sweep seed: token
-round-trips, data catalog, series overlay, points tables, study-style
-figures, URL hydration, and the continue-in-Python handoff. The
-orchestrator browser-drives the mounted dashboard after merge, so these
-tests assert on the pure helpers the Dash callbacks wrap plus
-TestClient page 200s.
+Callback-layer coverage over a heterogeneous three-sweep seed: series
+panels, points tables, study-style figures, context filters, and the
+continue-in-Python handoff. The orchestrator browser-drives the mounted
+dashboard after merge, so these tests assert on the pure helpers the
+Dash callbacks wrap plus TestClient page 200s.
 """
 
 import json
@@ -13,7 +12,6 @@ import math
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import unquote
 
 import pytest
 from dash import dcc, no_update
@@ -27,7 +25,6 @@ from jernerics_schema import (
     FlatContext,
     IngestRequest,
     Selection,
-    SelectionTokenError,
     SweepSnapshotEvent,
     TrackingEvent,
     TrialSnapshotEvent,
@@ -39,55 +36,30 @@ from jernerics_schema import (
 from jernerics_server.dashboard import analysis, components
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
-    VIEW_VERSION,
-    ViewStateError,
     apply_context_filters,
     auto_refresh_flip,
-    auto_refresh_polls,
     axis_state_edit,
-    browser_trial_columns,
-    browser_trial_outputs,
-    catalog_tab,
-    cold_start,
     context_filter_controls,
-    control_values,
-    decode_view_state,
-    default_axis_state,
-    default_scope_state,
     default_view_state,
-    edited_fields,
     edited_view,
-    encode_view_state,
-    expand_values,
-    hydrate_tray,
-    hydrate_view,
-    include_values,
-    mounted_selection,
     moved_keys,
     param_text,
     points_tab,
     points_view_data,
     python_snippet,
+    render_series_outputs,
     scope_fingerprint,
-    search_from_state,
     series_data_failure,
     series_data_outputs,
-    series_outputs,
     series_snapshot,
     series_status,
     series_view_outputs,
-    synced_search,
-    tray_from_edit,
-    tray_summary,
     trial_config_text,
     updated_ago,
     varying_param_keys,
     view_from_context_filter,
     view_from_controls,
-    view_from_include,
     view_from_trace_click,
-    with_focus,
-    workspace_focus_href,
 )
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
@@ -106,10 +78,9 @@ from jernerics_server.dashboard.figures import (
     stacked_figure,
 )
 from jernerics_server.dashboard.layout import shell
-from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import DashboardService
 from jernerics_server.dashboard.sessions import SessionSigner
-from jernerics_server.dashboard.workspace import active_sweeps, sweep_curation
+from jernerics_server.dashboard.workspace import active_sweeps
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
 from jernerics_server.queries import QueryService
@@ -525,38 +496,6 @@ def _ingest(store: Store) -> None:
         assert not result.conflicts
 
 
-def _tray(**overrides: Any) -> dict:
-    tray = {
-        "sweeps": [str(SWEEP_A)],
-        "trials": [],
-        "families": [],
-        "executions": [],
-        "expand": False,
-    }
-    tray.update(overrides)
-    return tray
-
-
-def _edit_tray(
-    sweep_rows: list,
-    family_rows: list,
-    expand: list,
-    current: dict | None,
-    **edited: bool,
-) -> dict:
-    """``tray_from_edit`` with every control authoritative unless an
-    explicit ``*_edited`` flag overrides it."""
-    return tray_from_edit(
-        sweep_rows,
-        family_rows,
-        expand,
-        current,
-        sweep_edited=edited.get("sweep_edited", True),
-        family_edited=edited.get("family_edited", True),
-        expand_edited=edited.get("expand_edited", True),
-    )
-
-
 def _seeded_store(tmp_path) -> Store:
     store = Store(tmp_path / "analysis.sqlite")
     _ingest(store)
@@ -609,27 +548,26 @@ def _grids(page):
     return _walk(page, lambda node: isinstance(node, AgGrid))
 
 
-def _points_service(
-    values: dict[str, dict[str, Any]],
-    value_keys: list[dict[str, Any]],
-    params: dict[str, dict[str, Any]],
-    param_keys: list[str],
-) -> Any:
-    """Duck-typed service returning one shaped analysis_points payload."""
+def _tray(**overrides: Any) -> dict:
+    tray = {
+        "sweeps": [str(SWEEP_A)],
+        "trials": [],
+        "families": [],
+        "executions": [],
+        "expand": False,
+    }
+    tray.update(overrides)
+    return tray
 
-    class _PointsService:
-        def analysis_points(self, project: str | None, tray: dict | None) -> dict:
-            return {
-                "trials": [
-                    {"number": 1, "trial_id": "cc320000-0000-4000-8000-000000000000"}
-                ],
-                "value_keys": value_keys,
-                "values": values,
-                "param_keys": param_keys,
-                "params": params,
-            }
 
-    return _PointsService()
+def series_outputs(service, project, tray, view_doc):
+    """One-shot composition of the live pieces: build the snapshot from
+    the service, then render it from the stored snapshot alone."""
+    snapshot = series_snapshot(service, project, tray, view_doc, 0)
+    panels, _payload, key_options, color_options, facet_options, *_rest = (
+        render_series_outputs(view_doc, snapshot)
+    )
+    return panels, snapshot, key_options, color_options, facet_options
 
 
 class TestClampPolicy:
@@ -657,84 +595,36 @@ class TestClampPolicy:
         assert clamped.endswith(components.ELLIPSIS)
 
 
-def _pres(page):
-    return _walk(page, lambda node: type(node).__name__ == "Pre")
+class TestEditedViewFunnel:
+    def test_changes_apply_over_current(self):
+        doc = default_view_state()
+        edited = edited_view(doc, {"auto_refresh": True})
+        assert edited["auto_refresh"] is True
+        assert edited["series"] == doc["series"]
 
-
-def _selected_trial_ids(service: DashboardService, selection: Selection) -> list[str]:
-    return sorted(str(record.trial_id) for record in service.queries.lineage(selection))
-
-
-class TestSelectionTokens:
-    def test_dashboard_round_trip_is_stable(self):
-        selection = Selection(project=PROJECT, sweeps=(SWEEP_A,), trials=(RA2, TA))
-        token = encode_selection(selection)
-        assert encode_selection(selection) == token
-        assert decode_selection_token(token) == selection
-
-    def test_client_format_token_parses_and_reencodes_identically(self):
-        selection = decode_selection_token(CLIENT_FORMAT_TOKEN)
-        assert selection == Selection(project=PROJECT, sweeps=(SWEEP_A,))
-        assert encode_selection(selection) == CLIENT_FORMAT_TOKEN
-
-    def test_schema_encoded_token_flows_through_both_sides(self):
-        selection = Selection(project=PROJECT, sweeps=(SWEEP_A,), trials=(RA2,))
-        token = encode_selection(selection)
-        assert decode_selection_token(token, project=PROJECT) == selection
-        assert decode_selection(token) == selection
-        assert encode_selection(decode_selection_token(token)) == token
-
-    def test_malformed_token_is_an_error(self):
-        with pytest.raises(SelectionTokenError, match="malformed"):
-            decode_selection_token("definitely-not-a-token-!!!")
-
-    def test_cross_project_token_surfaces_error_not_mixed_results(self, service):
-        with pytest.raises(SelectionTokenError, match="project 'other'"):
-            decode_selection_token(CROSS_PROJECT_TOKEN, project=PROJECT)
-        tray, error = hydrate_tray(
-            service=service,
-            project=PROJECT,
-            pathname="/dashboard/project/lab",
-            search=f"?sel={CROSS_PROJECT_TOKEN}",
-            current=None,
+    def test_absent_current_starts_from_defaults(self):
+        assert edited_view(None, {"auto_refresh": True}) == dict(
+            default_view_state(), auto_refresh=True
         )
-        assert tray is None
-        assert error is not None and "project" in error
 
 
 class TestUnifiedSelectionStore:
-    def test_token_hydration_feeds_scope_and_summary(self, service):
-        selection = Selection(project=PROJECT, sweeps=(SWEEP_A, SWEEP_B))
-        token = encode_selection(selection)
-        scope, error = hydrate_tray(
-            service, PROJECT, "/dashboard/project/lab", f"?sel={token}", None
+    def test_analysis_reads_resolve_one_selection(self, service):
+        # The analysis reads resolve a tray (sweep ids, family roots,
+        # expansion) to a typed Selection over one scope: expansion off
+        # contributes the family's current trial only, expansion on the
+        # whole lineage.
+        tray = {**EMPTY_TRAY, "sweeps": [str(SWEEP_A)]}
+        selection = service.analysis_selection(PROJECT, tray)
+        assert selection.sweeps == (SWEEP_A,)
+        current = service.analysis_selection(
+            PROJECT, {**EMPTY_TRAY, "families": [str(RA0)]}
         )
-        assert error is None and scope is not None
-        assert scope["sweeps"] == [str(SWEEP_A), str(SWEEP_B)]
-        assert tray_summary(scope).startswith(f"{len(selection.sweeps or ())} sweeps")
-        # The same token against the hydrated scope is a no-op, so the
-        # settled store does not rewrite forever.
-        again, error = hydrate_tray(
-            service, PROJECT, "/dashboard/project/lab", f"?sel={token}", scope
+        assert current.trials == (RA2,)
+        expanded = service.analysis_selection(
+            PROJECT, {**EMPTY_TRAY, "families": [str(RA0)], "expand": True}
         )
-        assert again is None and error is None
-
-    def test_analysis_edits_hit_one_scope(self):
-        scope = _edit_tray(
-            [{"sweep_id": str(SWEEP_A)}],
-            [{"root": str(RA0)}],
-            [],
-            dict(default_scope_state(), include_archived=True),
-        )
-        assert scope["sweeps"] == [str(SWEEP_A)]
-        assert scope["families"] == [str(RA0)]
-        assert scope["include_archived"] is True
-        # A later edit replaces families and keeps the rest of the store.
-        scope = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], ["expand"], scope)
-        assert scope["sweeps"] == [str(SWEEP_A)]
-        assert scope["families"] == []
-        assert scope["expand"] is True
-        assert scope["include_archived"] is True
+        assert set(expanded.trials) == {RA0, RA1, RA2}
 
     def test_points_grid_carries_click_selection(self, service):
         page = points_tab(
@@ -752,138 +642,6 @@ class TestUnifiedSelectionStore:
         assert options["pagination"] is False
         assert options["rowSelection"]["mode"] == "multiRow"
         assert options["rowSelection"]["enableClickSelection"] is True
-
-
-class TestTray:
-    def test_family_pick_without_expansion_selects_current_trial(self, service):
-        tray = _edit_tray([], [{"root": str(RA0)}], [], None)
-        selection = service.analysis_selection(PROJECT, tray)
-        assert selection.trials == (RA2,)
-        assert selection.retry_roots is None
-
-    def test_expansion_uses_lineage_for_every_generation(self, service):
-        tray = _edit_tray([], [{"root": str(RA0)}], ["expand"], None)
-        selection = service.analysis_selection(PROJECT, tray)
-        assert set(selection.trials or ()) == {RA0, RA1, RA2}
-
-    def test_grid_picks_keep_explicit_trials(self):
-        tray = _edit_tray(
-            [{"sweep_id": str(SWEEP_B)}],
-            [{"root": str(RA0)}],
-            [],
-            _tray(trials=[str(TC)]),
-        )
-        assert tray["sweeps"] == [str(SWEEP_B)]
-        assert tray["trials"] == [str(TC)]
-        assert tray["families"] == [str(RA0)]
-
-    def test_grid_event_only_touches_its_own_dimension(self):
-        """jernerics-8c9: an edit event from one grid leaves the other
-        controls' picks alone — the sibling grid may still hold a stale
-        selection snapshot while AG Grid applies programmatic rows."""
-        tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
-        family_echo = _edit_tray([], [], [], tray, sweep_edited=False)
-        assert family_echo == tray
-
-        family_tray = _edit_tray([], [{"root": str(RA0)}], ["expand"], None)
-        expand_off = _edit_tray(
-            [],
-            [],
-            [],
-            family_tray,
-            sweep_edited=False,
-            family_edited=False,
-            expand_edited=True,
-        )
-        assert expand_off["expand"] is False
-        assert expand_off["families"] == [str(RA0)]
-
-    def test_real_uncheck_of_the_last_sweep_clears(self):
-        tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
-        unchecked = _edit_tray([], [], [], tray, family_edited=False)
-        assert unchecked["sweeps"] == []
-
-    def test_mounting_grids_are_not_pushed_an_empty_selection(self):
-        """jernerics-8c9: the loaders' initial call skips empty selectedRows
-        writes — that write echoes back as an edit against a tray
-        hydration may have landed in between."""
-        assert mounted_selection([], initial=True) is no_update
-        assert mounted_selection([], initial=False) == []
-        assert mounted_selection([{"root": str(RA0)}], initial=True) == [
-            {"root": str(RA0)}
-        ]
-
-
-class TestDataCatalog:
-    def test_value_keys_kinds_points_and_step_presence(self, service):
-        entries = {
-            entry["key"]: entry
-            for entry in service.analysis_value_keys(
-                PROJECT,
-                _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
-            )
-        }
-        assert entries["loss"]["kind"] == "scalar"
-        assert entries["loss"]["steps"] is True
-        assert entries["loss"]["points"] == 12
-        assert entries["accuracy"]["steps"] is True
-        assert entries["summary"]["kind"] == "json"
-        assert entries["summary"]["steps"] is False
-        assert entries["score"]["steps"] is False
-
-    def test_context_dimensions_with_cardinality(self, service):
-        dims = {
-            entry["key"]: entry
-            for entry in service.analysis_context_catalog(
-                PROJECT, _tray(sweeps=[str(SWEEP_A)])
-            )
-        }
-        assert set(dims) == {"host", "shard"}
-        assert dims["host"]["cardinality"] == 3
-        assert dims["shard"]["cardinality"] == 2
-        assert len(dims["host"]["samples"]) == 3
-
-    def test_param_coverage_marks_missing_sweeps(self, service):
-        coverage = service.analysis_param_coverage(
-            PROJECT,
-            _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
-        )
-        rows = {row["key"]: row for row in coverage["rows"]}
-        lr = rows["lr"]["cells"]
-        assert lr[str(SWEEP_A)]["trials"] == 2
-        assert lr[str(SWEEP_B)]["trials"] == 1
-        assert lr[str(SWEEP_C)] is None
-        seed = rows["seed"]["cells"]
-        assert seed[str(SWEEP_A)]["trials"] == 2
-        assert seed[str(SWEEP_B)] is None
-        assert seed[str(SWEEP_C)] is None
-
-    def test_artifact_keys_discovered(self, service):
-        keys = {
-            entry["key"]: entry
-            for entry in service.analysis_artifacts(
-                PROJECT,
-                _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)]),
-            )
-        }
-        assert keys["checkpoint"]["count"] == 2
-        assert keys["report"]["count"] == 1
-
-    def test_catalog_tab_renders_sections(self, service):
-        page = catalog_tab(
-            service, PROJECT, _tray(sweeps=[str(SWEEP_A), str(SWEEP_B), str(SWEEP_C)])
-        )
-        rendered = str(page)
-        for needle in (
-            "loss",
-            "summary",
-            "host",
-            "shard",
-            "lr",
-            "seed",
-            "checkpoint",
-        ):
-            assert needle in rendered
 
 
 def _series_doc(**overrides: Any) -> dict:
@@ -1173,798 +931,9 @@ class TestPointsView:
         assert [row["tk"] for row in grid.rowData] == [str(TC)]
 
 
-class TestUrlReload:
-    def test_token_hydrates_equal_tray_selection(self, service):
-        selection = Selection(project=PROJECT, sweeps=(SWEEP_A,), trials=(RA2,))
-        search = f"?sel={encode_selection(selection)}"
-        scope, error = hydrate_tray(
-            service, PROJECT, "/dashboard/project/lab", search, None
-        )
-        assert error is None and scope is not None
-        assert service.analysis_selection(PROJECT, scope) == selection
-        assert expand_values({"scope": scope}) == []
-
-    def test_retry_root_token_hydrates_with_expansion(self, service):
-        selection = Selection(project=PROJECT, retry_roots=(RA0,))
-        scope, error = hydrate_tray(
-            service,
-            PROJECT,
-            "/dashboard/project/lab",
-            f"?sel={encode_selection(selection)}",
-            None,
-        )
-        assert error is None and scope is not None
-        assert expand_values({"scope": scope}) == ["expand"]
-        assert _selected_trial_ids(
-            service, service.analysis_selection(PROJECT, scope)
-        ) == _selected_trial_ids(service, selection)
-
-    def test_scope_round_trips_through_the_view_parameter(self, service):
-        scope = _edit_tray([], [{"root": str(RA0)}], ["expand"], None)
-        doc = edited_view(default_view_state(), {"scope": scope})
-        search = search_from_state(doc, "")
-        assert search is not None and search.startswith("?view=")
-        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
-        assert error is None and hydrated is not None
-        assert service.analysis_selection(PROJECT, hydrated["scope"]) == (
-            service.analysis_selection(PROJECT, scope)
-        )
-        assert search_from_state(hydrated, search) is None
-
-    def test_non_analysis_url_is_ignored(self, service):
-        tray, error = hydrate_tray(
-            service,
-            PROJECT,
-            "/dashboard/",
-            f"?sel={encode_selection(Selection(project=PROJECT))}",
-            None,
-        )
-        assert tray is None and error is None
-
-
-class TestColdStartAdoption:
-    """jernerics-xbx: a shared ``?sel=`` token opened before any project
-    is picked adopts the token's project through the picker — the same
-    settle path as a manual pick (picker -> project-store -> hydration
-    re-fires). Adoption offers only projects the dashboard has data
-    for; anything else surfaces an error naming the project instead of
-    silently empty grids."""
-
-    def test_known_project_token_offers_the_adoption(self, service):
-        selection = Selection(project=PROJECT, sweeps=(SWEEP_A, SWEEP_B))
-        adopted, error = cold_start(service, f"?sel={encode_selection(selection)}")
-        assert error is None and adopted == selection
-
-    def test_unknown_project_token_names_itself_in_the_hint(self, service):
-        token = encode_selection(Selection(project="ghost", trials=(RA0,)))
-        adopted, error = cold_start(service, f"?sel={token}")
-        assert adopted is None
-        assert error is not None and "project 'ghost'" in error
-
-    def test_invalid_token_errors_and_no_token_stays_quiet(self, service):
-        _adopted, error = cold_start(service, "?sel=definitely-not-a-token-!!!")
-        assert error is not None and "malformed" in error
-        assert cold_start(service, "") == (None, None)
-        assert cold_start(service, None) == (None, None)
-
-    def test_fresh_session_hydration_waits_for_the_settle(self, service):
-        """No project picked: hydration leaves the tray alone; once the
-        picker adoption settles project-store, the ordinary path
-        hydrates, and its own settle re-fire is a no-op."""
-        token = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
-        search = f"?sel={token}"
-        tray, error = hydrate_tray(
-            service, None, "/dashboard/project/lab", search, dict(EMPTY_TRAY)
-        )
-        assert tray is None and error is None
-        adopted, _error = cold_start(service, search)
-        assert adopted is not None and adopted.project == PROJECT
-        hydrated, error = hydrate_tray(
-            service, adopted.project, "/dashboard/project/lab", search, dict(EMPTY_TRAY)
-        )
-        assert error is None and hydrated is not None
-        assert hydrated["sweeps"] == [str(SWEEP_A)]
-        assert hydrate_tray(
-            service, adopted.project, "/dashboard/project/lab", search, hydrated
-        ) == (None, None)
-
-    def test_unknown_project_token_hints_on_the_analysis_page(self, service):
-        token = encode_selection(Selection(project="ghost", trials=(RA0,)))
-        tray, error = hydrate_tray(
-            service, None, "/dashboard/project/lab", f"?sel={token}", dict(EMPTY_TRAY)
-        )
-        assert tray is None
-        assert error is not None and "project 'ghost'" in error
-
-    def test_invalid_token_on_fresh_session_still_errors(self, service):
-        tray, error = hydrate_tray(
-            service,
-            None,
-            "/dashboard/project/lab",
-            "?sel=definitely-not-a-token-!!!",
-            dict(EMPTY_TRAY),
-        )
-        assert tray is None
-        assert error is not None and "malformed" in error
-
-    def test_off_analysis_url_neither_adopts_nor_errors(self, service):
-        token = encode_selection(Selection(project=PROJECT))
-        assert hydrate_tray(
-            service, None, "/dashboard/", f"?sel={token}", dict(EMPTY_TRAY)
-        ) == (None, None)
-
-
-class TestUrlSync:
-    """jernerics-8c9/2se: one shell-only callback owns ``url.search`` —
-    view edits mint ``?view=`` on the investigation page only (the
-    workspace page owns its search parameters outright), a navigation
-    drops only the parameters of pages that no longer mint, and a
-    navigation never mints (a stale document would clobber a freshly
-    opened deep link before hydration lands)."""
-
-    @staticmethod
-    def _doc(scope=None, **changes):
-        if scope is not None:
-            changes["scope"] = scope
-        return edited_view(default_view_state(), changes)
-
-    def test_view_edit_mints_on_the_investigation_page(self, service):
-        scope = _edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None)
-        target = synced_search(
-            "/dashboard/project/lab/investigation/inv-1",
-            self._doc(scope),
-            "",
-            url_navigated=False,
-        )
-        assert target is not None and target.startswith("?view=")
-        doc = decode_view_state(unquote(target.removeprefix("?view=")))
-        assert service.analysis_selection(PROJECT, doc["scope"]) == (
-            service.analysis_selection(PROJECT, scope)
-        )
-
-    def test_view_edit_on_workspace_leaves_the_search_alone(self, service):
-        doc = self._doc(_edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None))
-        assert (
-            synced_search("/dashboard/project/lab", doc, "", url_navigated=False)
-            is None
-        )
-        assert (
-            synced_search("/dashboard/project/lab", doc, "?view=x", url_navigated=False)
-            is None
-        )
-
-    def test_unchanged_state_leaves_the_search_alone(self, service):
-        doc = self._doc(_tray())
-        search = search_from_state(doc, "")
-        assert (
-            synced_search(
-                "/dashboard/project/lab/investigation/inv-1",
-                doc,
-                search,
-                url_navigated=False,
-            )
-            is None
-        )
-
-    def test_view_edit_off_analytic_pages_leaves_the_search_alone(self, service):
-        doc = self._doc(_edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None))
-        assert synced_search("/dashboard/", doc, "?view=x", url_navigated=False) is None
-
-    def test_navigation_off_workspace_strips_the_parameter(self, service):
-        assert (
-            synced_search(
-                "/dashboard/", default_view_state(), "?view=x", url_navigated=True
-            )
-            == ""
-        )
-
-    def test_navigation_with_no_search_leaves_the_url_alone(self, service):
-        assert (
-            synced_search("/dashboard/", default_view_state(), "", url_navigated=True)
-            is None
-        )
-
-    def test_navigation_onto_workspace_never_mints_over_a_deep_link(self, service):
-        doc = self._doc(_edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None))
-        deep_link = "?view=" + encode_view_state(
-            self._doc(_edit_tray([{"sweep_id": str(SWEEP_B)}], [], [], None))
-        )
-        assert (
-            synced_search(
-                "/dashboard/project/lab",
-                doc,
-                deep_link,
-                url_navigated=True,
-            )
-            == ""
-        )
-
-    def test_pre_picked_deep_link_survives_the_mount_echo(self, service):
-        """The 8c9 regression ordering, as one callback sequence: with a
-        session project already settled, a deep link hydrates while the
-        picker grids are still mounting; AG Grid's stale mount echo then
-        reports empty picks. The scope survives and ?view= is neither
-        stripped nor rewritten."""
-        session_doc = default_view_state()
-        search = "?view=" + encode_view_state(
-            self._doc(_edit_tray([{"sweep_id": str(SWEEP_A)}], [], [], None))
-        )
-        hydrated, error = hydrate_view("/dashboard/project/lab", search, session_doc)
-        assert error is None and hydrated is not None
-        assert hydrated["scope"]["sweeps"] == [str(SWEEP_A)]
-        # loaders' initial call: empty selection is not pushed to the
-        # mounting grids, so no empty-selection echo can fire
-        assert mounted_selection([], initial=True) is no_update
-        # the stale echo (family grid mounted, sweep grid not yet applied)
-        echo_scope = tray_from_edit(
-            [],
-            [],
-            [],
-            hydrated["scope"],
-            sweep_edited=False,
-            family_edited=True,
-            expand_edited=False,
-        )
-        echo = edited_view(hydrated, {"scope": echo_scope})
-        assert echo == hydrated  # equality guard prevents the edit
-        assert (
-            synced_search("/dashboard/project/lab", echo, search, url_navigated=False)
-            is None
-        )
-
-    def test_cold_start_deep_link_settles_through_adoption(self, service):
-        """jernerics-xbx ordering, as one callback sequence: the picker
-        adopts the token's project, project-store settles through the
-        picker's own remember callback (the manual-pick path), hydration
-        re-fires with a project and the scope lands — the settle re-fire
-        is a no-op, the grid echo edits nothing, and the URL keeps the
-        token (the workspace page never mints ?view= over it)."""
-        search = "?sel=" + encode_selection(
-            Selection(project=PROJECT, sweeps=(SWEEP_A,))
-        )
-        adoption, error = cold_start(service, search)
-        assert error is None and adoption is not None
-        assert adoption.project == PROJECT
-        # project-store settled: hydration re-fires with the project
-        scope, error = hydrate_tray(
-            service,
-            adoption.project,
-            "/dashboard/project/lab",
-            search,
-            default_scope_state(),
-        )
-        assert error is None and scope is not None
-        assert scope["sweeps"] == [str(SWEEP_A)]
-        # the settle re-fire against the hydrated scope rewrites nothing
-        assert hydrate_tray(
-            service, PROJECT, "/dashboard/project/lab", search, scope
-        ) == (None, None)
-        # a grid echo against the settled scope edits nothing
-        echo = tray_from_edit(
-            [],
-            [],
-            [],
-            scope,
-            sweep_edited=False,
-            family_edited=True,
-            expand_edited=False,
-        )
-        assert echo == scope
-        # the workspace page owns its search: the rewrite leaves the
-        # token in place instead of minting ?view= over it
-        assert (
-            synced_search(
-                "/dashboard/project/lab",
-                self._doc(scope),
-                search,
-                url_navigated=False,
-            )
-            is None
-        )
-
-
-class TestViewStateCodec:
-    """jernerics-cdf.3/2se: the dashboard-only ``view=`` document —
-    version, enums, JSON types, unknown-field dropping, defaults for
-    missing fields, percent-encoded compact JSON round-trips, the
-    defaults-diff encoding, and legacy full-document decode."""
-
-    def test_round_trip_is_exact_and_url_safe(self):
-        doc = default_view_state()
-        doc["series"] = {
-            **doc["series"],
-            "keys": ["loss", "accuracy", "delta"],
-            "mode": "overlay",
-            "reduction": "mean",
-            "trial_display": "highlighted",
-            "context_filters": {"host": ["node00", "node01"]},
-            "color": "shard",
-            "axes": {
-                "loss": {
-                    "scale": "log",
-                    "range": "custom",
-                    "min": 1.0,
-                    "max": 100.0,
-                },
-                "accuracy": {
-                    "scale": "linear",
-                    "range": "auto",
-                    "min": None,
-                    "max": None,
-                },
-            },
-            "overlay_axis": {
-                "scale": "linear",
-                "range": "custom",
-                "min": -1.0,
-                "max": 2.0,
-            },
-        }
-        doc["highlighted_trials"] = [str(RA0)]
-        doc["auto_refresh"] = True
-        encoded = encode_view_state(doc)
-        assert all(char not in '{}":,&' for char in encoded)
-        assert decode_view_state(unquote(encoded)) == doc
-        assert encode_view_state(decode_view_state(unquote(encoded))) == encoded
-
-    def test_default_mode_is_stacked_and_axes_default_to_linear_auto(self):
-        assert default_view_state()["series"]["mode"] == "stacked"
-        assert default_view_state()["series"]["axes"] == {}
-        assert default_view_state()["series"]["overlay_axis"] == (default_axis_state())
-        assert default_axis_state() == {
-            "scale": "linear",
-            "range": "auto",
-            "min": None,
-            "max": None,
-        }
-
-    def test_absent_axis_entry_means_linear_auto(self):
-        doc = decode_view_state(
-            json.dumps({"v": VIEW_VERSION, "series": {"keys": ["loss"]}})
-        )
-        assert doc["series"]["axes"] == {}
-
-    def test_auto_range_ignores_stored_bounds_and_unknown_axis_fields(self):
-        decoded = decode_view_state(
-            json.dumps(
-                {
-                    "v": VIEW_VERSION,
-                    "series": {
-                        "axes": {
-                            "loss": {
-                                "range": "auto",
-                                "min": 3,
-                                "max": 9,
-                                "dash": "dot",
-                            }
-                        },
-                        "overlay_axis": {"scale": "log", "bogus": 1},
-                    },
-                }
-            )
-        )
-        assert decoded["series"]["axes"]["loss"] == default_axis_state()
-        assert decoded["series"]["overlay_axis"] == {
-            "scale": "log",
-            "range": "auto",
-            "min": None,
-            "max": None,
-        }
-
-    def test_old_string_axes_form_is_rejected_without_alias(self):
-        with pytest.raises(ViewStateError, match="must be an object"):
-            decode_view_state(json.dumps({"v": 1, "series": {"axes": {"loss": "y1"}}}))
-
-    def test_unknown_fields_are_dropped_and_not_re_emitted(self):
-        doc = default_view_state()
-        doc["scope"]["include_archived"] = True
-        payload = json.dumps(
-            {
-                **doc,
-                "layout": "saved",
-                "series": {**doc["series"], "hover": 1, "plotly": {"x": 2}},
-                "optuna": {"zoom": "in"},
-                "active": "investigations",
-            }
-        )
-        assert decode_view_state(payload) == doc
-
-    def test_missing_fields_take_defaults(self):
-        assert decode_view_state(json.dumps({"v": VIEW_VERSION})) == (
-            default_view_state()
-        )
-        partial = json.dumps({"v": VIEW_VERSION, "auto_refresh": True})
-        assert decode_view_state(partial)["auto_refresh"] is True
-        assert decode_view_state(partial)["series"]["keys"] == []
-
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            "not json",
-            "[1, 2]",
-            json.dumps({"v": 3}),
-            json.dumps({"v": True}),
-            json.dumps({"v": VIEW_VERSION, "scope": []}),
-            json.dumps({"v": VIEW_VERSION, "scope": {"sweeps": 7}}),
-            json.dumps({"v": VIEW_VERSION, "scope": {"expand": "yes"}}),
-            json.dumps({"v": VIEW_VERSION, "scope": {"include_archived": 1}}),
-            json.dumps({"v": VIEW_VERSION, "scope": {"families": [""]}}),
-            json.dumps({"v": VIEW_VERSION, "series": {"keys": "loss"}}),
-            json.dumps({"v": VIEW_VERSION, "series": {"keys": [""]}}),
-            json.dumps({"v": VIEW_VERSION, "series": {"mode": "scatter"}}),
-            json.dumps({"v": VIEW_VERSION, "series": {"reduction": "latest"}}),
-            json.dumps({"v": VIEW_VERSION, "series": {"color": 3}}),
-            json.dumps({"v": VIEW_VERSION, "series": {"context_filters": []}}),
-            json.dumps(
-                {"v": VIEW_VERSION, "series": {"context_filters": {"host": "n0"}}}
-            ),
-            json.dumps({"v": VIEW_VERSION, "series": {"axes": {"loss": "y1"}}}),
-            json.dumps(
-                {
-                    "v": VIEW_VERSION,
-                    "series": {"axes": {"loss": {"range": "custom", "min": 1}}},
-                }
-            ),
-            json.dumps(
-                {
-                    "v": VIEW_VERSION,
-                    "series": {"axes": {"loss": {"range": "custom", "min": 5}}},
-                }
-            ),
-            json.dumps(
-                {
-                    "v": VIEW_VERSION,
-                    "series": {
-                        "axes": {"loss": {"range": "custom", "min": 2, "max": 1}}
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "v": VIEW_VERSION,
-                    "series": {
-                        "axes": {
-                            "loss": {
-                                "scale": "log",
-                                "range": "custom",
-                                "min": 0,
-                                "max": 5,
-                            }
-                        }
-                    },
-                }
-            ),
-            json.dumps(
-                {
-                    "v": VIEW_VERSION,
-                    "series": {
-                        "axes": {"loss": {"range": "custom", "min": "a", "max": 5}}
-                    },
-                }
-            ),
-            json.dumps(
-                {"v": VIEW_VERSION, "series": {"axes": {"loss": {"scale": "ln"}}}}
-            ),
-            json.dumps(
-                {
-                    "v": VIEW_VERSION,
-                    "series": {
-                        "overlay_axis": {
-                            "scale": "log",
-                            "range": "custom",
-                            "min": -1,
-                            "max": 5,
-                        }
-                    },
-                }
-            ),
-            json.dumps({"v": VIEW_VERSION, "series": {"axes": {"loss": 1}}}),
-            json.dumps({"v": VIEW_VERSION, "highlighted_trials": [7]}),
-            json.dumps({"v": VIEW_VERSION, "auto_refresh": "yes"}),
-        ],
-    )
-    def test_bad_payloads_fail_with_descriptive_errors(self, payload):
-        with pytest.raises(ViewStateError):
-            decode_view_state(payload)
-
-    def test_error_messages_name_the_problem(self):
-        with pytest.raises(ViewStateError, match="expected version 2"):
-            decode_view_state(json.dumps({"v": 3}))
-        with pytest.raises(ViewStateError, match="malformed"):
-            decode_view_state("%zz{")
-
-    def test_duplicate_keys_keep_first_occurrence_order(self):
-        doc = default_view_state()
-        doc["series"]["keys"] = ["loss", "accuracy", "loss"]
-        decoded = decode_view_state(json.dumps(doc))
-        assert decoded["series"]["keys"] == ["loss", "accuracy"]
-
-    def test_encode_emits_only_non_default_fields(self):
-        assert unquote(encode_view_state(default_view_state())) == '{"v":2}'
-        doc = with_focus(default_view_state(), {"kind": "sweep", "id": str(SWEEP_A)})
-        payload = json.loads(unquote(encode_view_state(doc)))
-        assert payload == {
-            "v": VIEW_VERSION,
-            "focus": {"kind": "sweep", "id": str(SWEEP_A)},
-        }
-        assert len(encode_view_state(doc)) < 200
-
-    def test_legacy_v1_document_decodes_to_the_same_effective_state(self):
-        legacy = {
-            "v": 1,
-            "active": "investigations",
-            "series": {
-                "keys": ["loss"],
-                "mode": "stacked",
-                "reduction": "none",
-                "trial_display": "all",
-                "context_filters": {},
-                "color": None,
-                "facet": None,
-                "axes": {},
-                "overlay_axis": default_axis_state(),
-            },
-            "highlighted_trials": [],
-            "focus": None,
-            "auto_refresh": False,
-            "include_archived": True,
-            "include_invalid": False,
-            "optuna": {"contour_x": None, "contour_y": None},
-        }
-        from_legacy = decode_view_state(json.dumps(legacy))
-        diff = {
-            "v": VIEW_VERSION,
-            "scope": {"include_archived": True},
-            "series": {"keys": ["loss"]},
-        }
-        assert decode_view_state(json.dumps(diff)) == from_legacy
-        # the re-encode is a minimal defaults-diff: no default field rides
-        payload = set(json.loads(unquote(encode_view_state(from_legacy))))
-        assert payload == {"v", "scope", "series"}
-
-    def test_legacy_v1_scope_never_carries_sweeps(self):
-        """v1 kept selection in the session tray; its tokens decode with
-        an empty scope, and the include flags move into it."""
-        legacy = {
-            "v": 1,
-            "include_archived": False,
-            "include_invalid": True,
-            "series": {},
-        }
-        decoded = decode_view_state(json.dumps(legacy))
-        expected = default_view_state()
-        expected["scope"]["include_invalid"] = True
-        assert decoded == expected
-
-
-class TestViewHydration:
-    def test_valid_document_lands_in_the_store(self):
-        doc = dict(default_view_state(), auto_refresh=True)
-        hydrated, error = hydrate_view(
-            "/dashboard/project/lab", f"?view={encode_view_state(doc)}", None
-        )
-        assert error is None and hydrated == doc
-
-    def test_equal_state_is_left_alone(self):
-        doc = dict(default_view_state(), auto_refresh=True)
-        search = f"?view={encode_view_state(doc)}"
-        assert hydrate_view("/dashboard/project/lab", search, doc) == (None, None)
-
-    def test_no_parameter_means_defaults(self):
-        assert hydrate_view("/dashboard/project/lab", "?sel=tok", None) == (
-            default_view_state(),
-            None,
-        )
-        doc = dict(default_view_state(), auto_refresh=True)
-        assert hydrate_view("/dashboard/project/lab", "", doc) == (
-            default_view_state(),
-            None,
-        )
-
-    def test_malformed_document_defaults_with_visible_error(self):
-        hydrated, error = hydrate_view(
-            "/dashboard/project/lab", "?view=%7Bbroken", dict(default_view_state())
-        )
-        assert hydrated == default_view_state()
-        assert error is not None and "view state" in error
-
-    def test_off_analysis_route_the_store_is_untouched(self):
-        doc = dict(default_view_state(), auto_refresh=True)
-        assert hydrate_view("/dashboard/", "?view=%7Bbroken", doc) == (
-            None,
-            None,
-        )
-
-
-class TestViewSync:
-    """jernerics-cdf.3/2se: one shell callback owns ``url.search`` and
-    mints ``?view=``; defaults stay out of the URL, and undecodable
-    garbage is never silently rewritten away."""
-
-    def test_view_edit_mints_the_parameter(self, service):
-        doc = dict(default_view_state(), auto_refresh=True)
-        target = search_from_state(doc, "")
-        assert target is not None and target.startswith("?view=")
-        assert decode_view_state(unquote(target.removeprefix("?view="))) == doc
-
-    def test_default_view_state_is_not_emitted(self, service):
-        assert search_from_state(default_view_state(), "") is None
-
-    def test_unchanged_state_is_not_rewritten(self, service):
-        doc = dict(default_view_state(), auto_refresh=True)
-        target = search_from_state(doc, "")
-        assert target is not None
-        assert search_from_state(doc, target) is None
-
-    def test_undecodable_view_parameter_is_left_in_place(self, service):
-        assert search_from_state(default_view_state(), "?view=%zz{") is None
-
-    _ALL_FIELDS = {
-        "keys",
-        "mode",
-        "reduction",
-        "color",
-        "facet",
-    }
-
-    def test_control_edits_rebuild_state_and_preserve_uncontrolled_fields(self):
-        doc = default_view_state()
-        doc["series"] = {
-            **doc["series"],
-            "keys": ["loss", "accuracy"],
-            "axes": {"loss": {"scale": "log", "range": "auto"}},
-            "overlay_axis": {"scale": "linear", "range": "custom", "min": 0, "max": 1},
-            "context_filters": {"host": ["node00"]},
-        }
-        doc["auto_refresh"] = True
-        edited = view_from_controls(
-            doc,
-            keys=["accuracy", "score"],
-            mode="overlay",
-            reduction="max",
-            color="shard",
-            facet=None,
-            edited=self._ALL_FIELDS,
-        )
-        assert edited["series"]["keys"] == ["accuracy", "score"]
-        assert edited["series"]["mode"] == "overlay"
-        assert edited["series"]["reduction"] == "max"
-        assert edited["series"]["axes"] == {"loss": {"scale": "log", "range": "auto"}}
-        assert edited is not None
-        assert edited["series"]["overlay_axis"] == {
-            "scale": "linear",
-            "range": "custom",
-            "min": 0,
-            "max": 1,
-        }
-        assert edited["series"]["context_filters"] == {"host": ["node00"]}
-        assert edited["auto_refresh"] is True
-
-    def test_keys_edit_dedupes_and_drops_empties(self):
-        junk_keys: list[Any] = ["loss", "", "accuracy", "loss", None]
-        edited = view_from_controls(
-            default_view_state(),
-            keys=junk_keys,
-            mode=None,
-            reduction=None,
-            color=None,
-            facet=None,
-            edited={"keys"},
-        )
-        assert edited["series"]["keys"] == ["loss", "accuracy"]
-
-    def test_mode_switch_keeps_dormant_per_key_axes(self):
-        doc = _series_doc(
-            keys=["loss", "accuracy"],
-            axes={"loss": {"scale": "log", "range": "auto"}},
-        )
-        overlaid = view_from_controls(
-            doc,
-            keys=["loss", "accuracy"],
-            mode="overlay",
-            reduction=None,
-            color=None,
-            facet=None,
-            edited={"mode"},
-        )
-        assert overlaid["series"]["mode"] == "overlay"
-        assert overlaid["series"]["axes"] == doc["series"]["axes"]
-        restored = view_from_controls(
-            overlaid,
-            keys=["loss", "accuracy"],
-            mode="stacked",
-            reduction=None,
-            color=None,
-            facet=None,
-            edited={"mode"},
-        )
-        assert restored["series"]["axes"] == doc["series"]["axes"]
-        assert restored["series"]["mode"] == "stacked"
-
-    def test_untriggered_controls_never_read_as_clears(self):
-        """The control-sync write fires the edit callback with every
-        input; a dropdown whose options have not loaded reports None and
-        must not wipe the hydrated keys."""
-        doc: dict[str, Any] = default_view_state()
-        doc["series"] = {
-            **doc["series"],
-            "keys": ["loss"],
-            "color": "shard",
-            "reduction": "mean",
-        }
-        tab_echo = view_from_controls(
-            doc,
-            keys=None,
-            mode=None,
-            reduction="mean",
-            color=None,
-            facet=None,
-            edited={"reduction"},
-        )
-        assert tab_echo["series"]["keys"] == ["loss"]
-        assert tab_echo["series"]["color"] == "shard"
-        assert tab_echo == doc
-
-    def test_edited_fields_maps_triggered_prop_ids(self):
-        assert edited_fields({"analysis-key.value", "analysis-mode.value"}) == {
-            "keys",
-            "mode",
-        }
-        assert edited_fields({"analysis-tabs.value"}) == set()
-        assert edited_fields({"url.search"}) == set()
-
-    _LOADED: dict[str, set[str] | None] = {
-        "keys": {"loss", "accuracy", "summary"},
-        "color": {"host", "shard"},
-        "facet": {"host", "shard"},
-    }
-
-    def test_control_values_read_the_ordered_series_keys(self):
-        doc = default_view_state()
-        doc["series"]["keys"] = ["accuracy", "loss"]
-        keys, mode, reduction, color, facet, display, auto = control_values(
-            doc,
-            self._LOADED,
-        )
-        assert (keys, mode, reduction) == (["accuracy", "loss"], "stacked", "none")
-        assert (color, facet) == (None, None)
-        assert (display, auto) == ("all", [])
-        assert control_values(None, self._LOADED)[0] == []
-        doc["series"]["trial_display"] = "median_iqr"
-        doc["auto_refresh"] = True
-        assert control_values(doc, self._LOADED)[5:] == ("median_iqr", ["auto"])
-
-    def test_values_wait_for_their_options(self):
-        """A value written before its options exist is dropped by the
-        dropdown and fires back as a spurious clear — gating keeps it
-        for the options-arrival write."""
-        doc = default_view_state()
-        doc["series"] = {**doc["series"], "keys": ["loss"], "color": "shard"}
-        unloaded: dict[str, set[str] | None] = {name: None for name in self._LOADED}
-        keys, _m, _r, color, _f, _d, _ar = control_values(doc, unloaded)
-        assert keys is no_update
-        assert color is no_update
-        partial = {**self._LOADED, "keys": set()}
-        keys, _m, _r, _c, _f, _d, _ar = control_values(doc, partial)
-        assert keys is no_update
-
-
-class TestEntryPoints:
-    """Doors back into the focused workspace: the artifact viewer's
-    back-links and the shell's view store."""
-
-    def test_focus_href_scopes_to_exactly_that_object(self):
-        href = workspace_focus_href(PROJECT, "sweep", str(SWEEP_A))
-        assert href.startswith("/dashboard/project/lab?view=")
-        doc = decode_view_state(unquote(href.split("?view=")[1]))
-        assert doc["focus"] == {"kind": "sweep", "id": str(SWEEP_A)}
-
-    def test_focus_href_needs_no_scope(self):
-        href = workspace_focus_href(PROJECT, "trial", str(SWEEP_B))
-        assert "sel=" not in href
-        doc = decode_view_state(unquote(href.split("?view=")[1]))
-        assert doc["focus"]["kind"] == "trial"
-        assert doc["series"]["keys"] == []
+class TestShellStores:
+    """The shell mounts the stores every page shares; the view store
+    starts at the canonical defaults so a fresh session renders defaults."""
 
     def test_view_store_starts_at_defaults(self):
         store = next(
@@ -1972,6 +941,15 @@ class TestEntryPoints:
             for node in _walk(shell(), lambda n: getattr(n, "id", None) == "view-store")
         )
         assert store.data == default_view_state()
+
+    def test_dead_stores_do_not_mount(self):
+        ids = {
+            node.id
+            for node in _walk(
+                shell(), lambda n: isinstance(getattr(n, "id", None), str)
+            )
+        }
+        assert not ids & {"project-store", "analysis-message-store", "nav"}
 
 
 class TestCallbackGraphSafety:
@@ -2002,9 +980,15 @@ class TestCallbackGraphSafety:
         stripped = key.removeprefix("..").removesuffix("..")
         return {part.split("@")[0] for part in stripped.split("...") if part}
 
-    def test_url_search_has_exactly_one_owner(self, callback_map):
-        owners = [key for key in callback_map if self._outputs(key) == {"url.search"}]
-        assert owners == ["url.search"]
+    def test_url_search_is_only_written_with_a_pathname(self, callback_map):
+        # The sole url.search writer left is the editor's save
+        # navigation, which always rewrites pathname and search together;
+        # a search-only write would fight the pages that own their own
+        # plain query strings.
+        writers = [key for key in callback_map if "url.search" in self._outputs(key)]
+        assert writers
+        for key in writers:
+            assert "url.pathname" in self._outputs(key), key
 
     def test_everywhere_firable_callbacks_never_mix_shell_and_page_ids(
         self, callback_map
@@ -2032,288 +1016,10 @@ class TestCallbackGraphSafety:
             assert states <= shell_ids, key
 
 
-class TestColdStartMountedJourney:
-    """jernerics-xbx over the mounted app: the registered callbacks,
-    driven through Dash's own dispatch endpoint exactly as the browser
-    would on a fresh deep link — the picker adopts the token's project,
-    the remember callback settles project-store, hydration re-fires and
-    the scope lands in the view doc."""
-
-    @pytest.fixture(scope="class")
-    def callback_map(self, tmp_path_factory):
-        service = DashboardService(
-            QueryService(_seeded_store(tmp_path_factory.mktemp("cold-start")))
-        )
-        ctx = DashboardContext(
-            api_key="secret123",
-            queries=service.queries,
-            service=service,
-            signer=SessionSigner(b"\x00" * 32),
-        )
-        return build_dash_app(ctx).callback_map
-
-    @staticmethod
-    def _callback_key(callback_map, wanted: set[str]) -> str:
-        def outputs_of(key):
-            stripped = key.removeprefix("..").removesuffix("..")
-            return {part.split("@")[0] for part in stripped.split("...") if part}
-
-        return next(key for key in callback_map if outputs_of(key) == wanted)
-
-    def _dispatch(self, client, callback_map, wanted, inputs, state=()):
-        key = self._callback_key(callback_map, wanted)
-        specs = [
-            part.split("@")[0]
-            for part in key.removeprefix("..").removesuffix("..").split("...")
-            if part
-        ]
-        outputs = []
-        for spec in specs:
-            prop = spec.rsplit(".", 1)[1]
-            raw = spec.rsplit(".", 1)[0]
-            if raw.startswith("{"):
-                wildcard = json.loads(raw)
-                concrete = {
-                    name: "canvas" if values == ["ALL"] else values
-                    for name, values in wildcard.items()
-                }
-                outputs.append({"id": concrete, "property": prop})
-            else:
-                outputs.append({"id": raw, "property": prop})
-        response = client.post(
-            "/dashboard/_dash-update-component",
-            json={
-                "output": key,
-                "outputs": outputs[0] if len(outputs) == 1 else outputs,
-                "inputs": inputs,
-                "state": list(state),
-                "changedPropIds": [f"{i['id']}.{i['property']}" for i in inputs],
-            },
-        )
-        assert response.status_code == 200, response.text
-        return response.json()["response"]
-
-    _HYDRATION_OUTPUTS = {
-        "analysis-message-store.data",
-        "view-store.data",
-    }
-
-    def test_cold_start_settles_picker_store_then_scope(self, authed, callback_map):
-        token = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
-        search = f"?sel={token}"
-        # the picker callback adopts the token's project
-        picker = self._dispatch(
-            authed,
-            callback_map,
-            {"project-picker.value"},
-            [
-                {"id": "project-store", "property": "data", "value": None},
-                {"id": "url", "property": "search", "value": search},
-            ],
-            state=[
-                {"id": "project-picker", "property": "value", "value": None},
-            ],
-        )
-        assert picker["project-picker"]["value"] == PROJECT
-        # the remember callback settles project-store (the manual-pick path)
-        store = self._dispatch(
-            authed,
-            callback_map,
-            {"project-store.data"},
-            [{"id": "project-picker", "property": "value", "value": PROJECT}],
-            state=[{"id": "project-store", "property": "data", "value": None}],
-        )
-        assert store["project-store"]["data"] == PROJECT
-        # hydration re-fires with the project: the scope lands in the doc
-        result = self._dispatch(
-            authed,
-            callback_map,
-            self._HYDRATION_OUTPUTS,
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": "/dashboard/project/lab",
-                },
-                {"id": "url", "property": "search", "value": search},
-                {"id": "project-store", "property": "data", "value": PROJECT},
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-        )
-        assert result["view-store"]["data"]["scope"]["sweeps"] == [str(SWEEP_A)]
-        assert result["analysis-message-store"]["data"] == ""
-
-    def test_picked_project_is_never_switched_by_a_foreign_token(
-        self, authed, callback_map
-    ):
-        token = encode_selection(Selection(project="other", trials=(RA0,)))
-        picker = self._dispatch(
-            authed,
-            callback_map,
-            {"project-picker.value"},
-            [
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "url", "property": "search", "value": f"?sel={token}"},
-            ],
-            state=[
-                {"id": "project-picker", "property": "value", "value": None},
-            ],
-        )
-        assert picker["project-picker"]["value"] == PROJECT
-        message = self._dispatch(
-            authed,
-            callback_map,
-            self._HYDRATION_OUTPUTS,
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": "/dashboard/project/lab",
-                },
-                {"id": "url", "property": "search", "value": f"?sel={token}"},
-                {"id": "project-store", "property": "data", "value": PROJECT},
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-        )
-        assert "not the current project" in message["analysis-message-store"]["data"]
-        assert message["view-store"]["data"]["scope"]["sweeps"] == []
-
-    def test_unknown_project_neither_adopts_nor_populates(self, authed, callback_map):
-        token = encode_selection(Selection(project="ghost", trials=(RA0,)))
-        picker = self._dispatch(
-            authed,
-            callback_map,
-            {"project-picker.value"},
-            [
-                {"id": "project-store", "property": "data", "value": None},
-                {"id": "url", "property": "search", "value": f"?sel={token}"},
-            ],
-            state=[
-                {"id": "project-picker", "property": "value", "value": None},
-            ],
-        )
-        assert picker["project-picker"]["value"] is None
-        cold = self._dispatch(
-            authed,
-            callback_map,
-            self._HYDRATION_OUTPUTS,
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": "/dashboard/project/lab",
-                },
-                {"id": "url", "property": "search", "value": f"?sel={token}"},
-                {"id": "project-store", "property": "data", "value": None},
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-        )
-        assert "project 'ghost'" in cold["analysis-message-store"]["data"]
-        assert cold["view-store"]["data"]["scope"]["sweeps"] == []
-
-    def test_deep_link_settles_view_state_alongside_the_tray(
-        self, authed, callback_map
-    ):
-        doc: dict[str, Any] = dict(default_view_state(), auto_refresh=True)
-        doc["series"] = {**doc["series"], "keys": ["loss"], "reduction": "mean"}
-        sel = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
-        search = f"?sel={sel}&view={encode_view_state(doc)}"
-        result = self._dispatch(
-            authed,
-            callback_map,
-            self._HYDRATION_OUTPUTS,
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": "/dashboard/project/lab",
-                },
-                {"id": "url", "property": "search", "value": search},
-                {"id": "project-store", "property": "data", "value": PROJECT},
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-        )
-        assert result["view-store"]["data"]["scope"]["sweeps"] == [str(SWEEP_A)]
-        assert result["view-store"]["data"]["series"]["keys"] == ["loss"]
-        assert result["view-store"]["data"]["auto_refresh"] is True
-
-    def test_malformed_view_parameter_defaults_and_errors(self, authed, callback_map):
-        sel = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
-        search = "?sel=" + sel + "&view=%zz{"
-        result = self._dispatch(
-            authed,
-            callback_map,
-            self._HYDRATION_OUTPUTS,
-            [
-                {
-                    "id": "url",
-                    "property": "pathname",
-                    "value": "/dashboard/project/lab",
-                },
-                {"id": "url", "property": "search", "value": search},
-                {"id": "project-store", "property": "data", "value": PROJECT},
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-        )
-        assert result["view-store"]["data"]["scope"]["sweeps"] == [str(SWEEP_A)]
-        assert result["view-store"]["data"] == dict(
-            default_view_state(),
-            scope=result["view-store"]["data"]["scope"],
-        )
-        assert "view state is malformed" in result["analysis-message-store"]["data"]
-
-    _SYNC_OUTPUTS = {
-        "analysis-key.value",
-        "analysis-mode.value",
-        "analysis-reduction.value",
-        "analysis-color.value",
-        "analysis-facet.value",
-        "analysis-display.value",
-        "analysis-auto-refresh.value",
-    }
-
-    def test_control_sync_lands_each_value_on_its_component(self, authed, callback_map):
-        doc = default_view_state()
-        doc["series"] = {
-            **doc["series"],
-            "keys": ["loss"],
-            "color": "shard",
-            "trial_display": "median_iqr",
-        }
-        doc["auto_refresh"] = True
-        result = self._dispatch(
-            authed,
-            callback_map,
-            self._SYNC_OUTPUTS,
-            [
-                {"id": "view-store", "property": "data", "value": doc},
-                {
-                    "id": "analysis-key",
-                    "property": "options",
-                    "value": [{"value": "loss", "label": "loss"}],
-                },
-                {
-                    "id": "analysis-color",
-                    "property": "options",
-                    "value": [{"value": "shard", "label": "shard"}],
-                },
-                {"id": "analysis-facet", "property": "options", "value": None},
-            ],
-        )
-        assert result["analysis-key"]["value"] == ["loss"]
-        assert result["analysis-mode"]["value"] == "stacked"
-        assert result["analysis-reduction"]["value"] == "none"
-        assert result["analysis-color"]["value"] == "shard"
-        assert result["analysis-facet"]["value"] is None
-        assert result["analysis-display"]["value"] == "median_iqr"
-        assert result["analysis-auto-refresh"]["value"] == ["auto"]
-
-
 class TestContinueInPython:
     def test_snippet_uses_real_client_api(self):
         from jernerics.tracking import TrackingClient
         from jernerics.tracking.client import ProjectHandle
-        from jernerics_schema import decode_selection
 
         selection = Selection(project=PROJECT, sweeps=(SWEEP_A,))
         snippet = python_snippet(
@@ -2367,66 +1073,6 @@ def curated_service(tmp_path) -> tuple[Store, DashboardService]:
     return store, DashboardService(QueryService(store))
 
 
-class TestIncludeControls:
-    """jernerics-cdf.2/2se: the scope group carries the discovery-only
-    ``include_archived``/``include_invalid`` booleans next to the
-    picked dimensions; the typed Selection keeps its token format."""
-
-    def test_defaults_are_off_and_missing_fields_take_them(self):
-        assert default_view_state()["scope"]["include_archived"] is False
-        assert default_view_state()["scope"]["include_invalid"] is False
-        assert decode_view_state(json.dumps({"v": VIEW_VERSION})) == (
-            default_view_state()
-        )
-
-    def test_round_trip_carries_both_flags(self):
-        doc = default_view_state()
-        doc["scope"]["include_archived"] = True
-        doc["scope"]["include_invalid"] = True
-        encoded = encode_view_state(doc)
-        assert decode_view_state(unquote(encoded)) == doc
-        assert "include_archived" in unquote(encoded)
-
-    @pytest.mark.parametrize(
-        "payload",
-        [
-            json.dumps({"v": VIEW_VERSION, "scope": {"include_archived": "yes"}}),
-            json.dumps({"v": VIEW_VERSION, "scope": {"include_archived": 1}}),
-            json.dumps({"v": VIEW_VERSION, "scope": {"include_invalid": []}}),
-        ],
-    )
-    def test_non_boolean_flags_fail_with_descriptive_errors(self, payload):
-        with pytest.raises(ViewStateError, match="include_"):
-            decode_view_state(payload)
-
-    def test_checklist_values_and_edits_touch_only_the_flags(self):
-        doc: dict[str, Any] = default_view_state()
-        doc["series"] = {**doc["series"], "keys": ["loss"]}
-        doc["scope"]["sweeps"] = [str(SWEEP_A)]
-        edited = view_from_include(doc, ["invalid"])
-        assert edited["scope"]["include_invalid"] is True
-        assert edited["scope"]["include_archived"] is False
-        assert edited["scope"]["sweeps"] == [str(SWEEP_A)]
-        assert edited["series"] == doc["series"]
-        assert include_values(edited) == ["invalid"]
-        assert include_values(view_from_include(edited, ["archived", "invalid"])) == [
-            "archived",
-            "invalid",
-        ]
-        assert include_values(None) == []
-
-    def test_default_flags_stay_out_of_the_url(self, service):
-        assert search_from_state(default_view_state(), "") is None
-
-    def test_include_flags_are_minted_into_the_view_parameter(self, service):
-        doc = default_view_state()
-        doc["scope"]["include_archived"] = True
-        target = search_from_state(doc, "")
-        assert target is not None and target.startswith("?view=")
-        decoded = decode_view_state(unquote(target.removeprefix("?view=")))
-        assert decoded["scope"]["include_archived"] is True
-
-
 class TestCuratedDiscovery:
     def test_terminal_curated_sweeps_hidden_from_active_discovery(
         self, curated_service
@@ -2441,31 +1087,6 @@ class TestCuratedDiscovery:
         assert [summary.sweep_id for summary in active_sweeps(summaries)] == [
             str(SWEEP_A)
         ]
-
-    def test_all_scope_keeps_distinct_curation_markers(self, curated_service):
-        _store, service = curated_service
-        markers = {
-            summary.sweep_id: sweep_curation(summary)
-            for summary in service.sweep_overview(PROJECT)
-        }
-        assert markers[str(SWEEP_B)] == "archived"
-        assert markers[str(SWEEP_C)] == "invalid"
-        assert markers[str(SWEEP_A)] == ""
-
-    def test_hydrated_curated_token_survives_with_active_scope(self, curated_service):
-        # A ?sel= token naming an invalid sweep still hydrates the scope;
-        # hiding curated sweeps is a discovery-side concern, not hydration's.
-        _store, service = curated_service
-        selection = Selection(project=PROJECT, sweeps=(SWEEP_C,))
-        tray, error = hydrate_tray(
-            service,
-            PROJECT,
-            "/dashboard/project/lab",
-            f"?sel={encode_selection(selection)}",
-            None,
-        )
-        assert error is None and tray is not None
-        assert tray["sweeps"] == [str(SWEEP_C)]
 
 
 def _fake_context(*prop_ids: str):
@@ -2915,38 +1536,6 @@ class TestKeyOrdering:
         assert moved_keys(doc, "ghost", "up") is None
         assert moved_keys(doc, "loss", "sideways") is None
 
-    def test_url_round_trip_reproduces_keys_order_mode_and_axes(self, service):
-        doc = _series_doc(
-            keys=["delta", "loss", "accuracy"],
-            mode="overlay",
-            axes={
-                "loss": {
-                    "scale": "log",
-                    "range": "custom",
-                    "min": 1.0,
-                    "max": 100.0,
-                },
-                "accuracy": {
-                    "scale": "linear",
-                    "range": "auto",
-                    "min": None,
-                    "max": None,
-                },
-            },
-            overlay_axis={
-                "scale": "linear",
-                "range": "custom",
-                "min": -1.0,
-                "max": 2.0,
-            },
-        )
-        search = f"?view={encode_view_state(doc)}"
-        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
-        assert error is None and hydrated == doc
-        target = search_from_state(doc, "")
-        assert target is not None and "view=" in target
-        assert decode_view_state(unquote(target.split("view=")[1])) == doc
-
     def test_reorder_and_mode_switch_preserve_dormant_axes(self, service):
         doc = _series_doc(
             keys=["loss", "accuracy"],
@@ -2963,10 +1552,14 @@ class TestKeyOrdering:
         assert reordered is not None
         assert reordered["series"]["keys"] == ["accuracy", "loss"]
         assert reordered["series"]["axes"] == doc["series"]["axes"]
-        search = f"?view={encode_view_state(reordered)}"
-        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
-        assert error is None and hydrated is not None
-        assert hydrated["series"]["keys"] == ["accuracy", "loss"]
+        panels, _payload = render_series_outputs(
+            reordered, series_snapshot(service, PROJECT, _all_sweeps(), reordered, 0)
+        )[:2]
+        titles = [header.children[0].children for header in _panel_headers(panels)]
+        assert [title.split(". ", 1)[1] for title in titles] == [
+            "accuracy",
+            "loss",
+        ]
 
 
 SWEEP_D = uuid.UUID("aa340000-0000-4000-8000-000000000000")
@@ -3028,40 +1621,6 @@ class TestTrialDisplayCodec:
     """jernerics-cdf.5: ``series.trial_display`` becomes the explicit
     all/highlighted/median_iqr enum, validated on decode."""
 
-    def test_null_and_absent_mean_all_and_bad_values_are_rejected(self):
-        assert (
-            decode_view_state(json.dumps({"v": 1}))["series"]["trial_display"] == "all"
-        )
-        assert (
-            decode_view_state(json.dumps({"v": 1, "series": {"trial_display": None}}))[
-                "series"
-            ]["trial_display"]
-            == "all"
-        )
-        with pytest.raises(ViewStateError, match="unsupported trial display"):
-            decode_view_state(
-                json.dumps({"v": 1, "series": {"trial_display": "latest"}})
-            )
-
-    def test_filters_display_and_highlights_round_trip_the_url(self, service):
-        doc = _series_doc(
-            keys=["loss"],
-            trial_display="median_iqr",
-            context_filters={"host": ["node01"]},
-        )
-        doc["highlighted_trials"] = [str(RA2)]
-        doc["auto_refresh"] = True
-        search = f"?view={encode_view_state(doc)}"
-        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
-        assert error is None and hydrated == doc
-        target = search_from_state(doc, "")
-        assert target is not None
-        decoded = decode_view_state(unquote(target.split("view=")[1]))
-        assert decoded["series"]["trial_display"] == "median_iqr"
-        assert decoded["series"]["context_filters"] == {"host": ["node01"]}
-        assert decoded["highlighted_trials"] == [str(RA2)]
-        assert decoded["auto_refresh"] is True
-
     def test_edits_validate_the_enum_and_preserve_dormant_filters(self):
         doc = _series_doc(
             keys=["loss"],
@@ -3080,25 +1639,6 @@ class TestTrialDisplayCodec:
         )
         assert edited["series"]["trial_display"] == "all"
         assert edited["series"]["context_filters"] == {"shard": ["0"]}
-
-    def test_empty_string_control_values_never_reach_the_url(self):
-        """A cleared dropdown reports ""; the codec rejects empty
-        strings, so the edit side must normalize to None or the next
-        hydration resets the whole view to defaults."""
-        doc = _series_doc(keys=["loss"], color="shard")
-        edited = view_from_controls(
-            doc,
-            keys=None,
-            mode=None,
-            reduction=None,
-            color="",
-            facet="",
-            edited={"color", "facet"},
-        )
-        assert edited["series"]["color"] is None
-        assert edited["series"]["facet"] is None
-        decoded = decode_view_state(unquote(encode_view_state(edited)))
-        assert decoded == edited
 
     def test_auto_refresh_edit_round_trips_through_view_from_controls(self):
         doc = default_view_state()
@@ -3396,13 +1936,6 @@ class TestContextFilters:
         assert dropdowns[1].value == []
         assert "No context dimensions" in str(context_filter_controls([], {}))
 
-    def test_filters_survive_reload_through_the_url(self, service):
-        doc = _series_doc(keys=["loss"], context_filters={"shard": ["0"]})
-        search = f"?view={encode_view_state(doc)}"
-        hydrated, error = hydrate_view("/dashboard/project/lab", search, None)
-        assert error is None and hydrated is not None
-        assert hydrated["series"]["context_filters"] == {"shard": ["0"]}
-
     def test_color_assignment_is_stable_under_filtering(self, service):
         unfiltered_doc = _series_doc(keys=["loss"])
         panels, *_rest = series_outputs(service, PROJECT, _tray(), unfiltered_doc)
@@ -3414,68 +1947,6 @@ class TestContextFilters:
         panels, *_rest = series_outputs(service, PROJECT, _tray(), filtered_doc)
         for trace in _panel_graphs(panels)[0].figure.data:
             assert trace.line.color == unfiltered[trace.name]
-
-
-class TestTrialBrowser:
-    def test_columns_and_rows_from_existing_data(self, service):
-        columns, rows, selected = browser_trial_outputs(
-            service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), _series_doc(keys=["loss"])
-        )
-        assert [column["field"] for column in columns] == [
-            "swatch",
-            "number",
-            "trial_short",
-            "state",
-            "objective",
-            "executions",
-            "generations",
-            "p_lr",
-            "p_seed",
-        ]
-        assert columns[0]["cellClass"] == "trace-swatch-cell"
-        assert columns[0]["cellStyle"] == {
-            "function": "params.value ? {background: params.value} : null"
-        }
-        by_trial = {row["trial_short"]: row for row in rows}
-        assert by_trial["cc310200"]["objective"] == "0.12"
-        assert by_trial["cc310200"]["p_lr"] == "0.1"
-        assert by_trial["cc310200"]["state"] == "completed"
-        assert by_trial["cc310200"]["executions"] == "dd310100, dd310200"
-        assert by_trial["cc310200"]["swatch"]
-        assert selected == []
-
-    def test_selection_follows_picked_family_roots(self, service):
-        tray = _edit_tray([{"sweep_id": str(SWEEP_A)}], [{"root": str(RA0)}], [], None)
-        _columns, rows, selected = browser_trial_outputs(
-            service, PROJECT, tray, _series_doc(keys=["loss"])
-        )
-        assert [row["trial_id"] for row in selected] == [str(RA2)]
-        assert [row["root"] for row in rows] == [str(RA0), str(TA)]
-
-    def test_sweep_column_appears_only_for_multi_sweep_scope(self, service):
-        multi = _tray(sweeps=[str(SWEEP_A), str(SWEEP_B)])
-        columns, _rows, _selected = browser_trial_outputs(
-            service, PROJECT, multi, _series_doc(keys=["loss"])
-        )
-        assert "sweep" in [column["field"] for column in columns]
-        single = browser_trial_outputs(
-            service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), _series_doc(keys=["loss"])
-        )
-        assert "sweep" not in [column["field"] for column in single[0]]
-
-    def test_swatch_matches_chart_color_for_a_sampled_param(self, service):
-        doc = _series_doc(keys=["loss"], color="param:lr")
-        _panels, payload, *_rest = series_outputs(service, PROJECT, _tray(), doc)
-        panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
-        chart = {
-            trace.customdata[0]: trace.line.color
-            for trace in _panel_graphs(panels)[0].figure.data
-        }
-        _columns, rows, _selected = browser_trial_outputs(
-            service, PROJECT, _tray(), doc, payload
-        )
-        for row in rows:
-            assert row["swatch"] == chart[row["trial_id"]]
 
 
 class TestVaryingParams:
@@ -3506,12 +1977,6 @@ class TestVaryingParams:
             "lambda_",
             "lambda_schedule",
             "lambda_warmup_steps",
-        ]
-        columns = browser_trial_columns(varying_param_keys(trials), multi_sweep=False)
-        assert [column["field"] for column in columns][-3:] == [
-            "p_lambda_",
-            "p_lambda_schedule",
-            "p_lambda_warmup_steps",
         ]
 
     def test_presence_difference_alone_varies(self):
@@ -3605,20 +2070,18 @@ class TestTraceHoverAndLegend:
         panels, *_ = series_outputs(service, PROJECT, _tray(), doc)
         assert _panel_graphs(panels)[0].figure.layout.height == 450
 
-    def test_plot_click_sets_focus_and_toggles_highlight(self):
+    def test_plot_click_toggles_highlight(self):
         doc = _series_doc(keys=["loss"])
         click = {"points": [{"customdata": str(RA2)}]}
         picked = view_from_trace_click(doc, click)
         assert picked is not None
         assert picked["highlighted_trials"] == [str(RA2)]
-        assert picked["focus"] == {"kind": "trial", "id": str(RA2)}
+        assert picked["series"]["keys"] == ["loss"]
         cleared = view_from_trace_click(picked, click)
         assert cleared is not None
         assert cleared["highlighted_trials"] == []
-        assert cleared["focus"] == {"kind": "trial", "id": str(RA2)}
         assert view_from_trace_click(doc, {"points": [{}]}) is None
         assert view_from_trace_click(doc, None) is None
-        assert picked["series"]["keys"] == ["loss"]
 
     def test_traces_carry_the_trial_identity_for_plot_clicks(self, service):
         doc = _series_doc(keys=["loss"])
@@ -3639,21 +2102,6 @@ class TestRefreshBehavior:
             PROJECT, _tray(sweeps=[str(SWEEP_A)])
         )
 
-    def test_auto_refresh_polls_gates_on_intent_and_incompleteness(self, tmp_path):
-        service = _live_service(tmp_path)
-        live_doc = edited_view(
-            default_view_state(),
-            {"auto_refresh": True, "scope": _tray(sweeps=[str(SWEEP_D)])},
-        )
-        done_doc = edited_view(
-            default_view_state(),
-            {"auto_refresh": True, "scope": _tray(sweeps=[str(SWEEP_A)])},
-        )
-        assert auto_refresh_polls(service, PROJECT, live_doc)
-        assert not auto_refresh_polls(service, PROJECT, done_doc)
-        assert not auto_refresh_polls(service, PROJECT, default_view_state())
-        assert not auto_refresh_polls(None, None, None)
-
     def test_page_content_polls_while_visible_sweeps_are_incomplete(self, tmp_path):
         service = _live_service(tmp_path)
         _page, polls = page_content("/dashboard/project/lab", service)
@@ -3669,11 +2117,10 @@ class TestRefreshBehavior:
     def test_series_data_and_view_outputs_shape(self, tmp_path):
         service = _live_service(tmp_path)
         doc = _series_doc(keys=["loss"], context_filters={"host": ["node01"]})
-        snapshot, updated, refresh = series_data_outputs(
+        snapshot, updated = series_data_outputs(
             service, PROJECT, _tray(sweeps=[str(SWEEP_A)]), doc, 1_000
         )
         assert updated.startswith("Updated ")
-        assert refresh == {"error": "", "at_ns": 1_000}
         assert snapshot["reduction"] == "none"
         assert snapshot["fingerprint"] == scope_fingerprint(
             PROJECT, _tray(sweeps=[str(SWEEP_A)])
@@ -3718,10 +2165,9 @@ class TestRefreshBehavior:
         failure = series_data_failure(RuntimeError("store is gone"), 42)
         assert failure[0] is no_update
         assert failure[1] is no_update
-        assert failure[2] == {
-            "error": "refresh failed — keeping the last successful view: store is gone",
-            "at_ns": 42,
-        }
+        assert failure[2] == (
+            "refresh failed — keeping the last successful view: store is gone"
+        )
 
     def test_broken_service_read_raises_through_to_the_callback_wrap(self):
         class BrokenService:
@@ -3940,9 +2386,8 @@ class TestContextDiscoveryBeyondPagination:
 
 
 class TestWorkspaceChurnGates:
-    """jernerics-igq.3: the project picker ignores URL view edits once a
-    project is established, and the scroll capture/restore clientside
-    callbacks stay wired."""
+    """The overview refresh dispatches nothing when the stored facts are
+    unchanged, and dead shell machinery stays unmounted."""
 
     @pytest.fixture(scope="class")
     def dash_app(self, tmp_path_factory):
@@ -3986,69 +2431,22 @@ class TestWorkspaceChurnGates:
             },
         )
 
-    def test_picker_ignores_url_view_edits_once_a_project_is_established(
-        self, authed, dash_app
-    ):
-        view_url = f"?view={encode_view_state(default_view_state())}"
-        cascade = self._post(
-            authed,
-            dash_app.callback_map,
-            {"project-picker.value"},
-            [
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "url", "property": "search", "value": view_url},
-            ],
-            state=[{"id": "project-picker", "property": "value", "value": None}],
-            changed=["url.search"],
-        )
-        assert cascade.status_code == 204
-        settle = self._post(
-            authed,
-            dash_app.callback_map,
-            {"project-picker.value"},
-            [
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "url", "property": "search", "value": view_url},
-            ],
-            state=[{"id": "project-picker", "property": "value", "value": None}],
-            changed=["project-store.data"],
-        )
-        assert settle.status_code == 200
-        assert settle.json()["response"]["project-picker"]["value"] == PROJECT
-
-    def test_scroll_capture_and_restore_callbacks_are_wired(self, dash_app):
-        def specs(output_id):
-            found = []
-            for key, spec in dash_app.callback_map.items():
-                outputs = {
-                    part.split("@")[0]
-                    for part in key.removeprefix("..").removesuffix("..").split("...")
-                    if part
-                }
-                if outputs == {f"{output_id}.data"}:
-                    found.append(spec)
-            return found
-
-        capture = specs("scroll-restore-store")
-
-        def input_ids(spec):
-            return {
-                dep["id"]
-                if isinstance(dep["id"], str)
-                else json.dumps(dep["id"], sort_keys=True)
-                for dep in spec["inputs"]
-            }
-
-        assert any(
-            input_ids(spec) == {'{"analysis-refresh":["ALL"]}', "poll"}
-            for spec in capture
-        )
-        restore = [
-            spec
-            for spec in capture
-            if input_ids(spec) == {'{"analysis-refresh-store":["ALL"]}'}
-        ]
-        assert len(restore) == 1
-        assert {dep["id"] for dep in restore[0].get("state", [])} == {
-            "scroll-restore-store"
+    def test_dead_callback_targets_have_no_registrations(self, dash_app):
+        # The demolition removed the legacy nav/picker chrome, the URL
+        # codec hydration, and the scroll-restore pair; no callback may
+        # still target them.
+        banned = {
+            "nav.style",
+            "project-picker.options",
+            "project-picker.value",
+            "project-store.data",
+            "analysis-message-store.data",
+            "scroll-restore-store.data",
         }
+        for key in dash_app.callback_map:
+            outputs = {
+                part.split("@")[0]
+                for part in key.removeprefix("..").removesuffix("..").split("...")
+                if part
+            }
+            assert not outputs & banned, (key, sorted(outputs))

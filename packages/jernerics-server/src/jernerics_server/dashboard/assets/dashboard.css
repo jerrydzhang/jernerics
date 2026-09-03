@@ -18,51 +18,6 @@ body {
   max-width: 96rem;
 }
 
-.nav {
-  display: flex;
-  align-items: center;
-  gap: 1rem;
-  padding: 0.5rem 0;
-  border-bottom: 1px solid #ddd;
-}
-
-.nav .brand {
-  font-weight: 700;
-  text-decoration: none;
-  color: inherit;
-}
-
-.nav .project-picker {
-  min-width: 14rem;
-}
-
-.nav .tray {
-  color: #555;
-  font-size: 0.9rem;
-  white-space: nowrap;
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-}
-
-.nav .tray:hover {
-  color: #000;
-  text-decoration: underline;
-}
-
-.nav form {
-  margin-left: auto;
-}
-
-.nav .logout {
-  border: 1px solid #ccc;
-  background: #f7f7f7;
-  padding: 0.3rem 0.8rem;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
 .page {
   padding: 1rem 0;
 }
@@ -73,57 +28,6 @@ body {
   padding: 1rem;
   margin: 0.5rem 0;
   background: #fafafa;
-}
-
-.project-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-
-.project-row {
-  display: grid;
-  grid-template-columns: 1.2fr 1.6fr 1.2fr 0.8fr;
-  gap: 0.75rem;
-  align-items: center;
-  padding: 0.55rem 0.75rem;
-  border: 1px solid #e3e3e3;
-  border-radius: 6px;
-  background: #fafafa;
-  color: inherit;
-  text-decoration: none;
-}
-
-a.project-row:hover {
-  border-color: #9aa;
-  background: #f2f4f8;
-}
-
-.project-head {
-  border: none;
-  background: none;
-  font-size: 0.78rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #777;
-  padding-bottom: 0;
-}
-
-.project-name {
-  font-weight: 600;
-}
-
-.project-counts {
-  display: flex;
-  gap: 0.4rem;
-  flex-wrap: wrap;
-}
-
-.project-sweep {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .badge {
@@ -210,53 +114,6 @@ a.project-row:hover {
   background: #f2f2f2;
 }
 
-.monitoring-row,
-.fact-row {
-  display: flex;
-  gap: 0.5rem;
-  flex-wrap: wrap;
-  align-items: center;
-}
-
-.fact-row span {
-  font-size: 0.9rem;
-}
-
-.quiet-note {
-  color: #666;
-  font-size: 0.85rem;
-}
-
-.failure-summary {
-  color: #b00020;
-}
-
-.progress-list {
-  margin: 0.25rem 0;
-  padding-left: 1.2rem;
-}
-
-.family-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 2.4fr) minmax(14rem, 1fr);
-  gap: 1rem;
-}
-
-.lineage-panel {
-  min-width: 0;
-  overflow-x: auto;
-  border: 1px dashed #ccc;
-  border-radius: 6px;
-  padding: 0.6rem 0.75rem;
-  background: #fff;
-}
-
-.lineage-chain {
-  font-family: ui-monospace, monospace;
-  font-size: 0.85rem;
-  word-break: break-all;
-}
-
 .config-json {
   background: #f6f6f8;
   border: 1px solid #e3e3e3;
@@ -264,11 +121,6 @@ a.project-row:hover {
   padding: 0.6rem 0.75rem;
   font-size: 0.8rem;
   overflow-x: auto;
-}
-
-.fact-row span {
-  font-size: 0.9rem;
-  overflow-wrap: anywhere;
 }
 
 .grid {
@@ -339,50 +191,9 @@ a.project-row:hover {
   font-weight: 600;
   margin-left: 0.25rem;
   text-decoration: underline dotted;
-}
-
-/* Badge-style state/health cells in the overview sweep grid
-   (jernerics-7bd): color-only, matching the artifact listing's state
-   cells. */
-
-.grid .cell-state {
+}/* Badge-style state/health cells in the overview sweep grid
+   (jernerics-7bd): color-only {
   font-weight: 600;
-}
-
-.grid .cell-state.state-active,
-.grid .cell-state.state-succeeded,
-.grid .cell-state.state-healthy,
-.grid .cell-state.state-completed {
-  color: #1e7e34;
-}
-
-.grid .cell-state.state-quiet,
-.grid .cell-state.state-attention,
-.grid .cell-state.state-running,
-.grid .cell-state.state-waiting {
-  color: #8a6d3b;
-}
-
-.grid .cell-state.state-stale,
-.grid .cell-state.state-unknown {
-  color: #b06d0b;
-}
-
-.grid .cell-state.state-failed,
-.grid .cell-state.state-failing {
-  color: #b00020;
-}
-
-.grid .cell-state.state-ended,
-.grid .cell-state.state-cancelled {
-  color: #4c5161;
-}
-
-.trial-header {
-  display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  align-items: baseline;
 }
 
 .login-card {
@@ -442,10 +253,6 @@ a.project-row:hover {
   flex: none;
 }
 
-.expand-toggle {
-  margin: 0.8rem 0;
-}
-
 /* Series panels (jernerics-cdf.4) */
 #analysis-series-figure {
   max-width: 75rem;
@@ -453,9 +260,7 @@ a.project-row:hover {
   /* Height floor: the graph never collapses to a thumbnail
      (jernerics-bt9); figures carry their own larger layout height. */
   min-height: 26rem;
-}
-
-@media (max-width: 78rem) {
+}@media (max-width: 78rem){
   #analysis-series-figure {
     max-width: 100%;
   }
@@ -467,11 +272,6 @@ a.project-row:hover {
   margin-top: 6px;
   margin-bottom: 6px;
   overflow: hidden;
-}
-
-.ag-row.row-hover-emphasis {
-  background: #fff3d666;
-  font-weight: 600;
 }
 
 .panel-header {
@@ -519,58 +319,6 @@ a.project-row:hover {
   color: #8a6d3b;
 }
 
-.scope-bar {
-  display: flex;
-  gap: 1rem;
-  flex-wrap: wrap;
-  align-items: baseline;
-  padding: 0.6rem 0.8rem;
-  border: 1px solid #e3e3e3;
-  border-radius: 6px;
-  background: #fafafa;
-  margin: 0.5rem 0;
-}
-
-.scope-bar .scope-sweeps {
-  font-weight: 600;
-}
-
-.scope-bar .scope-counts {
-  color: #555;
-  font-size: 0.9rem;
-}
-
-/* Optuna study figures pair up wherever the canvas allows and keep
-   their captions to one small line (jernerics-bt9). */
-.figure-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
-  gap: 0.75rem 1rem;
-}
-
-.figure-grid h4 {
-  margin: 0 0 0.15rem;
-  font-size: 0.85rem;
-  color: #555;
-}
-
-.figure-grid .figure-wide {
-  grid-column: 1 / -1;
-}
-
-.snippet-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.5rem;
-}
-
-.snippet-row pre {
-  flex: 1;
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
 /* Artifact listing and viewer (jernerics-h5d.14) */
 
 .badge-available {
@@ -581,20 +329,6 @@ a.project-row:hover {
 .badge-pending {
   border-color: #e2d49a;
   background: #fdf7e0;
-}
-
-.grid .cell-available {
-  color: #1e7e34;
-  font-weight: 600;
-}
-
-.grid .cell-pending {
-  color: #b06d0b;
-  font-weight: 600;
-}
-
-.mono-cell {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .download {
@@ -613,37 +347,6 @@ a.project-row:hover {
   background: #e8ecef;
 }
 
-.artifact-note {
-  color: #6b6250;
-  font-size: 0.9rem;
-}
-
-.artifact-card {
-  padding: 0.8rem 1rem;
-  border: 1px dashed #c9c9c9;
-  border-radius: 6px;
-  background: #fafafa;
-}
-
-.text-view,
-.log-view {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.85rem;
-  white-space: pre-wrap;
-  word-break: break-all;
-  overflow-wrap: anywhere;
-  max-height: 40rem;
-  overflow-y: auto;
-  margin: 0;
-}
-
-.log-view {
-  padding: 0.6rem 0.8rem;
-  border-radius: 6px;
-  background: #101418;
-  color: #d7e0d7;
-}
-
 .json-tree {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.85rem;
@@ -657,22 +360,6 @@ a.project-row:hover {
   padding-left: 1.1rem;
   white-space: pre-wrap;
   word-break: break-all;
-}
-
-.summary-cards {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem;
-  margin-bottom: 0.6rem;
-}
-
-.summary-card {
-  padding: 0.2rem 0.7rem;
-  border: 1px solid #c9c9c9;
-  border-radius: 6px;
-  background: #f4f6f8;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.85rem;
 }
 
 .quick-filter {
@@ -703,42 +390,6 @@ a.project-row:hover {
   color: #fff;
 }
 
-.action-bar {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  margin: 0.6rem 0;
-  flex-wrap: wrap;
-}
-
-.action-bar .action {
-  border: 1px solid #c9d1d9;
-  background: #f6f8fa;
-  border-radius: 6px;
-  padding: 0.35rem 0.8rem;
-  font-size: 0.9rem;
-  cursor: pointer;
-  text-decoration: none;
-  color: inherit;
-}
-
-.action-bar .action:hover:not(:disabled) {
-  background: #e8ecef;
-}
-
-.action-bar .action:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.reason-input {
-  border: 1px solid #c9d1d9;
-  border-radius: 6px;
-  padding: 0.35rem 0.6rem;
-  min-width: 18rem;
-  font-size: 0.9rem;
-}
-
 .action-message {
   margin: 0.3rem 0;
   font-size: 0.9rem;
@@ -750,82 +401,6 @@ a.project-row:hover {
 
 .action-message.err {
   color: #b00020;
-}
-
-/* Failure view batch controls: one row above the failed-sweep groups,
-   per-group checkboxes reading as row selectors next to the action. */
-.failed-controls {
-  display: flex;
-  align-items: center;
-  gap: 0.8rem;
-  margin: 0.3rem 0;
-}
-
-.failed-sweep-check {
-  margin: 0 0.6rem;
-}
-
-.failed-sweep-check label {
-  margin: 0;
-}
-
-/* Bulk curation hides behind a collapsed affordance (jernerics-9sl);
-   block flow keeps it below the sweep list at any width. */
-.curation-panel {
-  margin: 0.4rem 0;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  padding: 0.25rem 0.5rem;
-}
-
-.curation-panel > summary {
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.curation-panel[open] {
-  padding-bottom: 0.5rem;
-}
-
-.curation-banner {
-  border: 1px solid #d4a72c;
-  background: #fff8e1;
-  border-radius: 6px;
-  padding: 0.5rem 0.8rem;
-  margin: 0.3rem 0;
-  font-size: 0.9rem;
-}
-
-.curation-banner-invalid {
-  border-color: #b00020;
-  background: #fdecea;
-}
-
-.curation-section {
-  margin: 0.4rem 0 0.8rem;
-}
-
-.scope-warning {
-  color: #b00020;
-  font-size: 0.9rem;
-}
-
-/* Several invalid picks collapse into one expandable note
-   (jernerics-j9s): the summary stays a single flex-bar line and the
-   body reads as a plain list. */
-.scope-warning-details {
-  color: #b00020;
-  font-size: 0.9rem;
-}
-
-.scope-warning-summary {
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.scope-warning-list {
-  margin: 0.25rem 0 0;
-  padding-left: 1.1rem;
 }
 
 .include-toggle {
@@ -878,140 +453,6 @@ a.project-row:hover {
 
 .panel-instruction {
   padding: 1.5rem;
-}
-
-.workspace-main {
-  display: grid;
-  /* The canvas is the page: side columns cap lower so the tab strip,
-     controls, and charts keep room (jernerics-bo0). */
-  grid-template-columns: minmax(16rem, 19rem) minmax(0, 1fr) minmax(14rem, 17rem);
-  gap: 1rem;
-  align-items: start;
-}
-
-@media (max-width: 78rem) {
-  /* Mid widths tighten both side columns so the canvas keeps working
-     room below the wide-shell layout (jernerics-bo0). */
-  .workspace-main {
-    grid-template-columns:
-      minmax(14rem, 17rem) minmax(0, 1fr) minmax(13rem, 15rem);
-  }
-}
-
-/* Grid items default to min-width: auto, so a wide grid or table can
-   stretch the single 1fr column past the viewport (jernerics-jum). */
-.scope-browser,
-.workspace-canvas {
-  min-width: 0;
-}
-
-/* The Exceptions entry routes to the new-shell page, so it rides the
-   tab row as a link styled after the dcc.Tab chrome beside it. */
-.workspace-tab-row {
-  display: flex;
-  align-items: stretch;
-}
-
-.workspace-tab-link {
-  display: flex;
-  align-items: center;
-  padding: 12px 16px;
-  color: #0074d9;
-  text-decoration: none;
-  margin-bottom: -1px;
-}
-
-.workspace-tab-link:hover {
-  text-decoration: underline;
-}
-
-.scope-browser {
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  padding: 0.5rem;
-}
-
-.scope-browser summary {
-  cursor: pointer;
-  font-weight: 600;
-}
-
-.inspector {
-  border-left: 1px solid #ddd;
-  padding-left: 1rem;
-  min-width: 0;
-}
-
-.inspector:empty {
-  display: none;
-}
-
-.inspector-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.inspector-title {
-  margin: 0;
-}
-
-.inspector-hint {
-  color: #777;
-}
-
-.focus-link {
-  background: none;
-  border: none;
-  color: #0366d6;
-  cursor: pointer;
-  padding: 0;
-  font: inherit;
-  text-decoration: underline;
-}
-
-/* Narrow viewports stack in DOM order — scope browser, canvas,
-   inspector — as ordinary flow; fixed drawers overlapped the canvas
-   (jernerics-bo0). */
-@media (max-width: 60rem) {
-  .workspace-main {
-    grid-template-columns: 1fr;
-  }
-
-  .inspector:not(:empty) {
-    border-left: none;
-    border-top: 1px solid #ddd;
-    padding-left: 0;
-    padding-top: 0.75rem;
-  }
-}
-
-/* dcc.Tabs gives every tab an equal flex share with min-width 0, which
-   clips labels once the canvas narrows (jernerics-2qp): tabs size to
-   their labels and the strip wraps whole tabs instead. The explicit
-   row direction also overrides dash's vertical mobile tabs. */
-#analysis-tabs {
-  flex-direction: row;
-  flex-wrap: wrap;
-}
-
-#analysis-tabs .tab {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-@media (max-width: 30rem) {
-  /* The nav's 14rem picker floor otherwise pushes the logout button
-     past a phone viewport (jernerics-bo0). */
-  .nav {
-    flex-wrap: wrap;
-  }
-
-  .nav .project-picker {
-    min-width: 7rem;
-    flex: 1 1 7rem;
-  }
 }
 
 /* Operational overview (jernerics-g5rw.7): tiles, Active/All seg,
@@ -1092,10 +533,6 @@ button.tile.on {
   background: #f0f0f1;
   color: #111;
   font-weight: 600;
-}
-
-.chip-row {
-  margin: 0.25rem 0;
 }
 
 .chip {
@@ -1200,66 +637,6 @@ button.tile.on {
   text-decoration: underline;
 }
 
-.inv-sub {
-  color: #555;
-  margin: 0.1rem 0 0.4rem;
-}
-
-.inv-views {
-  display: flex;
-  gap: 0.75rem;
-  align-items: center;
-  flex-wrap: wrap;
-  margin: 0.25rem 0 0.6rem;
-}
-
-.inv-views .seg {
-  margin: 0;
-}
-
-.inv-views .py-details,
-.inv-views .btn-link {
-  margin-left: auto;
-}
-
-.inv-views .btn-link,
-.inv-save-row .btn-link {
-  font: inherit;
-  font-size: 0.85rem;
-  padding: 0.3rem 0.8rem;
-  border: 1px solid #ccc;
-  border-radius: 6px;
-  background: #fff;
-  color: #2563eb;
-  cursor: pointer;
-  text-decoration: none;
-}
-
-.py-details summary.btn-primary {
-  font: inherit;
-  font-size: 0.85rem;
-  padding: 0.3rem 0.8rem;
-  border: 1px solid #2563eb;
-  border-radius: 6px;
-  background: #fff;
-  color: #2563eb;
-  cursor: pointer;
-  list-style: none;
-}
-
-.py-details[open] summary.btn-primary {
-  background: #2563eb;
-  color: #fff;
-}
-
-.py-panel {
-  border: 1px solid #ddd;
-  border-radius: 8px;
-  padding: 0.5rem 0.75rem;
-  margin-top: 0.4rem;
-  background: #fff;
-}
-
 .coverage-strip {
   display: flex;
   gap: 0.75rem;
@@ -1286,35 +663,6 @@ button.tile.on {
   font-variant-numeric: tabular-nums;
 }
 
-.empty-state {
-  border: 1px dashed #ccc;
-  border-radius: 8px;
-  background: #fafafa;
-  padding: 0.9rem 1rem;
-  margin: 0.4rem 0;
-}
-
-.empty-state p {
-  margin: 0;
-  color: #444;
-}
-
-.inv-create-controls {
-  display: flex;
-  gap: 0.6rem;
-  align-items: center;
-  flex-wrap: wrap;
-  margin: 0.3rem 0 0.5rem;
-}
-
-.inv-create-controls .inv-name {
-  min-width: 18rem;
-}
-
-.inv-create-controls .inv-dd {
-  min-width: 20rem;
-}
-
 .inv-preview {
   border: 1px solid #ddd;
   border-radius: 8px;
@@ -1339,31 +687,4 @@ button.tile.on {
   padding-left: 1.2rem;
   color: #b45309;
   font-size: 0.85rem;
-}
-
-.inv-save-row {
-  display: flex;
-  gap: 0.6rem;
-  align-items: center;
-  margin: 0.4rem 0;
-}
-
-.inv-save-row .btn-primary {
-  font: inherit;
-  font-size: 0.85rem;
-  padding: 0.3rem 0.8rem;
-  border: 1px solid #2563eb;
-  border-radius: 6px;
-  background: #2563eb;
-  color: #fff;
-  cursor: pointer;
-}
-
-.inv-save-row .btn-primary:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.inv-save-row .action-message {
-  margin: 0;
 }

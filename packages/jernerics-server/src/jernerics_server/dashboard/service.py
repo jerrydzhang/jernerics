@@ -573,29 +573,6 @@ class DashboardService:
         except StoreError as error:
             raise CurationRejectedError(_curation_error(error)) from error
 
-    def investigation_scope(
-        self, investigation_id: str, member_index: int | None = None
-    ) -> dict[str, Any]:
-        """Analysis scope group for the investigation's materialized
-        Selection; ``member_index`` narrows to a single member sweep.
-        The URL carries the same state via the existing ``?sel=`` token
-        over :data:`materialize_selection`'s Selection."""
-        from .analysis import default_scope_state, tray_from_selection
-
-        detail = self.investigation_detail(investigation_id)
-        selection = materialize_selection(detail.investigation)
-        if member_index is not None:
-            members = selection.sweeps or ()
-            if not 0 <= member_index < len(members):
-                raise IndexError(
-                    f"member index {member_index} out of range "
-                    f"for {len(members)} members"
-                )
-            selection = Selection(
-                project=selection.project, sweeps=(members[member_index],)
-            )
-        return {**default_scope_state(), **tray_from_selection(selection)}
-
     def create_investigation(
         self,
         project: str,
@@ -1036,64 +1013,6 @@ class DashboardService:
         monitoring, for the sweep page's execution list."""
         return self.queries.executions(selection)
 
-    def trial_detail(self, trial_id: str) -> TrialDetail | None:
-        """Trial page data; ``None`` when the id matches no trial."""
-        parsed = _parse_id(trial_id)
-        if parsed is None:
-            return None
-        context = self.queries.trial_context(parsed)
-        if context is None:
-            return None
-        project = context["project"]
-        root = uuid.UUID(context["retry_root_trial_id"])
-        family = Selection(project=project, retry_roots=(root,))
-        named = Selection(project=project, trials=(parsed,))
-        return TrialDetail(
-            context=context,
-            params=self.queries.trial_params(named)[0],
-            catalog=self.queries.value_catalog(family),
-            executions=self.queries.executions(family),
-            lineage=[
-                {
-                    "trial_id": str(record.trial_id),
-                    "parent": (
-                        str(record.retry_of_trial_id)
-                        if record.retry_of_trial_id
-                        else ""
-                    ),
-                    "root": str(record.retry_root_trial_id),
-                    "index": record.retry_index,
-                }
-                for record in self.queries.lineage(family)
-            ],
-            artifacts=self.trial_artifacts(context["trial_id"]),
-        )
-
-    def execution_detail(self, execution_id: str) -> ExecutionDetail | None:
-        """Execution page data; ``None`` when the id matches no execution."""
-        parsed = _parse_id(execution_id)
-        if parsed is None:
-            return None
-        context = self.queries.execution_context(parsed)
-        if context is None:
-            return None
-        project = context["project"]
-        trial = uuid.UUID(context["trial_id"])
-        selection = Selection(project=project, trials=(trial,))
-        sweep_selection = Selection(
-            project=project, sweeps=(uuid.UUID(context["sweep_id"]),)
-        )
-        resolved = None
-        for record in self.queries.values(selection, keys=("resolved_config",))[0]:
-            resolved = record.observation
-        return ExecutionDetail(
-            context=context,
-            params=self.queries.trial_params(selection)[0],
-            provenance=self.queries.provenance(sweep_selection),
-            resolved_config=resolved,
-            artifacts=self.execution_artifacts(execution_id),
-        )
-
     # -- Artifacts (jernerics-h5d.14) ------------------------------------
 
     @staticmethod
@@ -1340,77 +1259,6 @@ class DashboardService:
             for summary in self._sweep_summaries(self.analysis_selection(project, tray))
         )
 
-    def analysis_param_coverage(
-        self, project: str | None, tray: dict[str, Any] | None
-    ) -> dict[str, Any]:
-        """Param key x sweep matrix: where each param exists, missing
-        cells marked ``None`` (never silently dropped)."""
-        if not project:
-            return {"sweeps": [], "names": {}, "rows": []}
-        selection = self.analysis_selection(project, tray)
-        names = self._sweep_names(project)
-        sweep_of = {
-            str(record.trial_id): str(record.sweep_id)
-            for record in self.queries.lineage(selection)
-        }
-        coverage: dict[str, dict[str, dict[str, Any]]] = {}
-        for record in self._follow_params(selection):
-            sweep = sweep_of.get(str(record.trial_id))
-            if sweep is None:
-                continue
-            cell = coverage.setdefault(record.key, {}).setdefault(
-                sweep, {"trials": 0, "kinds": set()}
-            )
-            cell["trials"] += 1
-            cell["kinds"].add(record.kind)
-        sweep_ids = sorted(
-            set(sweep_of.values()) | {str(value) for value in selection.sweeps or ()}
-        )
-        return {
-            "sweeps": sweep_ids,
-            "names": names,
-            "rows": [
-                {
-                    "key": key,
-                    "cells": {
-                        sweep: (
-                            {
-                                "trials": cell["trials"],
-                                "kinds": ",".join(sorted(cell["kinds"])),
-                            }
-                            if (cell := per_sweep.get(sweep)) is not None
-                            else None
-                        )
-                        for sweep in sweep_ids
-                    },
-                }
-                for key, per_sweep in sorted(coverage.items())
-            ],
-        }
-
-    def analysis_artifacts(
-        self, project: str | None, tray: dict[str, Any] | None
-    ) -> list[dict[str, Any]]:
-        if not project:
-            return []
-        records = self._follow_pages(
-            lambda sel, page, token: self.queries.artifacts(
-                sel, page=page, page_token=token
-            ),
-            self.analysis_selection(project, tray),
-        )
-        grouped: dict[str, dict[str, Any]] = {}
-        for record in records:
-            entry = grouped.setdefault(
-                record.key, {"key": record.key, "count": 0, "sources": set()}
-            )
-            entry["count"] += 1
-            entry["sources"].add(record.source)
-        return [
-            {**entry, "sources": sorted(entry["sources"])}
-            for entry in sorted(grouped.values(), key=lambda e: e["key"])
-        ]
-
     def analysis_series(
         self,
         project: str | None,
@@ -1503,63 +1351,6 @@ class DashboardService:
         return {
             trial_id: {key: payload for key, (_, payload) in per_trial.items()}
             for trial_id, per_trial in finals.items()
-        }
-
-    def analysis_points(
-        self, project: str | None, tray: dict[str, Any] | None
-    ) -> dict[str, Any]:
-        """Grid data for the points tab: non-step value keys (kind and
-        per-trial payloads — several executions' points are all kept) and
-        flat params per trial for comparison."""
-        empty = {
-            "trials": [],
-            "value_keys": [],
-            "values": {},
-            "param_keys": [],
-            "params": {},
-        }
-        if not project:
-            return empty
-        selection = self.analysis_selection(project, tray)
-        value_keys = [
-            {"key": record.key, "kind": record.kind}
-            for record in self.queries.value_catalog(selection)
-            if (record.latest_step or 0) == 0
-        ]
-        trials = [
-            {
-                "trial_id": str(record.trial_id),
-                "sweep_id": str(record.sweep_id),
-                "number": record.number,
-            }
-            for record in sorted(
-                self.queries.lineage(selection),
-                key=lambda record: (str(record.sweep_id), record.number),
-            )
-        ]
-        values: dict[str, dict[str, list[Any]]] = {}
-        if value_keys:
-            wanted = tuple(entry["key"] for entry in value_keys)
-            for record in self._follow_values(selection, wanted):
-                payload = (
-                    record.observation
-                    if record.observation is not None
-                    else record.value
-                )
-                values.setdefault(str(record.trial_id), {}).setdefault(
-                    record.key, []
-                ).append(payload)
-        params: dict[str, dict[str, Any]] = {}
-        for record in self._follow_params(selection):
-            params.setdefault(str(record.trial_id), {})[record.key] = record.value
-        return {
-            "trials": trials,
-            "value_keys": value_keys,
-            "values": values,
-            "param_keys": sorted(
-                {key for per_trial in params.values() for key in per_trial}
-            ),
-            "params": params,
         }
 
     def analysis_trials(

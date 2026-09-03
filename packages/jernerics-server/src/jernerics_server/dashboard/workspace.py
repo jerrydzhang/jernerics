@@ -49,15 +49,6 @@ _GRID_DEFAULTS: dict[str, Any] = {
 _SWEEP_ROW_ID: Any = "params.data.sweep_id"
 
 
-def sweep_curation(summary: SweepSummary) -> str:
-    """Distinct curation marker for grid cells; invalid outranks archived."""
-    if summary.invalid:
-        return "invalid"
-    if summary.archived:
-        return "archived"
-    return ""
-
-
 def hidden_curation(
     summary: SweepSummary, *, include_archived: bool, include_invalid: bool
 ) -> bool:

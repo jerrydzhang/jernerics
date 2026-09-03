@@ -20,7 +20,6 @@ from jernerics_schema import (
     TrialState,
 )
 from jernerics_server.dashboard import DashboardContext
-from jernerics_server.dashboard.analysis import tray_summary
 from jernerics_server.dashboard.auth import COOKIE_NAME
 from jernerics_server.dashboard.callbacks import page_content
 from jernerics_server.dashboard.routes import parse_route
@@ -443,13 +442,6 @@ class TestRoutesAndPages:
         spec = parse_route("/dashboard/project/ops")
         assert spec.kind == "workspace"
         assert spec.object_id == "ops"
-
-    def test_tray_summary_counts_the_unified_selection(self):
-        assert tray_summary(None) == ""
-        assert tray_summary({"sweeps": []}) == ""
-        assert tray_summary({"sweeps": ["a", "b"]}) == (
-            "2 sweeps · 0 trials · 0 families"
-        )
 
 
 class TestNoDashLeakage:

@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import quote
 
 import pytest
 from dash import dcc, html
@@ -556,10 +556,9 @@ class TestViewerFacts:
         rendered = str(page)
         assert "v2 of 2" in rendered
         assert "model-v2.bin" in rendered
-        assert hashlib.sha256(b"model-two-bytes").hexdigest() in rendered
-        assert "/dashboard/project/lab?view=" in rendered
-        assert str(TRIAL) in rendered
-        assert str(EXECUTION) in rendered
+        assert f"/dashboard/project/lab/sweep/{SWEEP}" in rendered
+        assert short_id(str(TRIAL)) in rendered
+        assert short_id(str(EXECUTION)) in rendered
         assert str(SWEEP) in rendered
 
     def test_facts_render_as_scroll_table_with_download_action(self, env):
@@ -602,29 +601,21 @@ class TestViewerTitleAndCrumbs:
         assert all(MODEL_V2.hex not in text for text in headings)
         assert "model" in str(page)
 
-    def test_breadcrumbs_link_workspace_sweep_trial_execution(self, env):
+    def test_breadcrumbs_link_project_and_sweep_pages(self, env):
         page, _ = page_content(f"/dashboard/artifact-view/{CUSTOM.hex}", env.service)
         crumb = next(
             node for node in _walk(page) if getattr(node, "className", None) == "crumb"
         )
         links = [(a.children, a.href) for a in _find(crumb, html.A)]
-        assert [label for label, _ in links] == [
-            "lab",
-            "alpha",
-            short_id(str(TRIAL)),
-            short_id(str(EXECUTION)),
+        assert links == [
+            ("lab", "/dashboard/project/lab"),
+            ("alpha", f"/dashboard/project/lab/sweep/{SWEEP}"),
         ]
-        assert links[0][1] == "/dashboard/project/lab"
-        for (_, href), kind, object_id in zip(
-            links[1:],
-            ("sweep", "trial", "execution"),
-            (SWEEP, TRIAL, EXECUTION),
-            strict=True,
-        ):
-            path, _, query = href.partition("?")
-            assert path == "/dashboard/project/lab"
-            doc = json.loads(unquote(parse_qs(query)["view"][0]))
-            assert doc["focus"] == {"kind": kind, "id": str(object_id)}
+        # Trial and execution have no pages of their own; they render as
+        # plain crumb hops, and the artifact stays the unlinked leaf.
+        texts = [c for c in crumb.children if isinstance(c, str)]
+        assert short_id(str(TRIAL)) in texts
+        assert short_id(str(EXECUTION)) in texts
         assert str(crumb.children[-1]) == "custom.bin"
 
 
