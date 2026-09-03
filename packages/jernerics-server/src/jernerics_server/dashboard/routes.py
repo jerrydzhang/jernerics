@@ -4,7 +4,9 @@ Deep links: ``/dashboard`` (project catalog), ``/dashboard/project/<name>``
 (the persistent workspace; its query string carries the selection token and
 the view document), ``/dashboard/project/<name>/investigation/new`` and
 ``.../investigation/<id>[/edit]`` (the investigation editor; ``<id>``
-alone is the investigation workspace), and ``/dashboard/artifact-view/<hex>``
+alone is the investigation workspace), ``/dashboard/project/<name>/sweep/<id>``
+and ``/dashboard/project/<name>/exceptions`` (new-shell pages; routes
+exist ahead of their rendering), and ``/dashboard/artifact-view/<hex>``
 (the viewer; ``/dashboard/artifact/<hex>`` is the raw download alias
 served by the HTTP layer, not a page). Unknown paths render the
 not-found surface. ``polls`` on a PageSpec is only the route-level
@@ -19,6 +21,8 @@ ROUTES_BASE = "/dashboard"
 PageKind = Literal[
     "project",
     "workspace",
+    "sweep",
+    "exceptions",
     "investigation",
     "investigation-edit",
     "artifact",
@@ -28,13 +32,16 @@ PageKind = Literal[
 _PROJECT_PREFIX = f"{ROUTES_BASE}/project/"
 _ARTIFACT_VIEW_PREFIX = f"{ROUTES_BASE}/artifact-view/"
 _INVESTIGATION_SEGMENT = "investigation"
+_SWEEP_SEGMENT = "sweep"
+_EXCEPTIONS_SEGMENT = "exceptions"
 
 
 @dataclass(frozen=True)
 class PageSpec:
     """Which page a URL denotes, plus the object it is focused on.
-    Investigation pages carry the project in ``object_id`` and the
-    investigation id in ``sub_id`` (``None`` for the create flow)."""
+    Project-scoped pages carry the project in ``object_id`` and the
+    focused object (investigation or sweep id) in ``sub_id`` (``None``
+    for the create flow and the exceptions page)."""
 
     kind: PageKind
     object_id: str | None = None
@@ -67,14 +74,18 @@ def _parse_project_segments(segments: list[str]) -> PageSpec | None:
     project = segments[0]
     if len(segments) == 1:
         return PageSpec(kind="workspace", object_id=project)
-    if segments[1] != _INVESTIGATION_SEGMENT:
+    if segments[1] == _INVESTIGATION_SEGMENT:
+        if len(segments) == 3 and segments[2] == "new":
+            return PageSpec(kind="investigation-edit", object_id=project)
+        if len(segments) == 4 and segments[3] == "edit":
+            return PageSpec(
+                kind="investigation-edit", object_id=project, sub_id=segments[2]
+            )
+        if len(segments) == 3:
+            return PageSpec(kind="investigation", object_id=project, sub_id=segments[2])
         return None
-    if len(segments) == 3 and segments[2] == "new":
-        return PageSpec(kind="investigation-edit", object_id=project)
-    if len(segments) == 4 and segments[3] == "edit":
-        return PageSpec(
-            kind="investigation-edit", object_id=project, sub_id=segments[2]
-        )
-    if len(segments) == 3:
-        return PageSpec(kind="investigation", object_id=project, sub_id=segments[2])
+    if len(segments) == 2 and segments[1] == _EXCEPTIONS_SEGMENT:
+        return PageSpec(kind="exceptions", object_id=project)
+    if len(segments) == 3 and segments[1] == _SWEEP_SEGMENT:
+        return PageSpec(kind="sweep", object_id=project, sub_id=segments[2])
     return None
