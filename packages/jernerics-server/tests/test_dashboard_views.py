@@ -7,7 +7,6 @@ on the pure helpers the Dash callbacks wrap plus TestClient page 200s.
 
 import re
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -45,6 +44,7 @@ from jernerics_server.dashboard.analysis import (
 )
 from jernerics_server.dashboard.callbacks import (
     apply_curation,
+    investigation_new_href,
     lineage_panel,
     page_content,
     remember_workspace,
@@ -54,12 +54,20 @@ from jernerics_server.dashboard.callbacks import (
     workspace_state,
 )
 from jernerics_server.dashboard.components import (
+    MISSING,
     TEXT_LIMIT,
     absolute_time,
     datetime_to_ns,
     grid_options,
     short_id,
 )
+from jernerics_server.dashboard.render import (
+    SortColumn,
+    sort_rows,
+    sortable_columns,
+    typed_sort_key,
+)
+from jernerics_server.dashboard.routes import ROUTES_BASE
 from jernerics_server.dashboard.service import (
     CurationRejectedError,
     CurationUnavailableError,
@@ -74,11 +82,13 @@ from jernerics_server.dashboard.workspace import (
     curation_note,
     curation_transitions,
     detail_curation,
+    exceptions_tab,
     failed_view_panel,
     family_grid_row,
     inspector_content,
-    overview_rollup,
+    overview_filter_matches,
     overview_tab,
+    overview_tiles,
     scoped_sweeps,
     selection_transitions,
 )
@@ -605,8 +615,12 @@ class TestWorkspaceLayout:
     def test_workspace_mounts_browser_tabs_and_inspector_once(self, service):
         page, polls = page_content("/dashboard/project/ops", service)
         rendered = str(page)
-        assert "Project ops" in rendered
-        assert "id='scope-browser'" in rendered
+        for tab in ("overview", "investigations", "exceptions"):
+            assert f"value='{tab}'" in rendered
+        for gone in ("catalog", "series", "points", "optuna", "python"):
+            assert f"value='{gone}'" not in rendered
+        assert "id='workspace-investigations'" in rendered
+        assert "id='workspace-exceptions'" in rendered
         assert "id='sweep-grid'" in rendered
         assert "id='analysis-family-grid'" in rendered
         assert "id='analysis-expand'" in rendered
@@ -614,8 +628,6 @@ class TestWorkspaceLayout:
         assert "id='workspace-quick'" in rendered
         assert "id='inspector'" in rendered
         assert "id='workspace-overview'" in rendered
-        for tab in ("overview", "catalog", "series", "points", "optuna", "python"):
-            assert f"value='{tab}'" in rendered
         for button in ("ws-archive", "ws-invalid", "ws-restore-validity", "ws-restore"):
             assert f"id='{button}'" in rendered
         assert "id='ws-reason'" in rendered
@@ -1142,8 +1154,9 @@ class TestOverviewCuration:
 
 
 class TestOverviewTab:
-    """jernerics-7bd: the overview is a bounded roll-up plus one
-    virtualized grid row per sweep — never a card per sweep."""
+    """jernerics-g5rw.7: the overview is a tile row where every tile is
+    a working filter, an Active/All control, and one paginated sortable
+    grid row per sweep — never a card per sweep."""
 
     def test_no_project_and_empty_scope_guards(self, service):
         rendered = str(overview_tab(service, None, None))
@@ -1162,52 +1175,108 @@ class TestOverviewTab:
         overview = overview_tab(service, "ops", {"sweeps": []})
         assert "overview-sweep-grid" in str(overview)
 
-    def test_overview_is_one_rollup_section_plus_one_grid_section(self, service):
+    def test_overview_is_tiles_plus_one_grid_section(self, service):
         overview = overview_tab(service, "ops", {"sweeps": []})
         sections = [
             node.className for node in _walk(overview) if isinstance(node, html.Section)
         ]
-        assert sections == ["section overview-rollup", "section overview-sweeps"]
+        assert sections == ["section overview-sweeps"]
         rendered = str(overview)
-        assert "Scope roll-up" in rendered
-        assert "Sweeps in scope" in rendered
+        assert "Sweeps" in rendered
+        assert "failed-trials-view" not in rendered  # triage lives in Exceptions
 
-    def test_rollup_aggregates_scope_not_sweeps(self, service):
-        rendered = str(overview_tab(service, "ops", {"sweeps": []}))
-        assert "sweeps 2" in rendered
-        assert "running 1" in rendered
-        assert "completed 1" in rendered
-        assert "health failing 1" in rendered
-        assert "health healthy 1" in rendered
-        assert "active 1" in rendered
-        assert "succeeded 2" in rendered
-        assert "in-flight executions 4" in rendered
-        assert "last activity " in rendered
-        assert "ago" in rendered
+    def test_tiles_report_the_scope_facts(self, service):
+        tiles = {
+            tile["value"]: tile
+            for tile in overview_tiles(
+                scoped_sweeps(service.sweep_overview("ops"), {"sweeps": []})
+            )
+        }
+        assert tiles["failed"]["kind"] == "crit"
+        assert tiles["failed"]["count"] == 1
+        assert tiles["failed"]["label"] == "failed executions · 1 sweep"
+        assert tiles["stale"]["kind"] == "warn"
+        assert tiles["stale"]["count"] == 1
+        assert tiles["state:running"]["count"] == 1
+        assert tiles["state:completed"]["count"] == 1
+        assert tiles["state:completed"]["label"] == "completed sweeps"
 
-    def test_rollup_hides_zero_monitoring_and_notes_all_quiet(self, service):
-        beta = next(
-            row for row in service.sweep_overview("ops") if row.sweep_id == str(SWEEP_B)
+    def test_every_tile_is_the_same_filter_affordance(self, service):
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        tiles = [
+            node
+            for node in _walk(overview)
+            if isinstance(node, html.Button)
+            and isinstance(node.id, dict)
+            and "overview-tile" in node.id
+        ]
+        assert len(tiles) == 4
+        for tile in tiles:
+            assert tile.id["overview-tile"]  # every tile carries a filter key
+            assert tile.className.startswith("tile")
+        assert {tile.className for tile in tiles} <= {"tile", "tile crit", "tile warn"}
+
+    def test_tile_filters_narrow_the_grid_and_show_a_way_back(self, service):
+        overview = overview_tab(
+            service, "ops", {"sweeps": []}, overview_filter="failed"
         )
-        rendered = str(overview_rollup([beta], 0))
-        assert "succeeded 1" in rendered
-        for label in ("active", "quiet", "stale", "failed", "unknown"):
-            assert f"badge-{label}" not in rendered
-        silent = replace(
-            beta, active=0, quiet=0, stale=0, failed=0, succeeded=0, unknown=0
+        grid = _grid(overview, "overview-sweep-grid")
+        assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_A)]
+        rendered = str(overview)
+        assert "1 sweep with failed executions" in rendered
+        assert "overview-filter-clear" in rendered
+        overview = overview_tab(
+            service, "ops", {"sweeps": []}, overview_filter="state:completed"
         )
-        rendered = str(overview_rollup([silent], 0))
-        assert "quiet" in rendered  # the single all-zero note
-        assert "badge-active" not in rendered
-        assert "succeeded" not in rendered
+        grid = _grid(overview, "overview-sweep-grid")
+        assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
+        overview = overview_tab(
+            service, "ops", {"sweeps": []}, overview_filter="state:ghost"
+        )
+        grid = _grid(overview, "overview-sweep-grid")
+        assert grid.rowData == []
+        assert "0 sweeps in state ghost" in str(overview)
+        plain = str(overview_tab(service, "ops", {"sweeps": []}))
+        assert "overview-filter-clear" not in plain
 
-    def test_grid_rows_carry_operational_facts_and_stable_ids(self, service):
+    def test_filter_predicate_matches_execution_facts_and_states(self, service):
+        from dataclasses import replace as _replace
+
+        alpha = next(
+            row for row in service.sweep_overview("ops") if row.sweep_id == str(SWEEP_A)
+        )
+        assert overview_filter_matches(alpha, None) is True
+        assert overview_filter_matches(alpha, "failed") is True
+        assert overview_filter_matches(alpha, "stale") is True
+        assert overview_filter_matches(alpha, "state:running") is True
+        assert overview_filter_matches(alpha, "state:completed") is False
+        silent = _replace(alpha, failed=0, stale=0)
+        assert overview_filter_matches(silent, "failed") is False
+
+    def test_active_all_control_reflects_the_include_flags(self, service):
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        rendered = str(overview)
+        assert "Active (2)" in rendered
+        assert "All (2)" in rendered
+        assert "Active sweeps · last activity" in rendered
+        overview = overview_tab(
+            service, "ops", {"sweeps": [], "include_archived": True}
+        )
+        rendered = str(overview)
+        assert "All sweeps — 2" in rendered
+
+    def test_grid_rows_carry_raw_typed_facts_and_stable_ids(self, service):
         overview = overview_tab(service, "ops", {"sweeps": []})
         grid = _grid(overview, "overview-sweep-grid")
         assert grid.getRowId == "params.data.sweep_id"
         options = grid.dashGridOptions
         assert options["enableCellTextSelection"] is True
         assert options["ensureDomOrder"] is True
+        assert options["pagination"] is True
+        assert options["paginationPageSize"] > 0
+        assert options["rowSelection"]["mode"] == "multiRow"
+        assert options["rowSelection"]["checkboxes"] is True
+        assert options["rowSelection"]["enableClickSelection"] is False
         assert {column["field"] for column in grid.columnDefs} == {
             "name",
             "state",
@@ -1215,7 +1284,7 @@ class TestOverviewTab:
             "monitoring",
             "curation",
             "expected_trials",
-            "last_activity",
+            "last_activity_ns",
         }
         rows = {row["sweep_id"]: row for row in grid.rowData}
         alpha = rows[str(SWEEP_A)]
@@ -1227,11 +1296,42 @@ class TestOverviewTab:
         assert alpha["monitoring"] == (
             "active 1 · quiet 1 · stale 1 · failed 1 · succeeded 1 · unknown 1"
         )
-        assert alpha["last_activity"].endswith("ago")
+        summary = {row.sweep_id: row for row in service.sweep_overview("ops")}[
+            str(SWEEP_A)
+        ]
+        assert alpha["last_activity_ns"] == summary.latest_submitted_ns
         beta = rows[str(SWEEP_B)]
         assert beta["state"] == "completed"
         assert beta["expected_trials"] == 1
         assert beta["monitoring"] == "succeeded 1"
+
+    def test_stored_sort_orders_rows_and_columns(self, service):
+        overview = overview_tab(
+            service,
+            "ops",
+            {"sweeps": []},
+            sort=[{"colId": "expected_trials", "sort": "desc"}],
+        )
+        grid = _grid(overview, "overview-sweep-grid")
+        assert [row["expected_trials"] for row in grid.rowData] == [8, 1]
+        columns = {column["field"]: column for column in grid.columnDefs}
+        assert columns["expected_trials"]["sort"] == "desc"
+        assert "sort" not in columns["name"]
+
+    def test_overview_action_bar_mounts_disabled(self, service):
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        create = next(
+            node
+            for node in _walk(overview)
+            if getattr(node, "id", None) == "overview-create-investigation"
+        )
+        assert create.disabled is True
+        bulkbar = next(
+            node
+            for node in _walk(overview)
+            if getattr(node, "id", None) == "overview-bulkbar"
+        )
+        assert bulkbar.style == {"display": "none"}
 
     def test_monitoring_column_clamps_with_full_value_reachable(self, service):
         """jernerics-l8f: the monitoring cell shares the clamped-cell
@@ -1249,16 +1349,13 @@ class TestOverviewTab:
             "active 1 · quiet 1 · stale 1 · failed 1 · succeeded 1 · unknown 1"
         )
 
-    def test_tray_scope_narrows_rollup_rows_and_keeps_curation(self, store_and_service):
+    def test_tray_scope_narrows_the_grid_and_keeps_curation(self, store_and_service):
         store, service = store_and_service
         store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
         overview = overview_tab(service, "ops", {"sweeps": [str(SWEEP_B)]})
         grid = _grid(overview, "overview-sweep-grid")
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
         assert grid.rowData[0]["curation"] == "invalid"
-        rendered = str(overview)
-        assert "sweeps 1" in rendered
-        assert "completed 1" in rendered
 
 
 class TestOverviewCurationVisibility:
@@ -1266,14 +1363,16 @@ class TestOverviewCurationVisibility:
     semantics — curated terminal sweeps leave roll-up and grid until
     included, while incomplete and picked sweeps never drop."""
 
-    def test_archived_terminal_sweep_leaves_rollup_and_grid(self, store_and_service):
+    def test_archived_terminal_sweep_leaves_grid_and_shows_its_subline(
+        self, store_and_service
+    ):
         store, service = store_and_service
         store.archive_sweep(str(SWEEP_B))
         overview = overview_tab(service, "ops", {"sweeps": []})
         grid = _grid(overview, "overview-sweep-grid")
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_A)]
         rendered = str(overview)
-        assert "sweeps 1" in rendered
+        assert "Active sweeps — hides 1 archived/invalid" in rendered
         assert "completed" not in rendered
 
     def test_include_archived_brings_the_sweep_back(self, store_and_service):
@@ -1287,7 +1386,7 @@ class TestOverviewCurationVisibility:
             str(SWEEP_A),
             str(SWEEP_B),
         }
-        assert "sweeps 2" in str(overview)
+        assert "All sweeps — 2" in str(overview)
 
     def test_invalid_sweep_needs_its_own_include(self, store_and_service):
         store, service = store_and_service
@@ -1320,7 +1419,7 @@ class TestOverviewCurationVisibility:
         overview = overview_tab(service, "ops", {"sweeps": [str(SWEEP_B)]})
         grid = _grid(overview, "overview-sweep-grid")
         assert [row["sweep_id"] for row in grid.rowData] == [str(SWEEP_B)]
-        assert "sweeps 1" in str(overview)
+        assert "Active (1)" in str(overview)
 
     def test_fully_curated_project_names_the_curation(self, curated):
         store, service = curated
@@ -1347,10 +1446,22 @@ class TestRoutesServe:
         for url in (
             "/dashboard/",
             "/dashboard/project/ops",
+            "/dashboard/project/ops/investigation/new",
+            "/dashboard/project/ops/investigation/abc-123",
+            "/dashboard/project/ops/investigation/abc-123/edit",
         ):
             response = authed.get(url)
             assert response.status_code == 200, url
             assert "react-entry-point" in response.text
+
+    def test_investigation_stub_pages_name_the_arriving_work(self, service):
+        page, polls = page_content("/dashboard/project/ops/investigation/new", service)
+        rendered = str(page)
+        assert "New investigation" in rendered
+        assert "jernerics-g5rw.8" in rendered
+        assert polls is False
+        page, _ = page_content("/dashboard/project/ops/investigation/abc-123", service)
+        assert "The investigation workspace arrives" in str(page)
 
 
 class TestServiceCurationMutations:
@@ -1548,6 +1659,7 @@ class TestWorkspacePersistence:
             "quick": "",
             "filters": None,
             "sort": None,
+            "overview_sort": None,
         }
         saved = {"ops": {"quick": "x"}}
         assert workspace_state(saved, "ops")["quick"] == "x"
@@ -1559,6 +1671,7 @@ class TestWorkspacePersistence:
                 "quick": "x",
                 "filters": None,
                 "sort": [{"colId": "name", "sort": "asc"}],
+                "overview_sort": [{"colId": "name", "sort": "desc"}],
             }
         }
         updated = remember_workspace(current, "ops", quick="")
@@ -1567,6 +1680,7 @@ class TestWorkspacePersistence:
             "quick": "",
             "filters": None,
             "sort": [{"colId": "name", "sort": "asc"}],
+            "overview_sort": [{"colId": "name", "sort": "desc"}],
         }
         assert remember_workspace(updated, "ops", quick="") is None
         other = remember_workspace(updated, "beta", quick="y")
@@ -1995,9 +2109,9 @@ class TestMountedCurationJourney:
 
 
 class TestFailureView:
-    """jernerics-gcj: the roll-up's failed badge opens a scope-wide
-    failure view; kind and summary read inline, trials focus in one
-    click, and marking the sweep invalid acts from that context.
+    """jernerics-g5rw.7: the Exceptions tab carries the scope-wide
+    failure triage view; kind and summary read inline, trials focus in
+    one click, and marking the sweep invalid acts from that context.
     jernerics-zdpq: many parallel failures from one shared bug die in
     one batched mark-invalid — group checkboxes, a select-all, and a
     single apply_curation call."""
@@ -2062,24 +2176,27 @@ class TestFailureView:
         assert _focus_ref("sweep", SWEEP_A) in rendered
         assert "Mark sweep invalid" in rendered
 
-    def test_overview_embeds_failure_view_only_when_failing(self, service):
-        overview = overview_tab(service, "ops", {"sweeps": []})
-        rendered = str(overview)
-        assert "failed-trials-view" in rendered
-        assert "failed-view-open" in rendered
-        assert "failed 1" in rendered
-        beta = scoped_sweeps(service.sweep_overview("ops"), {"sweeps": [str(SWEEP_B)]})
-        panel = failed_view_panel(service, "ops", beta, 0)
-        assert "No failed executions in scope." in str(panel)
+    def test_exceptions_tab_embeds_filled_failure_view(self, service):
+        rendered = exceptions_tab(service, "ops", {"sweeps": []}, 0)
+        details = next(
+            node
+            for node in _walk(rendered)
+            if getattr(node, "id", None) == "failed-trials-view"
+        )
+        assert getattr(details, "open", False) is True
+        children = str(details)
+        assert "boom: divide by zero" in children
+        assert "exception" in children
+        assert "Mark sweep invalid" in children
 
     def test_failure_view_absent_without_failures(self, curated):
         _store, service = curated
-        rendered = str(overview_tab(service, "curate", {"sweeps": []}))
+        rendered = str(exceptions_tab(service, "curate", {"sweeps": []}, 0))
         assert "failed-trials-view" not in rendered
+        assert "No failed executions in project curate." in rendered
 
     _FAILED_OUTPUTS = {
         "failed-trials-panel.children",
-        "failed-trials-view.open",
         "sweep-grid.rowData",
         "sweep-grid.selectedRows",
         "workspace-curation-note.children",
@@ -2104,7 +2221,6 @@ class TestFailureView:
     ) -> list:
         picked = checked or set()
         return [
-            {"id": "failed-view-open", "property": "n_clicks", "value": 1},
             [
                 {"id": {"failed-invalid": sid}, "property": "n_clicks", "value": 0}
                 for sid in group_ids
@@ -2200,22 +2316,6 @@ class TestFailureView:
             )
         )
         assert not result.conflicts
-
-    def test_badge_opens_panel_with_kind_and_summary(self, mutable_client):
-        _store, client = mutable_client
-        callback_map = self._callback_map(client)
-        response = self._failed_dispatch(
-            client,
-            callback_map,
-            self._failed_inputs([str(SWEEP_A)]),
-            self._failed_state(""),
-            changed=["failed-view-open.n_clicks"],
-            group_ids=[str(SWEEP_A)],
-        )
-        assert response["failed-trials-view"]["open"] is True
-        children = str(response["failed-trials-panel"]["children"])
-        assert "boom: divide by zero" in children
-        assert "exception" in children
 
     def test_panel_renders_batch_controls_and_group_checkboxes(self, store_and_service):
         store, service = store_and_service
@@ -2522,8 +2622,8 @@ class TestOriginFromHref:
         assert origin_from_href("/dashboard/project/lab") == "http://localhost:8000"
 
 
-class TestMountedTrayAndPythonCallbacks:
-    """The registered shell/analysis callbacks, driven through Dash's
+class TestMountedTrayCallbacks:
+    """The registered shell callbacks, driven through Dash's
     dispatch endpoint exactly as the browser would."""
 
     _TRAY_OUTPUTS = {
@@ -2615,27 +2715,194 @@ class TestMountedTrayAndPythonCallbacks:
         )
         assert response["selection-tray"]["style"] == {}
 
-    def test_python_tab_snippet_targets_the_browser_origin(self, mutable_client):
-        _store, client = mutable_client
-        response = self._dispatch(
-            client,
-            self._callback_map(client),
-            {"analysis-python.children"},
-            [
-                {
-                    "id": "view-store",
-                    "property": "data",
-                    "value": {"scope": {"sweeps": [str(SWEEP_A)], "trials": []}},
-                },
-                {"id": "analysis-tabs", "property": "value", "value": "python"},
-                {
-                    "id": "url",
-                    "property": "href",
-                    "value": "http://track.internal:9000/dashboard/project/ops",
-                },
-            ],
-            state=[{"id": "project-store", "property": "data", "value": "ops"}],
+
+class TestSortableTableInfrastructure:
+    """One shared helper gives every grid typed sort keys (numeric, ns,
+    string), missing values last in either direction, and one order
+    over the whole row set regardless of pagination."""
+
+    def test_typed_sort_key_kinds(self):
+        assert typed_sort_key(3, "numeric") < typed_sort_key(10, "numeric")
+        assert typed_sort_key(2.5, "ns") < typed_sort_key(7, "ns")
+        assert typed_sort_key("alpha", "string") < typed_sort_key("beta", "string")
+        assert typed_sort_key("Beta", "string") == typed_sort_key("beta", "string")
+        assert typed_sort_key(10, "numeric") > typed_sort_key(9, "numeric")
+
+    def test_typed_sort_key_missing_values_rank_last(self):
+        present = typed_sort_key("x", "string")
+        for missing in (None, "", MISSING):
+            assert typed_sort_key(missing, "string") > present
+            assert typed_sort_key(missing, "numeric") > typed_sort_key(-1e9, "numeric")
+
+    def test_sort_rows_orders_the_whole_row_set_with_empties_last(self):
+        columns = [SortColumn("value", "Value", "numeric")]
+        rows = [
+            {"id": n, "value": v}
+            for n, (v,) in enumerate([(10,), (2,), (None,), (1,), ("—",), ("",), (33,)])
+        ]
+        ordered = sort_rows(rows, columns, [{"colId": "value", "sort": "asc"}])
+        assert [row["value"] for row in ordered] == [1, 2, 10, 33, None, "—", ""]
+        ordered = sort_rows(rows, columns, [{"colId": "value", "sort": "desc"}])
+        assert [row["value"] for row in ordered] == [33, 10, 2, 1, None, "—", ""]
+
+    def test_sort_rows_compares_ns_stamps_numerically(self):
+        columns = [SortColumn("at_ns", "Last activity", "ns")]
+        rows = [{"at_ns": ns} for ns in (300, 1_000_000_000, 5, None)]
+        ordered = sort_rows(rows, columns, [{"colId": "at_ns", "sort": "desc"}])
+        assert [row["at_ns"] for row in ordered] == [
+            1_000_000_000,
+            300,
+            5,
+            None,
+        ]
+
+    def test_sort_rows_sorts_text_as_text(self):
+        columns = [SortColumn("name", "Sweep", "string")]
+        rows = [{"name": name} for name in ("alpha10", "alpha2", "beta", None)]
+        ordered = sort_rows(rows, columns, [{"colId": "name", "sort": "asc"}])
+        assert [row["name"] for row in ordered] == ["alpha10", "alpha2", "beta", None]
+
+    def test_sort_rows_ignores_unknown_or_directionless_entries(self):
+        columns = [SortColumn("value", "Value", "numeric")]
+        rows = [{"value": 2}, {"value": 1}]
+        assert sort_rows(rows, columns, [{"colId": "ghost", "sort": "asc"}]) == rows
+        assert sort_rows(rows, columns, [{"colId": "value", "sort": None}]) == rows
+        assert sort_rows(rows, columns, None) == rows
+
+    def test_sortable_columns_carry_typed_comparators_and_stored_sort(self):
+        columns = [
+            SortColumn("name", "Sweep", "string"),
+            SortColumn(
+                "last_activity_ns",
+                "Last activity",
+                "ns",
+                definition={"valueFormatter": {"function": "renderRelative(x)"}},
+            ),
+        ]
+        defs = sortable_columns(
+            columns, [{"colId": "last_activity_ns", "sort": "desc"}]
         )
-        rendered = str(response)
-        assert 'TrackingClient("http://track.internal:9000")' in rendered
-        assert "localhost:8000" not in rendered
+        assert defs[0]["comparator"] == {
+            "function": "renderTypedSort('string', 'name')"
+        }
+        assert defs[1]["comparator"] == {
+            "function": "renderTypedSort('ns', 'last_activity_ns')"
+        }
+        assert defs[1]["sort"] == "desc"
+        assert "sort" not in defs[0]
+        assert defs[1]["valueFormatter"] == {"function": "renderRelative(x)"}
+
+    def test_overview_grid_uses_the_shared_helper(self, service):
+        overview = overview_tab(service, "ops", {"sweeps": []})
+        grid = _grid(overview, "overview-sweep-grid")
+        comparators = {
+            column["field"]: column.get("comparator") for column in grid.columnDefs
+        }
+        assert comparators["name"] == {"function": "renderTypedSort('string', 'name')"}
+        assert comparators["expected_trials"] == {
+            "function": "renderTypedSort('numeric', 'expected_trials')"
+        }
+        assert comparators["last_activity_ns"] == {
+            "function": "renderTypedSort('ns', 'last_activity_ns')"
+        }
+
+
+class TestOverviewControlsWiring:
+    """The tile, seg, and Create Investigation callbacks are wired to
+    the components the overview mounts; the URL helper stays pure."""
+
+    def _callback_map(self, client):
+        from jernerics_server.dashboard.app import build_dash_app
+
+        ctx = client.app.state.dashboard
+        return build_dash_app(ctx).callback_map
+
+    def _key_with_input(self, callback_map, input_id):
+        found = [
+            key
+            for key, spec in callback_map.items()
+            if any(dep["id"] == input_id for dep in spec["inputs"])
+        ]
+        assert found, f"no callback consumes {input_id}"
+        return found
+
+    def test_investigation_new_href_encodes_the_seed(self):
+        pathname, search = investigation_new_href(
+            "ops", [str(SWEEP_B), str(SWEEP_A), str(SWEEP_A)]
+        )
+        assert pathname == f"{ROUTES_BASE}/project/ops/investigation/new"
+        assert search == f"?sweeps={SWEEP_A},{SWEEP_B}"
+
+    def test_create_investigation_callback_navigates_to_the_editor(
+        self, mutable_client
+    ):
+        _store, client = mutable_client
+        callback_map = self._callback_map(client)
+        keys = self._key_with_input(callback_map, "overview-create-investigation")
+        create = next(
+            key
+            for key in keys
+            if {
+                part.split("@")[0]
+                for part in key.removeprefix("..").removesuffix("..").split("...")
+                if part
+            }
+            == {"url.pathname", "url.search"}
+        )
+        inputs = [
+            {"id": "overview-create-investigation", "property": "n_clicks", "value": 1},
+        ]
+        state = [
+            {
+                "id": "overview-sweep-grid",
+                "property": "selectedRows",
+                "value": [{"sweep_id": str(SWEEP_B)}, {"sweep_id": str(SWEEP_A)}],
+            },
+            {"id": "project-store", "property": "data", "value": "ops"},
+        ]
+        response = client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": create,
+                "outputs": [
+                    {"id": "url", "property": "pathname"},
+                    {"id": "url", "property": "search"},
+                ],
+                "inputs": inputs,
+                "state": state,
+                "changedPropIds": ["overview-create-investigation.n_clicks"],
+            },
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()["response"]
+        assert body["url"]["pathname"].endswith("/investigation/new")
+        assert f"sweeps={SWEEP_A},{SWEEP_B}" in body["url"]["search"]
+
+    def test_tile_and_scope_controls_are_wired(self, mutable_client):
+        _store, client = mutable_client
+        callback_map = self._callback_map(client)
+        tile_keys = [
+            key
+            for key, spec in callback_map.items()
+            if any(
+                str(dep["id"]) == '{"overview-tile":["ALL"]}' for dep in spec["inputs"]
+            )
+        ]
+        assert tile_keys
+        assert self._key_with_input(callback_map, "overview-scope-active")
+        assert self._key_with_input(callback_map, "overview-scope-all")
+        assert self._key_with_input(callback_map, "overview-filter-clear")
+
+        def key_outputs(key):
+            stripped = key.removeprefix("..").removesuffix("..")
+            return {part.split("@")[0] for part in stripped.split("...") if part}
+
+        tab_callbacks = [
+            key
+            for key in callback_map
+            if any(dep["id"] == "analysis-tabs" for dep in callback_map[key]["inputs"])
+            and (
+                "workspace-investigations.children" in key_outputs(key)
+                or "workspace-exceptions.children" in key_outputs(key)
+            )
+        ]

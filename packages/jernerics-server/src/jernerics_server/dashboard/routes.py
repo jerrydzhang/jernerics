@@ -2,11 +2,13 @@
 
 Deep links: ``/dashboard`` (project catalog), ``/dashboard/project/<name>``
 (the persistent workspace; its query string carries the selection token and
-the view document), and ``/dashboard/artifact-view/<hex>`` (the viewer;
-``/dashboard/artifact/<hex>`` is the raw download alias served by the HTTP
-layer, not a page). Unknown paths render the not-found surface. ``polls``
-on a PageSpec is only the route-level default; live pages decide from
-fetched facts (see callbacks.page_content).
+the view document), ``/dashboard/project/<name>/investigation/new`` and
+``.../investigation/<id>[/edit]`` (the investigation editor; ``<id>``
+alone is the investigation workspace), and ``/dashboard/artifact-view/<hex>``
+(the viewer; ``/dashboard/artifact/<hex>`` is the raw download alias
+served by the HTTP layer, not a page). Unknown paths render the
+not-found surface. ``polls`` on a PageSpec is only the route-level
+default; live pages decide from fetched facts (see callbacks.page_content).
 """
 
 from dataclasses import dataclass
@@ -17,20 +19,26 @@ ROUTES_BASE = "/dashboard"
 PageKind = Literal[
     "project",
     "workspace",
+    "investigation",
+    "investigation-edit",
     "artifact",
     "not-found",
 ]
 
 _PROJECT_PREFIX = f"{ROUTES_BASE}/project/"
 _ARTIFACT_VIEW_PREFIX = f"{ROUTES_BASE}/artifact-view/"
+_INVESTIGATION_SEGMENT = "investigation"
 
 
 @dataclass(frozen=True)
 class PageSpec:
-    """Which page a URL denotes, plus the object it is focused on."""
+    """Which page a URL denotes, plus the object it is focused on.
+    Investigation pages carry the project in ``object_id`` and the
+    investigation id in ``sub_id`` (``None`` for the create flow)."""
 
     kind: PageKind
     object_id: str | None = None
+    sub_id: str | None = None
     polls: bool = False
 
 
@@ -40,11 +48,33 @@ def parse_route(pathname: str | None) -> PageSpec:
     if path in (ROUTES_BASE, f"{ROUTES_BASE}/"):
         return PageSpec(kind="project")
     if path.startswith(_PROJECT_PREFIX):
-        project = path[len(_PROJECT_PREFIX) :].strip("/")
-        if project:
-            return PageSpec(kind="workspace", object_id=project)
+        segments = [part for part in path[len(_PROJECT_PREFIX) :].split("/") if part]
+        spec = _parse_project_segments(segments)
+        if spec is not None:
+            return spec
     if path.startswith(_ARTIFACT_VIEW_PREFIX):
         artifact_id = path[len(_ARTIFACT_VIEW_PREFIX) :].strip("/")
         if artifact_id:
             return PageSpec(kind="artifact", object_id=artifact_id)
     return PageSpec(kind="not-found")
+
+
+def _parse_project_segments(segments: list[str]) -> PageSpec | None:
+    """The page under ``/project/<name>/...``, or ``None`` when the
+    path shape is unknown (the caller renders not-found)."""
+    if not segments:
+        return None
+    project = segments[0]
+    if len(segments) == 1:
+        return PageSpec(kind="workspace", object_id=project)
+    if segments[1] != _INVESTIGATION_SEGMENT:
+        return None
+    if len(segments) == 3 and segments[2] == "new":
+        return PageSpec(kind="investigation-edit", object_id=project)
+    if len(segments) == 4 and segments[3] == "edit":
+        return PageSpec(
+            kind="investigation-edit", object_id=project, sub_id=segments[2]
+        )
+    if len(segments) == 3:
+        return PageSpec(kind="investigation", object_id=project, sub_id=segments[2])
+    return None

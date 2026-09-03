@@ -50,8 +50,8 @@ def _control_edit(doc: dict, edited: set[str], **values) -> dict:
 class TestEditedViewFunnel:
     def test_changes_apply_and_focus_survives(self):
         doc = _focused()
-        edited = edited_view(doc, {"active": "series"})
-        assert edited["active"] == "series"
+        edited = edited_view(doc, {"active": "investigations"})
+        assert edited["active"] == "investigations"
         assert edited["focus"] == doc["focus"]
 
     def test_change_that_names_focus_overrides_it(self):
@@ -59,16 +59,16 @@ class TestEditedViewFunnel:
         assert edited_view(doc, {"focus": None})["focus"] is None
 
     def test_absent_current_starts_from_defaults(self):
-        assert edited_view(None, {"active": "series"}) == dict(
-            default_view_state(), active="series"
+        assert edited_view(None, {"active": "investigations"}) == dict(
+            default_view_state(), active="investigations"
         )
 
 
 class TestFocusSurvivesViewEdits:
     def test_tab_switch_keeps_focus(self):
         doc = _focused()
-        switched = _control_edit(doc, {"active"}, active="series")
-        assert switched["active"] == "series"
+        switched = _control_edit(doc, {"active"}, active="investigations")
+        assert switched["active"] == "investigations"
         assert switched["focus"] == doc["focus"]
 
     def test_series_control_edits_keep_focus(self):
@@ -168,7 +168,7 @@ class TestHydrationKeepsFocus:
 
     def test_no_view_param_resets_controls_but_keeps_focus(self):
         doc = _control_edit(
-            _focused(), {"keys", "active"}, keys=["loss"], active="series"
+            _focused(), {"keys", "active"}, keys=["loss"], active="investigations"
         )
         hydrated, error = hydrate_view(WORKSPACE, "?sel=tok", doc)
         assert error is None
@@ -182,12 +182,12 @@ class TestHydrationKeepsFocus:
 
     def test_view_param_without_focus_keeps_current_focus(self):
         doc = _focused()
-        shared = dict(default_view_state(), active="points")
+        shared = dict(default_view_state(), active="exceptions")
         search = f"?view={encode_view_state(shared)}"
         hydrated, error = hydrate_view(WORKSPACE, search, doc)
         assert error is None
         assert hydrated is not None
-        assert hydrated["active"] == "points"
+        assert hydrated["active"] == "exceptions"
         assert hydrated["focus"] == doc["focus"]
 
     def test_view_param_with_explicit_focus_wins(self):

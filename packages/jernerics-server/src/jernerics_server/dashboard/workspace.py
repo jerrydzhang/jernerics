@@ -10,11 +10,15 @@ from jernerics_schema import ExecutionRecord
 
 from . import analysis, artifacts, components
 from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
+from .render import SortColumn, sort_rows, sortable_columns
+from .routes import ROUTES_BASE
 from .service import (
+    CurationUnavailableError,
     DashboardService,
     ExecutionDetail,
     FailedExecutionRow,
     FamilyRow,
+    InvestigationRow,
     SweepDetail,
     SweepSummary,
     TrialDetail,
@@ -27,7 +31,18 @@ _INCOMPLETE_TRIAL_STATES = ("waiting", "running")
 
 
 _FAILED_VIEW_LIMIT = 200
+_OVERVIEW_PAGE_SIZE = 25
 _MONITORING_ORDER = ("active", "quiet", "stale", "failed", "succeeded", UNKNOWN)
+_STATE_TILE_LABELS = {
+    "completed": "completed sweeps",
+    "failed": "failed sweeps",
+    "no-data": "sweeps with no trials yet",
+    "running": "running sweeps",
+}
+_FILTER_CHIP_LABELS = {
+    "failed": "with failed executions",
+    "stale": "interrupted",
+}
 
 _GRID_DEFAULTS: dict[str, Any] = {
     "sortable": True,
@@ -1018,19 +1033,29 @@ def _badge_cell(field: str) -> dict[str, Any]:
     }
 
 
-_OVERVIEW_SWEEP_COLUMNS: list[dict[str, Any]] = [
-    {"headerName": "Sweep", "field": "name"},
-    {"headerName": "State", **_badge_cell("state")},
-    {"headerName": "Health", **_badge_cell("health")},
-    {
-        "headerName": "Monitoring",
-        "field": "monitoring",
-        **components.clamped_column(),
-        "maxWidth": 320,
-    },
-    {"headerName": "Curation", "field": "curation"},
-    {"headerName": "Expected trials", "field": "expected_trials"},
-    {"headerName": "Last activity", "field": "last_activity"},
+_OVERVIEW_SWEEP_COLUMNS: list[SortColumn] = [
+    SortColumn("name", "Sweep", "string"),
+    SortColumn("state", "State", "string", definition=_badge_cell("state")),
+    SortColumn("health", "Health", "string", definition=_badge_cell("health")),
+    SortColumn(
+        "monitoring",
+        "Monitoring",
+        "string",
+        definition={**components.clamped_column(), "maxWidth": 320},
+    ),
+    SortColumn("curation", "Curation", "string"),
+    SortColumn(
+        "expected_trials",
+        "Expected trials",
+        "numeric",
+        definition={"valueFormatter": {"function": "renderMissing(x)"}},
+    ),
+    SortColumn(
+        "last_activity_ns",
+        "Last activity",
+        "ns",
+        definition={"valueFormatter": {"function": "renderRelative(x)"}},
+    ),
 ]
 
 
@@ -1044,12 +1069,9 @@ def _monitoring_summary(summary: SweepSummary) -> str:
     return " · ".join(parts) if parts else MISSING
 
 
-def overview_sweep_rows(
-    scoped: Sequence[SweepSummary], now_ns: int | None = None
-) -> list[dict[str, Any]]:
-    """One overview-grid row per scoped sweep; deep detail stays in the
-    inspector behind a row click."""
-    now = time.time_ns() if now_ns is None else now_ns
+def overview_sweep_rows(scoped: Sequence[SweepSummary]) -> list[dict[str, Any]]:
+    """One overview-grid row per scoped sweep; stamps and counts stay
+    raw so the columns sort typed, and the grid formats at view time."""
     return [
         {
             "sweep_id": summary.sweep_id,
@@ -1058,96 +1080,183 @@ def overview_sweep_rows(
             "health": summary.health,
             "monitoring": _monitoring_summary(summary),
             "curation": sweep_curation(summary),
-            "expected_trials": (
-                MISSING if summary.expected_trials is None else summary.expected_trials
-            ),
-            "last_activity": (
-                MISSING
-                if summary.latest_submitted_ns is None
-                else components.relative_time(summary.latest_submitted_ns, now)
-            ),
+            "expected_trials": summary.expected_trials,
+            "last_activity_ns": summary.latest_submitted_ns,
         }
         for summary in scoped
     ]
 
 
-def overview_rollup(scoped: Sequence[SweepSummary], now_ns: int) -> html.Section:
-    """Aggregate operational facts for the scoped sweeps: counts by
-    state and health, execution monitoring totals, in-flight
-    executions, and the most recent activity."""
+def _counted_sweeps(count: int) -> str:
+    """``count`` with the noun form that matches it."""
+    return f"{count} sweep" if count == 1 else f"{count} sweeps"
+
+
+def overview_tiles(scoped: Sequence[SweepSummary]) -> list[dict[str, Any]]:
+    """Operational tiles for the scope: execution health first, then one
+    per observed sweep state. Only nonzero facts render a tile, and
+    every tile filters the sweep table — one uniform affordance."""
+    tiles: list[dict[str, Any]] = []
+    failing = [summary for summary in scoped if summary.failed]
+    if failing:
+        tiles.append(
+            {
+                "value": "failed",
+                "kind": "crit",
+                "count": sum(summary.failed for summary in failing),
+                "label": f"failed executions · {_counted_sweeps(len(failing))}",
+            }
+        )
+    interrupted = [summary for summary in scoped if summary.stale]
+    if interrupted:
+        tiles.append(
+            {
+                "value": "stale",
+                "kind": "warn",
+                "count": sum(summary.stale for summary in interrupted),
+                "label": (
+                    f"interrupted executions · {_counted_sweeps(len(interrupted))}"
+                ),
+            }
+        )
     states = Counter(summary.state for summary in scoped)
-    healths = Counter(summary.health for summary in scoped)
-    monitoring = {
-        label: sum(getattr(summary, label) for summary in scoped)
-        for label in _MONITORING_ORDER
-    }
-    in_flight = sum(max(0, summary.started - summary.terminal) for summary in scoped)
+    for state, count in sorted(states.items()):
+        tiles.append(
+            {
+                "value": f"state:{state}",
+                "kind": None,
+                "count": count,
+                "label": _STATE_TILE_LABELS.get(
+                    state, f"{state} {_counted_sweeps(count)}"
+                ),
+            }
+        )
+    return tiles
+
+
+def overview_tile_buttons(
+    tiles: list[dict[str, Any]], overview_filter: str | None
+) -> list[html.Button]:
+    """The tile row; the active filter's tile carries the ``on`` mark,
+    and clicking it again clears (as does the chip and the seg)."""
+    buttons = []
+    for tile in tiles:
+        classes = "tile"
+        if tile["kind"]:
+            classes += f" {tile['kind']}"
+        if tile["value"] == overview_filter:
+            classes += " on"
+        buttons.append(
+            html.Button(
+                [
+                    html.Div(str(tile["count"]), className="num"),
+                    html.Div(tile["label"], className="lbl"),
+                ],
+                id={"overview-tile": tile["value"]},
+                className=classes,
+            )
+        )
+    return buttons
+
+
+def overview_filter_matches(summary: SweepSummary, overview_filter: str | None) -> bool:
+    """Whether one sweep passes the active tile filter; everything
+    passes when no tile is active."""
+    if not overview_filter:
+        return True
+    if overview_filter == "failed":
+        return bool(summary.failed)
+    if overview_filter == "stale":
+        return bool(summary.stale)
+    if overview_filter.startswith("state:"):
+        return summary.state == overview_filter.removeprefix("state:")
+    return True
+
+
+def overview_filter_chip(filtered_count: int, overview_filter: str) -> html.Div:
+    """The visible active-filter chip; its × is the way back."""
+    label = _FILTER_CHIP_LABELS.get(
+        overview_filter, f"in state {overview_filter.removeprefix('state:')}"
+    )
+    return html.Div(
+        html.Span(
+            [
+                f"{_counted_sweeps(filtered_count)} {label} ",
+                html.Button(
+                    "\u00d7", id="overview-filter-clear", title="Clear the filter"
+                ),
+            ],
+            className="chip",
+        ),
+        className="chip-row",
+    )
+
+
+def overview_scope_control(active_count: int, all_count: int, on_all: bool) -> html.Div:
+    """The Active/All seg control over the include flags: Active is the
+    default discovery scope, All is the project's exhaustive list."""
+    return html.Div(
+        [
+            html.Button(
+                f"Active ({active_count})",
+                id="overview-scope-active",
+                className="on" if not on_all else "",
+            ),
+            html.Button(
+                f"All ({all_count})",
+                id="overview-scope-all",
+                className="on" if on_all else "",
+            ),
+        ],
+        className="seg",
+    )
+
+
+def overview_actions_bar() -> html.Div:
+    """The row-selection action bar; a selection enables Create
+    Investigation with the picked sweeps as editor seeds."""
+    return html.Div(
+        [
+            html.Span("", id="overview-selection-count"),
+            html.Button(
+                "Create Investigation",
+                id="overview-create-investigation",
+                disabled=True,
+                className="btn-primary",
+            ),
+            html.Button("Clear", id="overview-clear-selection"),
+        ],
+        id="overview-bulkbar",
+        className="bulkbar",
+        style={"display": "none"},
+    )
+
+
+def overview_subline(
+    summaries: Sequence[SweepSummary], active_count: int, on_all: bool, now_ns: int
+) -> html.P:
+    """The one-line scope fact: which list is shown, what it hides, and
+    the scope's most recent activity."""
     activity = max(
         (
             summary.latest_submitted_ns
-            for summary in scoped
+            for summary in summaries
             if summary.latest_submitted_ns is not None
         ),
         default=None,
     )
-    return html.Section(
-        [
-            html.H3("Scope roll-up"),
-            html.P(
-                [
-                    html.Span(f"sweeps {len(scoped)}"),
-                    *(
-                        Badge(f"{state} {count}", kind=state)
-                        for state, count in sorted(states.items())
-                    ),
-                ],
-                className="fact-row",
-            ),
-            html.P(
-                [
-                    Badge(f"health {label} {count}", kind=label)
-                    for label, count in sorted(healths.items())
-                ],
-                className="fact-row",
-            ),
-            html.P(
-                [
-                    *_rollup_monitoring(monitoring),
-                    html.Span(f"in-flight executions {in_flight}"),
-                    html.Span(
-                        "last activity "
-                        + (
-                            UNKNOWN
-                            if activity is None
-                            else components.relative_time(activity, now_ns)
-                        )
-                    ),
-                ],
-                className="fact-row",
-            ),
-        ],
-        className="section overview-rollup",
+    hidden = len(summaries) - active_count
+    if on_all:
+        scope = f"All sweeps — {len(summaries)}"
+    elif hidden:
+        scope = f"Active sweeps — hides {hidden} archived/invalid"
+    else:
+        scope = "Active sweeps"
+    return html.P(
+        f"{scope} · last activity "
+        + (UNKNOWN if activity is None else components.relative_time(activity, now_ns)),
+        className="overview-sub",
     )
-
-
-def _rollup_monitoring(counts: dict[str, int]) -> list[Any]:
-    """Roll-up monitoring pills; the failed pill opens the failure view."""
-    badges: list[Any] = []
-    for label in _MONITORING_ORDER:
-        count = counts.get(label)
-        if not count:
-            continue
-        if label == "failed":
-            badges.append(
-                html.Button(
-                    Badge(f"failed {count}", kind=label),
-                    id="failed-view-open",
-                    title="Show the scope's failed executions",
-                )
-            )
-        else:
-            badges.append(Badge(f"{label} {count}", kind=label))
-    return badges or [html.Span("quiet", className="quiet-note")]
 
 
 def scoped_sweeps(
@@ -1176,9 +1285,11 @@ def scoped_sweeps(
     ]
 
 
-def failed_view_section() -> html.Details:
-    """The collapsed failure view under the roll-up; the failed badge
-    opens it and a callback fills the panel on demand."""
+def failed_view_section(
+    panel: list[Any] | None = None, *, open: bool = False
+) -> html.Details:
+    """The failure-triage view; the Exceptions tab mounts it open with
+    its panel already filled, and a curation action re-renders it."""
     return html.Details(
         [
             html.Summary("Failed executions"),
@@ -1188,9 +1299,10 @@ def failed_view_section() -> html.Details:
                 placeholder="Reason (required for Mark invalid)",
                 className="reason-input",
             ),
-            html.Div(id="failed-trials-panel"),
+            html.Div(panel or [], id="failed-trials-panel"),
         ],
         id="failed-trials-view",
+        open=open,
     )
 
 
@@ -1287,12 +1399,18 @@ def failed_view_panel(
 
 
 def overview_tab(
-    service: DashboardService, project: str | None, tray: dict[str, Any] | None
+    service: DashboardService,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    *,
+    overview_filter: str | None = None,
+    sort: list | None = None,
 ) -> html.Div:
-    """Bounded operational summary for the scope: an aggregate roll-up
-    plus one virtualized grid row per sweep. Per-sweep depth lives in
-    the inspector; an empty scope means the whole project, curated by
-    the Browse include toggles (jernerics-mqw)."""
+    """The operational overview: every tile is a working filter over the
+    paginated sweep table, the Active/All control carries the project's
+    exhaustive list, and a row click inspects the sweep. Per-sweep depth
+    lives in the inspector; the include flags curate discovery
+    (jernerics-mqw, jernerics-g5rw.7)."""
     if not project:
         return html.Div(
             components.Empty("Pick a project in the header to browse its sweeps.")
@@ -1315,32 +1433,280 @@ def overview_tab(
             )
         )
     now = time.time_ns()
+    on_all = bool(
+        (tray or {}).get("include_archived") or (tray or {}).get("include_invalid")
+    )
+    active_count = len(scoped_sweeps(summaries, {}))
+    filtered = [
+        summary
+        for summary in scoped
+        if overview_filter_matches(summary, overview_filter)
+    ]
+    rows = sort_rows(overview_sweep_rows(filtered), _OVERVIEW_SWEEP_COLUMNS, sort)
     return html.Div(
         [
-            overview_rollup(scoped, now),
-            *([failed_view_section()] if any(s.failed for s in scoped) else []),
+            overview_subline(summaries, active_count, on_all, now),
+            html.Div(
+                overview_tile_buttons(overview_tiles(scoped), overview_filter),
+                className="tiles",
+            ),
+            overview_scope_control(active_count, len(summaries), on_all),
+            *(
+                [overview_filter_chip(len(filtered), overview_filter)]
+                if overview_filter
+                else []
+            ),
+            overview_actions_bar(),
             html.Section(
                 [
-                    html.H3("Sweeps in scope"),
+                    html.H3("Sweeps"),
                     AgGrid(
                         id="overview-sweep-grid",
-                        rowData=overview_sweep_rows(scoped, now),
-                        columnDefs=_OVERVIEW_SWEEP_COLUMNS,
+                        rowData=rows,
+                        columnDefs=sortable_columns(_OVERVIEW_SWEEP_COLUMNS, sort),
                         defaultColDef=_GRID_DEFAULTS,
-                        dashGridOptions=components.grid_options(),
+                        dashGridOptions=components.grid_options(
+                            pagination=True,
+                            paginationPageSize=_OVERVIEW_PAGE_SIZE,
+                            rowSelection={
+                                "mode": "multiRow",
+                                "checkboxes": True,
+                                "headerCheckboxSelection": True,
+                                "enableClickSelection": False,
+                            },
+                        ),
                         getRowId=_SWEEP_ROW_ID,
                         className="ag-theme-alpine grid",
                     ),
                     html.P(
-                        "A row click inspects that sweep in the inspector; the "
-                        "grid virtualizes, so any scope size renders as one "
-                        "bounded region.",
+                        "Checkboxes pick sweeps for Create Investigation; a row "
+                        "click inspects that sweep in the inspector. Tiles filter "
+                        "the table; Active/All chooses between current sweeps and "
+                        "every sweep of the project.",
                         className="hint",
                     ),
                 ],
                 className="section overview-sweeps",
             ),
         ]
+    )
+
+
+def investigation_coverage_text(row: InvestigationRow) -> str:
+    """The one-line coverage summary: with outcome / incomplete / invalid."""
+    incomplete = row.member_count - row.completed
+    return (
+        f"{row.with_outcome} with outcome · {incomplete} incomplete · "
+        f"{row.invalid} invalid"
+    )
+
+
+def _investigation_index_rows(
+    project: str, rows: Sequence[InvestigationRow]
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "investigation_id": row.investigation_id,
+            "name": row.name,
+            "link_href": (
+                f"{ROUTES_BASE}/project/{project}/investigation/" + row.investigation_id
+            ),
+            "link_label": row.name,
+            "factor": row.factor,
+            "outcome": row.outcome,
+            "member_count": row.member_count,
+            "coverage": investigation_coverage_text(row),
+            "last_activity_ns": row.last_activity_ns,
+            "edit_members": "",
+            "edit_href": (
+                f"{ROUTES_BASE}/project/{project}/investigation/"
+                + row.investigation_id
+                + "/edit"
+            ),
+        }
+        for row in rows
+    ]
+
+
+_INVESTIGATION_COLUMNS: list[SortColumn] = [
+    SortColumn(
+        "name",
+        "Investigation",
+        "string",
+        definition={"cellRenderer": {"function": "renderLinkCell(data)"}},
+    ),
+    SortColumn("factor", "Factor", "string"),
+    SortColumn("outcome", "Outcome", "string"),
+    SortColumn("member_count", "Members", "numeric"),
+    SortColumn("coverage", "Coverage", "string"),
+    SortColumn(
+        "last_activity_ns",
+        "Last activity",
+        "ns",
+        definition={"valueFormatter": {"function": "renderRelative(x)"}},
+    ),
+    SortColumn(
+        "edit_members",
+        "",
+        "string",
+        definition={
+            "sortable": False,
+            "cellRenderer": {"function": "renderEditCell(data)"},
+        },
+    ),
+]
+
+
+_UNORGANIZED_COLUMNS: list[SortColumn] = [
+    SortColumn(
+        "name",
+        "Sweep",
+        "string",
+        definition={"cellRenderer": {"function": "renderLinkCell(data)"}},
+    ),
+    SortColumn("state", "State", "string"),
+    SortColumn(
+        "expected_trials",
+        "Expected trials",
+        "numeric",
+        definition={"valueFormatter": {"function": "renderMissing(x)"}},
+    ),
+    SortColumn(
+        "last_activity_ns",
+        "Last activity",
+        "ns",
+        definition={"valueFormatter": {"function": "renderRelative(x)"}},
+    ),
+]
+
+
+def investigations_tab(service: DashboardService, project: str | None) -> html.Div:
+    """The Investigations index: one row per investigation with its real
+    coverage facts, the project-scope Unorganized list, and the New
+    Investigation action into the (task .8) member editor."""
+    if not project:
+        return html.Div(
+            components.Empty(
+                "Pick a project in the header to browse its investigations."
+            )
+        )
+    try:
+        index_rows = service.investigations_index(project)
+        unorganized = service.unorganized(project)
+    except CurationUnavailableError as error:
+        return html.Div(components.Empty(str(error)))
+    unorganized_rows = sort_rows(
+        [
+            {
+                "sweep_id": summary.sweep_id,
+                "name": summary.name,
+                "link_href": analysis.workspace_focus_href(
+                    project, "sweep", summary.sweep_id
+                ),
+                "link_label": summary.name,
+                "state": summary.state,
+                "expected_trials": summary.expected_trials,
+                "last_activity_ns": summary.latest_submitted_ns,
+            }
+            for summary in unorganized
+        ],
+        _UNORGANIZED_COLUMNS,
+        None,
+    )
+    return html.Div(
+        [
+            html.Div(
+                html.A(
+                    "New Investigation",
+                    href=f"{ROUTES_BASE}/project/{project}/investigation/new",
+                    className="btn btn-primary",
+                ),
+                className="actions",
+            ),
+            html.Section(
+                (
+                    [
+                        AgGrid(
+                            id="investigations-grid",
+                            rowData=_investigation_index_rows(project, index_rows),
+                            columnDefs=sortable_columns(_INVESTIGATION_COLUMNS),
+                            defaultColDef=_GRID_DEFAULTS,
+                            dashGridOptions=components.grid_options(),
+                            getRowId="params.data.investigation_id",
+                            className="ag-theme-alpine grid",
+                        )
+                    ]
+                    if index_rows
+                    else [
+                        components.Empty(
+                            "No investigations yet — pick sweeps in Overview and "
+                            "use Create Investigation, or start a new one."
+                        )
+                    ]
+                ),
+                className="section investigations-index",
+            ),
+            html.Section(
+                [
+                    html.H3("Unorganized"),
+                    html.P(
+                        f"{_counted_sweeps(len(unorganized))} not in any Investigation",
+                        className="overview-sub",
+                    ),
+                    *(
+                        [
+                            html.Details(
+                                [
+                                    html.Summary("Show list"),
+                                    AgGrid(
+                                        id="unorganized-grid",
+                                        rowData=unorganized_rows,
+                                        columnDefs=sortable_columns(
+                                            _UNORGANIZED_COLUMNS
+                                        ),
+                                        defaultColDef=_GRID_DEFAULTS,
+                                        dashGridOptions=components.grid_options(),
+                                        getRowId=_SWEEP_ROW_ID,
+                                        className="ag-theme-alpine grid",
+                                    ),
+                                ],
+                                className="failgroup",
+                            )
+                        ]
+                        if unorganized
+                        else []
+                    ),
+                ],
+                className="section investigations-unorganized",
+            ),
+        ],
+    )
+
+
+def exceptions_tab(
+    service: DashboardService,
+    project: str | None,
+    tray: dict[str, Any] | None,
+    now_ns: int,
+) -> html.Div:
+    """Project-scoped failure triage: the failure view, mounted open
+    with its panel already filled (the Overview tiles filter instead of
+    opening it)."""
+    if not project:
+        return html.Div(
+            components.Empty("Pick a project in the header to browse its exceptions.")
+        )
+    scoped = scoped_sweeps(service.sweep_overview(project), tray)
+    if not any(summary.failed for summary in scoped):
+        return html.Div(
+            components.Empty(f"No failed executions in project {project}."),
+            className="section exceptions-view",
+        )
+    return html.Div(
+        failed_view_section(
+            failed_view_panel(service, project, scoped, now_ns), open=True
+        ),
+        className="section exceptions-view",
     )
 
 
@@ -1573,29 +1939,21 @@ def workspace_page(
                                 value="overview",
                                 children=[
                                     dcc.Tab(label="Overview", value="overview"),
-                                    dcc.Tab(label="Catalog", value="catalog"),
-                                    dcc.Tab(label="Series", value="series"),
-                                    dcc.Tab(label="Points", value="points"),
-                                    dcc.Tab(label="Optuna", value="optuna"),
-                                    dcc.Tab(label="Python", value="python"),
+                                    dcc.Tab(
+                                        label="Investigations", value="investigations"
+                                    ),
+                                    dcc.Tab(label="Exceptions", value="exceptions"),
                                 ],
                             ),
                             html.Div(
                                 id="workspace-overview", style={"display": "block"}
                             ),
-                            html.Div(id="analysis-catalog", style={"display": "none"}),
                             html.Div(
-                                _series_tab().children,
-                                id="analysis-series-tab",
-                                style={"display": "none"},
+                                id="workspace-investigations", style={"display": "none"}
                             ),
-                            html.Div(id="analysis-points", style={"display": "none"}),
                             html.Div(
-                                _optuna_tab().children,
-                                id="analysis-optuna-tab",
-                                style={"display": "none"},
+                                id="workspace-exceptions", style={"display": "none"}
                             ),
-                            html.Div(id="analysis-python", style={"display": "none"}),
                         ],
                         className="workspace-canvas",
                     ),

@@ -43,7 +43,6 @@ from jernerics.tracking.batch_sync import ship_events_file
 from jernerics_schema import Selection, encode_selection
 from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
-    default_scope_state,
     default_view_state,
     edited_view,
     encode_view_state,
@@ -501,43 +500,11 @@ class TestWorkspaceStateJourney:
             },
         )
 
-    def test_scope_then_series_streams_the_scoped_trials(self, scenario):
-        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
-        doc = edited_view(
-            default_view_state(),
-            {"scope": {**default_scope_state(), "sweeps": [sweep_id]}},
-        )
-        doc["active"] = "series"
-        doc["series"]["keys"] = ["loss"]
-        response = self._post(
-            scenario,
-            {
-                "analysis-series-data.data",
-                "analysis-updated.children",
-                "analysis-refresh-store.data",
-            },
-            [
-                {"id": "view-store", "property": "data", "value": doc},
-                {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
-                {"id": "poll", "property": "n_intervals", "value": 1},
-                {"id": "analysis-tabs", "property": "value", "value": "series"},
-            ],
-            state=[
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "analysis-series-data", "property": "data", "value": None},
-            ],
-            changed=["analysis-tabs.value"],
-        )
-        assert response.status_code == 200
-        snapshot = response.json()["response"]["analysis-series-data"]["data"]
-        assert snapshot["fingerprint"]
-        assert "loss" in snapshot["per_key"]
-
     def test_shared_workspace_url_restores_scope_view_and_focus(self, scenario):
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
         trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
         doc = with_focus(
-            edited_view(default_view_state(), {"active": "series"}),
+            edited_view(default_view_state(), {"active": "overview"}),
             {"kind": "trial", "id": trial_id},
         )
         doc["scope"]["sweeps"] = [sweep_id]
@@ -560,7 +527,7 @@ class TestWorkspaceStateJourney:
         assert response.status_code == 200
         restored = response.json()["response"]
         assert restored["view-store"]["data"]["scope"]["sweeps"] == [sweep_id]
-        assert restored["view-store"]["data"]["active"] == "series"
+        assert restored["view-store"]["data"]["active"] == "overview"
         assert restored["view-store"]["data"]["focus"] == {
             "kind": "trial",
             "id": trial_id,

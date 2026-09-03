@@ -67,7 +67,7 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "resizable": True,
     "minWidth": 100,
 }
-_ANALYSIS_VIEWS = ("overview", "catalog", "series", "points", "optuna", "python")
+_ANALYSIS_VIEWS = ("overview", "investigations", "exceptions")
 _SERIES_MODES = ("stacked", "overlay")
 _TRIAL_DISPLAYS = ("all", "highlighted", "median_iqr")
 _AXIS_SCALES = ("linear", "log")
@@ -96,6 +96,7 @@ def default_view_state() -> dict[str, Any]:
         "v": VIEW_VERSION,
         "active": "overview",
         "auto_refresh": False,
+        "overview_filter": None,
         "scope": default_scope_state(),
         "focus": None,
         "highlighted_trials": [],
@@ -295,6 +296,7 @@ def decode_view_state(raw: str) -> dict[str, Any]:
     auto_refresh = payload.get("auto_refresh", False)
     _require(isinstance(auto_refresh, bool), "auto_refresh must be a boolean")
     doc["auto_refresh"] = auto_refresh
+    doc["overview_filter"] = _overview_filter(payload.get("overview_filter"))
     doc["scope"] = _decode_scope(payload.get("scope", {}))
     optuna = payload.get("optuna", {})
     _require(isinstance(optuna, dict), "optuna must be an object")
@@ -317,6 +319,24 @@ def encode_view_state(doc: dict[str, Any]) -> str:
         if key != "v" and value != defaults.get(key):
             payload[key] = value
     return quote(json.dumps(payload, separators=(",", ":"), sort_keys=True), safe="")
+
+
+def _overview_filter(value: Any) -> str | None:
+    """A validated operational-tile filter: the execution-health keys
+    or a ``state:`` sweep-state key, else ``None``."""
+    if value is None:
+        return None
+    _require(
+        isinstance(value, str) and value != "",
+        "overview_filter must be a non-empty string or null",
+    )
+    if value in ("failed", "stale"):
+        return value
+    _require(
+        value.startswith("state:") and len(value) > len("state:"),
+        f"unsupported overview filter {value!r}",
+    )
+    return value
 
 
 def decode_focus(value: Any) -> dict[str, str] | None:
@@ -784,11 +804,13 @@ def synced_search(
     """The URL search after a navigation or a view edit; ``None`` leaves
     it alone. Navigations may only drop the workspace parameters —
     minting on navigation would let a stale document clobber a freshly
-    opened deep link before hydration lands. View edits mint, and only
-    on the workspace page; the scope rides the document, so no separate
-    ``?sel=`` is minted anymore."""
+    opened deep link before hydration lands, and only the editor page
+    keeps its own query (its ``?sweeps=`` seed). View edits mint, and
+    only on the workspace page; the scope rides the document, so no
+    separate ``?sel=`` is minted anymore."""
     if url_navigated:
-        if current_search and parse_route(pathname).kind != "workspace":
+        kind = parse_route(pathname).kind
+        if current_search and kind not in ("workspace", "investigation-edit"):
             return ""
         return None
     if parse_route(pathname).kind != "workspace":

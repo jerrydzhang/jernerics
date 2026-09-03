@@ -92,7 +92,6 @@ from jernerics_server.dashboard.analysis import (
 from jernerics_server.dashboard.app import build_dash_app
 from jernerics_server.dashboard.auth import DashboardContext
 from jernerics_server.dashboard.callbacks import (
-    overlay_axis_control,
     page_content,
     pattern_trigger,
     tray_from_grid,
@@ -924,7 +923,7 @@ class TestDataCatalog:
 
 def _series_doc(**overrides: Any) -> dict:
     doc = default_view_state()
-    doc["active"] = "series"
+    doc["active"] = "investigations"
     doc["series"].update(overrides)
     return doc
 
@@ -1544,7 +1543,7 @@ class TestViewStateCodec:
 
     def test_round_trip_is_exact_and_url_safe(self):
         doc = default_view_state()
-        doc["active"] = "series"
+        doc["active"] = "investigations"
         doc["series"] = {
             **doc["series"],
             "keys": ["loss", "accuracy", "delta"],
@@ -1632,7 +1631,7 @@ class TestViewStateCodec:
 
     def test_unknown_fields_are_dropped_and_not_re_emitted(self):
         doc = default_view_state()
-        doc["active"] = "points"
+        doc["active"] = "investigations"
         payload = json.dumps(
             {
                 **doc,
@@ -1647,8 +1646,8 @@ class TestViewStateCodec:
         assert decode_view_state(json.dumps({"v": VIEW_VERSION})) == (
             default_view_state()
         )
-        partial = json.dumps({"v": VIEW_VERSION, "active": "optuna"})
-        assert decode_view_state(partial)["active"] == "optuna"
+        partial = json.dumps({"v": VIEW_VERSION, "active": "investigations"})
+        assert decode_view_state(partial)["active"] == "investigations"
         assert decode_view_state(partial)["series"]["keys"] == []
 
     @pytest.mark.parametrize(
@@ -1771,7 +1770,7 @@ class TestViewStateCodec:
     def test_legacy_v1_document_decodes_to_the_same_effective_state(self):
         legacy = {
             "v": 1,
-            "active": "series",
+            "active": "investigations",
             "series": {
                 "keys": ["loss"],
                 "mode": "stacked",
@@ -1793,7 +1792,7 @@ class TestViewStateCodec:
         from_legacy = decode_view_state(json.dumps(legacy))
         diff = {
             "v": VIEW_VERSION,
-            "active": "series",
+            "active": "investigations",
             "scope": {"include_archived": True},
             "series": {"keys": ["loss"]},
         }
@@ -1819,14 +1818,14 @@ class TestViewStateCodec:
 
 class TestViewHydration:
     def test_valid_document_lands_in_the_store(self):
-        doc = dict(default_view_state(), active="series")
+        doc = dict(default_view_state(), active="investigations")
         hydrated, error = hydrate_view(
             "/dashboard/project/lab", f"?view={encode_view_state(doc)}", None
         )
         assert error is None and hydrated == doc
 
     def test_equal_state_is_left_alone(self):
-        doc = dict(default_view_state(), active="series")
+        doc = dict(default_view_state(), active="investigations")
         search = f"?view={encode_view_state(doc)}"
         assert hydrate_view("/dashboard/project/lab", search, doc) == (None, None)
 
@@ -1862,7 +1861,7 @@ class TestViewSync:
     garbage is never silently rewritten away."""
 
     def test_view_edit_mints_the_parameter(self, service):
-        doc = dict(default_view_state(), active="series")
+        doc = dict(default_view_state(), active="investigations")
         target = search_from_state(doc, "")
         assert target is not None and target.startswith("?view=")
         assert decode_view_state(unquote(target.removeprefix("?view="))) == doc
@@ -1871,7 +1870,7 @@ class TestViewSync:
         assert search_from_state(default_view_state(), "") is None
 
     def test_unchanged_state_is_not_rewritten(self, service):
-        doc = dict(default_view_state(), active="series")
+        doc = dict(default_view_state(), active="investigations")
         target = search_from_state(doc, "")
         assert target is not None
         assert search_from_state(doc, target) is None
@@ -1902,7 +1901,7 @@ class TestViewSync:
         doc["auto_refresh"] = True
         edited = view_from_controls(
             doc,
-            active="series",
+            active="investigations",
             keys=["accuracy", "score"],
             mode="overlay",
             reduction="max",
@@ -1912,7 +1911,7 @@ class TestViewSync:
             contour_y="seed",
             edited=self._ALL_FIELDS,
         )
-        assert edited["active"] == "series"
+        assert edited["active"] == "investigations"
         assert edited["series"]["keys"] == ["accuracy", "score"]
         assert edited["series"]["mode"] == "overlay"
         assert edited["series"]["reduction"] == "max"
@@ -1950,7 +1949,7 @@ class TestViewSync:
         )
         overlaid = view_from_controls(
             doc,
-            active="series",
+            active="investigations",
             keys=["loss", "accuracy"],
             mode="overlay",
             reduction=None,
@@ -1964,7 +1963,7 @@ class TestViewSync:
         assert overlaid["series"]["axes"] == doc["series"]["axes"]
         restored = view_from_controls(
             overlaid,
-            active="series",
+            active="investigations",
             keys=["loss", "accuracy"],
             mode="stacked",
             reduction=None,
@@ -1981,7 +1980,7 @@ class TestViewSync:
         """The control-sync write fires the edit callback with every
         input; a dropdown whose options have not loaded reports None and
         must not wipe the hydrated keys."""
-        doc: dict[str, Any] = dict(default_view_state(), active="series")
+        doc: dict[str, Any] = dict(default_view_state(), active="investigations")
         doc["series"] = {
             **doc["series"],
             "keys": ["loss"],
@@ -1990,7 +1989,7 @@ class TestViewSync:
         }
         tab_echo = view_from_controls(
             doc,
-            active="series",
+            active="investigations",
             keys=None,
             mode=None,
             reduction="mean",
@@ -2131,11 +2130,8 @@ class TestScopeBar:
         )
         assert [tab.value for tab in tabs.children] == [
             "overview",
-            "catalog",
-            "series",
-            "points",
-            "optuna",
-            "python",
+            "investigations",
+            "exceptions",
         ]
 
 
@@ -2414,7 +2410,7 @@ class TestColdStartMountedJourney:
     def test_deep_link_settles_view_state_alongside_the_tray(
         self, authed, callback_map
     ):
-        doc: dict[str, Any] = dict(default_view_state(), active="series")
+        doc: dict[str, Any] = dict(default_view_state(), active="investigations")
         doc["series"] = {**doc["series"], "keys": ["loss"], "reduction": "mean"}
         sel = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
         search = f"?sel={sel}&view={encode_view_state(doc)}"
@@ -2435,7 +2431,7 @@ class TestColdStartMountedJourney:
         )
         assert result["view-store"]["data"]["scope"]["sweeps"] == [str(SWEEP_A)]
         assert result["view-store"]["data"]["series"]["keys"] == ["loss"]
-        assert result["view-store"]["data"]["active"] == "series"
+        assert result["view-store"]["data"]["active"] == "investigations"
 
     def test_malformed_view_parameter_defaults_and_errors(self, authed, callback_map):
         sel = encode_selection(Selection(project=PROJECT, sweeps=(SWEEP_A,)))
@@ -2464,71 +2460,23 @@ class TestColdStartMountedJourney:
 
     _SYNC_OUTPUTS = {
         "analysis-tabs.value",
-        "analysis-key.value",
-        "analysis-mode.value",
-        "analysis-reduction.value",
-        "analysis-color.value",
-        "analysis-facet.value",
-        "analysis-contour-x.value",
-        "analysis-contour-y.value",
-        "analysis-display.value",
-        "analysis-auto-refresh.value",
         "analysis-include.value",
         "analysis-expand.value",
     }
 
     def test_control_sync_lands_each_value_on_its_component(self, authed, callback_map):
         doc = {**default_view_state()}
-        doc["active"] = "series"
-
-        doc["series"] = {
-            **doc["series"],
-            "keys": ["loss"],
-            "mode": "overlay",
-            "reduction": "mean",
-            "color": "shard",
-            "facet": "host",
-            "trial_display": "median_iqr",
-        }
-        doc["optuna"] = {**doc["optuna"], "contour_x": "lr", "contour_y": "seed"}
-        doc["auto_refresh"] = True
-        options = [
-            {"label": name, "value": name}
-            for name in ("loss", "shard", "host", "lr", "seed")
-        ]
+        doc["active"] = "investigations"
+        doc["scope"] = {**doc["scope"], "include_archived": True, "expand": True}
         result = self._dispatch(
             authed,
             callback_map,
             self._SYNC_OUTPUTS,
-            [
-                {"id": "view-store", "property": "data", "value": doc},
-                {"id": "analysis-key", "property": "options", "value": options},
-                {"id": "analysis-color", "property": "options", "value": options},
-                {"id": "analysis-facet", "property": "options", "value": options},
-                {
-                    "id": "analysis-contour-x",
-                    "property": "options",
-                    "value": options,
-                },
-                {
-                    "id": "analysis-contour-y",
-                    "property": "options",
-                    "value": options,
-                },
-            ],
+            [{"id": "view-store", "property": "data", "value": doc}],
         )
-        assert result["analysis-tabs"]["value"] == "series"
-        assert result["analysis-key"]["value"] == ["loss"]
-        assert result["analysis-mode"]["value"] == "overlay"
-        assert result["analysis-reduction"]["value"] == "mean"
-        assert result["analysis-color"]["value"] == "shard"
-        assert result["analysis-facet"]["value"] == "host"
-        assert result["analysis-contour-x"]["value"] == "lr"
-        assert result["analysis-contour-y"]["value"] == "seed"
-        assert result["analysis-display"]["value"] == "median_iqr"
-        assert result["analysis-auto-refresh"]["value"] == ["auto"]
-        assert result["analysis-include"]["value"] == []
-        assert result["analysis-expand"]["value"] == []
+        assert result["analysis-tabs"]["value"] == "investigations"
+        assert result["analysis-include"]["value"] == ["archived"]
+        assert result["analysis-expand"]["value"] == ["expand"]
 
 
 class TestContinueInPython:
@@ -2565,7 +2513,8 @@ class TestWorkspaceRouteServes:
         rendered = str(page)
         assert "analysis-selection-store" not in rendered
         assert "Project lab" in rendered
-        assert "Optuna" in rendered
+        assert "Investigations" in rendered
+        assert "Exceptions" in rendered
         assert "analysis-scope-bar" in rendered
         assert "Browse scope" in rendered
         assert rendered.index("analysis-scope-bar") < rendered.index("analysis-tabs")
@@ -2618,7 +2567,7 @@ class TestIncludeControls:
             decode_view_state(payload)
 
     def test_checklist_values_and_edits_touch_only_the_flags(self):
-        doc: dict[str, Any] = dict(default_view_state(), active="series")
+        doc: dict[str, Any] = dict(default_view_state(), active="investigations")
         doc["series"] = {**doc["series"], "keys": ["loss"]}
         doc["scope"]["sweeps"] = [str(SWEEP_A)]
         edited = view_from_include(doc, ["invalid"])
@@ -2626,7 +2575,7 @@ class TestIncludeControls:
         assert edited["scope"]["include_archived"] is False
         assert edited["scope"]["sweeps"] == [str(SWEEP_A)]
         assert edited["series"] == doc["series"]
-        assert edited["active"] == "series"
+        assert edited["active"] == "investigations"
         assert include_values(edited) == ["invalid"]
         assert include_values(view_from_include(edited, ["archived", "invalid"])) == [
             "archived",
@@ -2765,16 +2714,6 @@ class TestPatternTriggers:
             _fake_context('{"panel-move-up": "loss"}.n_clicks')
         )
         assert (metric, control) == ("loss", "panel-move-up")
-
-    def test_overlay_axis_control_names_the_fired_field(self):
-        assert (
-            overlay_axis_control(
-                [{"prop_id": "analysis-overlay-range.value"}, {"prop_id": "url.search"}]
-            )
-            == "range"
-        )
-        assert overlay_axis_control([]) is None
-        assert overlay_axis_control([{"prop_id": "url.search"}]) is None
 
 
 class TestAxisResolution:
@@ -4287,82 +4226,6 @@ class TestWorkspaceChurnGates:
                 "changedPropIds": list(changed),
             },
         )
-
-    _CATALOG_OUTPUTS = {"analysis-catalog.children"}
-
-    def test_hidden_catalog_tab_neither_queries_nor_renders(self, authed, dash_app):
-        inputs = [
-            {"id": "selection-store", "property": "data", "value": dict(EMPTY_TRAY)},
-            {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
-            {"id": "poll", "property": "n_intervals", "value": 1},
-            {"id": "analysis-tabs", "property": "value", "value": "overview"},
-        ]
-        hidden = self._post(
-            authed,
-            dash_app.callback_map,
-            self._CATALOG_OUTPUTS,
-            inputs,
-            state=[{"id": "project-store", "property": "data", "value": PROJECT}],
-            changed=["poll.n_intervals"],
-        )
-        assert hidden.status_code == 204
-        visible = self._post(
-            authed,
-            dash_app.callback_map,
-            self._CATALOG_OUTPUTS,
-            [
-                *inputs[:-1],
-                {"id": "analysis-tabs", "property": "value", "value": "catalog"},
-            ],
-            state=[{"id": "project-store", "property": "data", "value": PROJECT}],
-            changed=["analysis-tabs.value"],
-        )
-        assert visible.status_code == 200
-        assert "analysis-catalog" in visible.json()["response"]
-
-    _SERIES_DATA_OUTPUTS = {
-        "analysis-series-data.data",
-        "analysis-updated.children",
-        "analysis-refresh-store.data",
-    }
-
-    def test_hidden_series_tab_fetches_nothing(self, authed, dash_app):
-        hidden = self._post(
-            authed,
-            dash_app.callback_map,
-            self._SERIES_DATA_OUTPUTS,
-            [
-                {"id": "view-store", "property": "data", "value": None},
-                {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
-                {"id": "poll", "property": "n_intervals", "value": 2},
-                {"id": "analysis-tabs", "property": "value", "value": "overview"},
-            ],
-            state=[
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "analysis-series-data", "property": "data", "value": None},
-            ],
-            changed=["poll.n_intervals"],
-        )
-        assert hidden.status_code == 204
-        visible = self._post(
-            authed,
-            dash_app.callback_map,
-            self._SERIES_DATA_OUTPUTS,
-            [
-                {"id": "view-store", "property": "data", "value": None},
-                {"id": "analysis-refresh", "property": "n_clicks", "value": 0},
-                {"id": "poll", "property": "n_intervals", "value": 2},
-                {"id": "analysis-tabs", "property": "value", "value": "series"},
-            ],
-            state=[
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "analysis-series-data", "property": "data", "value": None},
-            ],
-            changed=["analysis-tabs.value"],
-        )
-        assert visible.status_code == 200
-        snapshot = visible.json()["response"]["analysis-series-data"]["data"]
-        assert snapshot["fingerprint"]
 
     def test_picker_ignores_url_view_edits_once_a_project_is_established(
         self, authed, dash_app
