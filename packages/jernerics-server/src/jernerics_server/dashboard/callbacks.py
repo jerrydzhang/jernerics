@@ -20,7 +20,7 @@ from dash.exceptions import PreventUpdate
 
 from . import analysis, artifacts, components, figures, layout, workspace
 from .components import Error, short_id
-from .routes import ROUTES_BASE, parse_route
+from .routes import NEW_SHELL_KINDS, ROUTES_BASE, parse_route
 from .service import (
     CurationRejectedError,
     CurationUnavailableError,
@@ -634,6 +634,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         # A rendered page remounts workspace-overview empty, so its
         # content digest from the previous mount is void.
         return page, not polls, no_update, pathname, None
+
+    @app.callback(
+        Output("nav", "style"),
+        Input("url", "pathname"),
+    )
+    def _swap_page_chrome(pathname: str | None) -> dict[str, str]:
+        """New-shell pages render their own topbar; the legacy nav would
+        double it. Legacy pages always restore it."""
+        if parse_route(pathname).kind in NEW_SHELL_KINDS:
+            return {"display": "none"}
+        return {}
 
     @app.callback(
         Output("poll", "disabled", allow_duplicate=True),

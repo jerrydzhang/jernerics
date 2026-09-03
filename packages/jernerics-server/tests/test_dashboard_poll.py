@@ -497,6 +497,32 @@ class TestPickerNavigationMirrorGuard:
         assert payload["url"]["pathname"] == "/dashboard/"
 
 
+class TestPageChromeSwap:
+    """New-shell pages render their own topbar, so the chrome swap hides
+    the legacy nav for them and restores it for legacy pages."""
+
+    def _swap(self, client, callback_map, pathname):
+        return _dispatch(
+            client,
+            callback_map,
+            {"nav.style"},
+            inputs=[{"id": "url", "property": "pathname", "value": pathname}],
+        )
+
+    def test_catalog_and_viewer_hide_the_legacy_nav(self, authed, callback_map):
+        client, _store = authed
+        for path in ("/dashboard/", f"/dashboard/artifact-view/{'0' * 32}"):
+            response, payload = self._swap(client, callback_map, path)
+            assert response.status_code == 200
+            assert payload["nav"]["style"] == {"display": "none"}
+
+    def test_legacy_pages_restore_the_nav(self, authed, callback_map):
+        client, _store = authed
+        response, payload = self._swap(client, callback_map, WORKSPACE)
+        assert response.status_code == 200
+        assert payload["nav"]["style"] == {}
+
+
 class TestSweepsBrowserTickGuard:
     """The sweeps loader's digest guard (unchanged rows on a poll tick
     ship nothing) pinned so it cannot regress silently. jernerics-2se:

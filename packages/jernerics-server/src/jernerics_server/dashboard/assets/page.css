@@ -912,3 +912,40 @@
   font-family: var(--mono);
   font-size: 11px;
 }
+
+/* --- round 7: landing + artifact viewer --- */
+.np .topbar button.annotate {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.np img.artifact-image {
+  max-width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.np video.artifact-video {
+  max-width: 100%;
+}
+
+.np .json-tree {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.np .json-branch {
+  margin: 2px 0 2px 16px;
+}
+
+.np .json-branch > summary {
+  cursor: pointer;
+}
+
+.np .json-leaf {
+  margin-left: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
