@@ -15,12 +15,12 @@ from typing import Any, Literal
 from uuid import UUID
 
 import dash
-from dash import Input, Output, State, no_update
+from dash import ALL, Input, Output, State, no_update
 from dash.exceptions import PreventUpdate
 
 from . import analysis, artifacts, components, layout, workspace
 from .components import Error
-from .routes import _ARTIFACT_VIEW_PREFIX, ROUTES_BASE, parse_route
+from .routes import ROUTES_BASE, parse_route
 from .service import (
     CurationRejectedError,
     CurationUnavailableError,
@@ -67,6 +67,7 @@ def page_content(
     now_ns: int | None = None,
     workspace_state_doc: dict | None = None,
     view_doc: dict | None = None,
+    search: str | None = None,
 ) -> tuple[Any, bool]:
     """(page, poll enabled) for a URL, with live data.
 
@@ -93,13 +94,30 @@ def page_content(
             ),
             polls,
         )
-    if spec.kind in ("investigation", "investigation-edit"):
-        return (
-            layout.investigation_stub_page(
-                spec.kind, spec.object_id or "", spec.sub_id
-            ),
-            False,
-        )
+    if spec.kind == "investigation":
+        investigation_id = spec.sub_id or ""
+        try:
+            page = workspace.investigation_page(
+                service, spec.object_id or "", investigation_id
+            )
+        except CurationUnavailableError as error:
+            return components.Empty(str(error)), False
+        except CurationRejectedError:
+            return layout.missing_object_page("investigation", investigation_id), False
+        return page, False
+    if spec.kind == "investigation-edit":
+        try:
+            page = workspace.investigation_edit_page(
+                service,
+                spec.object_id or "",
+                spec.sub_id,
+                analysis.seed_sweeps_from_search(search),
+            )
+        except CurationUnavailableError as error:
+            return components.Empty(str(error)), False
+        except CurationRejectedError:
+            return layout.missing_object_page("investigation", spec.sub_id or ""), False
+        return page, False
     if spec.kind == "artifact":
         view = service.artifact_view(spec.object_id or "")
         if view is None:
@@ -511,6 +529,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         State("workspace-store", "data"),
         State("view-store", "data"),
         State("route-store", "data"),
+        State("url", "search"),
         prevent_initial_call="initial_duplicate",
     )
     def _render_page(
@@ -519,6 +538,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         workspace_doc: dict | None,
         view_doc: dict | None,
         rendered_route: str | None,
+        search: str | None,
     ):
         kind = parse_route(pathname).kind
         project = parse_route(pathname).object_id
@@ -533,9 +553,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             and (pathname == rendered_route)
         ):
             raise PreventUpdate
-        # A tick never re-mounts anything: the workspace's own data
-        # callbacks re-query on the same interval, so only the poll gate
-        # and the auto-refresh flip re-evaluate here.
         if ticked and kind == "workspace":
             polls = any(
                 summary.incomplete for summary in service.sweep_overview(project or "")
@@ -553,6 +570,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             service,
             workspace_state_doc=workspace_state(workspace_doc, project),
             view_doc=view_doc,
+            search=search,
         )
         # A rendered page remounts workspace-overview empty, so its
         # content digest from the previous mount is void.
@@ -645,18 +663,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if target == rendered_route:
             raise PreventUpdate
         # On the artifact viewer the picker mirrors the artifact's
-        # project; that adoption must not hijack the viewer route.
-        if (rendered_route or "").startswith(_ARTIFACT_VIEW_PREFIX):
+        # project; that adoption must not hijack the viewer route. The
+        # investigation pages mirror their project the same way.
+        rendered = parse_route(rendered_route)
+        if rendered.kind in ("artifact", "investigation", "investigation-edit"):
             raise PreventUpdate
         # A genuine project switch starts a fresh scope: the previous
         # project's ?view= must not ride along, or its hydration would
         # pin the old sweeps onto the new project.
-        rendered = parse_route(rendered_route)
-        clear_search = (
-            rendered.kind in ("workspace", "investigation", "investigation-edit")
-            and rendered.object_id != project
-        )
-        return target, "" if clear_search else no_update
+        if rendered.kind == "workspace" and rendered.object_id != project:
+            return target, ""
+        return target, no_update
 
     @app.callback(
         Output("project-picker", "value"),
@@ -705,7 +722,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _adopt_project_from_url(pathname: str | None, current: str | None):
         spec = parse_route(pathname)
-        if spec.kind == "workspace":
+        if spec.kind in ("workspace", "investigation", "investigation-edit"):
             if spec.object_id == current:
                 raise PreventUpdate
             return spec.object_id
@@ -1227,9 +1244,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 kind = "trial"
             elif '"focus-executions"' in text:
                 click, kind = executions_click, "execution"
-            if click is None or kind is None:
+            if not isinstance(click, dict) or kind is None:
                 continue
-            row_id = str((click or {}).get("rowId") or "")
+            row_id = str(click.get("rowId") or "")
             if not row_id:
                 raise PreventUpdate
             doc = analysis.with_focus(current, {"kind": kind, "id": row_id})
@@ -1385,7 +1402,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             raise PreventUpdate
         picked = len(picked_rows)
         return (
-            f"{picked} sweeps selected" if picked else "",
+            f"{workspace.counted_sweeps(picked)} selected" if picked else "",
             picked == 0,
             {} if picked else {"display": "none"},
         )
@@ -1447,6 +1464,296 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             raise PreventUpdate
         return workspace.exceptions_tab(
             service, project, (view_doc or {}).get("scope"), time.time_ns()
+        )
+
+    # -- Investigation workspace and member editor (jernerics-g5rw.8) ----
+
+    app.clientside_callback(
+        """
+        function(clicks) {
+            const views = ["compare", "series", "points", "search"];
+            let active = "compare";
+            (clicks || []).forEach((value, index) => {
+                if (value !== null && value !== undefined && views[index]) {
+                    active = views[index];
+                }
+            });
+            const out = [];
+            views.forEach((view) => out.push(view === active ? "on" : ""));
+            views.forEach((view) => out.push(
+                {display: view === active ? "block" : "none"}
+            ));
+            return out;
+        }
+        """,
+        Output({"inv-view": ALL}, "className"),
+        Output({"inv-region": ALL}, "style"),
+        Input({"inv-view": ALL}, "n_clicks"),
+    )
+
+    @app.callback(
+        Output("url", "pathname", allow_duplicate=True),
+        Output("url", "search", allow_duplicate=True),
+        Input("compare-members-grid", "cellClicked"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _open_member_sweep(click: dict | None, pathname: str | None):
+        # A row click on the member inventory inspects that sweep in the
+        # workspace (the same affordance the overview grid offers).
+        spec = parse_route(pathname)
+        if spec.kind != "investigation" or not isinstance(click, dict):
+            raise PreventUpdate
+        row_id = click.get("rowId")
+        if not row_id:
+            raise PreventUpdate
+        project = spec.object_id or ""
+        doc = analysis.with_focus(
+            analysis.default_view_state(), {"kind": "sweep", "id": str(row_id)}
+        )
+        return (
+            f"{ROUTES_BASE}/project/{project}",
+            f"?view={analysis.encode_view_state(doc)}",
+        )
+
+    @app.callback(
+        Output({"inv-compare": ALL}, "children"),
+        Input({"inv-compare-toggle": ALL}, "value"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _render_compare(values: list | None, pathname: str | None):
+        spec = parse_route(pathname)
+        if spec.kind != "investigation" or not spec.sub_id:
+            raise PreventUpdate
+        include_invalid = bool(values and values[0])
+        detail = service.investigation_detail(spec.sub_id)
+        doc = service.investigation_compare(
+            spec.sub_id, include_invalid=include_invalid
+        )
+        return [
+            workspace.compare_children(
+                doc,
+                spec.object_id or "",
+                detail.investigation.outcome,
+                include_invalid,
+            )
+        ]
+
+    @app.callback(
+        Output({"inv-edit-preview": ALL}, "children"),
+        Output({"inv-edit-save": ALL}, "disabled"),
+        Output({"inv-edit-grid": ALL}, "selectedRows"),
+        Input({"inv-edit-state": ALL}, "data"),
+        State({"inv-edit-grid": ALL}, "selectedRows"),
+        State("url", "pathname"),
+    )
+    def _render_editor_preview(
+        states: list | None, grid_selection: list | None, pathname: str | None
+    ):
+        if not states:
+            raise PreventUpdate
+        spec = parse_route(pathname)
+        if spec.kind != "investigation-edit":
+            raise PreventUpdate
+        state = states[0] or {}
+        picked = list(state.get("picked") or ())
+        preview = service.investigation_preview(spec.object_id or "", picked)
+        ready = bool(
+            str(state.get("name") or "").strip()
+            and state.get("factor")
+            and state.get("outcome")
+            and picked
+        )
+        # The freshly mounted grid takes the working selection; a
+        # selection the user just made echoes back and must not be
+        # rewritten (that would fight the click in progress).
+        current_ids = sorted(
+            {str(row.get("sweep_id")) for row in (grid_selection or [[]])[0] or []}
+        )
+        selection = (
+            [no_update]
+            if current_ids == picked
+            else [[{"sweep_id": sweep_id} for sweep_id in picked]]
+        )
+        return (
+            [workspace.editor_preview_panel(preview, state)],
+            [not ready],
+            selection,
+        )
+
+    @app.callback(
+        Output({"inv-edit-state": ALL}, "data", allow_duplicate=True),
+        Input({"inv-edit-grid": ALL}, "selectedRows"),
+        State({"inv-edit-state": ALL}, "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_editor_members(rows: list | None, states: list | None):
+        if not states:
+            raise PreventUpdate
+        state = dict(states[0] or {})
+        picked = sorted({str(row["sweep_id"]) for row in (rows or [[]])[0] or []})
+        if picked == state.get("picked"):
+            raise PreventUpdate
+        state["picked"] = picked
+        return [state]
+
+    @app.callback(
+        Output({"inv-edit-state": ALL}, "data", allow_duplicate=True),
+        Input({"inv-edit-name": ALL}, "value"),
+        State({"inv-edit-state": ALL}, "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_editor_name(names: list | None, states: list | None):
+        if not states:
+            raise PreventUpdate
+        state = dict(states[0] or {})
+        name = str((names or [""])[0] or "").strip()
+        if name == state.get("name"):
+            raise PreventUpdate
+        state["name"] = name
+        return [state]
+
+    @app.callback(
+        Output({"inv-edit-state": ALL}, "data", allow_duplicate=True),
+        Input({"inv-edit-factor": ALL}, "value"),
+        Input({"inv-edit-outcome": ALL}, "value"),
+        State({"inv-edit-state": ALL}, "data"),
+        prevent_initial_call=True,
+    )
+    def _edit_editor_body(
+        factors: list | None, outcomes: list | None, states: list | None
+    ):
+        if not states:
+            raise PreventUpdate
+        state = dict(states[0] or {})
+        factor = (factors or [None])[0]
+        outcome = (outcomes or [None])[0]
+        if factor == state.get("factor") and outcome == state.get("outcome"):
+            raise PreventUpdate
+        state["factor"] = factor
+        state["outcome"] = outcome
+        return [state]
+
+    @app.callback(
+        Output({"inv-edit-factor": ALL}, "options"),
+        Output({"inv-edit-outcome": ALL}, "options"),
+        Input({"inv-edit-state": ALL}, "data"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _load_editor_options(states: list | None, pathname: str | None):
+        if not states:
+            raise PreventUpdate
+        spec = parse_route(pathname)
+        if spec.kind != "investigation-edit":
+            raise PreventUpdate
+        state = states[0] or {}
+        preview = service.investigation_preview(
+            spec.object_id or "", list(state.get("picked") or ())
+        )
+        return [workspace.editor_factor_options(preview)], [
+            workspace.editor_outcome_options(preview)
+        ]
+
+    @app.callback(
+        Output("url", "pathname", allow_duplicate=True),
+        Output("url", "search", allow_duplicate=True),
+        Output({"inv-edit-state": ALL}, "data", allow_duplicate=True),
+        Output({"inv-edit-grid": ALL}, "rowData", allow_duplicate=True),
+        Output({"inv-edit-message": ALL}, "children", allow_duplicate=True),
+        Input({"inv-edit-save": ALL}, "n_clicks"),
+        State({"inv-edit-state": ALL}, "data"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _save_editor(_clicks: list | None, states: list | None, pathname: str | None):
+        if not states or not pressed_props(dash.callback_context):
+            raise PreventUpdate
+        spec = parse_route(pathname)
+        if spec.kind != "investigation-edit":
+            raise PreventUpdate
+        state = states[0] or {}
+        project = spec.object_id or ""
+        picked = list(state.get("picked") or ())
+        if spec.sub_id is None:
+            name = str(state.get("name") or "").strip()
+            factor = state.get("factor")
+            outcome = state.get("outcome")
+            if not (name and factor and outcome and picked):
+                return (
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    [
+                        workspace.action_message(
+                            False,
+                            "A name, a factor, an outcome, and at least one "
+                            "member are required.",
+                        )
+                    ],
+                )
+            try:
+                record = service.create_investigation(
+                    project, name, factor, outcome, members=picked
+                )
+            except CurationRejectedError as error:
+                return (
+                    no_update,
+                    no_update,
+                    no_update,
+                    no_update,
+                    [workspace.action_message(False, str(error))],
+                )
+            saved = sorted({str(sweep) for sweep in record.members})
+            return (
+                f"{ROUTES_BASE}/project/{project}/investigation/{record.id}",
+                "",
+                [{**state, "picked": saved, "saved": saved}],
+                [no_update],
+                [""],
+            )
+        try:
+            record = service.set_investigation_members(spec.sub_id, picked)
+        except CurationRejectedError as error:
+            return (
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                [workspace.action_message(False, str(error))],
+            )
+        saved = [str(sweep) for sweep in record.members]
+        return (
+            no_update,
+            no_update,
+            [{**state, "picked": saved, "saved": saved}],
+            [workspace.editor_rows(service.sweep_overview(project), saved, project)],
+            [
+                workspace.action_message(
+                    True, f"Saved — {len(saved)} members in {record.name}."
+                )
+            ],
+        )
+
+    @app.callback(
+        Output({"inv-edit-state": ALL}, "data", allow_duplicate=True),
+        Output({"inv-edit-grid": ALL}, "selectedRows", allow_duplicate=True),
+        Output({"inv-edit-message": ALL}, "children", allow_duplicate=True),
+        Input({"inv-edit-discard": ALL}, "n_clicks"),
+        State({"inv-edit-state": ALL}, "data"),
+        prevent_initial_call=True,
+    )
+    def _discard_editor(_clicks: list | None, states: list | None):
+        if not states or not pressed_props(dash.callback_context):
+            raise PreventUpdate
+        state = states[0] or {}
+        saved = list(state.get("saved") or ())
+        return (
+            [{**state, "picked": saved}],
+            [[{"sweep_id": sweep_id} for sweep_id in saved]],
+            [""],
         )
 
     # -- Analysis tabs inside the workspace ------------------------------

@@ -6,18 +6,25 @@ from typing import Any
 
 from dash import dcc, html
 from dash_ag_grid import AgGrid
-from jernerics_schema import ExecutionRecord
+from jernerics_schema import (
+    ExecutionRecord,
+    InvestigationRecord,
+    encode_selection,
+    materialize_selection,
+)
 
-from . import analysis, artifacts, components
+from . import analysis, artifacts, components, figures
 from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
 from .render import SortColumn, sort_rows, sortable_columns
 from .routes import ROUTES_BASE
 from .service import (
+    CompareDocument,
     CurationUnavailableError,
     DashboardService,
     ExecutionDetail,
     FailedExecutionRow,
     FamilyRow,
+    InvestigationPreview,
     InvestigationRow,
     SweepDetail,
     SweepSummary,
@@ -1087,7 +1094,7 @@ def overview_sweep_rows(scoped: Sequence[SweepSummary]) -> list[dict[str, Any]]:
     ]
 
 
-def _counted_sweeps(count: int) -> str:
+def counted_sweeps(count: int) -> str:
     """``count`` with the noun form that matches it."""
     return f"{count} sweep" if count == 1 else f"{count} sweeps"
 
@@ -1104,7 +1111,7 @@ def overview_tiles(scoped: Sequence[SweepSummary]) -> list[dict[str, Any]]:
                 "value": "failed",
                 "kind": "crit",
                 "count": sum(summary.failed for summary in failing),
-                "label": f"failed executions · {_counted_sweeps(len(failing))}",
+                "label": f"failed executions · {counted_sweeps(len(failing))}",
             }
         )
     interrupted = [summary for summary in scoped if summary.stale]
@@ -1115,7 +1122,7 @@ def overview_tiles(scoped: Sequence[SweepSummary]) -> list[dict[str, Any]]:
                 "kind": "warn",
                 "count": sum(summary.stale for summary in interrupted),
                 "label": (
-                    f"interrupted executions · {_counted_sweeps(len(interrupted))}"
+                    f"interrupted executions · {counted_sweeps(len(interrupted))}"
                 ),
             }
         )
@@ -1127,7 +1134,7 @@ def overview_tiles(scoped: Sequence[SweepSummary]) -> list[dict[str, Any]]:
                 "kind": None,
                 "count": count,
                 "label": _STATE_TILE_LABELS.get(
-                    state, f"{state} {_counted_sweeps(count)}"
+                    state, f"{state} {counted_sweeps(count)}"
                 ),
             }
         )
@@ -1181,7 +1188,7 @@ def overview_filter_chip(filtered_count: int, overview_filter: str) -> html.Div:
     return html.Div(
         html.Span(
             [
-                f"{_counted_sweeps(filtered_count)} {label} ",
+                f"{counted_sweeps(filtered_count)} {label} ",
                 html.Button(
                     "\u00d7",
                     id={"overview-filter-clear": "chip"},
@@ -1535,7 +1542,7 @@ _INVESTIGATION_COLUMNS: list[SortColumn] = [
         "name",
         "Investigation",
         "string",
-        definition={"cellRenderer": {"function": "renderLinkCell(data)"}},
+        definition={"cellRenderer": {"function": "renderLinkCell(params)"}},
     ),
     SortColumn("factor", "Factor", "string"),
     SortColumn("outcome", "Outcome", "string"),
@@ -1553,7 +1560,7 @@ _INVESTIGATION_COLUMNS: list[SortColumn] = [
         "string",
         definition={
             "sortable": False,
-            "cellRenderer": {"function": "renderEditCell(data)"},
+            "cellRenderer": {"function": "renderEditCell(params)"},
         },
     ),
 ]
@@ -1564,7 +1571,7 @@ _UNORGANIZED_COLUMNS: list[SortColumn] = [
         "name",
         "Sweep",
         "string",
-        definition={"cellRenderer": {"function": "renderLinkCell(data)"}},
+        definition={"cellRenderer": {"function": "renderLinkCell(params)"}},
     ),
     SortColumn("state", "State", "string"),
     SortColumn(
@@ -1652,7 +1659,7 @@ def investigations_tab(service: DashboardService, project: str | None) -> html.D
                 [
                     html.H3("Unorganized"),
                     html.P(
-                        f"{_counted_sweeps(len(unorganized))} not in any Investigation",
+                        f"{counted_sweeps(len(unorganized))} not in any Investigation",
                         className="overview-sub",
                     ),
                     *(
@@ -1710,6 +1717,774 @@ def exceptions_tab(
         ),
         className="section exceptions-view",
     )
+
+
+INVESTIGATION_VIEWS = ("compare", "series", "points", "search")
+"""The Investigation workspace's view row; Series, Points, and Search
+are placeholders until jernerics-g5rw.9 mounts their content."""
+
+_INVESTIGATION_VIEW_TITLES = {
+    "compare": "Compare",
+    "series": "Series",
+    "points": "Points",
+    "search": "Search",
+}
+
+_INVESTIGATION_PLACEHOLDERS = {
+    "series": "Series at Investigation scope lands with jernerics-g5rw.9.",
+    "points": "Points at Investigation scope lands with jernerics-g5rw.9.",
+    "search": "Search over the members lands with jernerics-g5rw.9.",
+}
+
+
+def investigations_index_href(project: str) -> str:
+    """The workspace URL showing the project's Investigations tab."""
+    doc = dict(analysis.default_view_state(), active="investigations")
+    return f"{ROUTES_BASE}/project/{project}?view={analysis.encode_view_state(doc)}"
+
+
+def investigation_crumb(
+    project: str, name: str, view_label: str | None = None
+) -> html.Div:
+    """``project › Investigations › name › view``; the trailing view
+    label is omitted on pages that are their own destination."""
+    parts: list[Any] = [
+        html.A(project, href=f"{ROUTES_BASE}/project/{project}"),
+        html.Span(className="dim"),
+        html.A("Investigations", href=investigations_index_href(project)),
+        html.Span(className="dim"),
+        html.Span(name),
+    ]
+    if view_label:
+        parts.append(html.Span(className="dim"))
+        parts.append(html.Span(view_label))
+    return html.Div(parts, className="crumb")
+
+
+def _views_row() -> list[Any]:
+    """The view switcher: Compare on, the rest placeholders until
+    jernerics-g5rw.9; a clientside callback flips the ``on`` mark."""
+    return [
+        html.Span("Investigation views", className="annotate"),
+        html.Div(
+            [
+                html.Button(
+                    _INVESTIGATION_VIEW_TITLES[view],
+                    id={"inv-view": view},
+                    className="on" if view == "compare" else "",
+                )
+                for view in INVESTIGATION_VIEWS
+            ],
+            className="seg",
+        ),
+    ]
+
+
+def open_in_python(record: InvestigationRecord) -> html.Details:
+    """The effective membership as an encoded Selection token plus the
+    runnable handoff snippet — a plain disclosure, no callback."""
+    token = encode_selection(materialize_selection(record))
+    snippet = analysis.python_snippet(token, record.project, "http://localhost:8000")
+    pre_style = {"whiteSpace": "pre", "overflowX": "auto"}
+    return html.Details(
+        [
+            html.Summary("Open in Python", className="btn-primary"),
+            html.Div(
+                [
+                    html.P(
+                        "The token decodes to the investigation's exact "
+                        "membership via jernerics_schema.decode_selection; "
+                        "point TrackingClient at your server.",
+                        className="hint",
+                    ),
+                    html.Div(
+                        [
+                            html.Pre(token, className="config-json", style=pre_style),
+                            dcc.Clipboard(content=token),
+                        ],
+                        className="snippet-row",
+                    ),
+                    html.Div(
+                        [
+                            html.Pre(snippet, className="config-json", style=pre_style),
+                            dcc.Clipboard(content=snippet),
+                        ],
+                        className="snippet-row",
+                    ),
+                ],
+                className="py-panel",
+            ),
+        ],
+        className="py-details",
+    )
+
+
+def coverage_strip(doc: CompareDocument) -> html.Div:
+    """Members / valid / invalid / with-outcome / incomplete — every
+    number read straight off the derived member rows."""
+    members = doc.members
+    invalid = sum(1 for member in members if member.invalid)
+    cells = [
+        ("Members", len(members)),
+        ("Valid", len(members) - invalid),
+        ("Marked invalid (excluded by default)", invalid),
+        ("With outcome", sum(1 for member in members if member.usable > 0)),
+        (
+            "Incomplete",
+            sum(1 for member in members if member.state != "completed"),
+        ),
+    ]
+    return html.Div(
+        [
+            html.Div(
+                [html.Span(label, className="lbl"), html.B(value, className="num")],
+                className="stat",
+            )
+            for label, value in cells
+        ],
+        className="coverage-strip",
+    )
+
+
+_COMPARE_MEMBER_COLUMNS: list[SortColumn] = [
+    SortColumn(
+        "factor",
+        "Factor",
+        "string",
+        definition={"valueFormatter": {"function": "renderMissing(x)"}},
+    ),
+    SortColumn("name", "Sweep", "string"),
+    SortColumn("state", "State", "string"),
+    SortColumn(
+        "expected_trials",
+        "Expected trials",
+        "numeric",
+        definition={"valueFormatter": {"function": "renderMissing(x)"}},
+    ),
+    SortColumn("completed", "Completed", "numeric"),
+    SortColumn("usable", "Usable (with outcome)", "numeric"),
+    SortColumn("curation", "Curation", "string"),
+]
+
+
+def _compare_member_rows(doc: CompareDocument, project: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "sweep_id": member.sweep_id,
+            "factor": member.factor_value,
+            "name": member.name,
+            "link_href": analysis.workspace_focus_href(
+                project, "sweep", member.sweep_id
+            ),
+            "link_label": member.name,
+            "curation": (
+                " ".join(
+                    name
+                    for flag, name in (
+                        (member.invalid, "invalid"),
+                        (member.archived, "archived"),
+                    )
+                    if flag
+                )
+                or MISSING
+            ),
+        }
+        for member in doc.members
+    ]
+
+
+def _matched_grid(
+    doc: CompareDocument, labels: dict[str, str], outcome: str
+) -> html.Section:
+    """Signatures matched by two or more analyzable members; one
+    numeric column per member, missing stays missing."""
+    shared = [row for row in doc.signatures if row.matched >= 2]
+    columns = [
+        SortColumn("signature", "Signature", "string"),
+        *(
+            SortColumn(
+                sweep_id,
+                labels.get(sweep_id, short_id(sweep_id)),
+                "numeric",
+                definition={"valueFormatter": {"function": "renderMissing(x)"}},
+            )
+            for sweep_id in doc.analyzable
+        ),
+    ]
+    rows = [
+        {
+            "signature": row.label,
+            **{sweep_id: row.values.get(sweep_id) for sweep_id in doc.analyzable},
+        }
+        for row in shared
+    ]
+    common = sum(1 for row in shared if row.common)
+    return html.Section(
+        [
+            html.H3(f"Matched comparison ({outcome})"),
+            html.P(
+                f"{len(shared)} signatures matched by ≥2 analyzable members · "
+                f"{common} common to all {len(doc.analyzable)} · medians pool "
+                "matched trials; no imputation, no outliers suppressed.",
+                className="overview-sub",
+            ),
+            AgGrid(
+                id="compare-matched-grid",
+                rowData=sort_rows(rows, columns, None),
+                columnDefs=sortable_columns(columns),
+                defaultColDef=_GRID_DEFAULTS,
+                dashGridOptions=components.grid_options(),
+                getRowId="params.data.signature",
+                className="ag-theme-alpine grid",
+            ),
+        ],
+        className="section compare-matched",
+    )
+
+
+def _members_grid(doc: CompareDocument, project: str) -> html.Section:
+    return html.Section(
+        [
+            html.H3("Members"),
+            AgGrid(
+                id="compare-members-grid",
+                rowData=sort_rows(
+                    _compare_member_rows(doc, project),
+                    _COMPARE_MEMBER_COLUMNS,
+                    None,
+                ),
+                columnDefs=sortable_columns(_COMPARE_MEMBER_COLUMNS),
+                defaultColDef=_GRID_DEFAULTS,
+                dashGridOptions=components.grid_options(),
+                getRowId=_SWEEP_ROW_ID,
+                className="ag-theme-alpine grid",
+            ),
+        ],
+        className="section compare-members",
+    )
+
+
+def compare_empty_state(doc: CompareDocument, include_invalid: bool) -> html.Div:
+    """The honest empty state: an analysis set with nothing to compare
+    names exactly who is excluded and why."""
+    members_total = len(doc.members)
+    no_outcome = members_total - len(doc.analyzable)
+    if doc.analyzable:
+        return html.Div(
+            html.P(
+                f"{no_outcome} of {members_total} members have no outcome "
+                "data; the rest are compared below."
+            ),
+            className="empty-state",
+        )
+    if include_invalid:
+        return html.Div(
+            html.P(
+                f"None of the {members_total} members has outcome data — "
+                "nothing to compare."
+            ),
+            className="empty-state",
+        )
+    return html.Div(
+        html.P(
+            "No analyzable members in the analysis set — "
+            f"{doc.excluded_data_bearing} data-bearing members are marked "
+            "invalid (excluded by default) and "
+            f"{no_outcome - doc.excluded_data_bearing} have no outcome data. "
+            "Tick “include invalid members in analysis” to see the real "
+            "comparison."
+        ),
+        className="empty-state",
+    )
+
+
+def compare_children(
+    doc: CompareDocument,
+    project: str,
+    outcome: str,
+    include_invalid: bool,
+) -> list[Any]:
+    """The Compare view's body for one analysis set: heatmap + ranking
+    over the common signatures, the matched-signature table, and the
+    member inventory. No analyzable members or no global overlap each
+    render their honest state instead of a manufactured ranking."""
+    members = {member.sweep_id: member for member in doc.members}
+    labels = {
+        sweep_id: member.factor_value or member.name
+        for sweep_id, member in members.items()
+    }
+    common = [row for row in doc.signatures if row.common]
+    body: list[Any] = []
+    if not doc.analyzable:
+        body.append(compare_empty_state(doc, include_invalid))
+    elif not common:
+        body.append(
+            html.Div(
+                html.P(
+                    f"No sampled signature is completed by all "
+                    f"{len(doc.analyzable)} analyzable members — no global "
+                    "overlap. Pairwise matches are listed below; no ranking "
+                    "is manufactured."
+                ),
+                className="empty-state",
+            )
+        )
+    else:
+        column_labels = [row.label for row in common]
+        row_labels = [labels.get(sweep_id, sweep_id) for sweep_id in doc.analyzable]
+        values = [
+            [row.values.get(sweep_id) for row in common] for sweep_id in doc.analyzable
+        ]
+        medians = []
+        matched_counts = []
+        for sweep_id in doc.analyzable:
+            pooled = [
+                row.values.get(sweep_id)
+                for row in common
+                if row.values.get(sweep_id) is not None
+            ]
+            medians.append(sum(pooled) / len(pooled) if pooled else 0.0)
+            matched_counts.append(len(pooled))
+        keys = ", ".join(doc.signature_keys) if doc.signature_keys else "none observed"
+        body.extend(
+            [
+                html.Section(
+                    [
+                        html.H3("Outcome heatmap"),
+                        html.P(
+                            "factor by exact sampled signature "
+                            f"({keys}) — no imputation, no outliers "
+                            "suppressed.",
+                            className="overview-sub",
+                        ),
+                        dcc.Graph(
+                            figure=figures.compare_heatmap(
+                                row_labels, column_labels, values
+                            ),
+                            config={"displayModeBar": False},
+                        ),
+                    ],
+                    className="section compare-heatmap",
+                ),
+                html.Section(
+                    [
+                        html.H3("Median over common signatures"),
+                        dcc.Graph(
+                            figure=figures.compare_ranking(
+                                row_labels, medians, matched_counts
+                            ),
+                            config={"displayModeBar": False},
+                        ),
+                    ],
+                    className="section compare-ranking",
+                ),
+            ]
+        )
+    if doc.signatures:
+        body.append(_matched_grid(doc, labels, outcome))
+    body.append(_members_grid(doc, project))
+    return body
+
+
+def investigation_page(
+    service: DashboardService, project: str, investigation_id: str
+) -> html.Div:
+    """The Investigation workspace: breadcrumb, header naming the
+    investigation, the view row, the Open in Python / Edit members
+    actions, and the Compare view (default; the only mounted view
+    until jernerics-g5rw.9)."""
+    if not project or not investigation_id:
+        return html.Div(components.Empty("No investigation requested."))
+    detail = service.investigation_detail(investigation_id)
+    record = detail.investigation
+    doc = service.investigation_compare(investigation_id)
+    invalid = sum(1 for member in doc.members if member.invalid)
+    compare_view = html.Div(
+        [
+            coverage_strip(doc),
+            *(
+                [
+                    dcc.Checklist(
+                        id={"inv-compare-toggle": "include"},
+                        options=[
+                            {
+                                "label": " include invalid members in analysis",
+                                "value": "invalid",
+                            }
+                        ],
+                        value=[],
+                        className="include-toggle",
+                    ),
+                ]
+                if invalid
+                else []
+            ),
+            html.Div(
+                compare_children(doc, project, record.outcome, False),
+                id={"inv-compare": "content"},
+            ),
+        ],
+        id={"inv-region": "compare"},
+        style={"display": "block"},
+    )
+    regions = [compare_view] + [
+        html.Div(
+            components.Empty(_INVESTIGATION_PLACEHOLDERS[view]),
+            id={"inv-region": view},
+            style={"display": "none"},
+        )
+        for view in INVESTIGATION_VIEWS
+        if view != "compare"
+    ]
+    return html.Div(
+        [
+            investigation_crumb(project, record.name, "Compare"),
+            html.H2(record.name),
+            html.P(
+                [
+                    f"factor {record.factor} · outcome {record.outcome} · "
+                    f"{counted_sweeps(detail.coverage.members)}",
+                ],
+                className="inv-sub",
+            ),
+            html.Div(
+                [
+                    *_views_row(),
+                    open_in_python(record),
+                    html.A(
+                        "Edit members",
+                        href=f"{ROUTES_BASE}/project/{project}/investigation/"
+                        f"{investigation_id}/edit",
+                        className="btn-link",
+                    ),
+                ],
+                className="inv-views",
+            ),
+            *regions,
+        ],
+        className="page investigation",
+    )
+
+
+_EDITOR_SWEEP_COLUMNS: list[SortColumn] = [
+    SortColumn("name", "Sweep", "string"),
+    SortColumn("state", "State", "string"),
+    SortColumn("member", "Member", "string"),
+    SortColumn("curation", "Curation", "string"),
+    SortColumn("completed", "Completed", "numeric"),
+    SortColumn(
+        "expected_trials",
+        "Expected trials",
+        "numeric",
+        definition={"valueFormatter": {"function": "renderMissing(x)"}},
+    ),
+    SortColumn(
+        "last_activity_ns",
+        "Last activity",
+        "ns",
+        definition={"valueFormatter": {"function": "renderRelative(x)"}},
+    ),
+]
+
+
+def editor_rows(
+    summaries: Sequence[SweepSummary], member_ids: Sequence[str], project: str
+) -> list[dict[str, Any]]:
+    """Every project sweep as an editor row; ``member`` marks saved
+    membership so the checkbox (the working set) never hides a change."""
+    saved = set(member_ids)
+    return [
+        {
+            "sweep_id": summary.sweep_id,
+            "name": summary.name,
+            "link_label": summary.name,
+            "link_href": analysis.workspace_focus_href(
+                project, "sweep", summary.sweep_id
+            ),
+            "state": summary.state,
+            "member": "member" if summary.sweep_id in saved else MISSING,
+            "curation": sweep_curation(summary) or MISSING,
+            "completed": summary.succeeded,
+            "expected_trials": summary.expected_trials,
+            "last_activity_ns": summary.latest_submitted_ns,
+        }
+        for summary in sorted(summaries, key=lambda row: row.name.casefold())
+    ]
+
+
+def _editor_grid(rows: list[dict[str, Any]]) -> AgGrid:
+    """The project sweep table with row-selection checkboxes; the
+    working selection arrives through the loader callback."""
+    return AgGrid(
+        id={"inv-edit-grid": "grid"},
+        rowData=rows,
+        columnDefs=sortable_columns(_EDITOR_SWEEP_COLUMNS),
+        defaultColDef=_GRID_DEFAULTS,
+        dashGridOptions=components.grid_options(
+            pagination=True,
+            paginationPageSize=_OVERVIEW_PAGE_SIZE,
+            rowSelection={
+                "mode": "multiRow",
+                "checkboxes": True,
+                "headerCheckboxSelection": True,
+                "enableClickSelection": False,
+            },
+        ),
+        getRowId=_SWEEP_ROW_ID,
+        className="ag-theme-alpine grid",
+    )
+
+
+_FACTOR_KIND_LABELS = {
+    "manual_param": "param",
+    "config_source": "config source",
+    "name_token": "name token",
+}
+
+
+def editor_factor_options(preview: InvestigationPreview) -> list[dict[str, str]]:
+    """Dropdown options from the preview's factor candidates, each with
+    its real member coverage."""
+    return [
+        {
+            "label": (
+                f"{_FACTOR_KIND_LABELS[candidate.kind]} {candidate.name} — "
+                f"{candidate.members} of {preview.member_count} members"
+            ),
+            "value": candidate.name,
+        }
+        for candidate in preview.factors
+    ]
+
+
+def editor_outcome_options(preview: InvestigationPreview) -> list[dict[str, str]]:
+    return [
+        {
+            "label": (
+                f"{candidate.key} — {candidate.members} of "
+                f"{preview.member_count} members"
+            ),
+            "value": candidate.key,
+        }
+        for candidate in preview.outcomes
+    ]
+
+
+def editor_preview_panel(preview: InvestigationPreview, state: dict) -> list[Any]:
+    """The deterministic pre-save facts: candidate factors/outcomes with
+    real coverage counts, the shared warnings, and the pending diff."""
+    picked = list(state.get("picked") or [])
+    saved = set(state.get("saved") or ())
+    added = [sweep_id for sweep_id in picked if sweep_id not in saved]
+    removed = [sweep_id for sweep_id in saved if sweep_id not in picked]
+    pending = f"+{len(added)} -{len(removed)} (unsaved)" if added or removed else "none"
+    panel: list[Any] = [
+        html.P(
+            [
+                html.B(str(preview.member_count)),
+                " project members picked · pending change: ",
+                html.B(pending),
+            ],
+            className="overview-sub",
+        )
+    ]
+    if preview.factors or preview.outcomes:
+        factor_lines = [
+            html.Div(
+                f"{_FACTOR_KIND_LABELS[candidate.kind]} "
+                f"{candidate.name} — {candidate.members} of "
+                f"{preview.member_count} members"
+            )
+            for candidate in preview.factors
+        ] or [html.Div("none observed")]
+        outcome_lines = [
+            html.Div(
+                f"{candidate.key} — {candidate.members} of "
+                f"{preview.member_count} members"
+            )
+            for candidate in preview.outcomes
+        ] or [html.Div("none observed")]
+        panel.append(
+            html.Div(
+                [
+                    html.Div(
+                        [html.B("Candidate factors"), *factor_lines],
+                        className="preview-col",
+                    ),
+                    html.Div(
+                        [html.B("Candidate outcomes"), *outcome_lines],
+                        className="preview-col",
+                    ),
+                ],
+                className="preview-cols",
+            )
+        )
+    if preview.warnings:
+        panel.append(
+            html.Ul(
+                [
+                    html.Li(f"{warning.kind.replace('_', ' ')}: {warning.detail}")
+                    for warning in preview.warnings
+                ],
+                className="preview-warnings",
+            )
+        )
+    return panel
+
+
+def investigation_edit_page(
+    service: DashboardService,
+    project: str,
+    investigation_id: str | None,
+    seed_sweeps: Sequence[str],
+) -> html.Div:
+    """The member editor: create (``/new``, seeded from ?sweeps=) and
+    edit (``/<id>/edit``) are distinct flows — a create never overwrites
+    an existing investigation, and nothing is written until Save."""
+    if not project:
+        return html.Div(
+            components.Empty("Pick a project in the header to edit investigations.")
+        )
+    summaries = service.sweep_overview(project)
+    if investigation_id is None:
+        picked = sorted(set(seed_sweeps))
+        state = {
+            "picked": picked,
+            "saved": [],
+            "name": "",
+            "factor": None,
+            "outcome": None,
+        }
+        preview = service.investigation_preview(project, picked)
+        return html.Div(
+            [
+                investigation_crumb(project, "New Investigation"),
+                html.H2("New Investigation"),
+                html.P(
+                    "Drafts stay local until Save; a name this project's "
+                    "investigations already use cannot be created again with "
+                    "a different body.",
+                    className="inv-sub",
+                ),
+                html.Div(
+                    [
+                        dcc.Input(
+                            id={"inv-edit-name": "name"},
+                            value="",
+                            placeholder="Investigation name…",
+                            className="quick-filter inv-name",
+                        ),
+                        dcc.Dropdown(
+                            id={"inv-edit-factor": "factor"},
+                            options=editor_factor_options(preview),
+                            placeholder="Comparison factor…",
+                            className="inv-dd",
+                        ),
+                        dcc.Dropdown(
+                            id={"inv-edit-outcome": "outcome"},
+                            options=editor_outcome_options(preview),
+                            placeholder="Outcome key…",
+                            className="inv-dd",
+                        ),
+                    ],
+                    className="inv-create-controls",
+                ),
+                *_editor_body(project, summaries, state, preview, editing=False),
+            ],
+            className="page investigation-edit",
+        )
+    detail = service.investigation_detail(investigation_id)
+    record = detail.investigation
+    members = [str(sweep) for sweep in record.members]
+    state = {
+        "picked": list(members),
+        "saved": list(members),
+        "name": record.name,
+        "factor": record.factor,
+        "outcome": record.outcome,
+    }
+    preview = service.investigation_preview(project, members)
+    return html.Div(
+        [
+            investigation_crumb(project, record.name, "Edit members"),
+            html.H2("Edit members"),
+            html.P(
+                f"{record.name} · factor {record.factor} · outcome "
+                f"{record.outcome} — the name, factor, and outcome are "
+                "fixed; membership edits save explicitly.",
+                className="inv-sub",
+            ),
+            *_editor_body(project, summaries, state, preview, editing=True),
+        ],
+        className="page investigation-edit",
+    )
+
+
+def _editor_body(
+    project: str,
+    summaries: Sequence[SweepSummary],
+    state: dict,
+    preview: InvestigationPreview,
+    *,
+    editing: bool,
+) -> list[Any]:
+    """Controls shared by the create and edit flows: the deterministic
+    preview, the project sweep table with the working selection, and
+    the save row."""
+    rows = editor_rows(summaries, state["saved"], project)
+    return [
+        dcc.Store(id={"inv-edit-state": "members"}, data=state),
+        html.Div(
+            editor_preview_panel(preview, state),
+            id={"inv-edit-preview": "preview"},
+            className="inv-preview",
+        ),
+        html.Section(
+            [
+                html.H3("Project sweeps"),
+                _editor_grid(rows),
+                html.P(
+                    "Checkboxes edit the working member set; the Member "
+                    "column shows what is saved. Selection never mutates "
+                    "membership directly.",
+                    className="hint",
+                ),
+            ],
+            className="section editor-sweeps",
+        ),
+        html.Div(
+            [
+                html.Button(
+                    "Save members" if editing else "Create investigation",
+                    id={"inv-edit-save": "save"},
+                    n_clicks=0,
+                    disabled=not editing,
+                    className="btn-primary",
+                ),
+                *(
+                    [
+                        html.Button(
+                            "Discard changes",
+                            id={"inv-edit-discard": "discard"},
+                            n_clicks=0,
+                            className="btn-link",
+                        )
+                    ]
+                    if editing
+                    else []
+                ),
+                html.Span(id={"inv-edit-message": "message"}),
+            ],
+            className="inv-save-row",
+        ),
+        html.P(
+            html.A(
+                f"Back to {project} investigations",
+                href=investigations_index_href(project),
+            ),
+            className="hint",
+        ),
+    ]
 
 
 def _series_tab() -> html.Div:

@@ -1,14 +1,21 @@
 """DashboardService investigation reads, scope materialization, writes."""
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
+from dash import dcc, html
+from dash.development.base_component import Component
+from fastapi.testclient import TestClient
 from jernerics_schema import (
     PROTOCOL_VERSION,
     ExecutionEndEvent,
     ExecutionStartEvent,
+    FlatContext,
     IngestRequest,
+    ManualParamEvent,
     Selection,
     SweepSnapshotEvent,
     TrialSnapshotEvent,
@@ -17,11 +24,15 @@ from jernerics_schema import (
     encode_selection,
     materialize_selection,
 )
+from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
     default_scope_state,
+    seed_sweeps_from_search,
     tray_from_selection,
 )
+from jernerics_server.dashboard.callbacks import page_content
+from jernerics_server.dashboard.components import MISSING
 from jernerics_server.dashboard.routes import ROUTES_BASE
 from jernerics_server.dashboard.selection_tokens import decode_selection_token
 from jernerics_server.dashboard.service import (
@@ -29,7 +40,15 @@ from jernerics_server.dashboard.service import (
     CurationUnavailableError,
     DashboardService,
 )
-from jernerics_server.dashboard.workspace import investigations_tab
+from jernerics_server.dashboard.workspace import (
+    compare_children,
+    compare_empty_state,
+    coverage_strip,
+    editor_factor_options,
+    editor_outcome_options,
+    editor_preview_panel,
+    investigations_tab,
+)
 from jernerics_server.ingest import IngestService
 from jernerics_server.investigations import InvestigationService
 from jernerics_server.queries import QueryService
@@ -445,3 +464,754 @@ def _walk_children(node):
             yield from _walk_children(child)
     elif children is not None and hasattr(children, "children"):
         yield from _walk_children(children)
+
+
+# -- jernerics-g5rw.8: Compare view, workspace shell, member editor -----
+
+CMP = "cmp"
+
+CS1 = uuid.UUID("aa410000-0000-4000-8000-000000000001")
+CS2 = uuid.UUID("aa410000-0000-4000-8000-000000000002")
+CS3 = uuid.UUID("aa410000-0000-4000-8000-000000000003")
+CS4 = uuid.UUID("aa410000-0000-4000-8000-000000000004")
+CS5 = uuid.UUID("aa410000-0000-4000-8000-000000000005")
+
+CT1 = uuid.UUID("cc410000-0000-4000-8000-000000000001")
+CT2 = uuid.UUID("cc410000-0000-4000-8000-000000000002")
+CT3 = uuid.UUID("cc410000-0000-4000-8000-000000000003")
+CT4 = uuid.UUID("cc410000-0000-4000-8000-000000000004")
+CT5 = uuid.UUID("cc410000-0000-4000-8000-000000000005")
+
+CE1 = uuid.UUID("dd410000-0000-4000-8000-000000000001")
+CE2 = uuid.UUID("dd410000-0000-4000-8000-000000000002")
+CE3 = uuid.UUID("dd410000-0000-4000-8000-000000000003")
+CE4 = uuid.UUID("dd410000-0000-4000-8000-000000000004")
+CE5 = uuid.UUID("dd410000-0000-4000-8000-000000000005")
+
+_SIG = ("kde_bandwidth", 0.1), ("n_kde", 20)
+_SIG_LABEL = "kde_bandwidth=0.1 · n_kde=20"
+
+
+def _cmp_events() -> list:
+    """Project cmp: f01 (two completed trials on one signature), f02
+    (one), f03 (invalid but data-bearing), f04 (a disjoint signature),
+    and a trial-less sweep."""
+    now = datetime.now(UTC)
+
+    def at(seconds_ago: float) -> datetime:
+        return now - timedelta(seconds=seconds_ago)
+
+    def event(cls, seconds_ago: float, **kwargs):
+        return cls(event_id=uuid.uuid4(), recorded_at=at(seconds_ago), **kwargs)
+
+    def sweep(sweep_id, name, seconds_ago, project=CMP):
+        return event(
+            SweepSnapshotEvent,
+            seconds_ago,
+            project=project,
+            sweep_id=sweep_id,
+            name=name,
+            state="completed",
+        )
+
+    def scored(number, trial_id, sweep_id, execution_id, params, value, factor):
+        return [
+            event(
+                ManualParamEvent,
+                510 - number,
+                trial_id=trial_id,
+                key="problem",
+                value=factor,
+            ),
+            event(
+                TrialSnapshotEvent,
+                500 - number,
+                trial_id=trial_id,
+                sweep_id=sweep_id,
+                number=number,
+                state=TrialState.COMPLETED,
+                retry_root_trial_id=trial_id,
+                params=FlatContext(dict(params)),
+            ),
+            event(
+                ExecutionStartEvent,
+                490 - number,
+                execution_id=execution_id,
+                trial_id=trial_id,
+                hostname="node00",
+                started_at=at(490 - number),
+            ),
+            event(
+                ExecutionEndEvent,
+                480 - number,
+                execution_id=execution_id,
+                ended_at=at(480 - number),
+                outcome="success",
+                exit_code=0,
+            ),
+            event(
+                ValueEvent,
+                470 - number,
+                trial_id=trial_id,
+                key=OUTCOME,
+                step=0,
+                value=value,
+            ),
+        ]
+
+    return [
+        sweep(CS1, "cmp_f01", 900),
+        sweep(CS2, "cmp_f02", 800),
+        sweep(CS3, "cmp_f03", 700),
+        sweep(CS4, "cmp_f04", 600),
+        sweep(CS5, "cmp_lone", 500),
+        *scored(0, CT1, CS1, CE1, _SIG, 0.5, "f01"),
+        *scored(1, CT2, CS1, CE2, _SIG, 0.7, "f01"),
+        *scored(0, CT3, CS2, CE3, _SIG, 1.0, "f02"),
+        *scored(0, CT4, CS3, CE4, _SIG, 9.9, "f03"),
+        *scored(0, CT5, CS4, CE5, (("kde_bandwidth", 0.3), ("n_kde", 20)), 3.0, "f04"),
+    ]
+
+
+@pytest.fixture
+def cmp_store(tmp_path) -> Store:
+    store = Store(tmp_path / "compare.sqlite")
+    result = IngestService(store).apply(
+        IngestRequest(protocol_version=PROTOCOL_VERSION, events=_cmp_events())
+    )
+    assert not result.conflicts
+    store.mark_sweep_invalid(str(CS3), "upstream data error")
+    return store
+
+
+@pytest.fixture
+def cmp_service(cmp_store) -> DashboardService:
+    return DashboardService(QueryService(cmp_store), cmp_store)
+
+
+@pytest.fixture
+def cmp_shared(cmp_store) -> InvestigationService:
+    return InvestigationService(cmp_store)
+
+
+@pytest.fixture
+def sig(cmp_shared) -> SimpleNamespace:
+    """Four investigations over the cmp sweeps: the canonical compare
+    set (with the invalid member), a disjoint-signature pair, a hollow
+    member set, and an invalid-only one."""
+    compare = cmp_shared.create(
+        CMP,
+        "sig-compare",
+        "problem",
+        OUTCOME,
+        members=[str(CS1), str(CS2), str(CS3)],
+    )
+    disjoint = cmp_shared.create(
+        CMP, "disjoint", "problem", OUTCOME, members=[str(CS1), str(CS4)]
+    )
+    hollow = cmp_shared.create(CMP, "hollow", "problem", OUTCOME, members=[str(CS5)])
+    only_invalid = cmp_shared.create(
+        CMP, "only-invalid", "problem", OUTCOME, members=[str(CS3)]
+    )
+    return SimpleNamespace(
+        compare=str(compare.id),
+        disjoint=str(disjoint.id),
+        hollow=str(hollow.id),
+        only_invalid=str(only_invalid.id),
+    )
+
+
+class TestInvestigationCompare:
+    """Compare row derivation against the seeded facts."""
+
+    def test_exact_signature_match_pools_trials_per_member(self, cmp_service, sig):
+        doc = cmp_service.investigation_compare(sig.compare)
+        assert doc.signature_keys == ("kde_bandwidth", "n_kde")
+        assert doc.analyzable == (str(CS1), str(CS2))
+        assert len(doc.signatures) == 1
+        row = doc.signatures[0]
+        assert row.label == _SIG_LABEL
+        assert row.values == {str(CS1): 0.6, str(CS2): 1.0}
+        assert row.common and row.matched == 2
+
+    def test_invalid_members_excluded_from_analysis_by_default(self, cmp_service, sig):
+        doc = cmp_service.investigation_compare(sig.compare)
+        assert doc.excluded_data_bearing == 1
+        assert str(CS3) not in doc.analyzable
+        assert all(
+            str(CS3) not in row.values or row.values.get(str(CS3)) is None
+            for row in doc.signatures
+        )
+
+    def test_include_invalid_toggle_expands_the_analysis_set(self, cmp_service, sig):
+        doc = cmp_service.investigation_compare(sig.compare, include_invalid=True)
+        assert doc.analyzable == (str(CS1), str(CS2), str(CS3))
+        row = doc.signatures[0]
+        assert row.values[str(CS3)] == pytest.approx(9.9)
+        assert row.common and row.matched == 3
+
+    def test_member_rows_carry_derived_factor_state_and_usable(self, cmp_service, sig):
+        doc = cmp_service.investigation_compare(sig.compare)
+        by_id = {member.sweep_id: member for member in doc.members}
+        assert by_id[str(CS1)].factor_value == "f01"  # a name token
+        assert by_id[str(CS1)].usable == 2
+        assert by_id[str(CS2)].usable == 1
+        assert by_id[str(CS3)].invalid and by_id[str(CS3)].usable == 1
+        assert by_id[str(CS3)].factor_value == "f03"
+
+    def test_no_global_overlap_renders_no_manufactured_ranking(self, cmp_service, sig):
+        doc = cmp_service.investigation_compare(sig.disjoint)
+        assert doc.signatures and all(row.matched == 1 for row in doc.signatures)
+        children = compare_children(doc, CMP, OUTCOME, False)
+        assert "no global overlap" in str(children)
+        assert not [
+            node for node in _walk_children(children) if isinstance(node, dcc.Graph)
+        ]
+
+    def test_empty_analysis_set_names_the_exclusions(self, cmp_service, sig):
+        doc = cmp_service.investigation_compare(sig.only_invalid)
+        assert doc.analyzable == ()
+        text = str(compare_empty_state(doc, include_invalid=False))
+        assert "No analyzable members in the analysis set" in text
+        assert "1 data-bearing members are marked invalid" in text
+        assert "include invalid members in analysis" in text
+
+    def test_compare_reads_match_the_shared_service(self, cmp_service, sig):
+        doc = cmp_service.investigation_compare(sig.compare)
+        assert {member.sweep_id for member in doc.members} == {
+            str(sweep)
+            for sweep in cmp_service.investigation_detail(
+                sig.compare
+            ).investigation.members
+        }
+
+
+class TestInvestigationWorkspacePage:
+    """The Investigation shell and Compare view assembly."""
+
+    def test_shell_names_project_investigation_and_default_view(self, cmp_service, sig):
+        page = workspace.investigation_page(cmp_service, CMP, sig.compare)
+        text = str(page)
+        assert "sig-compare" in text
+        assert "factor problem · outcome heldout_rmse · 3 sweeps" in text
+        hrefs = [node.href for node in _walk_anchors(page)]
+        assert f"{ROUTES_BASE}/project/{CMP}" in hrefs
+
+    def test_views_row_mounts_compare_plus_honest_placeholders(self, cmp_service, sig):
+        page = workspace.investigation_page(cmp_service, CMP, sig.compare)
+        buttons = [
+            node
+            for node in _walk_children(page)
+            if isinstance(node, html.Button)
+            and isinstance(getattr(node, "id", None), dict)
+            and "inv-view" in node.id
+        ]
+        assert [button.children for button in buttons] == [
+            "Compare",
+            "Series",
+            "Points",
+            "Search",
+        ]
+        regions = {
+            node.id["inv-region"]: node
+            for node in _walk_children(page)
+            if isinstance(getattr(node, "id", None), dict) and "inv-region" in node.id
+        }
+        assert regions["compare"].style == {"display": "block"}
+        for view in ("series", "points", "search"):
+            assert regions[view].style == {"display": "none"}
+            assert "jernerics-g5rw.9" in str(regions[view])
+
+    def test_open_in_python_exports_the_member_selection_token(self, cmp_service, sig):
+        page = workspace.investigation_page(cmp_service, CMP, sig.compare)
+        clipboards = [
+            node for node in _walk_children(page) if isinstance(node, dcc.Clipboard)
+        ]
+        selection = decode_selection_token(clipboards[0].content)
+        assert selection.project == CMP
+        assert set(selection.sweeps or ()) == {CS1, CS2, CS3}
+        edit_links = [
+            node.href
+            for node in _walk_anchors(page)
+            if node.href and node.href.endswith("/edit")
+        ]
+        assert edit_links == [
+            f"{ROUTES_BASE}/project/{CMP}/investigation/{sig.compare}/edit"
+        ]
+
+    def test_coverage_strip_matches_the_derived_members(self, cmp_service, sig):
+        doc = cmp_service.investigation_compare(sig.compare)
+        numbers = [
+            node.children
+            for node in _walk_children(coverage_strip(doc))
+            if isinstance(node, html.B)
+        ]
+        assert numbers == [3, 2, 1, 3, 0]  # members/valid/invalid/outcome/incomplete
+
+    def test_include_toggle_mounts_only_with_invalid_members(
+        self, cmp_service, cmp_shared, sig
+    ):
+        page = workspace.investigation_page(cmp_service, CMP, sig.compare)
+        assert _pattern_nodes(page, "inv-compare-toggle")
+        pair = cmp_shared.create(
+            CMP, "pair", "problem", OUTCOME, members=[str(CS1), str(CS2)]
+        )
+        clean = workspace.investigation_page(cmp_service, CMP, str(pair.id))
+        assert not _pattern_nodes(clean, "inv-compare-toggle")
+
+    def test_only_invalid_page_renders_the_exclusion_empty_state(
+        self, cmp_service, sig
+    ):
+        page = workspace.investigation_page(cmp_service, CMP, sig.only_invalid)
+        text = str(page)
+        assert "No analyzable members in the analysis set" in text
+        assert "1 data-bearing members are marked invalid" in text
+
+    def test_page_content_maps_routes_storeless_and_unknown_ids(
+        self, cmp_service, cmp_store, sig
+    ):
+        base = f"{ROUTES_BASE}/project/{CMP}/investigation"
+        page, polls = page_content(f"{base}/{sig.compare}", cmp_service)
+        assert "sig-compare" in str(page) and polls is False
+        page, _ = page_content(f"{base}/{uuid.uuid4()}", cmp_service)
+        assert "No investigation matches" in str(page)
+        read_only = DashboardService(QueryService(cmp_store))
+        page, _ = page_content(f"{base}/{sig.compare}", read_only)
+        assert "no write store" in str(page)
+        editor, polls = page_content(
+            f"{base}/new",
+            cmp_service,
+            search=f"?sweeps={CS1},{CS2}",
+        )
+        assert "New Investigation" in str(editor) and polls is False
+
+
+class TestInvestigationEditorPages:
+    """Create and edit are distinct flows; the preview carries real
+    coverage counts before anything is written."""
+
+    def test_create_flow_seeds_members_preview_and_gating(self, cmp_service, sig):
+        seed = seed_sweeps_from_search(f"?sweeps={CS2},{CS1},deadbeef")
+        assert seed == sorted({str(CS1), str(CS2), "deadbeef"})
+        page = workspace.investigation_edit_page(cmp_service, CMP, None, seed)
+        state = _first_pattern(page, "inv-edit-state").data
+        assert state["picked"] == seed and state["saved"] == []
+        grid = _first_pattern(page, "inv-edit-grid")
+        assert "initialState" not in grid.dashGridOptions
+        assert _first_pattern(page, "inv-edit-name") is not None
+        assert _first_pattern(page, "inv-edit-save").disabled is True
+        assert not _pattern_nodes(page, "inv-edit-discard")
+        text = _text(_first_pattern(page, "inv-edit-preview"))
+        assert "unknown sweep: no sweep with id deadbeef" in text
+
+    def test_create_factor_options_carry_real_coverage(self, cmp_service, sig):
+        page = workspace.investigation_edit_page(
+            cmp_service, CMP, None, [str(CS1), str(CS2)]
+        )
+        factor = _first_pattern(page, "inv-edit-factor")
+        assert {
+            "label": "param problem — 2 of 2 members",
+            "value": "problem",
+        } in factor.options
+        outcome = _first_pattern(page, "inv-edit-outcome")
+        assert {
+            "label": "heldout_rmse — 2 of 2 members",
+            "value": OUTCOME,
+        } in outcome.options
+
+    def test_edit_flow_preselects_saved_members_without_create_controls(
+        self, cmp_service, sig
+    ):
+        page = workspace.investigation_edit_page(cmp_service, CMP, sig.compare, [])
+        state = _first_pattern(page, "inv-edit-state").data
+        assert state["picked"] == state["saved"] == [str(CS1), str(CS2), str(CS3)]
+        grid = _first_pattern(page, "inv-edit-grid")
+        assert "initialState" not in grid.dashGridOptions
+        assert not _pattern_nodes(page, "inv-edit-name")
+        assert not _pattern_nodes(page, "inv-edit-factor")
+        assert _first_pattern(page, "inv-edit-save").disabled is False
+        assert _first_pattern(page, "inv-edit-discard") is not None
+
+    def test_preview_panel_reports_pending_diff_and_coverage(self, cmp_service, sig):
+        picked = [str(CS1), str(CS2), "deadbeef"]
+        preview = cmp_service.investigation_preview(CMP, picked)
+        panel = editor_preview_panel(
+            preview,
+            {"picked": picked, "saved": [str(CS1)], "name": "", "factor": None},
+        )
+        text = _text(panel)
+        assert "2 project members picked" in text
+        assert "+2 -0 (unsaved)" in text
+        assert "param problem — 2 of 2 members" in text
+        assert "heldout_rmse — 2 of 2 members" in text
+        assert "unknown sweep: no sweep with id deadbeef" in text
+        assert "problem" in {
+            option["value"] for option in editor_factor_options(preview)
+        }
+        assert editor_outcome_options(preview)[0]["value"] == OUTCOME
+
+    def test_create_never_overwrites_an_existing_investigation(self, cmp_service, sig):
+        record = cmp_service.create_investigation(
+            CMP, "sig-compare", "problem", OUTCOME, members=[str(CS1)]
+        )
+        assert record.id == uuid.UUID(sig.compare)
+        assert [str(sweep) for sweep in record.members] == [
+            str(CS1),
+            str(CS2),
+            str(CS3),
+        ]
+        with pytest.raises(CurationRejectedError):
+            cmp_service.create_investigation(
+                CMP, "sig-compare", "f02", OUTCOME, members=[str(CS1)]
+            )
+
+
+class TestEditorCallbacks:
+    """The mounted editor callbacks, driven through Dash's dispatch
+    endpoint exactly as the browser would."""
+
+    @pytest.fixture(scope="class")
+    def mounted(self, tmp_path_factory):
+        from jernerics_server.dashboard.app import build_dash_app
+        from jernerics_server.dashboard.auth import DashboardContext
+        from jernerics_server.dashboard.sessions import SessionSigner
+        from jernerics_server.http import create_app
+
+        root = tmp_path_factory.mktemp("editor-callbacks")
+        store = Store(root / "callbacks.sqlite")
+        result = IngestService(store).apply(
+            IngestRequest(protocol_version=PROTOCOL_VERSION, events=_cmp_events())
+        )
+        assert not result.conflicts
+        store.mark_sweep_invalid(str(CS3), "upstream data error")
+        shared = InvestigationService(store)
+        compare = shared.create(
+            CMP,
+            "sig-compare",
+            "problem",
+            OUTCOME,
+            members=[str(CS1), str(CS2), str(CS3)],
+        )
+        service = DashboardService(QueryService(store), store)
+        ctx = DashboardContext(
+            api_key="secret123",
+            queries=service.queries,
+            service=service,
+            signer=SessionSigner(b"\x00" * 32),
+        )
+        client = TestClient(
+            create_app(store, api_key="secret123", dashboard=True),
+            base_url="https://testserver",
+        )
+        response = client.post(
+            "/dashboard/login", data={"api_key": "secret123"}, follow_redirects=False
+        )
+        assert response.status_code == 303
+        return SimpleNamespace(
+            client=client,
+            callback_map=build_dash_app(ctx).callback_map,
+            shared=shared,
+            compare=str(compare.id),
+        )
+
+    @staticmethod
+    def _key(callback_map, output_needle: str, input_needle: str) -> str:
+        """Callback keys carry the output specs only; the input specs
+        disambiguate callbacks that share an output."""
+        for key, spec in callback_map.items():
+            if output_needle not in key:
+                continue
+            if input_needle in json.dumps(spec.get("inputs", [])):
+                return key
+        raise AssertionError(f"no callback for {output_needle}/{input_needle}")
+
+    @staticmethod
+    def _single(value):
+        """Pattern multi-output responses wrap values per matched component."""
+        return value[0] if isinstance(value, list) and value else value
+
+    @staticmethod
+    def _out(result, name: str, prop: str):
+        """Pattern-callback responses key outputs by the compact id."""
+        return result["response"][f'{{"{name}":["ALL"]}}'][prop]
+
+    def _dispatch(self, mounted, key, inputs, state=()):
+        if isinstance(state, dict):
+            state = [state]
+        specs = [
+            spec.split(".")
+            for spec in key.removeprefix("..").removesuffix("..").split("...")
+            if spec
+        ]
+        outputs = []
+        for spec_id, prop in specs:
+            try:
+                resolved = json.loads(spec_id)
+            except json.JSONDecodeError:
+                resolved = spec_id
+            outputs.append({"id": resolved, "property": prop.split("@")[0]})
+        response = mounted.client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": key,
+                "outputs": outputs,
+                "inputs": inputs,
+                "state": list(state),
+                "changedPropIds": [
+                    f"{json.dumps(item['id'], separators=(',', ':'))}"
+                    f".{item['property']}"
+                    for group in inputs
+                    for item in group
+                ],
+            },
+        )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    _CREATE_ROUTE = f"{ROUTES_BASE}/project/{CMP}/investigation/new"
+    _EDIT_ROUTE = f"{ROUTES_BASE}/project/{CMP}/investigation/<id>/edit"
+
+    @staticmethod
+    def _state(picked, saved, **extra):
+        return {
+            "picked": picked,
+            "saved": saved,
+            "name": extra.get("name"),
+            "factor": extra.get("factor"),
+            "outcome": extra.get("outcome"),
+        }
+
+    def test_grid_selection_updates_the_picked_members(self, mounted):
+        key = self._key(mounted.callback_map, "inv-edit-state", "inv-edit-grid")
+        result = self._dispatch(
+            mounted,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"inv-edit-grid": "grid"},
+                        "property": "selectedRows",
+                        "value": [{"sweep_id": str(CS1)}],
+                    }
+                ]
+            ],
+            state=[
+                [
+                    {
+                        "id": {"inv-edit-state": "members"},
+                        "property": "data",
+                        "value": self._state(
+                            [str(CS1), str(CS2)], [str(CS1), str(CS2)]
+                        ),
+                    }
+                ]
+            ],
+        )
+        assert self._out(result, "inv-edit-state", "data")["picked"] == [str(CS1)]
+
+    def test_state_edit_flows_to_preview_and_save_gating(self, mounted):
+        key = self._key(mounted.callback_map, "inv-edit-preview", "inv-edit-state")
+        result = self._dispatch(
+            mounted,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"inv-edit-state": "members"},
+                        "property": "data",
+                        "value": self._state(
+                            [str(CS1), str(CS2)],
+                            [],
+                            name="draft",
+                            factor="problem",
+                            outcome=OUTCOME,
+                        ),
+                    }
+                ]
+            ],
+            state=[
+                [
+                    {
+                        "id": {"inv-edit-grid": "grid"},
+                        "property": "selectedRows",
+                        "value": [],
+                    }
+                ],
+                {"id": "url", "property": "pathname", "value": self._CREATE_ROUTE},
+            ],
+        )
+        assert self._out(result, "inv-edit-save", "disabled") == [False]
+        text = _text(self._out(result, "inv-edit-preview", "children"))
+        assert "2 project members picked" in text
+        assert "+2 -0 (unsaved)" in text
+        # the empty grid selection mismatches the working set: the loader
+        # hands the pre-selection to the grid (one entry per picked row)
+        selection = self._single(self._out(result, "inv-edit-grid", "selectedRows"))
+        assert selection == [
+            {"sweep_id": str(CS1)},
+            {"sweep_id": str(CS2)},
+        ]
+
+    def test_save_on_edit_flow_replaces_and_syncs_members(self, mounted):
+        key = self._key(mounted.callback_map, "url.pathname", "inv-edit-save")
+        route = self._EDIT_ROUTE.replace("<id>", mounted.compare)
+        result = self._dispatch(
+            mounted,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"inv-edit-save": "save"},
+                        "property": "n_clicks",
+                        "value": 1,
+                    }
+                ]
+            ],
+            state=[
+                [
+                    {
+                        "id": {"inv-edit-state": "members"},
+                        "property": "data",
+                        "value": self._state(
+                            [str(CS1)], [str(CS1), str(CS2), str(CS3)]
+                        ),
+                    }
+                ],
+                {"id": "url", "property": "pathname", "value": route},
+            ],
+        )
+        state = self._single(self._out(result, "inv-edit-state", "data"))
+        assert state["saved"] == [str(CS1)]
+        assert "Saved — 1 members" in _text(
+            self._single(self._out(result, "inv-edit-message", "children"))
+        )
+        members = [
+            str(sweep)
+            for sweep in mounted.shared.detail(mounted.compare).investigation.members
+        ]
+        assert members == [str(CS1)]
+        rows = self._single(self._out(result, "inv-edit-grid", "rowData"))
+        member_column = {row["sweep_id"]: row["member"] for row in rows}
+        assert member_column[str(CS1)] == "member"
+        assert member_column[str(CS2)] == MISSING
+
+    def test_save_on_create_requires_a_complete_body(self, mounted):
+        key = self._key(mounted.callback_map, "url.pathname", "inv-edit-save")
+        result = self._dispatch(
+            mounted,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"inv-edit-save": "save"},
+                        "property": "n_clicks",
+                        "value": 1,
+                    }
+                ]
+            ],
+            state=[
+                [
+                    {
+                        "id": {"inv-edit-state": "members"},
+                        "property": "data",
+                        "value": self._state([str(CS1)], []),
+                    }
+                ],
+                {"id": "url", "property": "pathname", "value": self._CREATE_ROUTE},
+            ],
+        )
+        assert "required" in _text(self._out(result, "inv-edit-message", "children"))
+        assert "url" not in result["response"]
+
+    def test_save_on_create_navigates_to_the_new_investigation(self, mounted):
+        key = self._key(mounted.callback_map, "url.pathname", "inv-edit-save")
+        result = self._dispatch(
+            mounted,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"inv-edit-save": "save"},
+                        "property": "n_clicks",
+                        "value": 1,
+                    }
+                ]
+            ],
+            state=[
+                [
+                    {
+                        "id": {"inv-edit-state": "members"},
+                        "property": "data",
+                        "value": self._state(
+                            [str(CS1), str(CS2)],
+                            [],
+                            name="fresh-draft",
+                            factor="f01",
+                            outcome=OUTCOME,
+                        ),
+                    }
+                ],
+                {"id": "url", "property": "pathname", "value": self._CREATE_ROUTE},
+            ],
+        )
+        envelope = result["response"]["url"]
+        target = envelope["pathname"]
+        new_id = target.rsplit("/", 1)[1]
+        assert target.startswith(f"{ROUTES_BASE}/project/{CMP}/investigation/")
+        members = mounted.shared.detail(new_id).investigation.members
+        assert {str(sweep) for sweep in members} == {str(CS1), str(CS2)}
+
+    def test_discard_rolls_the_working_set_back_to_saved(self, mounted):
+        key = self._key(mounted.callback_map, "inv-edit-message", "inv-edit-discard")
+        result = self._dispatch(
+            mounted,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"inv-edit-discard": "discard"},
+                        "property": "n_clicks",
+                        "value": 1,
+                    }
+                ]
+            ],
+            state=[
+                [
+                    {
+                        "id": {"inv-edit-state": "members"},
+                        "property": "data",
+                        "value": self._state([str(CS1)], [str(CS1), str(CS2)]),
+                    }
+                ]
+            ],
+        )
+        state = self._single(self._out(result, "inv-edit-state", "data"))
+        assert state["picked"] == [str(CS1), str(CS2)]
+        assert self._single(self._out(result, "inv-edit-grid", "selectedRows")) == [
+            {"sweep_id": str(CS1)},
+            {"sweep_id": str(CS2)},
+        ]
+
+
+def _pattern_nodes(component, key: str) -> list:
+    return [
+        node
+        for node in _walk_children(component)
+        if isinstance(getattr(node, "id", None), dict) and key in node.id
+    ]
+
+
+def _first_pattern(component, key: str):
+    nodes = _pattern_nodes(component, key)
+    return nodes[0] if nodes else None
+
+
+def _text(node) -> str:
+    """Every scalar leaf concatenated — assertions read facts, not reprs."""
+    if isinstance(node, Component):
+        return _text(getattr(node, "children", None))
+    if isinstance(node, dict):
+        return _text((node.get("props") or {}).get("children"))
+    if isinstance(node, (list, tuple)):
+        return "".join(_text(child) for child in node)
+    return "" if node is None else str(node)

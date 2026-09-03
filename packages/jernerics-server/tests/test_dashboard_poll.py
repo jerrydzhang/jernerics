@@ -318,6 +318,7 @@ class TestOverviewPollCascade:
                 {"id": "workspace-store", "property": "data", "value": None},
                 {"id": "view-store", "property": "data", "value": None},
                 {"id": "route-store", "property": "data", "value": None},
+                {"id": "url", "property": "search", "value": None},
             ],
             changed=["url.pathname"],
         )
@@ -336,6 +337,7 @@ class TestOverviewPollCascade:
                 {"id": "workspace-store", "property": "data", "value": None},
                 {"id": "view-store", "property": "data", "value": None},
                 {"id": "route-store", "property": "data", "value": WORKSPACE},
+                {"id": "url", "property": "search", "value": None},
             ],
             changed=["poll.n_intervals"],
         )

@@ -1150,3 +1150,200 @@ button.tile.on {
   cursor: pointer;
   text-decoration: none;
 }
+
+/* Investigation workspace (jernerics-g5rw.8): breadcrumb, header,
+   views row with actions, coverage strip, and the member editor. */
+
+.crumb {
+  display: flex;
+  gap: 0.45rem;
+  align-items: baseline;
+  font-size: 0.85rem;
+  color: #555;
+  margin-bottom: 0.35rem;
+}
+
+.crumb .dim {
+  color: #aaa;
+}
+
+.crumb .dim::before {
+  content: "\203A";
+}
+
+.crumb a {
+  color: #2563eb;
+  text-decoration: none;
+}
+
+.crumb a:hover {
+  text-decoration: underline;
+}
+
+.inv-sub {
+  color: #555;
+  margin: 0.1rem 0 0.4rem;
+}
+
+.inv-views {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0.25rem 0 0.6rem;
+}
+
+.inv-views .seg {
+  margin: 0;
+}
+
+.inv-views .py-details,
+.inv-views .btn-link {
+  margin-left: auto;
+}
+
+.inv-views .btn-link,
+.inv-save-row .btn-link {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  color: #2563eb;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.py-details summary.btn-primary {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #fff;
+  color: #2563eb;
+  cursor: pointer;
+  list-style: none;
+}
+
+.py-details[open] summary.btn-primary {
+  background: #2563eb;
+  color: #fff;
+}
+
+.py-panel {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem;
+  margin-top: 0.4rem;
+  background: #fff;
+}
+
+.coverage-strip {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0 0.6rem;
+}
+
+.coverage-strip .stat {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  padding: 0.45rem 0.9rem;
+  min-width: 8rem;
+}
+
+.coverage-strip .stat .lbl {
+  display: block;
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.coverage-strip .stat .num {
+  font-size: 1.2rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.empty-state {
+  border: 1px dashed #ccc;
+  border-radius: 8px;
+  background: #fafafa;
+  padding: 0.9rem 1rem;
+  margin: 0.4rem 0;
+}
+
+.empty-state p {
+  margin: 0;
+  color: #444;
+}
+
+.inv-create-controls {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0.3rem 0 0.5rem;
+}
+
+.inv-create-controls .inv-name {
+  min-width: 18rem;
+}
+
+.inv-create-controls .inv-dd {
+  min-width: 20rem;
+}
+
+.inv-preview {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  background: #fff;
+  padding: 0.6rem 0.9rem;
+  margin: 0.3rem 0 0.5rem;
+}
+
+.preview-cols {
+  display: flex;
+  gap: 2rem;
+  flex-wrap: wrap;
+  margin: 0.4rem 0;
+}
+
+.preview-col > div {
+  font-size: 0.85rem;
+}
+
+.preview-warnings {
+  margin: 0.3rem 0 0;
+  padding-left: 1.2rem;
+  color: #b45309;
+  font-size: 0.85rem;
+}
+
+.inv-save-row {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+  margin: 0.4rem 0;
+}
+
+.inv-save-row .btn-primary {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.8rem;
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #fff;
+  cursor: pointer;
+}
+
+.inv-save-row .btn-primary:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.inv-save-row .action-message {
+  margin: 0;
+}

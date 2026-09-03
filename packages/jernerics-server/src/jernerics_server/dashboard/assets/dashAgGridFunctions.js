@@ -40,22 +40,28 @@ function renderRelative(x) {
   return Math.floor(seconds / 86400) + "d ago";
 }
 
-// Cell renderer for row-link columns; textContent keeps row labels
-function renderLinkCell(data) {
-  const a = document.createElement("a");
-  a.href = (data && data.link_href) || "#";
-  a.className = "sweep-link";
-  a.textContent = (data && data.link_label) || "";
-  return a;
+// Cell renderers are React function components (props = the ag-grid
+// cell params): they must return elements from createElement — a
+// string renders as literal text and a DOM node cannot reconcile.
+// React escapes text children, so labels need no manual escaping.
+function sweepLink(href, label) {
+  return React.createElement(
+    "a",
+    { href: href || "#", className: "sweep-link" },
+    label
+  );
+}
+
+function renderLinkCell(params) {
+  const data = (params && params.data) || {};
+  return sweepLink(data.link_href, data.link_label);
 }
 
 // Cell renderer for the index's Edit-members column; the row carries
 // its target href so the column stays a plain data column.
-function renderEditCell(data) {
-  const a = document.createElement("a");
-  a.href = (data && data.edit_href) || "#";
-  a.textContent = "Edit members";
-  return a;
+function renderEditCell(params) {
+  const data = (params && params.data) || {};
+  return sweepLink(data.edit_href, "Edit members");
 }
 
 window.dashAgGridFunctions = window.dashAgGridFunctions || {};
