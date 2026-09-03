@@ -1,7 +1,5 @@
 import uuid
-from unittest import mock
 
-from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
     auto_refresh_flip,
     axis_state_edit,
@@ -17,7 +15,6 @@ from jernerics_server.dashboard.analysis import (
     view_query,
     with_focus,
 )
-from jernerics_server.dashboard.callbacks import focus_from_trigger
 
 SWEEP_A = uuid.UUID("aa110000-0000-4000-8000-000000000000")
 TRIAL_F2 = uuid.UUID("cc130000-0000-4000-8000-000000000000")
@@ -224,60 +221,3 @@ class TestUrlSyncCarriesFocus:
     def test_default_doc_mints_no_parameter(self):
         assert view_query(default_view_state()) == ""
         assert view_query(None) == ""
-
-
-class TestFocusFromTrigger:
-    def test_recreated_close_button_is_not_a_clear(self):
-        assert (
-            focus_from_trigger([{"prop_id": "inspector-close.n_clicks", "value": 0}])
-            == ""
-        )
-
-    def test_real_close_clears(self):
-        assert (
-            focus_from_trigger([{"prop_id": "inspector-close.n_clicks", "value": 3}])
-            is None
-        )
-
-    def test_recreated_focus_button_is_skipped(self):
-        events = [
-            {"prop_id": '{"focus-object": "trial:abc12345"}.n_clicks', "value": 0},
-            {"prop_id": '{"focus-object": "sweep:def99999"}.n_clicks', "value": 2},
-        ]
-        assert focus_from_trigger(events) == {"kind": "sweep", "id": "def99999"}
-
-    def test_attribute_shaped_events(self):
-        class Event:
-            prop_id = "inspector-close.n_clicks"
-            value = 1
-
-        assert focus_from_trigger([Event()]) is None
-
-    def test_nothing_focusable_fires(self):
-        assert focus_from_trigger([]) == ""
-        assert focus_from_trigger([{"prop_id": "url.pathname", "value": "/x"}]) == ""
-
-
-class TestFocusIncompleteCheapRead:
-    """jernerics-g6t: sweep liveness comes from the cheap overview-row
-    read; the full sweep detail fetch stays out of every poll gate."""
-
-    def test_sweep_focus_answers_from_the_cheap_read(self):
-        service = mock.Mock(spec=["sweep_incomplete", "sweep_detail"])
-        service.sweep_incomplete.return_value = True
-        focus = {"kind": "sweep", "id": str(SWEEP_A)}
-        assert workspace.focus_incomplete(service, focus) is True
-        service.sweep_incomplete.assert_called_once_with(str(SWEEP_A))
-        service.sweep_detail.assert_not_called()
-
-    def test_non_sweep_kinds_keep_their_detail_reads(self):
-        service = mock.Mock(spec=["trial_detail", "execution_detail"])
-        service.trial_detail.return_value = None
-        service.execution_detail.return_value = None
-        assert (
-            workspace.focus_incomplete(service, {"kind": "trial", "id": "t1"}) is False
-        )
-        assert (
-            workspace.focus_incomplete(service, {"kind": "execution", "id": "e1"})
-            is False
-        )

@@ -7,7 +7,6 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from urllib.parse import unquote
 
 import httpx
 import optuna
@@ -36,7 +35,6 @@ from jernerics_schema import (
 )
 from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
-    decode_view_state,
     default_view_state,
     encode_view_state,
     investigation_scope_state,
@@ -761,28 +759,25 @@ class TestDashboardJourney:
             ],
             changed=["compare-members-grid.cellClicked"],
         )
-        search = response["url"]["search"]
-        assert response["url"]["pathname"] == f"{ROUTES_BASE}/project/{PROJECT}"
-        doc = decode_view_state(unquote(search.removeprefix("?view=")))
-        assert doc["focus"] == {"kind": "sweep", "id": sgd}
-        assert doc["via"] == investigation_id
-
-        hub = workspace.inspector_content(
-            world.service,
-            {"kind": "sweep", "id": sgd},
-            time.time_ns(),
-            project=PROJECT,
-            via=investigation_id,
+        assert response["url"]["pathname"] == (
+            f"{ROUTES_BASE}/project/{PROJECT}/sweep/{sgd}"
         )
-        text = _page_text(hub)
+        assert response["url"]["search"] == f"?via={investigation_id}"
+
+        page, _polls = page_content(
+            f"{ROUTES_BASE}/project/{PROJECT}/sweep/{sgd}",
+            world.service,
+            search=f"?via={investigation_id}",
+        )
+        text = _page_text(page)
         assert PROJECT in text and "Investigations" in text
         assert MAIN_INV in text and ROBERTS_SGD in text
         links = {
-            node.children: node.href
-            for node in _components(hub)
-            if isinstance(node, html.A) and node.href
+            node.children: getattr(node, "href", None)
+            for node in _components(page)
+            if isinstance(node, html.A) and getattr(node, "href", None)
         }
-        assert links[f"Back to {MAIN_INV}"] == investigation_view_href(
+        assert links[f"← {MAIN_INV}"] == investigation_view_href(
             PROJECT, investigation_id, "compare"
         )
         assert links["Series"] == investigation_view_href(
@@ -795,13 +790,10 @@ class TestDashboardJourney:
             PROJECT, investigation_id, "search"
         )
 
-        plain = workspace.inspector_content(
-            world.service,
-            {"kind": "sweep", "id": sgd},
-            time.time_ns(),
-            project=PROJECT,
+        plain, _plain_polls = page_content(
+            f"{ROUTES_BASE}/project/{PROJECT}/sweep/{sgd}", world.service
         )
-        assert f"Back to {MAIN_INV}" not in _page_text(plain)
+        assert f"← {MAIN_INV}" not in _page_text(plain)
 
     def test_open_in_python_token_decodes_to_the_materialized_selection(
         self, world, saved

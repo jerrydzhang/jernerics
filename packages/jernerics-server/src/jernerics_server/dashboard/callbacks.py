@@ -1,24 +1,21 @@
 """Navigation, project picker, selection tray, and polling callbacks.
 
-Routing model after the workspace cutover: the project catalog and the
-persistent workspace are the only non-artifact pages; sweeps, trials,
-and executions render in the workspace's inspector region, driven by
-the view document's ``focus`` field.
+Routing model: the project catalog, the persistent workspace, the
+investigation pages, and the per-sweep page are routed by URL; the
+sweep page refreshes its region from the view document's ``scope``
+picks and the poll interval while the sweep is incomplete.
 """
 
-import ast
 import hashlib
 import json
 import time
-from collections.abc import Sequence
-from typing import Any, Literal
-from uuid import UUID
+from typing import Any
 
 import dash
 from dash import ALL, Input, Output, State, html, no_update
 from dash.exceptions import PreventUpdate
 
-from . import analysis, artifacts, components, figures, layout, workspace
+from . import analysis, artifacts, components, figures, layout, sweep, workspace
 from .components import Error, short_id
 from .routes import ROUTES_BASE, parse_route
 from .service import (
@@ -107,9 +104,7 @@ def page_content(
     if spec.kind == "workspace":
         project = spec.object_id or ""
         summaries = service.sweep_overview(project)
-        polls = any(summary.incomplete for summary in summaries) or (
-            workspace.focus_incomplete(service, (view_doc or {}).get("focus"))
-        )
+        polls = any(summary.incomplete for summary in summaries)
         state = workspace_state(workspace_state_doc, project)
         return (
             workspace.workspace_page(
@@ -147,6 +142,21 @@ def page_content(
         except CurationRejectedError:
             return layout.missing_object_page("investigation", spec.sub_id or ""), False
         return page, False
+    if spec.kind == "sweep":
+        sweep_id = spec.sub_id or ""
+        found = sweep.page(
+            service,
+            spec.object_id or "",
+            sweep_id,
+            sweep.via_from_search(search),
+            now,
+            picked_families=set(
+                ((view_doc or {}).get("scope") or {}).get("families") or ()
+            ),
+        )
+        if found is None:
+            return layout.missing_object_page("sweep", sweep_id), False
+        return found, service.sweep_incomplete(sweep_id)
     if spec.kind == "artifact":
         view = service.artifact_view(spec.object_id or "")
         if view is None:
@@ -255,118 +265,6 @@ def overview_content(
     covers stored facts only, never the rendered children."""
     facts = overview_facts(service, project, tray, overview_filter)
     return facts, _content_digest(facts)
-
-
-def lineage_panel(rows: list[dict] | None, data: dict | None) -> list[object]:
-    """Side-panel lineage for the family selected in the inspector grid."""
-    lineage = (data or {}).get("lineage") or []
-    root = str(rows[0]["root"]) if rows else None
-    return workspace.lineage_chain(root, lineage)
-
-
-def _execution_fact_rows(records: Sequence[Any]) -> list[list[Any]]:
-    """Per-execution stored facts: identity, derived monitoring label,
-    outcome, and terminal stamps — nothing rendered."""
-    return [
-        [
-            str(record.execution_id),
-            record.monitoring or "",
-            record.outcome.value if record.outcome else "",
-            components.datetime_to_ns(record.started_at),
-            (
-                components.datetime_to_ns(record.ended_at)
-                if record.ended_at is not None
-                else None
-            ),
-        ]
-        for record in records
-    ]
-
-
-def _artifact_fact_rows(rows: Sequence[Any]) -> list[list[Any]]:
-    """Artifact identity and receipt stamps for the digest."""
-    return [
-        [row.artifact_id, row.version, row.size_bytes, row.received_ns] for row in rows
-    ]
-
-
-def _param_fact_rows(records: Sequence[Any]) -> list[list[Any]]:
-    return [[record.kind, record.key, str(record.value)] for record in records]
-
-
-def _trial_facts(service: DashboardService, object_id: str) -> dict[str, Any]:
-    detail = service.trial_detail(object_id)
-    if detail is None:
-        return {"kind": "trial", "id": object_id}
-    return {
-        "kind": "trial",
-        "id": object_id,
-        "context": detail.context,
-        "params": _param_fact_rows(detail.params),
-        "catalog": [
-            [
-                record.key,
-                record.kind,
-                record.n_points,
-                record.latest_step,
-                record.n_trials,
-            ]
-            for record in detail.catalog
-        ],
-        "executions": _execution_fact_rows(detail.executions),
-        "lineage": [
-            [entry["trial_id"], entry["root"], entry["index"]]
-            for entry in detail.lineage
-        ],
-        "artifacts": _artifact_fact_rows(detail.artifacts),
-    }
-
-
-def _execution_facts(service: DashboardService, object_id: str) -> dict[str, Any]:
-    detail = service.execution_detail(object_id)
-    if detail is None:
-        return {"kind": "execution", "id": object_id}
-    return {
-        "kind": "execution",
-        "id": object_id,
-        "context": detail.context,
-        "params": _param_fact_rows(detail.params),
-        "provenance": [
-            [
-                str(record.submission_id),
-                record.backend,
-                record.submitted_at_ns,
-                record.expected_trials,
-                record.git_hash,
-                record.config_source,
-            ]
-            for record in detail.provenance
-        ],
-        "resolved_config": detail.resolved_config,
-        "artifacts": _artifact_fact_rows(detail.artifacts),
-    }
-
-
-def inspector_facts(
-    service: DashboardService, focus: dict[str, Any] | None
-) -> dict[str, Any]:
-    """Digest-stable facts for the focused object — ids, counts, terminal
-    flags, stored nanosecond stamps — computed before any tree build so
-    an unchanged tick rebuilds and ships nothing, and relative-time
-    strings can never reach the digest (jernerics-l4k)."""
-    if not focus:
-        return {"kind": None}
-    kind, object_id = focus.get("kind"), str(focus.get("id") or "")
-    if kind == "sweep":
-        facts = service.sweep_facts(object_id)
-        if facts is None:
-            return {"kind": "sweep", "id": object_id}
-        return {"kind": "sweep", "id": object_id, **facts}
-    if kind == "trial":
-        return _trial_facts(service, object_id)
-    if kind == "execution":
-        return _execution_facts(service, object_id)
-    return {"kind": kind, "id": object_id}
 
 
 def workspace_state(store: dict | None, project: str | None) -> dict:
@@ -513,39 +411,6 @@ def _event_field(event: Any, name: str) -> Any:
     return getattr(event, name, None)
 
 
-def focus_from_trigger(events: Any) -> dict[str, str] | Literal[""] | None:
-    """The focus a real row-click or button press names: ``{kind, id}``,
-    ``None`` to clear, or ``""`` when nothing was actually clicked.
-
-    Only truthy ``n_clicks`` count: an inspector re-render recreates the
-    close and focus buttons, which changes their props without a press —
-    treating those as actions cleared the focus on every poll refresh
-    (jernerics-gk6).
-    """
-    for event in events or ():
-        text = str(_event_field(event, "prop_id") or "")
-        value = _event_field(event, "value")
-        if text.startswith("inspector-close."):
-            return None if value else ""
-        if text.startswith(("sweep-grid.", "analysis-family-grid.")) or (
-            '"overview-grid"' in text or '"focus-family"' in text
-        ):
-            continue
-        if ".cellClicked" not in text and ".n_clicks" not in text:
-            continue
-        if ".n_clicks" in text and not value:
-            continue
-        head, _, _prop = text.rpartition(".")
-        try:
-            ident = ast.literal_eval(head)
-        except ValueError:
-            continue
-        if isinstance(ident, dict) and "focus-object" in ident:
-            kind, _, object_id = str(ident["focus-object"]).partition(":")
-            return {"kind": kind, "id": object_id}
-    return ""
-
-
 def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     @app.callback(
         Output("page-container", "children"),
@@ -585,7 +450,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if ticked and kind == "workspace":
             polls = any(
                 summary.incomplete for summary in service.sweep_overview(project or "")
-            ) or workspace.focus_incomplete(service, (view_doc or {}).get("focus"))
+            )
             flip = analysis.auto_refresh_flip(view_doc, polls)
             return (
                 no_update,
@@ -624,6 +489,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 no_update,
                 no_update,
             )
+        if ticked and kind == "sweep":
+            polls = service.sweep_incomplete(parse_route(pathname).sub_id or "")
+            return no_update, not polls, no_update, no_update, no_update
         page, polls = page_content(
             pathname,
             service,
@@ -658,7 +526,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             "project": project,
             "scope": analysis.scope_dims(doc.get("scope")),
             "auto_refresh": doc.get("auto_refresh"),
-            "focus": doc.get("focus"),
             "inv": doc.get("inv"),
         }
         triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
@@ -667,7 +534,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             and (facts or {}).get("project") == desired["project"]
             and (facts or {}).get("scope") == desired["scope"]
             and (facts or {}).get("auto_refresh") == desired["auto_refresh"]
-            and (facts or {}).get("focus") == desired["focus"]
             and (facts or {}).get("inv") == desired["inv"]
         ):
             raise PreventUpdate
@@ -693,18 +559,16 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 not service.analysis_scope_incomplete(project, tray),
                 desired,
             )
+        if kind == "sweep":
+            sweep_id = parse_route(pathname).sub_id or ""
+            return (not service.sweep_incomplete(sweep_id), desired)
         if kind != "workspace":
             raise PreventUpdate
         scope_open = bool(project) and service.analysis_scope_incomplete(
             project, doc.get("scope")
         )
-        focus_open = workspace.focus_incomplete(service, doc.get("focus"))
         return (
-            not (
-                analysis.auto_refresh_polls(service, project, view_doc)
-                or scope_open
-                or focus_open
-            ),
+            not (analysis.auto_refresh_polls(service, project, view_doc) or scope_open),
             desired,
         )
 
@@ -814,7 +678,12 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
     )
     def _adopt_project_from_url(pathname: str | None, current: str | None):
         spec = parse_route(pathname)
-        if spec.kind in ("workspace", "investigation", "investigation-edit"):
+        if spec.kind in (
+            "workspace",
+            "investigation",
+            "investigation-edit",
+            "sweep",
+        ):
             if spec.object_id == current:
                 raise PreventUpdate
             return spec.object_id
@@ -861,16 +730,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if parse_route(pathname).kind != "workspace":
             raise PreventUpdate
         return True
-
-    @app.callback(
-        Output("family-lineage-panel", "children"),
-        Input({"focus-family": dash.ALL}, "selectedRows"),
-        State("family-lineage-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _show_lineage(rows: list, data: dict | None):
-        picked = next((entry for entry in reversed(rows) if entry is not None), None)
-        return lineage_panel(picked, data)
 
     # -- Scope browser and workspace curation ----------------------------
 
@@ -1097,64 +956,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             note,
         )
 
-    DETAIL_ACTIONS = {
-        "detail-archive.n_clicks": "archive",
-        "detail-invalid.n_clicks": "invalid",
-        "detail-restore-validity.n_clicks": "restore_validity",
-        "detail-restore.n_clicks": "restore",
-    }
-
-    @app.callback(
-        Output("detail-message", "children"),
-        Output("detail-curation", "children"),
-        Output("sweep-grid", "rowData", allow_duplicate=True),
-        Output("sweep-grid", "selectedRows", allow_duplicate=True),
-        Output("workspace-curation-note", "children", allow_duplicate=True),
-        Input("detail-archive", "n_clicks"),
-        Input("detail-invalid", "n_clicks"),
-        Input("detail-restore-validity", "n_clicks"),
-        Input("detail-restore", "n_clicks"),
-        State("view-store", "data"),
-        State("detail-reason", "value"),
-        State("sweep-grid", "selectedRows"),
-        State("project-store", "data"),
-        prevent_initial_call=True,
-    )
-    def _curate_from_detail(
-        _archive: int,
-        _invalid: int,
-        _validity: int,
-        _restore: int,
-        view_doc: dict | None,
-        reason: str | None,
-        grid_selection: list[dict] | None,
-        project: str | None,
-    ):
-        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
-        action = triggered_action(triggered, DETAIL_ACTIONS)
-        focus = (view_doc or {}).get("focus") or {}
-        if action is None or focus.get("kind") != "sweep":
-            raise PreventUpdate
-        sweep_id = str(focus.get("id") or "")
-        ok, report = apply_curation(service, action, [sweep_id], reason or "")
-        detail = service.sweep_detail(sweep_id)
-        banner = (
-            workspace.detail_curation(detail.overview)
-            if detail is not None
-            else no_update
-        )
-        # The grid mirrors the detail action immediately — same tray-driven
-        # recomputation as the workspace bar — with the surviving selection.
-        fresh, note = _post_action_grid(service, project, view_doc)
-        kept = {str(row["sweep_id"]) for row in grid_selection or []}
-        return (
-            workspace.action_message(ok, report),
-            banner,
-            fresh,
-            [row for row in fresh if row["sweep_id"] in kept],
-            note,
-        )
-
     # -- Failure view: the roll-up's scope-wide failed executions --------
 
     @app.callback(
@@ -1264,100 +1065,152 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             )
         raise PreventUpdate
 
-    # -- Focus: the inspector region --------------------------------------
+    # -- Sweep page: live region, curation, retry-root picking ------------
 
     @app.callback(
-        Output("inspector", "children"),
-        Output("inspector-render-store", "data"),
-        Input("view-store", "data"),
+        Output("sweep-page-body", "children"),
+        Output("sweep-page-facts-store", "data"),
         Input("poll", "n_intervals"),
-        State("project-store", "data"),
-        State("inspector-render-store", "data"),
+        State("url", "pathname"),
+        State("url", "search"),
+        State("view-store", "data"),
+        State("sweep-page-facts-store", "data"),
+        prevent_initial_call=True,
     )
-    def _render_inspector(
-        view_doc: dict | None,
+    def _refresh_sweep_page(
         _tick: int | None,
-        project: str,
-        rendered: dict | None,
+        pathname: str | None,
+        search: str | None,
+        view_doc: dict | None,
+        facts: dict | None,
     ):
-        # Unrelated view edits with the same focus render nothing; a
-        # re-render would also rebuild the focus controls, re-firing
-        # the focus editor on every poll tick for nothing.
-        focus = (view_doc or {}).get("focus")
-        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
-        if (
-            "poll.n_intervals" not in triggered
-            and (rendered or {}).get("focus") == focus
-        ):
+        spec = parse_route(pathname)
+        if spec.kind != "sweep":
             raise PreventUpdate
-        # Facts before trees: an unchanged tick pays a few cheap reads,
-        # never a rebuild, a re-digest, or a re-ship of the region.
-        digest = _content_digest(inspector_facts(service, focus))
-        if digest == (rendered or {}).get("digest"):
+        sweep_id = spec.sub_id or ""
+        # Facts before trees: the cheap overview gate skips the full
+        # sweep read on every unchanged tick.
+        cheap = _content_digest(service.sweep_facts(sweep_id))
+        if cheap == (facts or {}).get("cheap"):
             raise PreventUpdate
-        children = workspace.inspector_content(
-            service,
-            focus,
-            time.time_ns(),
-            project=project or "",
-            via=str((view_doc or {}).get("via") or ""),
+        data = sweep.collect(service, sweep_id, sweep.via_from_search(search))
+        if data is None:
+            raise PreventUpdate
+        fresh = sweep.digest(data)
+        if fresh == (facts or {}).get("digest"):
+            return no_update, {"digest": fresh, "cheap": cheap}
+        picked = set(((view_doc or {}).get("scope") or {}).get("families") or ())
+        body = sweep.render(
+            data, spec.object_id or "", sweep_id, time.time_ns(), picked
         )
-        return children, {"focus": focus, "digest": digest}
+        return body, {"digest": fresh, "cheap": cheap}
+
+    SWEEP_ACTIONS = {
+        "sweep-archive.n_clicks": "archive",
+        "sweep-invalid.n_clicks": "invalid",
+        "sweep-restore-validity.n_clicks": "restore_validity",
+        "sweep-restore.n_clicks": "restore",
+    }
 
     @app.callback(
-        Output("view-store", "data", allow_duplicate=True),
-        Input({"focus-object": dash.ALL}, "n_clicks"),
-        Input("inspector-close", "n_clicks"),
-        Input("sweep-grid", "cellClicked"),
-        Input({"overview-grid": dash.ALL}, "cellClicked"),
-        Input({"focus-family": dash.ALL}, "cellClicked"),
-        Input("analysis-family-grid", "cellClicked"),
-        Input({"focus-executions": dash.ALL}, "cellClicked"),
+        Output("sweep-message", "children"),
+        Output("sweep-page-body", "children", allow_duplicate=True),
+        Output("sweep-page-facts-store", "data", allow_duplicate=True),
+        Input("sweep-archive", "n_clicks"),
+        Input("sweep-invalid", "n_clicks"),
+        Input("sweep-restore-validity", "n_clicks"),
+        Input("sweep-restore", "n_clicks"),
+        State("sweep-reason", "value"),
+        State("url", "pathname"),
+        State("url", "search"),
         State("view-store", "data"),
         prevent_initial_call=True,
     )
-    def _edit_focus(
-        _buttons: Any,
-        _close: int | None,
-        sweep_click: dict | None,
-        overview_clicks: list,
-        family_clicks: list,
-        browser_family_click: dict | None,
-        executions_click: dict | None,
-        current: dict | None,
+    def _curate_from_sweep_page(
+        _archive: int,
+        _invalid: int,
+        _validity: int,
+        _restore: int,
+        reason: str | None,
+        pathname: str | None,
+        search: str | None,
+        view_doc: dict | None,
     ):
-        triggered = dash.callback_context.triggered_prop_ids
-        for text in (str(prop) for prop in triggered or ()):
-            click = None
-            kind = None
-            if text.startswith("sweep-grid."):
-                click, kind = sweep_click, "sweep"
-            elif '"overview-grid"' in text:
-                click = next((c for c in reversed(overview_clicks) if c), None)
-                kind = "sweep"
-            elif text.startswith("analysis-family-grid."):
-                click, kind = browser_family_click, "trial"
-            elif '"focus-family"' in text:
-                click = next((c for c in reversed(family_clicks) if c), None)
-                kind = "trial"
-            elif '"focus-executions"' in text:
-                click, kind = executions_click, "execution"
-            if not isinstance(click, dict) or kind is None:
-                continue
-            row_id = str(click.get("rowId") or "")
-            if not row_id:
-                raise PreventUpdate
-            doc = analysis.with_focus(current, {"kind": kind, "id": row_id})
-            if doc == (current or {}):
-                raise PreventUpdate
-            return doc
-        focus = focus_from_trigger(dash.callback_context.triggered)
-        if focus == "":
+        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
+        action = triggered_action(triggered, SWEEP_ACTIONS)
+        spec = parse_route(pathname)
+        if action is None or spec.kind != "sweep":
             raise PreventUpdate
-        doc = analysis.with_focus(current, focus)
-        if doc == (current or {}):
+        sweep_id = spec.sub_id or ""
+        ok, report = apply_curation(service, action, [sweep_id], reason or "")
+        data = sweep.collect(service, sweep_id, sweep.via_from_search(search))
+        if data is None:
+            return workspace.action_message(ok, report), no_update, no_update
+        picked = set(((view_doc or {}).get("scope") or {}).get("families") or ())
+        body = sweep.render(
+            data, spec.object_id or "", sweep_id, time.time_ns(), picked
+        )
+        return (
+            workspace.action_message(ok, report),
+            body,
+            {
+                "digest": sweep.digest(data),
+                "cheap": _content_digest(service.sweep_facts(sweep_id)),
+            },
+        )
+
+    @app.callback(
+        Output("view-store", "data", allow_duplicate=True),
+        Input({"sweep-trial-pick": dash.ALL}, "value"),
+        State("view-store", "data"),
+        State("url", "pathname"),
+        prevent_initial_call=True,
+    )
+    def _pick_retry_roots(
+        values: list,
+        current: dict | None,
+        pathname: str | None,
+    ):
+        # Trial checkboxes on the sweep page are the retry-root picker's
+        # permanent home: checking merges this sweep's roots into the
+        # scope's families; unchecking drops exactly this sweep's roots.
+        spec = parse_route(pathname)
+        if spec.kind != "sweep" or not spec.object_id:
             raise PreventUpdate
-        return doc
+        checked = {str(entry[0]) for entry in values or [] if entry}
+        roots = {
+            str(row["root"])
+            for row in service.analysis_families(spec.object_id, [spec.sub_id or ""])
+        }
+        scope = dict(
+            (current or analysis.default_view_state()).get("scope")
+            or analysis.default_scope_state()
+        )
+        merged = sorted((set(scope.get("families") or []) - roots) | checked)
+        if merged == sorted(str(v) for v in scope.get("families") or []):
+            raise PreventUpdate
+        scope["families"] = merged
+        # A pattern-input callback returns its single output as a tuple.
+        return (analysis.edited_view(current, {"scope": scope}),)
+
+    app.clientside_callback(
+        """
+        function(clicks) {
+            return (clicks || []).map((c) => !(c && c % 2 === 1));
+        }
+        """,
+        Output({"trial-subrow": dash.ALL}, "hidden"),
+        Input({"trial-toggle": dash.ALL}, "n_clicks"),
+    )
+    app.clientside_callback(
+        """
+        function(clicks) {
+            return (clicks || []).map((c) => (c && c % 2 === 1) ? "▾" : "▸");
+        }
+        """,
+        Output({"trial-chev": dash.ALL}, "children"),
+        Input({"trial-toggle": dash.ALL}, "n_clicks"),
+    )
 
     @app.callback(
         Output("overview-digest-store", "data"),
@@ -1580,23 +1433,17 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
     def _open_member_sweep(click: dict | None, pathname: str | None):
-        # A row click on the member inventory opens the sweep hub in the
-        # workspace: the sweep's overview with the investigation
-        # breadcrumb and back link (the ``?via=`` return path).
+        # A row click on the member inventory opens the sweep page with
+        # the ``?via=`` return path to this investigation.
         spec = parse_route(pathname)
         if spec.kind != "investigation" or not isinstance(click, dict):
             raise PreventUpdate
         row_id = click.get("rowId")
         if not row_id:
             raise PreventUpdate
-        project = spec.object_id or ""
-        doc = analysis.with_focus(
-            analysis.default_view_state(), {"kind": "sweep", "id": str(row_id)}
-        )
-        doc = analysis.edited_view(doc, {"via": str(spec.sub_id or "")})
         return (
-            f"{ROUTES_BASE}/project/{project}",
-            f"?view={analysis.encode_view_state(doc)}",
+            f"{ROUTES_BASE}/project/{spec.object_id}/sweep/{row_id}",
+            f"?via={spec.sub_id or ''}",
         )
 
     @app.callback(
@@ -2820,20 +2667,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         prevent_initial_call=True,
     )
 
-    # -- Artifact listing and viewer (jernerics-h5d.14) ------------------
-
-    @app.callback(
-        Output("url", "pathname"),
-        Input("artifact-grid", "cellClicked"),
-        prevent_initial_call=True,
-    )
-    def _open_artifact(click: dict | None):
-        row_id = click.get("rowId") if isinstance(click, dict) else None
-        try:
-            artifact_id = UUID(str(row_id))
-        except ValueError:
-            raise PreventUpdate from None
-        return artifacts.viewer_href(str(artifact_id))
+    # -- Artifact viewer (jernerics-h5d.14) -------------------------------
 
     @app.callback(
         Output("artifact-rows-grid", "dashGridOptions"),

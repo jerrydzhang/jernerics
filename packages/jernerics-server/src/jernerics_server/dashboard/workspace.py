@@ -1,4 +1,3 @@
-import json
 import time
 from collections import Counter
 from collections.abc import Sequence
@@ -8,33 +7,25 @@ from uuid import UUID
 from dash import dcc, html
 from dash_ag_grid import AgGrid
 from jernerics_schema import (
-    ExecutionRecord,
     InvestigationRecord,
     Selection,
     encode_selection,
     materialize_selection,
 )
 
-from . import analysis, artifacts, components, figures
-from .components import MISSING, UNKNOWN, Badge, short_id, time_cell
+from . import analysis, components, figures
+from .components import MISSING, UNKNOWN, Badge, short_id
 from .render import SortColumn, sort_rows, sortable_columns
 from .routes import ROUTES_BASE
 from .service import (
     CompareDocument,
-    CurationRejectedError,
     CurationUnavailableError,
     DashboardService,
-    ExecutionDetail,
     FailedExecutionRow,
-    FamilyRow,
     InvestigationPreview,
     InvestigationRow,
-    SweepDetail,
     SweepSummary,
-    TrialDetail,
 )
-
-FOCUS_KINDS = ("sweep", "trial", "execution")
 
 INVESTIGATION_VIEWS = analysis.INVESTIGATION_VIEWS
 """Re-exported view vocabulary; the ``view=`` codec owns the names."""
@@ -44,13 +35,17 @@ _INCOMPLETE_TRIAL_STATES = ("waiting", "running")
 
 _FAILED_VIEW_LIMIT = 200
 _OVERVIEW_PAGE_SIZE = 25
-_MONITORING_ORDER = ("active", "quiet", "stale", "failed", "succeeded", UNKNOWN)
 _STATE_TILE_LABELS = {
     "completed": "completed sweeps",
     "failed": "failed sweeps",
     "no-data": "sweeps with no trials yet",
     "running": "running sweeps",
+    "stale": "interrupted",
 }
+
+_MONITORING_ORDER = ("active", "quiet", "stale", "failed", "succeeded", UNKNOWN)
+"""Execution-monitoring labels in their canonical display order."""
+
 _FILTER_CHIP_LABELS = {
     "failed": "with failed executions",
     "stale": "interrupted",
@@ -64,18 +59,6 @@ _GRID_DEFAULTS: dict[str, Any] = {
 
 _SWEEP_ROW_ID: Any = "params.data.sweep_id"
 _TRIAL_ROW_ID: Any = "params.data.root || params.data.trial_id"
-
-
-def focus_ref(kind: str, object_id: str) -> str:
-    """Pattern-id token naming one focusable object."""
-    return f"{kind}:{object_id}"
-
-
-def focus_button(label: str, kind: str, object_id: str) -> html.Button:
-    """In-page focus control; never navigates, never touches scope."""
-    return html.Button(
-        label, id={"focus-object": focus_ref(kind, object_id)}, className="focus-link"
-    )
 
 
 def sweep_curation(summary: SweepSummary) -> str:
@@ -333,803 +316,6 @@ def scope_bar(
             )
         )
     return html.Div(children, className="scope-bar")
-
-
-def _correlation_table(jobs: list[dict]) -> html.Table:
-    rows = [
-        [
-            short_id(job["submission_id"]),
-            job["backend"],
-            Badge(job["submission_state"]),
-            job["scheduler_job_id"] or MISSING,
-            job["role"] or MISSING,
-            Badge(job["job_state"]) if job["job_state"] else MISSING,
-        ]
-        for job in jobs
-    ]
-    return components.DataTable(
-        (
-            "Submission",
-            "Backend",
-            "Submission state",
-            "Scheduler job",
-            "Role",
-            "Job state",
-        ),
-        rows,
-    )
-
-
-def _monitoring_badges(counts: dict[str, int]) -> list[html.Span]:
-    """One pill per nonzero monitoring label, in the canonical order; an
-    all-zero scope renders a single quiet note."""
-    badges = [
-        Badge(f"{label} {counts[label]}", kind=label)
-        for label in _MONITORING_ORDER
-        if counts.get(label)
-    ]
-    return badges or [html.Span("quiet", className="quiet-note")]
-
-
-def _monitoring_counts(summary: SweepSummary) -> html.Div:
-    return html.Div(
-        _monitoring_badges(
-            {label: getattr(summary, label) for label in _MONITORING_ORDER}
-        ),
-        className="monitoring-row",
-    )
-
-
-def _progress_list(progress: list[dict]) -> html.Div:
-    if not progress:
-        return html.Div()
-    return html.Div(
-        html.Ul(
-            [
-                html.Li(
-                    focus_button(
-                        f"{short_id(row['execution_id'])} · "
-                        f"{row['current']}/{row['total']} {row['unit']}",
-                        "execution",
-                        row["execution_id"],
-                    )
-                )
-                for row in progress
-            ],
-            className="progress-list",
-        )
-    )
-
-
-def _executions_table(executions: Sequence[ExecutionRecord], now_ns: int) -> html.Table:
-    """One row per execution: monitoring badge, focus control, short
-    host, and single-line timestamps (absolute time in the tooltip)."""
-    return components.DataTable(
-        ("Monitoring", "Execution", "Host", "Started", "Ended"),
-        [
-            (
-                Badge(record.monitoring or UNKNOWN),
-                focus_button(
-                    short_id(str(record.execution_id)),
-                    "execution",
-                    str(record.execution_id),
-                ),
-                components.short_host(record.hostname),
-                components.time_cell_compact(
-                    components.datetime_to_ns(record.started_at), now_ns
-                ),
-                (
-                    UNKNOWN
-                    if record.ended_at is None
-                    else components.time_cell_compact(
-                        components.datetime_to_ns(record.ended_at), now_ns
-                    )
-                ),
-            )
-            for record in executions
-        ],
-    )
-
-
-_FAMILY_GRID_COLUMNS: list[dict[str, Any]] = [
-    {"headerName": "Family root", "field": "root_short"},
-    {"headerName": "Current trial", "field": "current_short"},
-    {"headerName": "#", "field": "number"},
-    {"headerName": "State", "field": "state"},
-    {"headerName": "Objective", "field": "objective"},
-    {"headerName": "Params", "field": "params"},
-    {"headerName": "Retries", "field": "retries"},
-]
-
-
-def family_grid_row(family: FamilyRow) -> dict[str, object]:
-    """One AG Grid row dict for the trial-family grid."""
-    shown = ", ".join(f"{key}={value}" for key, value in family.params[:3])
-    hidden = len(family.params) - 3
-    return {
-        "root": family.root,
-        "root_short": short_id(family.root),
-        "current_trial": family.current_trial,
-        "current_short": short_id(family.current_trial),
-        "number": family.number,
-        "state": family.state,
-        "objective": components.objective_text(family.objective),
-        "params": f"{shown}, +{hidden}" if hidden > 0 else shown,
-        "retries": family.retry_count,
-        "generations": family.generations,
-    }
-
-
-def lineage_chain(root: str | None, lineage: list[dict]) -> list[object]:
-    """Side-panel lineage for one family: ordered generations with
-    parent -> root -> index facts, exactly as stored."""
-    if not root:
-        return [html.P("Pick a family row to inspect its retry lineage.")]
-    entries = sorted(
-        (entry for entry in lineage if entry["root"] == root),
-        key=lambda entry: entry["index"],
-    )
-    if not entries:
-        return [html.P("No lineage facts for this family.")]
-    return [
-        html.P(
-            " → ".join(short_id(entry["trial_id"]) for entry in entries),
-            className="lineage-chain",
-        ),
-        components.DataTable(
-            ("Index", "Trial", "Parent", "Root"),
-            [
-                (
-                    entry["index"],
-                    short_id(entry["trial_id"]),
-                    short_id(entry["parent"]) if entry["parent"] else MISSING,
-                    short_id(entry["root"]),
-                )
-                for entry in entries
-            ],
-        ),
-    ]
-
-
-def curation_banners(overview: SweepSummary) -> list[html.Div]:
-    """Archived/invalid banners naming the state; invalid carries the
-    reason and its timestamp."""
-    banners = []
-    if overview.archived:
-        banners.append(
-            html.Div(
-                [
-                    Badge("archived", kind="archived"),
-                    " This sweep is archived — curation changes review "
-                    "visibility only; tracked facts and running work are "
-                    "untouched.",
-                ],
-                className="curation-banner",
-            )
-        )
-    if overview.invalid:
-        banners.append(
-            html.Div(
-                [
-                    Badge("invalid", kind="invalid"),
-                    " Marked scientifically invalid at "
-                    f"{components.absolute_time(overview.invalid_ns)} — "
-                    f"reason: {overview.invalid_reason}. The data stays "
-                    "queryable but must not be treated as valid science.",
-                ],
-                className="curation-banner curation-banner-invalid",
-            )
-        )
-    return banners
-
-
-def detail_curation(overview: SweepSummary) -> html.Div:
-    """Sweep-inspector banners plus the action row (refreshed after a
-    mutation so button availability follows the new state)."""
-    offered = curation_transitions(overview.archived, overview.invalid)
-    actions = html.Div(
-        [
-            html.Button(
-                "Archive",
-                id="detail-archive",
-                disabled=not offered["archive"],
-                className="action",
-            ),
-            html.Button(
-                "Mark this sweep invalid",
-                id="detail-invalid",
-                disabled=not offered["invalid"],
-                className="action",
-            ),
-            html.Button(
-                "Restore validity",
-                id="detail-restore-validity",
-                disabled=not offered["restore_validity"],
-                className="action",
-            ),
-            html.Button(
-                "Restore",
-                id="detail-restore",
-                disabled=not offered["restore"],
-                className="action",
-            ),
-        ],
-        className="action-bar",
-    )
-    return html.Div([*curation_banners(overview), actions])
-
-
-_PROGRESS_SHOWN = 10
-
-_LINEAGE_STORE_CAP = 1000
-
-_EXECUTION_ROW_ID: Any = "params.data.execution_id"
-
-_EXECUTION_GRID_COLUMNS: list[dict[str, Any]] = [
-    {
-        "headerName": "Monitoring",
-        "field": "monitoring",
-        "cellClass": {"function": "'cell-state state-' + (params.value || 'unknown')"},
-    },
-    {"headerName": "Execution", "field": "execution_short"},
-    {"headerName": "Host", "field": "host"},
-    {"headerName": "Started", "field": "started", "tooltipField": "started_at"},
-    {"headerName": "Ended", "field": "ended", "tooltipField": "ended_at"},
-]
-
-
-def _execution_grid_rows(
-    executions: Sequence[ExecutionRecord], now_ns: int
-) -> list[dict[str, Any]]:
-    """One virtualized grid row per execution: monitoring label, focus
-    target, host, and relative recency with absolute tooltips."""
-    started_ns = [components.datetime_to_ns(record.started_at) for record in executions]
-    ended_ns = [
-        None if record.ended_at is None else components.datetime_to_ns(record.ended_at)
-        for record in executions
-    ]
-    return [
-        {
-            "execution_id": str(record.execution_id),
-            "monitoring": record.monitoring or UNKNOWN,
-            "execution_short": short_id(str(record.execution_id)),
-            "host": components.short_host(record.hostname),
-            "started": components.relative_time(row_started, now_ns),
-            "started_at": components.absolute_time(row_started),
-            "ended": (
-                UNKNOWN
-                if row_ended is None
-                else components.relative_time(row_ended, now_ns)
-            ),
-            "ended_at": (
-                UNKNOWN if row_ended is None else components.absolute_time(row_ended)
-            ),
-        }
-        for record, row_started, row_ended in zip(
-            executions, started_ns, ended_ns, strict=True
-        )
-    ]
-
-
-def _lineage_store_rows(lineage: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Newest whole retry families up to the store cap; trimmed roots
-    report no lineage facts in the side panel."""
-    if len(lineage) <= _LINEAGE_STORE_CAP:
-        return lineage
-    trimmed = lineage[-_LINEAGE_STORE_CAP:]
-    head = trimmed[0]["root"]
-    for index, entry in enumerate(trimmed):
-        if entry["root"] != head:
-            return trimmed[index:]
-    return []
-
-
-def _sweep_sections(detail: SweepDetail, now_ns: int) -> list[Any]:
-    overview = detail.overview
-    return [
-        html.Div(
-            [
-                html.Div(detail_curation(overview), id="detail-curation"),
-                dcc.Input(
-                    id="detail-reason",
-                    type="text",
-                    placeholder="Reason (required for Mark invalid)",
-                    className="reason-input",
-                ),
-                html.Div(id="detail-message"),
-            ],
-            className="curation-section",
-        ),
-        html.Section(
-            [html.H3("Submissions & jobs"), _correlation_table(detail.jobs)],
-            className="section",
-        ),
-        html.Section(
-            [html.H3("Execution monitoring"), _monitoring_counts(overview)],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("Executions"),
-                AgGrid(
-                    id={"focus-executions": "grid"},
-                    rowData=_execution_grid_rows(detail.executions, now_ns),
-                    columnDefs=_EXECUTION_GRID_COLUMNS,
-                    defaultColDef={**_GRID_DEFAULTS, "minWidth": 90},
-                    dashGridOptions=components.grid_options(),
-                    getRowId=_EXECUTION_ROW_ID,
-                    className="ag-theme-alpine grid",
-                ),
-            ],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("In-flight progress"),
-                _progress_list(detail.progress[:_PROGRESS_SHOWN]),
-                *(
-                    [
-                        html.P(
-                            f"…and {len(detail.progress) - _PROGRESS_SHOWN} more "
-                            "in flight",
-                            className="hint",
-                        )
-                    ]
-                    if len(detail.progress) > _PROGRESS_SHOWN
-                    else []
-                ),
-            ],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("Trial families"),
-                html.Div(
-                    [
-                        AgGrid(
-                            id={"focus-family": "grid"},
-                            rowData=[
-                                family_grid_row(family) for family in detail.families
-                            ],
-                            columnDefs=_FAMILY_GRID_COLUMNS,
-                            defaultColDef={**_GRID_DEFAULTS, "minWidth": 90},
-                            dashGridOptions=components.grid_options(),
-                            getRowId=_TRIAL_ROW_ID,
-                            className="ag-theme-alpine grid",
-                        ),
-                        html.Div(
-                            [html.P("Pick a family row to inspect its retry lineage.")],
-                            id="family-lineage-panel",
-                            className="lineage-panel",
-                        ),
-                    ],
-                    className="family-layout",
-                ),
-            ],
-            className="section",
-        ),
-        dcc.Store(
-            id="family-lineage-store",
-            data={"lineage": _lineage_store_rows(detail.lineage)},
-        ),
-    ]
-
-
-def _trial_sections(detail: TrialDetail, now_ns: int) -> list[Any]:
-    context = detail.context
-    chain = sorted(
-        (
-            entry
-            for entry in detail.lineage
-            if entry["root"] == context["retry_root_trial_id"]
-        ),
-        key=lambda entry: entry["index"],
-    )
-    header_bits = [
-        html.Span(
-            " → ".join(short_id(entry["trial_id"]) for entry in chain)
-            or short_id(context["trial_id"]),
-            className="lineage-chain",
-        ),
-        html.Span(
-            f"retry index {context['retry_index']} · root "
-            f"{short_id(context['retry_root_trial_id'])}"
-        ),
-    ]
-    return [
-        html.P(header_bits, className="trial-header"),
-        html.Section(
-            [
-                html.H3("Optimizer trial state"),
-                html.P(
-                    [
-                        Badge(context["state"]),
-                        html.Span(
-                            "objective "
-                            + f"{components.objective_text(context['objective'])}"
-                        ),
-                        html.Span(f"number {context['number']}"),
-                        focus_button(
-                            f"sweep {context['sweep_name']}",
-                            "sweep",
-                            context["sweep_id"],
-                        ),
-                    ],
-                    className="fact-row",
-                ),
-            ],
-            className="section",
-            id="section-optimizer-state",
-        ),
-        html.Section(
-            [
-                html.H3("Params"),
-                components.DataTable(
-                    ("Kind", "Key", "Value"),
-                    [
-                        (record.kind, record.key, str(record.value))
-                        for record in detail.params
-                    ],
-                ),
-            ],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("Value catalog"),
-                components.DataTable(
-                    ("Key", "Kind", "Points", "Latest step", "Trials"),
-                    [
-                        (
-                            record.key,
-                            record.kind,
-                            record.n_points,
-                            record.latest_step,
-                            record.n_trials,
-                        )
-                        for record in detail.catalog
-                    ],
-                ),
-            ],
-            className="section",
-        ),
-        html.Section(
-            [html.H3("Executions"), _executions_table(detail.executions, now_ns)],
-            className="section",
-        ),
-        html.Section(
-            [
-                html.H3("Artifacts"),
-                artifacts.artifact_grid(detail.artifacts, now_ns),
-            ],
-            className="section",
-        ),
-    ]
-
-
-def _execution_sections(detail: ExecutionDetail, now_ns: int) -> list[Any]:
-    context = detail.context
-    timeline = components.DataTable(
-        ("Fact", "When"),
-        [
-            ("Started", time_cell(context["started_ns"], now_ns)),
-            (
-                "Last heartbeat",
-                (
-                    UNKNOWN
-                    if context["last_heartbeat_ns"] is None
-                    else time_cell(context["last_heartbeat_ns"], now_ns)
-                ),
-            ),
-            (
-                "Last observation",
-                (
-                    UNKNOWN
-                    if context["last_observation_ns"] is None
-                    else time_cell(context["last_observation_ns"], now_ns)
-                ),
-            ),
-            (
-                "Ended",
-                (
-                    UNKNOWN
-                    if context["ended_ns"] is None
-                    else time_cell(context["ended_ns"], now_ns)
-                ),
-            ),
-        ],
-    )
-    progress = context["progress"]
-    outcome_bits = [
-        Badge(context["monitoring"] or UNKNOWN),
-        html.Span(f"outcome {context['outcome'] or UNKNOWN}"),
-        html.Span(
-            f"exit {UNKNOWN if context['exit_code'] is None else context['exit_code']}"
-        ),
-    ]
-    if context["failure_summary"]:
-        outcome_bits.append(
-            html.Span(
-                f"{context['failure_kind'] or UNKNOWN}: {context['failure_summary']}",
-                className="failure-summary",
-            )
-        )
-    facts = html.Section(
-        [
-            html.H3("Execution facts"),
-            html.P(
-                [
-                    html.Span(f"host {context['hostname']}"),
-                    *outcome_bits,
-                    html.Span(
-                        "progress "
-                        + (
-                            f"{progress['current']}/{progress['total']} "
-                            f"{progress['unit']}"
-                            if progress
-                            else UNKNOWN
-                        )
-                    ),
-                ],
-                className="fact-row",
-            ),
-            html.H4("Timeline"),
-            timeline,
-            html.H4("Params"),
-            components.DataTable(
-                ("Kind", "Key", "Value"),
-                [
-                    (record.kind, record.key, str(record.value))
-                    for record in detail.params
-                ],
-            ),
-            html.H4("Resolved config"),
-            html.Pre(
-                json.dumps(detail.resolved_config, indent=2, sort_keys=True)
-                if detail.resolved_config is not None
-                else UNKNOWN,
-                className="config-json",
-            ),
-            html.H4("Provenance"),
-            components.DataTable(
-                ("Submission", "Backend", "Submitted", "Expected", "Git", "Config"),
-                [
-                    (
-                        short_id(str(record.submission_id)),
-                        record.backend,
-                        (
-                            MISSING
-                            if record.submitted_at_ns is None
-                            else components.relative_time(
-                                record.submitted_at_ns, now_ns
-                            )
-                        ),
-                        (
-                            MISSING
-                            if record.expected_trials is None
-                            else record.expected_trials
-                        ),
-                        record.git_hash or MISSING,
-                        record.config_source or MISSING,
-                    )
-                    for record in detail.provenance
-                ],
-            ),
-        ],
-        className="section",
-        id="section-execution-facts",
-    )
-    optimizer = html.Section(
-        [
-            html.H3("Optimizer trial state"),
-            html.P(
-                [
-                    Badge(context["trial_state"]),
-                    html.Span(
-                        f"objective {components.objective_text(context['objective'])}"
-                    ),
-                    html.Span(f"number {context['number']}"),
-                    html.Span(
-                        f"retry index {context['retry_index']} · root "
-                        f"{short_id(context['retry_root_trial_id'])}"
-                    ),
-                ],
-                className="fact-row",
-            ),
-            html.P(
-                [
-                    focus_button(
-                        f"trial {short_id(context['trial_id'])}",
-                        "trial",
-                        context["trial_id"],
-                    ),
-                    focus_button(
-                        f"sweep {context['sweep_name']}", "sweep", context["sweep_id"]
-                    ),
-                ],
-                className="fact-row",
-            ),
-        ],
-        className="section",
-        id="section-optimizer-state",
-    )
-    artifact_section = html.Section(
-        [
-            html.H3("Artifacts"),
-            artifacts.artifact_grid(detail.artifacts, now_ns),
-        ],
-        className="section",
-        id="section-execution-artifacts",
-    )
-    return [facts, artifact_section, optimizer]
-
-
-def inspector_placeholder() -> html.Div:
-    """No-focus inspector region; keeps the close control in the layout."""
-    return html.Div(
-        [
-            html.Button(
-                "✕",
-                id="inspector-close",
-                title="Close inspector",
-                style={"display": "none"},
-            ),
-            "Click a sweep, trial, or execution row to inspect it here.",
-        ],
-        className="inspector-hint inspector-placeholder",
-    )
-
-
-def _via_investigation(
-    service: DashboardService, project: str, via: str | None
-) -> InvestigationRecord | None:
-    """The investigation a ``via`` return path names, when it exists in
-    this store and belongs to the same project; anything else is an
-    unknown context and renders none."""
-    if not via:
-        return None
-    try:
-        record = service.investigation_detail(str(via)).investigation
-    except (CurationRejectedError, CurationUnavailableError):
-        return None
-    return record if record.project == project else None
-
-
-def sweep_hub_header(
-    service: DashboardService,
-    project: str,
-    sweep_id: str,
-    sweep_name: str,
-    via: str | None,
-) -> list[Any]:
-    """Breadcrumb, back link, and the data-supported views row for a
-    sweep opened from an investigation: Series and Points narrow to this
-    member, Search opens over all members, Overview is the hub itself.
-    A sweep reached outside an investigation renders no hub."""
-    record = _via_investigation(service, project, via)
-    if record is None:
-        return []
-    series_supported = any(
-        entry["kind"] == "scalar" and entry["steps"]
-        for entry in service.analysis_value_keys(project, {"sweeps": [sweep_id]})
-    )
-    detail = service.sweep_detail(sweep_id)
-    points_supported = bool(detail and detail.overview.started)
-    views: list[Any] = [html.Span("Overview", className="on")]
-    if series_supported:
-        views.append(
-            html.A(
-                "Series",
-                href=analysis.investigation_view_href(
-                    project, str(record.id), "series", sweep_id
-                ),
-            )
-        )
-    if points_supported:
-        views.append(
-            html.A(
-                "Points",
-                href=analysis.investigation_view_href(
-                    project, str(record.id), "points", sweep_id
-                ),
-            )
-        )
-    views.append(
-        html.A(
-            "Search",
-            href=analysis.investigation_view_href(project, str(record.id), "search"),
-        )
-    )
-    return [
-        investigation_crumb(project, record.name, sweep_name),
-        html.Div(
-            [
-                html.Span("Views", className="annotate"),
-                html.Div(views, className="seg"),
-                html.A(
-                    f"Back to {record.name}",
-                    href=analysis.investigation_view_href(
-                        project, str(record.id), "compare"
-                    ),
-                    className="btn-link",
-                ),
-            ],
-            className="inv-views",
-        ),
-    ]
-
-
-def inspector_content(
-    service: DashboardService,
-    focus: dict[str, Any] | None,
-    now_ns: int,
-    project: str = "",
-    via: str | None = None,
-) -> html.Div:
-    """The focused object's factual content; a missing id is named, not
-    hidden. A sweep focus opened from an investigation carries the hub:
-    the investigation breadcrumb, the back link, and the member-scoped
-    views row."""
-    if not focus:
-        return inspector_placeholder()
-    kind, object_id = focus.get("kind"), str(focus.get("id") or "")
-
-    if kind == "sweep":
-        detail = service.sweep_detail(object_id)
-        body = (
-            _sweep_sections(detail, now_ns)
-            if detail is not None
-            else [components.Empty(f"No sweep matches {object_id} in this store.")]
-        )
-        heading = (
-            f"Sweep {detail.overview.name} · {short_id(detail.overview.sweep_id)}"
-            if detail is not None
-            else f"Sweep {object_id}"
-        )
-        hub = sweep_hub_header(
-            service,
-            project,
-            object_id,
-            detail.overview.name if detail else object_id,
-            via,
-        )
-    elif kind == "trial":
-        detail = service.trial_detail(object_id)
-        body = (
-            _trial_sections(detail, now_ns)
-            if detail is not None
-            else [components.Empty(f"No trial matches {object_id} in this store.")]
-        )
-        heading = f"Trial {short_id(object_id)}"
-        hub = []
-    elif kind == "execution":
-        detail = service.execution_detail(object_id)
-        body = (
-            _execution_sections(detail, now_ns)
-            if detail is not None
-            else [components.Empty(f"No execution matches {object_id} in this store.")]
-        )
-        heading = f"Execution {short_id(object_id)}"
-        hub = []
-    else:
-        return html.Div(
-            components.Empty(f"Unknown focus kind {kind!r}."),
-            className="inspector-body",
-        )
-    return html.Div(
-        [
-            html.Div(
-                [
-                    html.H3(heading, className="inspector-title"),
-                    html.Button("✕", id="inspector-close", title="Close inspector"),
-                ],
-                className="inspector-header",
-            ),
-            *hub,
-            html.Div(body, className="inspector-body"),
-        ],
-        className="inspector-panel",
-    )
 
 
 def _badge_cell(field: str) -> dict[str, Any]:
@@ -1460,11 +646,7 @@ def failed_view_panel(
                 [
                     html.P(
                         [
-                            focus_button(
-                                names.get(sweep_id, short_id(sweep_id)),
-                                "sweep",
-                                sweep_id,
-                            ),
+                            html.Span(names.get(sweep_id, short_id(sweep_id))),
                             dcc.Checklist(
                                 id={"failed-sweep": sweep_id},
                                 options=[{"label": "", "value": sweep_id}],
@@ -1483,9 +665,7 @@ def failed_view_panel(
                         ("Trial", "#", "Kind", "Summary", "Last activity"),
                         [
                             (
-                                focus_button(
-                                    f"#{row.trial_number}", "trial", row.trial_id
-                                ),
+                                f"#{row.trial_number}",
                                 row.trial_number,
                                 row.failure_kind or UNKNOWN,
                                 row.failure_summary or MISSING,
@@ -1516,9 +696,8 @@ def overview_tab(
     sort: list | None = None,
 ) -> html.Div:
     """The operational overview: every tile is a working filter over the
-    paginated sweep table, the Active/All control carries the project's
-    exhaustive list, and a row click inspects the sweep. Per-sweep depth
-    lives in the inspector; the include flags curate discovery
+    paginated sweep table, and the Active/All control carries the
+    project's exhaustive list; the include flags curate discovery
     (jernerics-mqw, jernerics-g5rw.7)."""
     if not project:
         return html.Div(
@@ -1588,10 +767,9 @@ def overview_tab(
                         className="ag-theme-alpine grid",
                     ),
                     html.P(
-                        "Checkboxes pick sweeps for Create Investigation; a row "
-                        "click inspects that sweep in the inspector. Tiles filter "
-                        "the table; Active/All chooses between current sweeps and "
-                        "every sweep of the project.",
+                        "Checkboxes pick sweeps for Create Investigation. "
+                        "Tiles filter the table; Active/All chooses between "
+                        "current sweeps and every sweep of the project.",
                         className="hint",
                     ),
                 ],
@@ -2952,17 +2130,16 @@ def workspace_page(
     quick: str = "",
     filters: dict | None = None,
 ) -> html.Div:
-    """The stable workspace: scope browser, tabbed canvas, inspector.
+    """The stable workspace: scope browser and tabbed canvas.
 
     Mounted once per project navigation; every data region updates through
-    its own callback so scope, tab, settings, and focus survive refreshes
+    its own callback so scope, tab, and settings edits survive refreshes
     and history without remounting children.
     """
     return html.Div(
         [
             html.H2(f"Project {project}"),
             html.Div(id={"analysis-error": "page"}),
-            dcc.Store(id="inspector-render-store"),
             dcc.Store(id="sweep-browser-facts-store"),
             dcc.Store(id="trial-browser-facts-store"),
             dcc.Store(id="scroll-restore-store"),
@@ -3040,9 +2217,9 @@ def workspace_page(
                                 className="expand-toggle",
                             ),
                             html.P(
-                                "Sweep checkboxes edit the scope; a row click "
-                                "inspects that sweep. Trial checkboxes pick "
-                                "retry roots.",
+                                "Sweep checkboxes edit the scope; trial "
+                                "checkboxes pick retry roots. Per-sweep "
+                                "depth lives on the sweep page.",
                                 className="hint",
                             ),
                         ],
@@ -3075,32 +2252,9 @@ def workspace_page(
                         ],
                         className="workspace-canvas",
                     ),
-                    html.Aside(
-                        id="inspector",
-                        className="inspector",
-                        children=inspector_placeholder(),
-                    ),
                 ],
                 className="workspace-main",
             ),
         ],
         className="page workspace",
     )
-
-
-def focus_incomplete(service: DashboardService, focus: dict[str, Any] | None) -> bool:
-    """Whether the focused object still has work in flight."""
-    if not focus:
-        return False
-    kind, object_id = focus.get("kind"), str(focus.get("id") or "")
-    if kind == "sweep":
-        return service.sweep_incomplete(object_id)
-    if kind == "trial":
-        detail = service.trial_detail(object_id)
-        return detail is not None and any(
-            record.ended_at is None for record in detail.executions
-        )
-    if kind == "execution":
-        detail = service.execution_detail(object_id)
-        return detail is not None and detail.context["ended_ns"] is None
-    return False

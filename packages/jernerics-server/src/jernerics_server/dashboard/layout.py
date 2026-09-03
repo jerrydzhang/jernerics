@@ -150,6 +150,7 @@ def project_page(catalog: list[ProjectSummary], now_ns: int) -> html.Div:
 
 _KIND_LABELS = {
     "workspace": "Project",
+    "sweep": "Sweep",
     "artifact": "Artifact",
     "investigation": "Investigation",
 }

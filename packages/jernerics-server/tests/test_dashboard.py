@@ -5,7 +5,6 @@ import stat
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest import mock
 from urllib.parse import quote
 
 import pytest
@@ -20,7 +19,7 @@ from jernerics_schema import (
     TrialSnapshotEvent,
     TrialState,
 )
-from jernerics_server.dashboard import DashboardContext, workspace
+from jernerics_server.dashboard import DashboardContext
 from jernerics_server.dashboard.analysis import tray_summary
 from jernerics_server.dashboard.auth import COOKIE_NAME
 from jernerics_server.dashboard.callbacks import page_content
@@ -428,19 +427,17 @@ class TestRoutesAndPages:
         assert "Nothing here yet" in rendered
         assert polls is False
 
-    def test_focused_unknown_object_renders_empty_inspector(self, tmp_path):
-        from jernerics_server.dashboard import workspace
-
+    def test_unknown_sweep_renders_missing_object(self, tmp_path):
         client = _build(tmp_path)
         service = _ctx(client).service
-        for kind in ("sweep", "trial", "execution"):
-            rendered = str(
-                workspace.inspector_content(
-                    service, {"kind": kind, "id": "0123456789abcdef"}, 0
-                )
-            )
-            assert "0123456789abcdef" in rendered
-            assert "Nothing here yet" in rendered
+        page, polls = page_content(
+            "/dashboard/project/ops/sweep/0123456789abcdef0123456789abcdef",
+            service,
+        )
+        rendered = str(page)
+        assert "0123456789abcdef" in rendered
+        assert "Nothing here yet" in rendered
+        assert polls is False
 
     def test_workspace_route_parses(self):
         spec = parse_route("/dashboard/project/ops")
@@ -532,34 +529,3 @@ def _declare_artifact(client: TestClient, artifact_id: uuid.UUID) -> None:
         headers={"Authorization": f"Bearer {API_KEY}"},
     )
     assert response.status_code == 200, response.text
-
-
-class TestLineageStoreCap:
-    """jernerics-g6t: the sweep inspector's lineage store stays bounded
-    by keeping the newest whole retry families."""
-
-    def test_under_cap_passes_through(self):
-        lineage = [{"trial_id": "t", "parent": "", "root": "r", "index": 0}]
-        assert workspace._lineage_store_rows(lineage) is lineage
-
-    def test_cap_keeps_whole_families_and_drops_the_oldest(self):
-        lineage = [
-            {
-                "trial_id": f"t{root}-{index}",
-                "parent": "",
-                "root": f"r{root}",
-                "index": index,
-            }
-            for root in range(3)
-            for index in range(root + 1)
-        ]
-        with mock.patch.object(workspace, "_LINEAGE_STORE_CAP", 4):
-            kept = workspace._lineage_store_rows(lineage)
-        assert [entry["root"] for entry in kept] == ["r2", "r2", "r2"]
-
-    def test_single_oversized_family_drops_to_empty(self):
-        lineage = [
-            {"trial_id": "t", "parent": "", "root": "r", "index": i} for i in range(3)
-        ]
-        with mock.patch.object(workspace, "_LINEAGE_STORE_CAP", 2):
-            assert workspace._lineage_store_rows(lineage) == []

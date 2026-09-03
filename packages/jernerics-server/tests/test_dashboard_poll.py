@@ -20,6 +20,7 @@ from jernerics_schema import (
     encode_selection,
 )
 from jernerics_server.dashboard import callbacks, workspace
+from jernerics_server.dashboard import sweep as sweep_page
 from jernerics_server.dashboard.analysis import (
     default_scope_state,
     default_view_state,
@@ -570,207 +571,136 @@ class TestSweepsBrowserTickGuard:
         assert again[0].status_code == 204
 
 
-class TestInspectorPollCascade:
-    """The per-tick inspector re-render rebuilt the focus controls,
-    re-firing the focus editor (the double view-store writer) on every
-    tick; identical content must ship nothing."""
+class TestSweepPagePollCascade:
+    """The sweep page region re-renders only when its stored facts move;
+    identical ticks ship nothing and never remount the page."""
 
-    def _fire(self, client, cmap, view_doc, rendered):
+    def _fire(self, client, cmap, facts):
         return _dispatch(
             client,
             cmap,
-            {"inspector.children", "inspector-render-store.data"},
-            inputs=[
-                {"id": "view-store", "property": "data", "value": view_doc},
-                _TICK_INPUT,
-            ],
+            {"sweep-page-body.children", "sweep-page-facts-store.data"},
+            inputs=[_TICK_INPUT],
             state=[
-                _PROJECT_STATE,
-                {"id": "inspector-render-store", "property": "data", "value": rendered},
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"{WORKSPACE}/sweep/{SWEEP_A}",
+                },
+                {"id": "url", "property": "search", "value": ""},
+                {"id": "view-store", "property": "data", "value": None},
+                {
+                    "id": "sweep-page-facts-store",
+                    "property": "data",
+                    "value": facts,
+                },
             ],
         )
 
-    def test_focused_renders_then_static_tick_ships_nothing(self, authed, callback_map):
+    def test_first_render_then_static_tick_ships_nothing(self, authed, callback_map):
         client, _store = authed
-        focused = {"focus": {"kind": "sweep", "id": str(SWEEP_A)}}
-        response, payload = self._fire(client, callback_map, focused, None)
+        response, payload = self._fire(client, callback_map, None)
         assert response.status_code == 200
         assert "alpha" in response.text
-        rendered = payload["inspector-render-store"]["data"]
-        assert rendered["focus"] == focused["focus"]
-        tick = self._fire(client, callback_map, focused, rendered)
-        assert tick[0].status_code == 204
-
-    def test_unfocused_placeholder_tick_ships_nothing(self, authed, callback_map):
-        client, _store = authed
-        response, payload = self._fire(client, callback_map, None, None)
-        assert response.status_code == 200
-        rendered = payload["inspector-render-store"]["data"]
-        tick = self._fire(client, callback_map, None, rendered)
+        rendered = payload["sweep-page-facts-store"]["data"]
+        assert rendered["digest"] and rendered["cheap"]
+        tick = self._fire(client, callback_map, rendered)
         assert tick[0].status_code == 204
 
 
-class TestInspectorFactsGuard:
-    """jernerics-g6t: the inspector tick digest covers canonical facts
-    computed before any tree build, so an unchanged tick runs no sweep
+class TestSweepPageFactsGuard:
+    """The sweep page keeps jernerics-g6t's pattern: the tick gate reads
+    the cheap overview facts first, so an unchanged tick runs no sweep
     detail, builds no tree, and ships nothing — while a real fact change
     (a new execution) still re-renders."""
 
-    def _fire(self, client, cmap, view_doc, rendered):
+    def _fire(self, client, cmap, facts):
         return _dispatch(
             client,
             cmap,
-            {"inspector.children", "inspector-render-store.data"},
-            inputs=[
-                {"id": "view-store", "property": "data", "value": view_doc},
-                _TICK_INPUT,
-            ],
+            {"sweep-page-body.children", "sweep-page-facts-store.data"},
+            inputs=[_TICK_INPUT],
             state=[
-                _PROJECT_STATE,
-                {"id": "inspector-render-store", "property": "data", "value": rendered},
+                {
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"{WORKSPACE}/sweep/{SWEEP_A}",
+                },
+                {"id": "url", "property": "search", "value": ""},
+                {"id": "view-store", "property": "data", "value": None},
+                {
+                    "id": "sweep-page-facts-store",
+                    "property": "data",
+                    "value": facts,
+                },
             ],
         )
-
-    def _focused(self) -> dict:
-        return {"focus": {"kind": "sweep", "id": str(SWEEP_A)}}
 
     def test_facts_carry_no_relative_time_and_digest_is_stable(self, authed):
         _client, store = authed
         service = DashboardService(QueryService(store))
-        facts = callbacks.inspector_facts(service, self._focused()["focus"])
+        data = sweep_page.collect(service, str(SWEEP_A), None)
+        assert data is not None
+        facts = sweep_page.facts(data)
         assert "ago" not in json.dumps(facts, default=str)
-        assert callbacks._content_digest(facts) == callbacks._content_digest(
-            callbacks.inspector_facts(service, self._focused()["focus"])
-        )
+        again = sweep_page.collect(service, str(SWEEP_A), None)
+        assert again is not None
+        assert sweep_page.digest(data) == sweep_page.digest(again)
 
     def test_unchanged_tick_builds_no_tree_and_ships_nothing(
         self, authed, callback_map, monkeypatch
     ):
         client, _store = authed
         builds = []
-        real = workspace.inspector_content
+        real = sweep_page.render
 
         def spy(*args, **kwargs):
             builds.append(args)
             return real(*args, **kwargs)
 
-        monkeypatch.setattr(workspace, "inspector_content", spy)
-        response, payload = self._fire(client, callback_map, self._focused(), None)
+        monkeypatch.setattr(sweep_page, "render", spy)
+        response, payload = self._fire(client, callback_map, None)
         assert response.status_code == 200
-        rendered = payload["inspector-render-store"]["data"]
+        rendered = payload["sweep-page-facts-store"]["data"]
         assert len(builds) == 1
-        tick = self._fire(client, callback_map, self._focused(), rendered)
+        tick = self._fire(client, callback_map, rendered)
         assert tick[0].status_code == 204
         assert len(builds) == 1
 
     def test_wall_clock_advance_alone_keeps_the_digest(self, authed, callback_map):
         client, _store = authed
-        focused = self._focused()
-        _response, payload = self._fire(client, callback_map, focused, None)
-        rendered = payload["inspector-render-store"]["data"]
+        _response, payload = self._fire(client, callback_map, None)
+        rendered = payload["sweep-page-facts-store"]["data"]
         later = time.time_ns() + 120_000_000_000
         with mock.patch("time.time_ns", return_value=later):
-            tick = self._fire(client, callback_map, focused, rendered)
+            tick = self._fire(client, callback_map, rendered)
         assert tick[0].status_code == 204
 
-    def test_sweep_tick_never_invokes_sweep_detail(self, authed, callback_map):
+    def test_unchanged_tick_never_invokes_sweep_detail(self, authed, callback_map):
         client, _store = authed
-        focused = self._focused()
-        _response, payload = self._fire(client, callback_map, focused, None)
-        assert payload["inspector-render-store"]["data"]
-        rendered = payload["inspector-render-store"]["data"]
+        _response, payload = self._fire(client, callback_map, None)
+        rendered = payload["sweep-page-facts-store"]["data"]
         with mock.patch.object(DashboardService, "sweep_detail") as spy:
-            tick = self._fire(client, callback_map, focused, rendered)
+            tick = self._fire(client, callback_map, rendered)
             assert tick[0].status_code == 204
             assert spy.call_count == 0
 
-    def test_new_execution_rebuilds_the_inspector(self, authed, callback_map):
+    def test_new_execution_rebuilds_the_region(self, authed, callback_map):
         client, store = authed
-        focused = self._focused()
-        _response, payload = self._fire(client, callback_map, focused, None)
-        rendered = payload["inspector-render-store"]["data"]
+        _response, payload = self._fire(client, callback_map, None)
+        rendered = payload["sweep-page-facts-store"]["data"]
         _start_execution(store, EXEC_B, 10)
-        response, payload = self._fire(client, callback_map, focused, rendered)
+        response, payload = self._fire(client, callback_map, rendered)
         assert response.status_code == 200
         assert "dd200000" in response.text
-        assert payload["inspector-render-store"]["data"]["digest"] != rendered["digest"]
+        digest = payload["sweep-page-facts-store"]["data"]["digest"]
+        assert digest != rendered["digest"]
 
-    def test_sweep_inspector_renders_executions_through_the_grid(
-        self, authed, callback_map
-    ):
+    def test_region_renders_the_executions_table(self, authed, callback_map):
         client, _store = authed
-        response, _payload = self._fire(client, callback_map, self._focused(), None)
+        response, _payload = self._fire(client, callback_map, None)
         assert response.status_code == 200
-        assert "focus-executions" in response.text
-
-
-class TestExecutionsGridFocus:
-    """The sweep inspector's executions grid focuses an execution on row
-    click, replacing the plain table's per-row focus buttons."""
-
-    _EDIT_INPUT_IDS = {
-        '{"focus-object":["ALL"]}',
-        "inspector-close",
-        "sweep-grid",
-        '{"overview-grid":["ALL"]}',
-        '{"focus-family":["ALL"]}',
-        "analysis-family-grid",
-        '{"focus-executions":["ALL"]}',
-    }
-
-    def _click(self, client, cmap, click):
-        key = _callback_key(cmap, {"view-store.data"}, self._EDIT_INPUT_IDS)
-        return _dispatch(
-            client,
-            cmap,
-            {"view-store.data"},
-            inputs=[
-                {
-                    "id": {"focus-object": "sweep:aaaaaaaa"},
-                    "property": "n_clicks",
-                    "value": None,
-                },
-                {"id": "inspector-close", "property": "n_clicks", "value": None},
-                {"id": "sweep-grid", "property": "cellClicked", "value": None},
-                {
-                    "id": {"overview-grid": "sweeps"},
-                    "property": "cellClicked",
-                    "value": None,
-                },
-                {
-                    "id": "analysis-family-grid",
-                    "property": "cellClicked",
-                    "value": None,
-                },
-                {
-                    "id": {"focus-family": "grid"},
-                    "property": "cellClicked",
-                    "value": None,
-                },
-                {
-                    "id": {"focus-executions": "grid"},
-                    "property": "cellClicked",
-                    "value": click,
-                },
-            ],
-            state=[{"id": "view-store", "property": "data", "value": None}],
-            changed=['{"focus-executions": "grid"}.cellClicked'],
-            key=key,
-        )
-
-    def test_row_click_focuses_the_execution(self, authed, callback_map):
-        client, _store = authed
-        response, payload = self._click(client, callback_map, {"rowId": str(EXEC_A)})
-        assert response.status_code == 200
-        assert payload["view-store"]["data"]["focus"] == {
-            "kind": "execution",
-            "id": str(EXEC_A),
-        }
-
-    def test_click_without_a_row_id_is_skipped(self, authed, callback_map):
-        client, _store = authed
-        response, _payload = self._click(client, callback_map, {"rowId": ""})
-        assert response.status_code == 204
+        assert "Executions" in response.text
 
 
 class TestScrollRestoreWiring:

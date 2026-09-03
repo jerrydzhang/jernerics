@@ -41,7 +41,6 @@ from jernerics.retry import RetryContext
 from jernerics.runner import run_trial
 from jernerics.tracking.batch_sync import ship_events_file
 from jernerics_schema import Selection, encode_selection
-from jernerics_server.dashboard import workspace
 from jernerics_server.dashboard.analysis import (
     default_view_state,
     edited_view,
@@ -282,6 +281,9 @@ def _page_text(page: Component) -> str:
     chunks: list[str] = []
 
     def collect(node: object) -> None:
+        if isinstance(node, str):
+            chunks.append(node)
+            return
         children = getattr(node, "children", None)
         if isinstance(children, str):
             chunks.append(children)
@@ -323,7 +325,7 @@ def _page_hrefs(page: Component) -> set[str]:
     for component in _components(page):
         if isinstance(component, AgGrid):
             hrefs |= _grid_hrefs(component)
-        elif isinstance(component, html.A) and component.href:
+        elif isinstance(component, html.A) and getattr(component, "href", None):
             hrefs.add(component.href)
     return {urljoin(LANDING, href) for href in hrefs}
 
@@ -376,7 +378,7 @@ class TestLinkGraphJourney:
             for href in _page_hrefs(page):
                 assert parse_route(href).kind in {"project", "workspace", "artifact"}
 
-    def test_focused_inspector_reaches_every_object_kind(self, scenario):
+    def test_sweep_page_reaches_every_object_kind(self, scenario):
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
         trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
         execution_id = _rows(scenario.db_path, "SELECT execution_id FROM executions")[
@@ -387,17 +389,17 @@ class TestLinkGraphJourney:
             "SELECT artifact_id FROM artifacts WHERE key = 'model'",
         )[0][0]
 
-        for kind, object_id in (
-            ("sweep", sweep_id),
-            ("trial", trial_id),
-            ("execution", execution_id),
-        ):
-            rendered = str(
-                workspace.inspector_content(
-                    scenario.service, {"kind": kind, "id": object_id}, 0
-                )
-            )
-            assert short_id(object_id) in rendered
+        page, polls = page_content(
+            f"{ROUTES_BASE}/project/{PROJECT}/sweep/{sweep_id}", scenario.service
+        )
+        rendered = _page_text(page)
+        assert SWEEP in rendered  # the sweep names itself; ids ride the rows
+        # Trials identify by number and params; executions carry ids and
+        # artifacts link to the viewer.
+        assert "#0" in rendered and "mode" in rendered
+        assert short_id(execution_id) in rendered
+        assert viewer_href(artifact_id) in _page_hrefs(page)
+        assert polls is False
 
         viewer, _polls = page_content(viewer_href(artifact_id), scenario.service)
         assert short_id(artifact_id) in _page_text(viewer)
@@ -703,69 +705,3 @@ class TestMountedDashboardHttp:
         referenced = {dep["id"] for dep in owner["inputs"]}
         referenced |= {dep["id"] for dep in owner.get("state", [])}
         assert referenced <= shell_ids
-
-
-class TestArtifactRowClickNavigation:
-    """The artifact listing's row-click navigation, over the mounted
-    server. In the browser, dash-ag-grid evaluates getRowId only when it
-    is the registered-function form (an inline JS string is inert
-    without dangerously_allow_code) and fires cellClicked with the
-    evaluated row id; _open_artifact must then map only real UUIDs to
-    the viewer URL."""
-
-    @staticmethod
-    def _cell_clicked(base_url: str, row_id: str | None) -> httpx.Response:
-        """POST the _dash-update-component payload a real cellClicked
-        event produces."""
-        return httpx.post(
-            f"{base_url}{ROUTES_BASE}/_dash-update-component",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-            json={
-                "output": "url.pathname",
-                "outputs": {"id": "url", "property": "pathname"},
-                "inputs": [
-                    {
-                        "id": "artifact-grid",
-                        "property": "cellClicked",
-                        "value": {"rowId": row_id},
-                    }
-                ],
-                "changedPropIds": ["artifact-grid.cellClicked"],
-            },
-        )
-
-    def test_row_id_expression_is_a_registered_asset_function(self, scenario):
-        trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]
-        page = workspace.inspector_content(
-            scenario.service, {"kind": "trial", "id": trial_id}, 0
-        )
-        grid = next(
-            component
-            for component in _components(page)
-            if isinstance(component, AgGrid) and component.id == "artifact-grid"
-        )
-        assert grid.getRowId == _ARTIFACT_ROW_ID
-
-        auth = {"Authorization": f"Bearer {API_KEY}"}
-        index = httpx.get(f"{scenario.base_url}{ROUTES_BASE}/", headers=auth)
-        assert "assets/dashAgGridFunctions.js" in index.text
-
-    def test_cell_clicked_with_artifact_uuid_navigates_to_viewer(self, scenario):
-        artifact_id = _rows(
-            scenario.db_path, "SELECT artifact_id FROM artifacts WHERE key = 'model'"
-        )[0][0]
-        response = self._cell_clicked(scenario.base_url, artifact_id)
-        assert response.status_code == 200
-        assert response.json()["response"]["url"]["pathname"] == viewer_href(
-            artifact_id
-        )
-
-        shuffled = self._cell_clicked(scenario.base_url, artifact_id.upper())
-        assert shuffled.json()["response"]["url"]["pathname"] == viewer_href(
-            artifact_id
-        )
-
-    def test_cell_clicked_with_non_uuid_row_id_never_navigates(self, scenario):
-        for row_id in ("undefined", "", "../admin", None):
-            response = self._cell_clicked(scenario.base_url, row_id)
-            assert response.status_code == 204, row_id

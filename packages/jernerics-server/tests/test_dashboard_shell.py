@@ -98,15 +98,21 @@ class TestShellRoutes:
             "inv-1",
         )
 
-    def test_new_kinds_render_nothing_yet(self, tmp_path):
+    def test_exceptions_kind_renders_nothing_yet(self, tmp_path):
         service = _service(tmp_path)
-        for path in (
-            "/dashboard/project/ops/sweep/sw-1",
-            "/dashboard/project/ops/exceptions",
-        ):
-            page_html, polls = page_content(path, service)
-            assert "Not found" in _text(page_html)
-            assert polls is False
+        page_html, polls = page_content("/dashboard/project/ops/exceptions", service)
+        assert "Not found" in _text(page_html)
+        assert polls is False
+
+    def test_unknown_sweep_renders_missing_object(self, tmp_path):
+        service = _service(tmp_path)
+        page_html, polls = page_content(
+            "/dashboard/project/ops/sweep/0123456789abcdef0123456789abcdef", service
+        )
+        text = _text(page_html)
+        assert "Sweep 0123456789abcdef0123456789abcdef" in text
+        assert "Nothing here yet" in text
+        assert polls is False
 
 
 class TestPageComposition:

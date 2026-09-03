@@ -22,7 +22,6 @@ from jernerics_schema import (
     ExecutionHeartbeatEvent,
     ExecutionOutcome,
     ExecutionProgressEvent,
-    ExecutionRecord,
     ExecutionStartEvent,
     FailureKind,
     FlatContext,
@@ -36,6 +35,7 @@ from jernerics_schema import (
     ValueEvent,
 )
 from jernerics_server.dashboard import layout
+from jernerics_server.dashboard import sweep as sweep_page
 from jernerics_server.dashboard.analysis import (
     python_snippet,
     tray_summary,
@@ -43,7 +43,6 @@ from jernerics_server.dashboard.analysis import (
 from jernerics_server.dashboard.callbacks import (
     apply_curation,
     investigation_new_href,
-    lineage_panel,
     page_content,
     remember_workspace,
     selected_failed_sweeps,
@@ -54,8 +53,6 @@ from jernerics_server.dashboard.callbacks import (
 from jernerics_server.dashboard.components import (
     MISSING,
     TEXT_LIMIT,
-    absolute_time,
-    datetime_to_ns,
     grid_options,
     short_id,
 )
@@ -72,18 +69,11 @@ from jernerics_server.dashboard.service import (
     DashboardService,
 )
 from jernerics_server.dashboard.workspace import (
-    _MONITORING_ORDER,
-    _executions_table,
-    _monitoring_badges,
-    _monitoring_counts,
     browser_sweep_rows,
     curation_note,
     curation_transitions,
-    detail_curation,
     exceptions_tab,
     failed_view_panel,
-    family_grid_row,
-    inspector_content,
     overview_filter_matches,
     overview_tab,
     overview_tiles,
@@ -555,15 +545,17 @@ def mutable_client(tmp_path) -> tuple[Store, TestClient]:
     return store, client
 
 
-def _walk(component: Component):
+def _walk(component):
+    if isinstance(component, str):
+        yield component
+        return
     yield component
     children = getattr(component, "children", None)
-    if isinstance(children, Component):
+    if isinstance(children, Component | str):
         yield from _walk(children)
     elif isinstance(children, list | tuple):
         for child in children:
-            if isinstance(child, Component):
-                yield from _walk(child)
+            yield from _walk(child)
 
 
 def _grid(page: Any, grid_id: str | dict[str, str]) -> Any:
@@ -574,12 +566,31 @@ def _grid(page: Any, grid_id: str | dict[str, str]) -> Any:
     return found[0]
 
 
-def _inspector(service: DashboardService, kind: str, object_id) -> Any:
-    return inspector_content(service, {"kind": kind, "id": str(object_id)}, 0)
-
-
-def _focus_ref(kind: str, object_id) -> str:
-    return f"{{'focus-object': '{kind}:{object_id}'}}"
+def _sweep_body(service: DashboardService, sweep_id, picks=()) -> str:
+    """Ids, classes, and leaf text of the rendered page body in one
+    string — assertions read the whole tree, never a truncated repr."""
+    data = sweep_page.collect(service, str(sweep_id), None)
+    assert data is not None
+    body = sweep_page.render(data, "ops", str(sweep_id), NOW, set(picks))
+    parts: list[str] = []
+    for child in body:
+        for node in _walk(child):
+            if isinstance(node, str):
+                parts.append(node)
+                continue
+            ident = getattr(node, "id", None)
+            if ident is not None:
+                parts.append(str(ident))
+            cls = getattr(node, "className", None)
+            if cls:
+                parts.append(str(cls))
+            href = getattr(node, "href", None)
+            if href:
+                parts.append(str(href))
+            children = getattr(node, "children", None)
+            if isinstance(children, str):
+                parts.append(children)
+    return " ".join(parts)
 
 
 NOW = 0
@@ -624,7 +635,7 @@ class TestWorkspaceLayout:
         assert "id='analysis-expand'" in rendered
         assert "id='analysis-include'" in rendered
         assert "id='workspace-quick'" in rendered
-        assert "id='inspector'" in rendered
+        assert "id='inspector'" not in rendered
         assert "id='workspace-overview'" in rendered
         for button in ("ws-archive", "ws-invalid", "ws-restore-validity", "ws-restore"):
             assert f"id='{button}'" in rendered
@@ -738,24 +749,18 @@ class TestCellTextSelection:
         assert sweep_options["ensureDomOrder"] is True
         assert sweep_options["rowSelection"] == {"mode": "multiRow"}
 
-        inspector = _inspector(service, "sweep", SWEEP_A)
-        family_options = _grid(inspector, {"focus-family": "grid"}).dashGridOptions
-        assert family_options["enableCellTextSelection"] is True
-        assert family_options["ensureDomOrder"] is True
 
-
-class TestSweepInspector:
-    def test_job_correlation_rows(self, service):
+class TestSweepPage:
+    def test_jobs_and_provenance_render(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
         assert detail is not None
         jobs = {(job["scheduler_job_id"], job["role"]) for job in detail.jobs}
         assert jobs == {("9400001", "trials"), ("9400002", "checker")}
-        assert {job["backend"] for job in detail.jobs} == {"slurm"}
-        rendered = str(_inspector(service, "sweep", SWEEP_A))
+        rendered = _sweep_body(service, SWEEP_A)
         assert "9400001" in rendered
         assert "checker" in rendered
 
-    def test_monitoring_counts_match_seeded_facts(self, service):
+    def test_monitoring_counts_drive_the_sub_line(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
         assert detail is not None
         overview = detail.overview
@@ -765,91 +770,31 @@ class TestSweepInspector:
         assert overview.failed == 1
         assert overview.succeeded == 1
         assert overview.unknown == 1
-        rendered = str(_inspector(service, "sweep", SWEEP_A))
-        for label in ("active", "quiet", "stale", "failed", "succeeded"):
-            assert f"{label} 1" in rendered
-        assert "unknown 1" in rendered
+        rendered = _sweep_body(service, SWEEP_A)
+        assert "1 succeeded · 1 failed" in rendered
+        assert "1 lost — no terminal event" in rendered
 
-    def test_monitoring_row_hides_zero_labels_and_notes_all_quiet(self, service):
-        detail = service.sweep_detail(str(SWEEP_B))
-        assert detail is not None
-        row = _monitoring_counts(detail.overview)
-        assert row.children is not None
-        assert [badge.children for badge in row.children] == ["succeeded 1"]
-        zeros = {label: 0 for label in _MONITORING_ORDER}
-        quiet = _monitoring_badges(zeros)
-        assert len(quiet) == 1
-        assert quiet[0].children == "quiet"
-        assert str(getattr(quiet[0], "className", "")) == "quiet-note"
+    def test_lost_execution_rows_carry_the_stale_note(self, service):
+        rendered = _sweep_body(service, SWEEP_A)
+        assert "lost — last heartbeat" in rendered
 
-    def test_progress_list_shows_in_flight_with_current_total_unit(self, service):
-        detail = service.sweep_detail(str(SWEEP_A))
-        assert detail is not None
-        progress = {row["execution_id"]: row for row in detail.progress}
-        assert progress[str(E4)]["current"] == 7
-        assert progress[str(E4)]["total"] == 10
-        assert progress[str(E4)]["unit"] == "epoch"
-        assert str(E5) in progress
-        terminal_detail = service.sweep_detail(str(SWEEP_B))
-        assert terminal_detail is not None
-        assert terminal_detail.progress == []
-        rendered = str(_inspector(service, "sweep", SWEEP_A))
-        assert "7/10 epoch" in rendered
-        assert "3/10 epoch" in rendered
-
-        # jernerics-nqs: no empty-state boilerplate for terminal sweeps.
-        assert "No in-flight executions report progress." not in str(
-            _inspector(service, "sweep", SWEEP_B)
-        )
-
-    def test_executions_section_focuses_every_execution(self, service):
+    def test_executions_table_lists_every_execution(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
         assert detail is not None
         assert {str(record.execution_id) for record in detail.executions} == {
             str(execution_id) for execution_id in (E1, E3, E4, E5, E6, E7)
         }
-        grid = _grid(
-            _inspector(service, "sweep", SWEEP_A), {"focus-executions": "grid"}
-        )
-        assert grid.id == {"focus-executions": "grid"}
-        assert grid.getRowId == "params.data.execution_id"
-        rows = {row["execution_id"]: row for row in grid.rowData}
-        assert set(rows) == {
-            str(execution_id) for execution_id in (E1, E3, E4, E5, E6, E7)
-        }
-        assert "node07" not in {row["host"] for row in rows.values()}
+        rendered = _sweep_body(service, SWEEP_A)
+        for execution_id in (E1, E3, E4, E5, E6, E7):
+            assert short_id(str(execution_id)) in rendered
         finished = service.sweep_detail(str(SWEEP_B))
         assert finished is not None
         assert {str(record.execution_id) for record in finished.executions} == {str(E8)}
-        finished_grid = _grid(
-            _inspector(service, "sweep", SWEEP_B), {"focus-executions": "grid"}
-        )
-        assert {row["execution_id"] for row in finished_grid.rowData} == {str(E8)}
-        assert "node07" in {row["host"] for row in finished_grid.rowData}
+        assert short_id(str(E8)) in _sweep_body(service, SWEEP_B)
 
-    def test_executions_table_shortens_hosts_and_keeps_times_single_line(self):
-        ended = datetime.now(UTC) - timedelta(seconds=30)
-        started = ended - timedelta(minutes=3)
-        record = ExecutionRecord(
-            execution_id=uuid.uuid4(),
-            trial_id=uuid.uuid4(),
-            hostname="node05.hpc.cluster.example.com",
-            started_at=started,
-            ended_at=ended,
-            monitoring="active",
-        )
-        rendered = str(_executions_table([record], datetime_to_ns(ended)))
-        assert "node05" in rendered  # first DNS label only
-        assert "hpc.cluster.example.com" not in rendered
-        assert "3m ago" in rendered  # relative-only cell text
-        started_ns = datetime_to_ns(started)
-        assert f"title='{absolute_time(started_ns)}'" in rendered
-        assert rendered.count(absolute_time(started_ns)) == 1  # tooltip only
-
-    def test_sweep_inspector_offers_close_control(self, service):
-        rendered = str(_inspector(service, "sweep", SWEEP_A))
-        assert "id='inspector-close'" in rendered
-        assert f"Sweep alpha · {short_id(str(SWEEP_A))}" in rendered
+    def test_failure_rows_name_the_failure_kind(self, service):
+        rendered = _sweep_body(service, SWEEP_A)
+        assert "exception" in rendered
 
 
 class TestTrialFamilies:
@@ -863,38 +808,19 @@ class TestTrialFamilies:
         assert family.state == "completed"
         assert family.objective == pytest.approx(0.75)
         assert family.retry_count == 2
-        row = family_grid_row(family)
-        assert row["params"] == "batch=32, depth=4, lr=0.1, +1"
+        assert ("lr", "0.1") in family.params
 
     def test_family_rows_identify_root_and_current_trial(self, service):
         detail = service.sweep_detail(str(SWEEP_A))
         assert detail is not None
         for family in detail.families:
-            row = family_grid_row(family)
-            assert row["root"] == family.root
-            assert row["current_trial"] == family.current_trial
-            assert row["root_short"] == short_id(family.root)
-            assert row["current_short"] == short_id(family.current_trial)
-        grid = _grid(_inspector(service, "sweep", SWEEP_A), {"focus-family": "grid"})
-        columns = {column["field"]: column for column in grid.columnDefs}
-        assert columns["root_short"]["field"] == "root_short"
-        assert grid.getRowId == "params.data.root || params.data.trial_id"
+            assert family.current_trial
+            assert family.root
 
-    def test_lineage_side_panel_chain_is_exact(self, service):
-        detail = service.sweep_detail(str(SWEEP_A))
-        assert detail is not None
-        panel = lineage_panel([{"root": str(F0)}], {"lineage": detail.lineage})
-        rendered = str(panel)
-        chain = "cc110000 → cc120000 → cc130000"
-        assert chain in rendered
-        for index, trial, parent in (
-            (0, "cc110000", "—"),
-            (1, "cc120000", "cc110000"),
-            (2, "cc130000", "cc120000"),
-        ):
-            assert f"Td({index})" in rendered
-            assert f"Td('{trial}')" in rendered
-            assert f"Td('{parent}')" in rendered
+    def test_trial_subrow_carries_the_lineage_chain(self, service):
+        rendered = _sweep_body(service, SWEEP_A)
+        assert "retry index 2" in rendered
+        assert "→" in rendered
 
     def test_tray_from_grid_keeps_analysis_picks_and_flags(self):
         scope = tray_from_grid(
@@ -923,104 +849,24 @@ class TestTrialFamilies:
         ]
 
 
-class TestTrialInspector:
-    def test_family_header_params_catalog_and_executions(self, service):
-        rendered = str(_inspector(service, "trial", F2))
-        assert "cc110000 → cc120000 → cc130000" in rendered
-        assert "retry index 2" in rendered
-        assert "completed" in rendered
-        assert "objective 0.75" in rendered
+class TestTrialFactsOnPage:
+    def test_params_catalog_and_executions_render_inline(self, service):
+        rendered = _sweep_body(service, SWEEP_A)
         assert "sampled" in rendered and "manual" in rendered
         assert "loss" in rendered
         assert "node01" in rendered and "node02" in rendered
-        assert _focus_ref("execution", E1) in rendered
-        assert _focus_ref("execution", E3) in rendered
-        assert _focus_ref("sweep", SWEEP_A) in rendered
-        assert "id='section-optimizer-state'" in rendered
-
-
-class TestExecutionInspector:
-    def test_timeline_failure_summary_and_separate_sections(self, service):
-        rendered = str(_inspector(service, "execution", E1))
-        assert "id='section-execution-facts'" in rendered
-        assert "id='section-optimizer-state'" in rendered
-        facts_at = rendered.index("id='section-execution-facts'")
-        optimizer_at = rendered.index("id='section-optimizer-state'")
-        assert facts_at != optimizer_at
-        assert "boom: divide by zero" in rendered
-        assert "exception" in rendered
-        assert "Started" in rendered
-        assert "Last heartbeat" in rendered
-        assert "Last observation" in rendered
-        assert "Ended" in rendered
-        assert "unknown" in rendered
-        assert "failed" in rendered  # optimizer trial state of F0
-
-    def test_progress_params_resolved_config_and_provenance(self, service):
-        rendered = str(_inspector(service, "execution", E4))
-        assert "7/10 epoch" in rendered
-        assert "host node03" in rendered
-        assert '"lr": 0.1' in rendered
-        assert "deadbeef" in rendered
-        assert "sweep.yaml" in rendered
-        assert "slurm" in rendered
-        assert "section-optimizer-state" in rendered
-        assert "running" in rendered
-
-    def test_stale_execution_renders_stale_not_failed(self, service):
-        rendered = str(_inspector(service, "execution", E6))
-        assert "badge-stale" in rendered
-        assert "Span(children='stale'" in rendered
-        assert "failed" not in rendered
-
-    def test_missing_heartbeat_renders_unknown(self, service):
-        rendered = str(_inspector(service, "execution", E7))
-        assert "badge-unknown" in rendered
-        assert "Span(children='unknown'" in rendered
-        assert "Last heartbeat" in rendered
-
-    def test_execution_inspector_links_back_to_trial_and_sweep(self, service):
-        detail = service.execution_detail(str(E4))
-        assert detail is not None
-        rendered = str(_inspector(service, "execution", E4))
-        assert _focus_ref("trial", detail.context["trial_id"]) in rendered
-        assert _focus_ref("sweep", SWEEP_A) in rendered
-        assert "id='section-execution-artifacts'" in rendered
+        assert "completed" in rendered
 
 
 class TestPolling:
     def test_workspace_polls_while_any_sweep_is_incomplete(self, service):
-
         assert page_content("/dashboard/project/ops", service)[1] is True
 
-    def test_focus_polls_only_while_the_focused_object_is_open(self, service):
-        from jernerics_server.dashboard import workspace
-
-        assert (
-            workspace.focus_incomplete(service, {"kind": "sweep", "id": str(SWEEP_A)})
-            is True
-        )
-        assert (
-            workspace.focus_incomplete(service, {"kind": "sweep", "id": str(SWEEP_B)})
-            is False
-        )
-        assert (
-            workspace.focus_incomplete(service, {"kind": "trial", "id": str(T4)})
-            is True
-        )
-        assert (
-            workspace.focus_incomplete(service, {"kind": "trial", "id": str(F2)})
-            is False
-        )
-        assert (
-            workspace.focus_incomplete(service, {"kind": "execution", "id": str(E4)})
-            is True
-        )
-        assert (
-            workspace.focus_incomplete(service, {"kind": "execution", "id": str(E8)})
-            is False
-        )
-        assert workspace.focus_incomplete(service, None) is False
+    def test_sweep_page_polls_only_while_incomplete(self, service):
+        running = page_content(f"{ROUTES_BASE}/project/ops/sweep/{SWEEP_A}", service)
+        assert running[1] is True
+        finished = page_content(f"{ROUTES_BASE}/project/ops/sweep/{SWEEP_B}", service)
+        assert finished[1] is False
 
 
 class TestCurrentSemantics:
@@ -1725,50 +1571,47 @@ class TestApplyCuration:
         assert store._curation_row(str(SWEEP_A))[1] is not None
 
 
-class TestSweepInspectorCuration:
-    def test_archived_banner_and_disabled_transitions(self, store_and_service):
+class TestSweepPageCuration:
+    def _buttons(self, service, sweep_id) -> set[str]:
+        data = sweep_page.collect(service, str(sweep_id), None)
+        assert data is not None
+        body = sweep_page.render(data, "ops", str(sweep_id), NOW, set())
+        buttons: set[str] = set()
+        for child in body:
+            for node in _walk(child):
+                if isinstance(node, html.Button) and isinstance(node.children, str):
+                    buttons.add(node.children)
+        return buttons
+
+    def test_archived_page_offers_unarchive_only(self, store_and_service):
         store, service = store_and_service
         store.archive_sweep(str(SWEEP_B))
-        rendered = str(_inspector(service, "sweep", SWEEP_B))
-        assert "This sweep is archived" in rendered
-        assert "id='detail-curation'" in rendered
-        assert "id='detail-reason'" in rendered
-        assert "id='detail-message'" in rendered
-        assert "badge-archived" in rendered
+        rendered = _sweep_body(service, SWEEP_B)
+        assert "badge archived" in rendered
+        assert "Unarchive" in self._buttons(service, SWEEP_B)
+        assert "Archive" not in self._buttons(service, SWEEP_B)
+        assert "Clear invalid" not in self._buttons(service, SWEEP_B)
 
-    def test_invalid_banner_names_reason_and_timestamp(self, store_and_service):
+    def test_invalid_page_names_reason_and_offers_clear(self, store_and_service):
         store, service = store_and_service
         store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
-        rendered = str(_inspector(service, "sweep", SWEEP_B))
-        assert "Marked scientifically invalid" in rendered
-        assert "contaminated dataset" in rendered
-        assert "UTC" in rendered
-        assert "badge-invalid" in rendered
+        rendered = _sweep_body(service, SWEEP_B)
+        assert "badge invalid" in rendered
+        assert "reason: contaminated dataset" in rendered
+        assert "Clear invalid" in self._buttons(service, SWEEP_B)
+        assert "Mark invalid" not in self._buttons(service, SWEEP_B)
 
-    def test_inspector_buttons_follow_valid_transitions(self, store_and_service):
-        store, service = store_and_service
-        store.mark_sweep_invalid(str(SWEEP_B), "contaminated dataset")
-        buttons = {
-            node.id: node
-            for node in _walk(_inspector(service, "sweep", SWEEP_B))
-            if isinstance(getattr(node, "id", None), str)
-            and node.id.startswith("detail-")
-        }
-        assert buttons["detail-archive"].disabled is True
-        assert buttons["detail-invalid"].disabled is True
-        assert buttons["detail-restore-validity"].disabled is False
-        assert buttons["detail-restore"].disabled is True
+    def test_clean_page_offers_invalid_and_archive(self, store_and_service):
+        _store, service = store_and_service
+        rendered = _sweep_body(service, SWEEP_B)
+        assert "Mark invalid" in self._buttons(service, SWEEP_B)
+        assert "Archive" in self._buttons(service, SWEEP_B)
+        assert "sweep-reason" in rendered
+        assert "Clear invalid" not in rendered
 
-    def test_detail_curation_banners_and_buttons(self, store_and_service):
-        store, service = store_and_service
-        store.mark_sweep_invalid(str(SWEEP_B), "kept for audit")
-        detail = service.sweep_detail(str(SWEEP_B))
-        assert detail is not None
-        rendered = str(detail_curation(detail.overview))
-        assert "badge-invalid" in rendered
-        assert "kept for audit" in rendered
-        assert "Mark this sweep invalid" in rendered
-        assert ">Mark invalid<" not in rendered
+    def test_failures_link_targets_the_exceptions_route(self, service):
+        rendered = _sweep_body(service, SWEEP_A)
+        assert "/project/ops/exceptions?sweep=" in rendered
 
 
 class TestProjectPageCuration:
@@ -1951,60 +1794,41 @@ class TestMountedCurationJourney:
         assert "requires a reason" in message
         assert store._curation_row(str(SWEEP_B))[1] is None  # nothing dispatched
 
-    _DETAIL_OUTPUTS = {
-        "detail-message.children",
-        "detail-curation.children",
-        "sweep-grid.rowData",
-        "sweep-grid.selectedRows",
-        "workspace-curation-note.children",
-    }
-
-    def test_detail_mark_invalid_persists_reason_and_banner(self, mutable_client):
+    def test_sweep_page_mark_invalid_persists_reason_and_badge(self, mutable_client):
         store, client = mutable_client
         callback_map = self._callback_map(client)
         response = self._dispatch(
             client,
             callback_map,
-            self._DETAIL_OUTPUTS,
+            {
+                "sweep-message.children",
+                "sweep-page-body.children",
+                "sweep-page-facts-store.data",
+            },
             [
-                {"id": "detail-archive", "property": "n_clicks", "value": 0},
-                {"id": "detail-invalid", "property": "n_clicks", "value": 1},
-                {"id": "detail-restore-validity", "property": "n_clicks", "value": 0},
-                {"id": "detail-restore", "property": "n_clicks", "value": 0},
+                {"id": "sweep-archive", "property": "n_clicks", "value": 0},
+                {"id": "sweep-invalid", "property": "n_clicks", "value": 1},
+                {"id": "sweep-restore-validity", "property": "n_clicks", "value": 0},
+                {"id": "sweep-restore", "property": "n_clicks", "value": 0},
             ],
             state=[
+                {"id": "sweep-reason", "property": "value", "value": "bad shards"},
                 {
-                    "id": "view-store",
-                    "property": "data",
-                    "value": {
-                        "focus": {"kind": "sweep", "id": str(SWEEP_B)},
-                        "scope": {
-                            "sweeps": [str(SWEEP_B)],
-                            "trials": [],
-                            "families": [],
-                        },
-                    },
+                    "id": "url",
+                    "property": "pathname",
+                    "value": f"{ROUTES_BASE}/project/ops/sweep/{SWEEP_B}",
                 },
-                {"id": "detail-reason", "property": "value", "value": "bad shards"},
-                {"id": "sweep-grid", "property": "selectedRows", "value": None},
-                {"id": "project-store", "property": "data", "value": "ops"},
+                {"id": "url", "property": "search", "value": ""},
+                {"id": "view-store", "property": "data", "value": None},
             ],
-            changed=["detail-invalid.n_clicks"],
+            changed=["sweep-invalid.n_clicks"],
         )
-        assert response["detail-message"]["children"]["props"]["children"] == (
-            "Marked invalid beta."
-        )
-        rendered = str(response["detail-curation"]["children"])
+        message = str(response["sweep-message"]["children"])
+        assert "Marked invalid beta." in message
+        rendered = str(response["sweep-page-body"]["children"])
         assert "bad shards" in rendered
         row = store._curation_row(str(SWEEP_B))
         assert row[1] is not None and row[2] == "bad shards"
-        row_ids = [entry["sweep_id"] for entry in response["sweep-grid"]["rowData"]]
-        grid_row = next(
-            entry
-            for entry in response["sweep-grid"]["rowData"]
-            if entry["sweep_id"] == str(SWEEP_B)
-        )
-        assert grid_row["invalid"] is True and grid_row["curation"] == "invalid"
 
     _TICK_OUTPUTS = {
         "sweep-grid.rowData",
@@ -2163,13 +1987,11 @@ class TestFailureView:
         store.mark_sweep_invalid(str(CUR_SWEEP_OLD), "bad shard map")
         assert service.failed_executions("curate") == []
 
-    def test_panel_groups_failures_with_focus_and_summary(self, service):
+    def test_panel_groups_failures_with_summary(self, service):
         scoped = scoped_sweeps(service.sweep_overview("ops"), None)
         rendered = str(failed_view_panel(service, "ops", scoped, 0))
         assert "boom: divide by zero" in rendered
         assert "exception" in rendered
-        assert _focus_ref("trial", F0) in rendered
-        assert _focus_ref("sweep", SWEEP_A) in rendered
         assert "Mark sweep invalid" in rendered
 
     def test_exceptions_tab_embeds_filled_failure_view(self, service):

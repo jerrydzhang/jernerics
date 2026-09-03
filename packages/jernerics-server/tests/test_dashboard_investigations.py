@@ -1,6 +1,7 @@
 """DashboardService investigation reads, scope materialization, writes."""
 
 import json
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from jernerics_schema import (
     materialize_selection,
 )
 from jernerics_server.dashboard import analysis, workspace
+from jernerics_server.dashboard import sweep as sweep_page
 from jernerics_server.dashboard.analysis import (
     EMPTY_TRAY,
     decode_view_state,
@@ -1223,6 +1225,16 @@ def _first_pattern(component, key: str):
     return nodes[0] if nodes else None
 
 
+def _sweep_hub(data, compare):
+    """(crumb, views row) of the rendered sweep page body."""
+    body = sweep_page.render(data, CMP, str(CS1), time.time_ns(), set())
+    crumb = next(node for node in body if getattr(node, "className", None) == "crumb")
+    views = next(
+        node for node in body if getattr(node, "className", None) == "limit-row"
+    )
+    return crumb, views
+
+
 def _text(node) -> str:
     """Every scalar leaf concatenated — assertions read facts, not reprs."""
     if isinstance(node, Component):
@@ -1374,15 +1386,14 @@ class TestMemberScopeAndViews:
             str(CT4),
         }
 
-    def test_sweep_hub_gates_views_on_real_data(self, cmp_service, sig):
+    def test_sweep_page_gates_views_on_real_data(self, cmp_service, sig):
         # cmp members carry the outcome at step 0 only — no step series,
         # so Series is unsupported; every member has trials, so Points
-        # renders; Search always opens over all members.
-        hub = workspace.sweep_hub_header(
-            cmp_service, CMP, str(CS1), "cmp_f01", sig.compare
-        )
-        crumb, views = hub
-        assert _text(crumb) == f"{CMP}Investigationssig-comparecmp_f01"
+        # renders; the via investigation gives Search its destination.
+        data = sweep_page.collect(cmp_service, str(CS1), sig.compare)
+        assert data is not None
+        crumb, views = _sweep_hub(data, sig.compare)
+        assert _text(crumb) == f"{CMP}›Investigations›sig-compare›cmp_f01"
         labels = [
             node.children
             for node in _walk_children(views)
@@ -1393,7 +1404,7 @@ class TestMemberScopeAndViews:
         links = {
             node.children: node.href
             for node in _walk_children(views)
-            if isinstance(node, html.A)
+            if isinstance(node, html.A) and node.href
         }
         points_href = links["Points"]
         assert f"/investigation/{sig.compare}" in points_href
@@ -1405,22 +1416,21 @@ class TestMemberScopeAndViews:
         )
         search_doc = decode_view_state(unquote(links["Search"].split("view=")[1]))
         assert search_doc["inv"] == {"view": "search", "member": None}
-        back = _text(views).count("Back to sig-compare")
-        assert back == 1
 
-    def test_sweep_hub_renders_nothing_without_a_via(self, cmp_service, sig):
-        assert (
-            workspace.sweep_hub_header(cmp_service, CMP, str(CS1), "cmp_f01", None)
-            == []
-        )
-        assert (
-            workspace.sweep_hub_header(
-                cmp_service, CMP, str(CS1), "cmp_f01", "no-such-inv"
-            )
-            == []
-        )
-        foreign = workspace.investigation_page(cmp_service, CMP, sig.compare)
-        assert _pattern_nodes(foreign, "inv-region")  # sanity: page builds
+    def test_sweep_page_gates_optuna_on_distributions(self, cmp_service, sig):
+        data = sweep_page.collect(cmp_service, str(CS1), sig.compare)
+        assert data is not None
+        _crumb, views = _sweep_hub(data, sig.compare)
+        assert "Optuna" not in _text(views)
+
+    def test_sweep_page_without_a_via_drops_the_return_path(self, cmp_service, sig):
+        for via in (None, "no-such-inv"):
+            data = sweep_page.collect(cmp_service, str(CS1), via)
+            assert data is not None
+            body = sweep_page.render(data, CMP, str(CS1), time.time_ns(), set())
+            text = _text(body)
+            assert "Investigations" not in text
+            assert "← sig-compare" not in text
 
     def test_via_return_path_survives_its_own_url_only(self, cmp_service, sig):
         doc = analysis.edited_view(

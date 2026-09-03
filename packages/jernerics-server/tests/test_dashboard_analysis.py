@@ -4136,9 +4136,8 @@ class TestContextDiscoveryBeyondPagination:
 
 class TestWorkspaceChurnGates:
     """jernerics-igq.3: hidden tabs never query or render, the project
-    picker ignores URL view edits once a project is established, the
-    inspector runs only on focus changes and polls, and the scroll
-    capture/restore clientside callbacks stay wired."""
+    picker ignores URL view edits once a project is established, and the
+    scroll capture/restore clientside callbacks stay wired."""
 
     @pytest.fixture(scope="class")
     def dash_app(self, tmp_path_factory):
@@ -4211,45 +4210,6 @@ class TestWorkspaceChurnGates:
         )
         assert settle.status_code == 200
         assert settle.json()["response"]["project-picker"]["value"] == PROJECT
-
-    def test_inspector_runs_only_on_focus_changes_and_polls(self, authed, dash_app):
-        focus = {"kind": "sweep", "id": str(SWEEP_A)}
-        inputs = [
-            {
-                "id": "view-store",
-                "property": "data",
-                "value": {"focus": focus},
-            },
-            {"id": "poll", "property": "n_intervals", "value": 0},
-        ]
-        same = self._post(
-            authed,
-            dash_app.callback_map,
-            {"inspector.children", "inspector-render-store.data"},
-            inputs,
-            state=[
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {
-                    "id": "inspector-render-store",
-                    "property": "data",
-                    "value": {"focus": focus},
-                },
-            ],
-            changed=["view-store.data"],
-        )
-        assert same.status_code == 204
-        changed_focus = self._post(
-            authed,
-            dash_app.callback_map,
-            {"inspector.children", "inspector-render-store.data"},
-            inputs,
-            state=[
-                {"id": "project-store", "property": "data", "value": PROJECT},
-                {"id": "inspector-render-store", "property": "data", "value": None},
-            ],
-            changed=["view-store.data"],
-        )
-        assert changed_focus.status_code == 200
 
     def test_scroll_capture_and_restore_callbacks_are_wired(self, dash_app):
         def specs(output_id):

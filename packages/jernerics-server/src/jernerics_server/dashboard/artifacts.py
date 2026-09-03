@@ -17,9 +17,9 @@ from dash import dcc, html
 from dash_ag_grid import AgGrid
 
 from . import analysis, components
-from .components import MISSING, Badge, Empty, human_size, relative_time, short_id
+from .components import MISSING, Badge, human_size, short_id
 from .routes import ROUTES_BASE
-from .service import ArtifactRow, ArtifactView, DashboardService
+from .service import ArtifactView, DashboardService
 
 JSON_CAP = 1024 * 1024
 """Upper bound for a blob rendered as JSON (tree or summary/rows table)."""
@@ -33,32 +33,6 @@ _GRID_DEFAULTS: dict[str, Any] = {
     "resizable": True,
     "minWidth": 100,
 }
-_ROW_ID_FUNCTION: Any = "params.data.artifact_id"
-
-_LISTING_COLUMNS: list[dict[str, Any]] = [
-    {"headerName": "Version", "field": "version", "maxWidth": 100},
-    {"headerName": "Key", "field": "key"},
-    {"headerName": "Filename", "field": "filename"},
-    {"headerName": "Source", "field": "source", "maxWidth": 100},
-    {"headerName": "Size", "field": "size"},
-    {"headerName": "Type", "field": "content_type"},
-    {
-        "headerName": "SHA-256",
-        "field": "sha256_short",
-        "cellClass": "mono-cell",
-    },
-    {"headerName": "Context", "field": "context"},
-    {"headerName": "Declared", "field": "declared"},
-    {"headerName": "Received", "field": "received"},
-    {
-        "headerName": "State",
-        "field": "state",
-        "cellClassRules": {
-            "cell-available": "params.value === 'available'",
-            "cell-pending": "params.value === 'pending'",
-        },
-    },
-]
 
 
 def viewer_href(artifact_id: str) -> str:
@@ -90,42 +64,6 @@ def _context_text(context: dict[str, Any] | None) -> str:
     if not context:
         return MISSING
     return ", ".join(f"{k}={v}" for k, v in sorted(context.items()))
-
-
-def grid_row(row: ArtifactRow, now_ns: int) -> dict[str, Any]:
-    """One AG Grid row dict for the artifact listing."""
-    return {
-        "artifact_id": row.artifact_id,
-        "version": f"v{row.version}",
-        "key": row.key,
-        "filename": row.filename,
-        "source": row.source,
-        "size": human_size(row.size_bytes),
-        "content_type": row.content_type,
-        "sha256_short": (row.sha256 or MISSING)[:12],
-        "context": _context_text(row.context),
-        "declared": relative_time(row.declared_ns, now_ns),
-        "received": (
-            relative_time(row.received_ns, now_ns) if row.received_ns else MISSING
-        ),
-        "state": "available" if row.available else "pending",
-    }
-
-
-def artifact_grid(rows: tuple[ArtifactRow, ...], now_ns: int) -> AgGrid | html.Div:
-    """The version listing shared by the trial and execution pages; a row
-    click opens the viewer (callbacks._open_artifact)."""
-    if not rows:
-        return Empty("No artifacts declared here yet.")
-    return AgGrid(
-        id="artifact-grid",
-        rowData=[grid_row(row, now_ns) for row in rows],
-        columnDefs=_LISTING_COLUMNS,
-        defaultColDef=_GRID_DEFAULTS,
-        dashGridOptions=components.grid_options(),
-        getRowId=_ROW_ID_FUNCTION,
-        className="ag-theme-alpine grid",
-    )
 
 
 def _download(view: ArtifactView) -> html.A:

@@ -5,8 +5,8 @@ Deep links: ``/dashboard`` (project catalog), ``/dashboard/project/<name>``
 the view document), ``/dashboard/project/<name>/investigation/new`` and
 ``.../investigation/<id>[/edit]`` (the investigation editor; ``<id>``
 alone is the investigation workspace), ``/dashboard/project/<name>/sweep/<id>``
-and ``/dashboard/project/<name>/exceptions`` (new-shell pages; routes
-exist ahead of their rendering), and ``/dashboard/artifact-view/<hex>``
+(the sweep page) and ``/dashboard/project/<name>/exceptions`` (route ahead
+of its rendering until R3), and ``/dashboard/artifact-view/<hex>``
 (the viewer; ``/dashboard/artifact/<hex>`` is the raw download alias
 served by the HTTP layer, not a page). Unknown paths render the
 not-found surface. ``polls`` on a PageSpec is only the route-level

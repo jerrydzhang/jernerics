@@ -20,11 +20,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from jernerics_schema import (
+    ArtifactRecord,
     ExecutionRecord,
     Page,
     ProvenanceRecord,
     Selection,
     TrialParamRecord,
+    TrialRecord,
     ValueCatalogRecord,
     ValueRecord,
     materialize_selection,
@@ -843,10 +845,10 @@ class DashboardService:
         return summary is not None and summary.incomplete
 
     def sweep_facts(self, sweep_id: str) -> dict[str, Any] | None:
-        """Digest-stable inspector facts for one sweep: the overview row
-        plus bounded job and in-flight progress identities — no rendered
-        tree, nothing wall-clock derived — so a tick without a fact
-        change skips the sweep-detail tree build entirely."""
+        """Digest-stable cheap facts for one sweep: the overview row plus
+        bounded job and in-flight progress identities — no rendered tree,
+        nothing wall-clock derived — so the sweep page's tick gate skips
+        the full sweep read entirely."""
         parsed = _parse_id(sweep_id)
         if parsed is None:
             return None
@@ -952,6 +954,68 @@ class DashboardService:
                 for record in self.queries.lineage(selection)
             ],
         )
+
+    def _sweep_scope(self, sweep_id: str) -> Selection | None:
+        """Typed selection over one sweep, or None when no sweep matches."""
+        parsed = _parse_id(sweep_id)
+        if parsed is None:
+            return None
+        context = self.queries.sweep_context(parsed)
+        if context is None:
+            return None
+        return Selection(project=context["project"], sweeps=(parsed,))
+
+    def sweep_trials(self, sweep_id: str) -> list[TrialRecord]:
+        """Every trial of one sweep with lineage and search-space facts."""
+        scope = self._sweep_scope(sweep_id)
+        if scope is None:
+            return []
+        return self._follow_pages(
+            lambda sel, page, token: self.queries.trials(
+                sel, page=page, page_token=token
+            ),
+            scope,
+        )
+
+    def sweep_trial_params(self, sweep_id: str) -> list[TrialParamRecord]:
+        """Every trial's flat params (sampled and manual) under one sweep."""
+        scope = self._sweep_scope(sweep_id)
+        if scope is None:
+            return []
+        return self._follow_params(scope)
+
+    def sweep_artifacts(self, sweep_id: str) -> list[ArtifactRecord]:
+        """Every artifact declared under one sweep, trial-bound."""
+        scope = self._sweep_scope(sweep_id)
+        if scope is None:
+            return []
+        return self._follow_pages(
+            lambda sel, page, token: self.queries.artifacts(
+                sel, page=page, page_token=token
+            ),
+            scope,
+        )
+
+    def sweep_provenance(self, sweep_id: str) -> list[ProvenanceRecord]:
+        """Submission-level provenance rows for one sweep."""
+        scope = self._sweep_scope(sweep_id)
+        if scope is None:
+            return []
+        return self.queries.provenance(scope)
+
+    def trial_value_catalogs(
+        self, project: str, trial_ids: Sequence[str]
+    ) -> dict[str, list[ValueCatalogRecord]]:
+        """Per-trial value catalogs; a trial's own executions only."""
+        catalogs: dict[str, list[ValueCatalogRecord]] = {}
+        for trial_id in trial_ids:
+            parsed = _parse_id(trial_id)
+            if parsed is None:
+                continue
+            catalogs[trial_id] = self.queries.value_catalog(
+                Selection(project=project, trials=(parsed,))
+            )
+        return catalogs
 
     def sweep_executions(self, selection: Selection) -> list[ExecutionRecord]:
         """Every execution under the selection's sweeps, with derived
