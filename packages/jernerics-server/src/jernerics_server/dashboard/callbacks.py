@@ -2370,7 +2370,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 summary
                 for summary in service.sweep_overview(record.project)
                 if summary.sweep_id in member_ids
-            ]
+            ],
+            record.project,
+            str(record.id),
         )
         needle = str(query or "").strip().casefold()
         shown = [
