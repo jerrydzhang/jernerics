@@ -1,10 +1,13 @@
-"""Typed read client for the jernerics tracking server.
+"""Typed client for the jernerics tracking server.
 
 Dashboards, notebooks, scripts, and agents read tracked data through
 :class:`TrackingClient` and :class:`ProjectHandle`: typed frozen records
 over the domain read endpoints, opaque keyset pagination followed
-transparently, and no SQL and no dataframe dependency. Expert users can
-still drop to :meth:`TrackingClient.raw_query` explicitly — it is the only
+transparently, and no SQL and no dataframe dependency. Investigation
+create/membership/archive calls are the one mutation surface; the server
+treats them as idempotent metadata writes, so the transport's bounded
+retry applies to them too. Expert users can still drop to
+:meth:`TrackingClient.raw_query` explicitly — it is the only
 place SQL is accepted.
 
 Optional pandas/optuna conveniences live in
@@ -20,7 +23,7 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 from urllib.parse import urlsplit
 
 import httpx
@@ -31,6 +34,8 @@ from jernerics_schema import (
     ExecutionId,
     ExecutionRecord,
     ExecutionsQuery,
+    InvestigationId,
+    InvestigationRecord,
     LineageQuery,
     Page,
     ProvenanceQuery,
@@ -49,8 +54,9 @@ from jernerics_schema import (
     ValueCatalogRecord,
     ValueRecord,
     ValuesQuery,
+    materialize_selection,
 )
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 from .infra import TrackingServerSchemeError, resolve_tracking_ship
 
@@ -82,6 +88,64 @@ class TrackingClientError(Exception):
         self.code = code
 
 
+FactorKind = Literal["manual_param", "config_source", "name_token"]
+WarningKind = Literal[
+    "unknown_sweep",
+    "cross_project_sweep",
+    "git_hash_divergence",
+    "config_source_divergence",
+]
+
+
+class FactorCandidate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: FactorKind
+    name: str
+    members: int
+
+
+class OutcomeCandidate(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    key: str
+    members: int
+
+
+class PreviewWarning(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: WarningKind
+    detail: str
+
+
+class InvestigationPreview(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    project: str
+    member_count: int
+    factors: tuple[FactorCandidate, ...]
+    outcomes: tuple[OutcomeCandidate, ...]
+    warnings: tuple[PreviewWarning, ...]
+
+
+class InvestigationCoverage(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    members: int
+    with_outcome: int
+    completed: int
+    invalid: int
+    last_activity_ns: int | None
+
+
+class InvestigationDetail(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    investigation: InvestigationRecord
+    coverage: InvestigationCoverage
+
+
 _SWEEP_RECORDS = TypeAdapter(list[SweepRecord])
 _TRIAL_RECORDS = TypeAdapter(list[TrialRecord])
 _TRIAL_LINEAGE_RECORDS = TypeAdapter(list[TrialLineageRecord])
@@ -91,6 +155,7 @@ _VALUE_CATALOG_RECORDS = TypeAdapter(list[ValueCatalogRecord])
 _VALUE_RECORDS = TypeAdapter(list[ValueRecord])
 _ARTIFACT_RECORDS = TypeAdapter(list[ArtifactRecord])
 _PROVENANCE_RECORDS = TypeAdapter(list[ProvenanceRecord])
+_INVESTIGATION_RECORDS = TypeAdapter(list[InvestigationRecord])
 
 _NAMED_REDUCERS: dict[str, Callable[[list[float]], float]] = {
     "sum": lambda xs: float(sum(xs)),
@@ -362,6 +427,129 @@ class ProjectHandle:
             ProvenanceQuery(selection=self._scope(selection)).model_dump(mode="json"),
         )
         return _PROVENANCE_RECORDS.validate_python(data["records"])
+
+    def investigations(
+        self, *, include_archived: bool = False
+    ) -> list[InvestigationRecord]:
+        """Every investigation in the project; archived only on request."""
+        data = self._client._post_json(
+            "/investigations",
+            {"project": self.name, "include_archived": include_archived},
+        )
+        return _INVESTIGATION_RECORDS.validate_python(data["records"])
+
+    def investigation(
+        self, investigation_id: InvestigationId | str
+    ) -> InvestigationDetail:
+        """One investigation with its member coverage facts."""
+        data = self._client._post_json(
+            "/investigations/get", {"investigation_id": str(investigation_id)}
+        )
+        return InvestigationDetail.model_validate(data)
+
+    def investigation_preview(
+        self, sweep_ids: Iterable[SweepId | str]
+    ) -> InvestigationPreview:
+        """Factor/outcome candidates a membership would cover, plus warnings."""
+        data = self._client._post_json(
+            "/investigations/preview",
+            {"project": self.name, "sweep_ids": [str(value) for value in sweep_ids]},
+        )
+        return InvestigationPreview.model_validate(data)
+
+    def create_investigation(
+        self,
+        name: str,
+        factor: str,
+        outcome: str,
+        members: Iterable[SweepId | str],
+        *,
+        replicate_factor: str | None = None,
+    ) -> InvestigationRecord:
+        """Create, or idempotently re-create, one named investigation."""
+        return self._investigation_record(
+            "/investigations/create",
+            {
+                "project": self.name,
+                "name": name,
+                "factor": factor,
+                "outcome": outcome,
+                "replicate_factor": replicate_factor,
+                "members": [str(value) for value in members],
+            },
+        )
+
+    def set_investigation_members(
+        self,
+        investigation_id: InvestigationId | str,
+        sweep_ids: Iterable[SweepId | str],
+    ) -> InvestigationRecord:
+        """Replace the member list wholesale."""
+        return self._investigation_members(
+            "/investigations/members/set", investigation_id, sweep_ids
+        )
+
+    def add_investigation_members(
+        self,
+        investigation_id: InvestigationId | str,
+        sweep_ids: Iterable[SweepId | str],
+    ) -> InvestigationRecord:
+        """Add members; already-present ids change nothing."""
+        return self._investigation_members(
+            "/investigations/members/add", investigation_id, sweep_ids
+        )
+
+    def remove_investigation_members(
+        self,
+        investigation_id: InvestigationId | str,
+        sweep_ids: Iterable[SweepId | str],
+    ) -> InvestigationRecord:
+        """Drop members; absent ids change nothing."""
+        return self._investigation_members(
+            "/investigations/members/remove", investigation_id, sweep_ids
+        )
+
+    def archive_investigation(
+        self, investigation_id: InvestigationId | str
+    ) -> InvestigationRecord:
+        """Archive; replaying keeps the first archived timestamp."""
+        return self._investigation_record(
+            "/investigations/archive", {"investigation_id": str(investigation_id)}
+        )
+
+    def restore_investigation(
+        self, investigation_id: InvestigationId | str
+    ) -> InvestigationRecord:
+        """Clear the archive marker; restoring an active record is a no-op."""
+        return self._investigation_record(
+            "/investigations/restore", {"investigation_id": str(investigation_id)}
+        )
+
+    def investigation_selection(
+        self, investigation_id: InvestigationId | str
+    ) -> Selection:
+        """The Selection behind the dashboard's "Open in Python" token."""
+        return materialize_selection(self.investigation(investigation_id).investigation)
+
+    def _investigation_members(
+        self,
+        path: str,
+        investigation_id: InvestigationId | str,
+        sweep_ids: Iterable[SweepId | str],
+    ) -> InvestigationRecord:
+        return self._investigation_record(
+            path,
+            {
+                "investigation_id": str(investigation_id),
+                "sweep_ids": [str(value) for value in sweep_ids],
+            },
+        )
+
+    def _investigation_record(
+        self, path: str, payload: dict[str, Any]
+    ) -> InvestigationRecord:
+        data = self._client._post_json(path, payload)
+        return InvestigationRecord.model_validate(data)
 
     def latest_values(
         self,

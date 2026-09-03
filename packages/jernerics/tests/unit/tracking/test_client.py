@@ -19,7 +19,12 @@ from typing import Any
 import httpx
 import pytest
 from fastapi import FastAPI
-from jernerics.tracking import TrackingClient, TrackingClientError
+from jernerics.tracking import (
+    InvestigationDetail,
+    InvestigationPreview,
+    TrackingClient,
+    TrackingClientError,
+)
 from jernerics_schema import (
     PROTOCOL_VERSION,
     ArtifactDeclarationEvent,
@@ -28,6 +33,7 @@ from jernerics_schema import (
     ExecutionStartEvent,
     FlatContext,
     IngestRequest,
+    InvestigationRecord,
     ManualParamEvent,
     Selection,
     SubmissionSnapshotEvent,
@@ -841,3 +847,137 @@ class TestIntegrations:
         assert complete.params == {"lr": 0.05}
         assert complete.distributions["lr"] == FloatDistribution(0.001, 0.1, log=True)
         assert failed.params == {}
+
+
+class TestInvestigations:
+    def test_create_list_and_detail_round_trip(self, scenario):
+        with scenario.client() as client:
+            handle = client.project(PROJECT)
+            assert handle.investigations() == []
+            record = handle.create_investigation(
+                "baseline", "dataset", "heldout_rmse", [scenario.sweep_a]
+            )
+            assert isinstance(record, InvestigationRecord)
+            assert record.project == PROJECT
+            assert record.name == "baseline"
+            assert record.factor == "dataset"
+            assert record.outcome == "heldout_rmse"
+            assert record.replicate_factor is None
+            assert record.archived_ns is None
+            assert record.members == (scenario.sweep_a,)
+            assert handle.investigations() == [record]
+            detail = handle.investigation(record.id)
+            assert isinstance(detail, InvestigationDetail)
+            assert detail.investigation == record
+            assert detail.coverage.members == 1
+
+    def test_replicate_factor_round_trips(self, scenario):
+        with scenario.client() as client:
+            handle = client.project(PROJECT)
+            record = handle.create_investigation(
+                "seeded",
+                "dataset",
+                "heldout_rmse",
+                [scenario.sweep_a],
+                replicate_factor="seed",
+            )
+            assert record.replicate_factor == "seed"
+            assert handle.investigation(record.id).investigation == record
+
+    def test_archive_hides_until_requested_and_restore_brings_back(self, scenario):
+        with scenario.client() as client:
+            handle = client.project(PROJECT)
+            record = handle.create_investigation(
+                "baseline", "dataset", "heldout_rmse", []
+            )
+            archived = handle.archive_investigation(record.id)
+            assert archived.archived_ns is not None
+            assert handle.investigations() == []
+            assert handle.investigations(include_archived=True) == [archived]
+            restored = handle.restore_investigation(record.id)
+            assert restored.archived_ns is None
+            assert handle.investigations() == [restored]
+
+    def test_member_mutations(self, scenario):
+        with scenario.client() as client:
+            handle = client.project(PROJECT)
+            record = handle.create_investigation(
+                "baseline", "dataset", "heldout_rmse", [scenario.sweep_a]
+            )
+            added = handle.add_investigation_members(
+                record.id, [scenario.sweep_b, scenario.sweep_a]
+            )
+            assert added.members == (scenario.sweep_a, scenario.sweep_b)
+            replay = handle.add_investigation_members(record.id, [scenario.sweep_b])
+            assert replay == added
+            removed = handle.remove_investigation_members(record.id, [scenario.sweep_a])
+            assert removed.members == (scenario.sweep_b,)
+            replaced = handle.set_investigation_members(record.id, [scenario.sweep_a])
+            assert replaced.members == (scenario.sweep_a,)
+
+    def test_mutation_retry_is_safe_because_mutations_are_idempotent(self, scenario):
+        with scenario.client() as client:
+            handle = client.project(PROJECT)
+            record = handle.create_investigation(
+                "baseline", "dataset", "heldout_rmse", [scenario.sweep_a]
+            )
+        flaky = FlakyTransport(SyncASGITransport(app=scenario.app), failures=1)
+        with TrackingClient("http://t", transport=flaky) as client:
+            result = client.project(PROJECT).add_investigation_members(
+                record.id, [scenario.sweep_b]
+            )
+        assert flaky.failed == 1
+        assert result.members == (scenario.sweep_a, scenario.sweep_b)
+
+    def test_investigation_selection_matches_materialized_members(self, scenario):
+        with scenario.client() as client:
+            handle = client.project(PROJECT)
+            record = handle.create_investigation(
+                "baseline",
+                "dataset",
+                "heldout_rmse",
+                [scenario.sweep_a, scenario.sweep_b],
+            )
+            selection = handle.investigation_selection(record.id)
+        assert selection == Selection(
+            project=PROJECT, sweeps=(scenario.sweep_a, scenario.sweep_b)
+        )
+
+    def test_preview_reports_candidates_and_unknown_sweep_warning(self, scenario):
+        with scenario.client() as client:
+            handle = client.project(PROJECT)
+            preview = handle.investigation_preview([scenario.sweep_a, "ghost"])
+            assert isinstance(preview, InvestigationPreview)
+            assert [(f.kind, f.name, f.members) for f in preview.factors] == [
+                ("config_source", "config_source", 1),
+                ("name_token", "alpha", 1),
+            ]
+            assert preview.project == PROJECT
+            assert preview.member_count == 1
+            assert any(outcome.key == "loss" for outcome in preview.outcomes)
+            assert [w.kind for w in preview.warnings if w.kind == "unknown_sweep"] == [
+                "unknown_sweep"
+            ]
+            empty = handle.investigation_preview([])
+            assert empty == InvestigationPreview(
+                project=PROJECT, member_count=0, factors=(), outcomes=(), warnings=()
+            )
+
+    def test_conflicting_create_and_unknown_ids_raise_with_server_codes(self, scenario):
+        with scenario.client() as client:
+            handle = client.project(PROJECT)
+            record = handle.create_investigation(
+                "baseline", "dataset", "heldout_rmse", [scenario.sweep_a]
+            )
+            with pytest.raises(TrackingClientError) as excinfo:
+                handle.create_investigation("baseline", "dataset", "accuracy", [])
+            assert excinfo.value.status_code == 409
+            assert excinfo.value.code == "investigation_conflict"
+            with pytest.raises(TrackingClientError) as excinfo:
+                handle.investigation("ghost")
+            assert excinfo.value.status_code == 404
+            assert excinfo.value.code == "investigation_not_found"
+            with pytest.raises(TrackingClientError) as excinfo:
+                handle.add_investigation_members(record.id, ["ghost"])
+            assert excinfo.value.status_code == 404
+            assert excinfo.value.code == "sweep_not_found"
