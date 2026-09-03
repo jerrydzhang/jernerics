@@ -389,7 +389,7 @@ class TestPendingState:
 
 
 class TestJsonRenderers:
-    def test_inspection_shape_renders_summary_cards_and_200_row_grid(self, env):
+    def test_inspection_shape_renders_summary_chips_and_200_row_grid(self, env):
         page, _ = page_content(
             f"/dashboard/artifact-view/{INSPECTION.hex}", env.service
         )
@@ -403,6 +403,8 @@ class TestJsonRenderers:
         rendered = str(page)
         assert "accuracy: 0.91" in rendered
         assert "n_rows: 200" in rendered
+        chips = [span for span in _find(page, html.Span) if span.className == "chip"]
+        assert any("accuracy: 0.91" in str(chip.children) for chip in chips)
         assert _find(page, dcc.Input, "artifact-quick-filter")
 
     def test_generic_json_object_renders_collapsible_tree(self, env):
@@ -434,25 +436,14 @@ class TestTextRenderer:
 
 
 class TestLogPresentation:
-    def test_stdout_stderr_get_log_styling_distinct_from_plain_text(self, env):
-        out_page, _ = page_content(
-            f"/dashboard/artifact-view/{STDOUT.hex}", env.service
-        )
-        out_pres = [pre for pre in _find(out_page, html.Pre) if pre.className]
-        assert any(pre.className == "log-view" for pre in out_pres)
-
-        err_page, _ = page_content(
-            f"/dashboard/artifact-view/{STDERR.hex}", env.service
-        )
-        err_pres = [pre for pre in _find(err_page, html.Pre) if pre.className]
-        assert any(pre.className == "log-view" for pre in err_pres)
-
-        text_page, _ = page_content(
-            f"/dashboard/artifact-view/{BIGLOG.hex}", env.service
-        )
-        text_pres = [pre for pre in _find(text_page, html.Pre) if pre.className]
-        assert any(pre.className == "text-view" for pre in text_pres)
-        assert not any(pre.className == "log-view" for pre in text_pres)
+    def test_logs_and_text_render_as_mono_pre_blocks(self, env):
+        for artifact_id in (STDOUT, STDERR, BIGLOG):
+            page, _ = page_content(
+                f"/dashboard/artifact-view/{artifact_id.hex}", env.service
+            )
+            pres = [pre for pre in _find(page, html.Pre) if pre.className]
+            assert any(pre.className == "mono" for pre in pres)
+            assert not any(pre.className == "log-view" for pre in pres)
 
 
 class TestMediaRenderers:
@@ -517,10 +508,11 @@ class TestFallbackRenderer:
         page, _ = page_content(f"/dashboard/artifact-view/{CUSTOM.hex}", env.service)
         rendered = str(page)
         assert "no inline renderer for application/x-custom" in rendered
-        cards = _find(page, html.Div, None)
-        assert any(card.className == "artifact-card" for card in cards)
+        notes = [p for p in _find(page, html.P) if p.className == "sub"]
+        assert any("no inline renderer" in str(note.children) for note in notes)
         links = [a for a in _find(page, html.A) if a.children == "Download"]
         assert links[0].href == raw_href(str(CUSTOM))
+        assert links[0].className == "btn"
 
 
 class TestSessionProtectedDownload:
@@ -564,22 +556,53 @@ class TestViewerFacts:
         assert str(TRIAL) in rendered
         assert str(EXECUTION) in rendered
         assert str(SWEEP) in rendered
-        assert "section-artifact-facts" in rendered
+
+    def test_facts_render_as_scroll_table_with_download_action(self, env):
+        page, _ = page_content(f"/dashboard/artifact-view/{MODEL_V2.hex}", env.service)
+        scroll = next(
+            node
+            for node in _walk(page)
+            if getattr(node, "className", None) == "table-scroll"
+        )
+        heads = [th.children for th in _walk(scroll) if isinstance(th, html.Th)]
+        assert heads == ["Fact", "Value"]
+        rows = [
+            tr
+            for tr in _walk(scroll)
+            if isinstance(tr, html.Tr) and isinstance(tr.children[0], html.Td)
+        ]
+        labels = [tr.children[0].children for tr in rows]
+        assert "Key" in labels
+        assert "SHA-256" in labels
+        state_row = next(tr for tr in rows if tr.children[0].children == "State")
+        badge = _find(state_row, html.Span)[0]
+        assert badge.className == "badge badge-ok"
+        actions = next(
+            node
+            for node in _walk(page)
+            if getattr(node, "className", None) == "actions"
+        )
+        download = _find(actions, html.A)[0]
+        assert download.children == "Download"
+        assert download.className == "btn"
+        assert download.href == raw_href(str(MODEL_V2))
 
 
 class TestViewerTitleAndCrumbs:
     def test_title_is_filename_with_key_not_raw_hex(self, env):
         page, _ = page_content(f"/dashboard/artifact-view/{MODEL_V2.hex}", env.service)
-        h2s = _find(page, html.H2)
-        assert [h.children for h in h2s] == ["model-v2.bin"]
-        headings = [str(h.children) for h in h2s + _find(page, html.H3)]
+        h1s = _find(page, html.H1)
+        assert [h.children for h in h1s] == ["model-v2.bin"]
+        headings = [str(h.children) for h in h1s + _find(page, html.H2)]
         assert all(MODEL_V2.hex not in text for text in headings)
         assert "model" in str(page)
 
     def test_breadcrumbs_link_workspace_sweep_trial_execution(self, env):
         page, _ = page_content(f"/dashboard/artifact-view/{CUSTOM.hex}", env.service)
-        nav = _find(page, html.Nav)[0]
-        links = [(a.children, a.href) for a in _find(nav, html.A)]
+        crumb = next(
+            node for node in _walk(page) if getattr(node, "className", None) == "crumb"
+        )
+        links = [(a.children, a.href) for a in _find(crumb, html.A)]
         assert [label for label, _ in links] == [
             "lab",
             "alpha",
@@ -597,8 +620,31 @@ class TestViewerTitleAndCrumbs:
             assert path == "/dashboard/project/lab"
             doc = json.loads(unquote(parse_qs(query)["view"][0]))
             assert doc["focus"] == {"kind": kind, "id": str(object_id)}
-        leaves = _find(nav, html.Span)
-        assert leaves[-1].children == "custom.bin"
+        assert str(crumb.children[-1]) == "custom.bin"
+
+
+class TestViewerShell:
+    def test_viewer_is_bare_new_shell_page_without_legacy_chrome(self, env):
+        page, _ = page_content(f"/dashboard/artifact-view/{CUSTOM.hex}", env.service)
+        assert getattr(page, "className", None) == "np"
+        link = _find(page, html.Link)[0]
+        assert link.href == "/dashboard/assets/page.css"
+        assert not any(
+            getattr(node, "className", None) == "topbar" for node in _walk(page)
+        )
+        rendered = str(page)
+        for gone in (
+            "artifact-note",
+            "artifact-card",
+            "artifact-text",
+            "crumbs",
+            "quick-filter",
+            "log-view",
+            "text-view",
+            "summary-card",
+            "section-artifact",
+        ):
+            assert gone not in rendered
 
 
 class TestNoNewSqlOutsideQueries:

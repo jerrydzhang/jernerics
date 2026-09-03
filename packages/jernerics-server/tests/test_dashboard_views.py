@@ -598,15 +598,57 @@ class TestProjectsPage:
         assert row.recent_sweep == "alpha"
 
         page, polls = page_content("/dashboard/", service)
-        rendered = str(page)
-        assert "ops" in rendered
-        assert "active 1" in rendered
-        assert "stale 1" in rendered
-        assert "failed 1" in rendered
-        assert "alpha" in rendered
-        assert "1m ago" in rendered
-        assert "/dashboard/project/ops" in rendered
+        assert getattr(page, "className", None) == "np"
+        link = next(node for node in _walk(page) if isinstance(node, html.Link))
+        assert link.href == f"{ROUTES_BASE}/assets/page.css"
+        topbar = next(
+            node for node in _walk(page) if getattr(node, "className", None) == "topbar"
+        )
+        form = next(node for node in _walk(topbar) if isinstance(node, html.Form))
+        assert form.action == f"{ROUTES_BASE}/logout"
+        assert not any(
+            getattr(node, "className", None) == "scopebar" for node in _walk(page)
+        )
+        table = next(node for node in _walk(page) if isinstance(node, html.Table))
+        heads = [th.children for th in _walk(page) if isinstance(th, html.Th)]
+        assert heads == [
+            "Project",
+            "Execution health",
+            "Recent sweep",
+            "Last activity",
+        ]
+        body_row = next(
+            tr
+            for tr in _walk(page)
+            if isinstance(tr, html.Tr) and isinstance(tr.children[0], html.Td)
+        )
+        cells = list(body_row.children)
+        assert (cells[0].children.children, cells[0].children.href) == (
+            "ops",
+            f"{ROUTES_BASE}/project/ops",
+        )
+        dots = [
+            node
+            for node in cells[1].children
+            if getattr(node, "className", "").startswith("st ")
+        ]
+        assert [dot.className for dot in dots] == [
+            "st st-running",
+            "st st-stale",
+            "st st-failed",
+        ]
+        assert [dot.children[0] for dot in dots] == ["running", "stale", "failed"]
+        assert [dot.children[1].children for dot in dots] == ["1", "1", "1"]
+        assert cells[2].children == "alpha"
+        assert cells[3].children == "1m ago"
+        assert "UTC" in cells[3].title
         assert polls is False
+
+    def test_empty_catalog_keeps_the_new_shell(self):
+        page = layout.project_page([], 0)
+        assert getattr(page, "className", None) == "np"
+        assert "No projects yet" in str(page)
+        assert not any(isinstance(node, html.Table) for node in _walk(page))
 
 
 class TestWorkspaceLayout:
@@ -1790,7 +1832,12 @@ class TestProjectPageCuration:
         store.archive_sweep(str(SWEEP_B))
         page, _polls = page_content("/dashboard/", service)
         rendered = str(page)
-        assert "failed 1" in rendered  # alpha's failed execution stays Current
+        # alpha's failed execution stays Current: the health cell is a
+        # status dot whose note carries the count.
+        assert (
+            "Span(children=['failed', Span(children='1', className='note')], "
+            "className='st st-failed')" in rendered
+        )
 
 
 class TestMountedCurationJourney:

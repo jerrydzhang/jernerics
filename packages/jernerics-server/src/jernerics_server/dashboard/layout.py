@@ -10,8 +10,9 @@ interval pages enable or disable through the router callback.
 """
 
 from dash import dcc, html
+from dash.development.base_component import Component
 
-from . import components
+from . import components, page
 from .analysis import default_view_state
 from .routes import ROUTES_BASE
 from .service import ProjectSummary
@@ -30,6 +31,7 @@ def shell() -> html.Div:
             ),
             dcc.Location(id="url", refresh=False),
             html.Header(
+                id="nav",
                 className="nav",
                 children=[
                     html.A("jernerics", href=f"{ROUTES_BASE}/", className="brand"),
@@ -67,84 +69,74 @@ def shell() -> html.Div:
     )
 
 
+def _health(summary: ProjectSummary) -> list[Component | str]:
+    """Execution-health cell: one status dot per non-zero state, plus
+    curation badges when sweeps were archived or invalidated."""
+    parts: list[Component | str] = []
+    for status, count in (
+        ("running", summary.active),
+        ("stale", summary.stale),
+        ("failed", summary.failed),
+    ):
+        if not count:
+            continue
+        if parts:
+            parts.append(" · ")
+        parts.append(page.status_dot(status, str(count)))
+    if summary.archived_sweeps:
+        parts.append(
+            components.Badge(f"archived {summary.archived_sweeps}", kind="archived")
+        )
+    if summary.invalid_sweeps:
+        parts.append(
+            components.Badge(f"invalid {summary.invalid_sweeps}", kind="invalid")
+        )
+    if parts:
+        return parts
+    return [components.MISSING]
+
+
 def project_page(catalog: list[ProjectSummary], now_ns: int) -> html.Div:
     """Project catalog: health counts, recent sweep, last activity."""
-    if not catalog:
-        return html.Div(
-            [
-                html.H2("Projects"),
-                components.Empty(
-                    "No projects yet — tracking data appears here once a "
-                    "sweep is ingested."
-                ),
-            ],
-            className="page",
-        )
-    rows = [
-        html.A(
-            [
-                html.Span(summary.project, className="project-name"),
-                html.Span(
-                    [
-                        components.Badge(f"active {summary.active}", kind="active"),
-                        components.Badge(f"stale {summary.stale}", kind="stale"),
-                        components.Badge(f"failed {summary.failed}", kind="failed"),
-                        *(
-                            [
-                                components.Badge(
-                                    f"archived {summary.archived_sweeps}",
-                                    kind="archived",
-                                )
-                            ]
-                            if summary.archived_sweeps
-                            else []
-                        ),
-                        *(
-                            [
-                                components.Badge(
-                                    f"invalid {summary.invalid_sweeps}", kind="invalid"
-                                )
-                            ]
-                            if summary.invalid_sweeps
-                            else []
-                        ),
-                    ],
-                    className="project-counts",
-                ),
-                html.Span(
-                    summary.recent_sweep or components.MISSING,
-                    className="project-sweep",
-                ),
-                html.Span(
-                    components.relative_time(summary.last_activity_ns, now_ns),
-                    className="project-activity",
-                ),
-            ],
-            href=f"{ROUTES_BASE}/project/{summary.project}",
-            className="project-row",
-        )
-        for summary in catalog
-    ]
-    return html.Div(
-        [
-            html.H2("Projects"),
-            html.Div(
+    body: list[Component | str] = [html.H1("Projects")]
+    if catalog:
+        body.append(
+            page.scroll_table(
                 [
-                    html.Div(
-                        [
-                            html.Span("Project", className="project-name"),
-                            html.Span("Execution health", className="project-counts"),
-                            html.Span("Recent sweep", className="project-sweep"),
-                            html.Span("Last activity", className="project-activity"),
-                        ],
-                        className="project-row project-head",
-                    ),
-                    *rows,
+                    page.head_cell("Project"),
+                    page.head_cell("Execution health"),
+                    page.head_cell("Recent sweep"),
+                    page.head_cell("Last activity"),
                 ],
-                className="project-list",
-            ),
-        ],
-        className="page",
+                [
+                    html.Tr(
+                        [
+                            html.Td(
+                                html.A(
+                                    summary.project,
+                                    href=f"{ROUTES_BASE}/project/{summary.project}",
+                                )
+                            ),
+                            html.Td(_health(summary)),
+                            html.Td(summary.recent_sweep or components.MISSING),
+                            components.time_cell_compact(
+                                summary.last_activity_ns, now_ns
+                            ),
+                        ]
+                    )
+                    for summary in catalog
+                ],
+            )
+        )
+    else:
+        body.append(
+            components.Empty(
+                "No projects yet — tracking data appears here once a sweep is ingested."
+            )
+        )
+    return html.Div(
+        [page.stylesheet(), page.topbar(None), page.page_container(*body)],
+        className="np",
     )
 
 

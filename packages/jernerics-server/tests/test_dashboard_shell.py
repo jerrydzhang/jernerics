@@ -127,10 +127,21 @@ class TestPageComposition:
         brand = _by_class(bar, "brand")[0]
         assert brand.children == "jernerics"
         assert _by_class(bar, "spacer")
+        form = _of(bar, html.Form)[0]
+        assert form.action == "/dashboard/logout"
+        assert form.method == "post"
+        button = _of(form, html.Button)[0]
+        assert button.type == "submit"
         assert _text(_by_class(bar, "annotate")[0]) == "Log out"
         scopebar = _by_class(bar, "scopebar")[0]
         assert _text(scopebar) == "ops·Scope: Sweep sw-1"
         assert _of(scopebar, html.B)[0].children == "Sweep sw-1"
+
+    def test_topbar_without_project_drops_scopebar(self):
+        bar = page.topbar(None)
+        assert _by_class(bar, "brand")
+        assert not _by_class(bar, "scopebar")
+        assert _of(bar, html.Form)[0].action == "/dashboard/logout"
 
     def test_tab_bar_active_state(self):
         bar = page.tab_bar("Exceptions", "ops")

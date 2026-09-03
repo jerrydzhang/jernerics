@@ -14,9 +14,10 @@ import json
 from typing import Any
 
 from dash import dcc, html
+from dash.development.base_component import Component
 from dash_ag_grid import AgGrid
 
-from . import analysis, components
+from . import analysis, components, page
 from .components import MISSING, Badge, Empty, human_size, relative_time, short_id
 from .routes import ROUTES_BASE
 from .service import ArtifactRow, ArtifactView, DashboardService
@@ -129,100 +130,91 @@ def artifact_grid(rows: tuple[ArtifactRow, ...], now_ns: int) -> AgGrid | html.D
 
 
 def _download(view: ArtifactView) -> html.A:
-    return html.A("Download", href=raw_href(view.artifact_id), className="download")
+    return html.A("Download", href=raw_href(view.artifact_id), className="btn")
 
 
-def _viewer_header(view: ArtifactView, now_ns: int) -> html.Section:
-    facts = components.DataTable(
-        ("Fact", "Value"),
-        [
-            ("Key", view.key),
-            ("Version", f"v{view.version} of {view.versions}"),
-            ("Filename", view.filename),
-            ("Size", f"{human_size(view.size_bytes)} ({view.size_bytes} bytes)"),
-            ("Content type", view.content_type),
-            ("SHA-256", html.Code(view.sha256 or MISSING)),
-            ("Source", view.source),
-            ("Context", _context_text(view.context)),
-            ("Declared", components.time_cell(view.declared_ns, now_ns)),
+def _fact_rows(view: ArtifactView, now_ns: int) -> list[html.Tr]:
+    """The factual header: identity, size, hashes, lineage, timing."""
+    facts: list[tuple[str, Component | str]] = [
+        ("Key", view.key),
+        ("Version", f"v{view.version} of {view.versions}"),
+        ("Filename", view.filename),
+        ("Size", f"{human_size(view.size_bytes)} ({view.size_bytes} bytes)"),
+        ("Content type", view.content_type),
+        ("SHA-256", html.Code(view.sha256 or MISSING, className="mono")),
+        ("Source", view.source),
+        ("Context", _context_text(view.context)),
+        ("Declared", components.time_cell(view.declared_ns, now_ns)),
+        (
+            "Received",
             (
-                "Received",
-                (
-                    components.time_cell(view.received_ns, now_ns)
-                    if view.received_ns
-                    else MISSING
+                components.time_cell(view.received_ns, now_ns)
+                if view.received_ns
+                else MISSING
+            ),
+        ),
+        (
+            "State",
+            Badge("available", kind="ok") if view.available else Badge("pending"),
+        ),
+        (
+            "Trial",
+            html.A(
+                short_id(view.trial_id),
+                href=analysis.workspace_focus_href(
+                    view.project, "trial", view.trial_id
                 ),
             ),
-            ("State", Badge("available" if view.available else "pending")),
+        ),
+        (
+            "Execution",
             (
-                "Trial",
                 html.A(
-                    short_id(view.trial_id),
+                    short_id(view.execution_id),
                     href=analysis.workspace_focus_href(
-                        view.project, "trial", view.trial_id
+                        view.project, "execution", view.execution_id
                     ),
+                )
+                if view.execution_id
+                else MISSING
+            ),
+        ),
+        (
+            "Sweep",
+            html.A(
+                view.sweep_name,
+                href=analysis.workspace_focus_href(
+                    view.project, "sweep", view.sweep_id
                 ),
             ),
-            (
-                "Execution",
-                (
-                    html.A(
-                        short_id(view.execution_id),
-                        href=analysis.workspace_focus_href(
-                            view.project, "execution", view.execution_id
-                        ),
-                    )
-                    if view.execution_id
-                    else MISSING
-                ),
-            ),
-            (
-                "Sweep",
-                html.A(
-                    view.sweep_name,
-                    href=analysis.workspace_focus_href(
-                        view.project, "sweep", view.sweep_id
-                    ),
-                ),
-            ),
-        ],
-    )
-    return html.Section(
-        [html.H3("Facts"), facts, _download(view)],
-        className="section",
-        id="section-artifact-facts",
-    )
+        ),
+    ]
+    return [html.Tr([html.Td(label), html.Td(value)]) for label, value in facts]
 
 
 def _pending_card(view: ArtifactView) -> html.Div:
     return html.Div(
         [
-            html.P(
-                "blob not received — declared metadata only", className="artifact-note"
-            ),
+            html.P("blob not received — declared metadata only", className="sub"),
             _download(view),
-        ],
-        className="artifact-card",
+        ]
     )
 
 
 def _fallback_card(view: ArtifactView, note: str | None = None) -> html.Div:
     text = note or f"no inline renderer for {view.content_type}"
-    return html.Div(
-        [html.P(text, className="artifact-note"), _download(view)],
-        className="artifact-card",
-    )
+    return html.Div([html.P(text, className="sub"), _download(view)])
 
 
 def _truncation_note(view: ArtifactView) -> html.P:
     return html.P(
         f"truncated (showing first {human_size(TEXT_CAP)} of "
         f"{human_size(view.size_bytes)}) — download for the full file",
-        className="artifact-note",
+        className="annotate",
     )
 
 
-def _text_body(service: DashboardService, view: ArtifactView, *, log: bool) -> html.Div:
+def _text_body(service: DashboardService, view: ArtifactView) -> html.Div:
     read = service.read_artifact_text(view.artifact_id, TEXT_CAP)
     if read is None:
         return _pending_card(view)
@@ -230,8 +222,8 @@ def _text_body(service: DashboardService, view: ArtifactView, *, log: bool) -> h
     if "\x00" in text:
         return _fallback_card(view, note="blob bytes are not text")
     parts: list[Any] = [_truncation_note(view)] if truncated else []
-    parts.append(html.Pre(text, className="log-view" if log else "text-view"))
-    return html.Div(parts, className="artifact-text")
+    parts.append(html.Pre(text, className="mono"))
+    return html.Div(parts)
 
 
 def _json_node(key: str, value: Any) -> Any:
@@ -278,10 +270,10 @@ def _is_summary_rows(payload: Any) -> bool:
 def _summary_rows_view(payload: dict[str, Any]) -> html.Div:
     cards = html.Div(
         [
-            html.Span(f"{key}: {value}", className="summary-card")
+            html.Span(f"{key}: {value}", className="chip")
             for key, value in sorted(payload["summary"].items())
         ],
-        className="summary-cards",
+        className="chips",
     )
     rows = payload["rows"]
     columns = [{"headerName": key, "field": key} for key in rows[0]] if rows else []
@@ -291,7 +283,7 @@ def _summary_rows_view(payload: dict[str, Any]) -> html.Div:
         columnDefs=columns,
         defaultColDef=_GRID_DEFAULTS,
         dashGridOptions=components.grid_options(quickFilterText=""),
-        className="ag-theme-alpine grid",
+        className="ag-theme-alpine",
     )
     return html.Div(
         [
@@ -300,7 +292,6 @@ def _summary_rows_view(payload: dict[str, Any]) -> html.Div:
                 id="artifact-quick-filter",
                 type="text",
                 placeholder="Filter rows…",
-                className="quick-filter",
             ),
             grid,
         ]
@@ -319,7 +310,7 @@ def _json_body(service: DashboardService, view: ArtifactView) -> Any:
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
-        return _text_body(service, view, log=False)
+        return _text_body(service, view)
     if _is_summary_rows(payload):
         return _summary_rows_view(payload)
     return _json_tree(payload)
@@ -332,7 +323,7 @@ def _content_body(service: DashboardService, view: ArtifactView) -> Any:
     if renderer == "json":
         return _json_body(service, view)
     if renderer in ("text", "log"):
-        return _text_body(service, view, log=renderer == "log")
+        return _text_body(service, view)
     if renderer == "image":
         return html.Img(
             src=raw_href(view.artifact_id),
@@ -348,10 +339,10 @@ def _content_body(service: DashboardService, view: ArtifactView) -> Any:
     return _fallback_card(view)
 
 
-def _breadcrumbs(view: ArtifactView) -> html.Nav:
-    """Project > Sweep > Trial > Execution trail back into the focused
+def _breadcrumbs(view: ArtifactView) -> html.Div:
+    """Project › Sweep › Trial › Execution trail back into the focused
     workspace; the artifact itself is the unlinked leaf."""
-    hops: list[tuple[str, str]] = [
+    hops: list[tuple[str, str] | str] = [
         (view.project, f"{ROUTES_BASE}/project/{view.project}"),
         (
             view.sweep_name,
@@ -371,29 +362,35 @@ def _breadcrumbs(view: ArtifactView) -> html.Nav:
                 ),
             )
         )
-    children: list[Any] = []
-    for label, href in hops:
-        children += [html.A(label, href=href), html.Span("/")]
-    children.append(html.Span(view.filename))
-    return html.Nav(children, className="crumbs")
+    hops.append(view.filename)
+    return page.breadcrumbs(hops)
 
 
 def viewer_page(service: DashboardService, view: ArtifactView, now_ns: int) -> html.Div:
-    """The artifact viewer: breadcrumbs, factual header, one renderer."""
+    """The artifact viewer: crumb trail, facts, one renderer. A bare
+    content page — no topbar, it opens beside the workspace."""
     return html.Div(
         [
-            _breadcrumbs(view),
-            html.H2(view.filename),
-            html.P(
-                f"{view.key} · {short_id(view.artifact_id)}",
-                className="artifact-note",
-            ),
-            _viewer_header(view, now_ns),
-            html.Section(
-                [html.H3("Content"), _content_body(service, view)],
-                className="section",
-                id="section-artifact-content",
+            page.stylesheet(),
+            html.Div(
+                [
+                    _breadcrumbs(view),
+                    html.H1(view.filename),
+                    html.P(
+                        f"{view.key} · {short_id(view.artifact_id)}",
+                        className="sub",
+                    ),
+                    html.H2("Facts"),
+                    page.scroll_table(
+                        [page.head_cell("Fact"), page.head_cell("Value")],
+                        _fact_rows(view, now_ns),
+                    ),
+                    html.Div([_download(view)], className="actions"),
+                    html.H2("Content"),
+                    _content_body(service, view),
+                ],
+                className="page",
             ),
         ],
-        className="page",
+        className="np",
     )

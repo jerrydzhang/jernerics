@@ -26,11 +26,13 @@ def stylesheet() -> html.Link:
     return html.Link(rel="stylesheet", href=STYLESHEET_HREF)
 
 
-def topbar(project: str, scope: str = "Active sweeps") -> html.Div:
-    """Brand · project scope · log out, one line across the top."""
-    return html.Div(
-        [
-            html.Span("jernerics", className="brand"),
+def topbar(project: str | None, scope: str = "Active sweeps") -> html.Div:
+    """Brand · project scope · log out, one line across the top. A
+    catalog page has no project, so it passes ``None`` to drop the
+    scopebar; the logout posts to the auth route."""
+    children: list[Component | str] = [html.Span("jernerics", className="brand")]
+    if project is not None:
+        children.append(
             html.Span(
                 [
                     project,
@@ -39,12 +41,17 @@ def topbar(project: str, scope: str = "Active sweeps") -> html.Div:
                     html.B(scope),
                 ],
                 className="scopebar",
-            ),
-            html.Span(className="spacer"),
-            html.Span("Log out", className="annotate"),
-        ],
-        className="topbar",
+            )
+        )
+    children.append(html.Span(className="spacer"))
+    children.append(
+        html.Form(
+            html.Button("Log out", type="submit", className="annotate"),
+            action=f"{ROUTES_BASE}/logout",
+            method="post",
+        )
     )
+    return html.Div(children, className="topbar")
 
 
 def tab_bar(active: str, project: str) -> html.Div:
