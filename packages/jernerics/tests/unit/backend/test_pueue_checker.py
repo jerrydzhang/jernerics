@@ -1,4 +1,5 @@
 import json
+from typing import Any
 from unittest.mock import MagicMock
 
 from jernerics.backend.adapter import SweepSubmissionParams
@@ -18,8 +19,8 @@ def _make_adapter(host=None, **overrides):
     return PueueAdapter(host=host, **defaults)
 
 
-def _make_params(**overrides):
-    defaults = {
+def _make_params(**overrides: Any) -> SweepSubmissionParams:
+    defaults: dict[str, Any] = {
         "setup_command": "wrapped_setup",
         "trial_command": "wrapped_trial",
         "n_trials": 3,
