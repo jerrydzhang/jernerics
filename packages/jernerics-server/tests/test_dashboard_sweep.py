@@ -509,7 +509,7 @@ class TestSubViews:
         rendered = _flat(page)
         assert "sweep-points-grid" in rendered
         assert "sweep-points-figure" in rendered
-        assert "objective (final)" in rendered
+        assert "sweep-points-params" in rendered
         assert polls is True
 
     def test_search_filters_this_sweeps_trials(self, service):
@@ -888,6 +888,125 @@ def _json_id_count(node, wanted):
         for value in node:
             total += _json_id_count(value, wanted)
     return total
+
+
+def _pcp_dims() -> list[dict]:
+    """Points-grid parcoords dims in the shape points_view_data ships:
+    two sampled params plus the fixed sweep and outcome columns."""
+    return [
+        {"label": "lr", "values": [0.1, 0.2], "range": [0.05, 0.25]},
+        {"label": "width", "values": [8.0, 16.0], "range": [7.0, 17.0]},
+        {
+            "label": "sweep",
+            "values": [0.0, 0.0],
+            "range": [-0.5, 0.5],
+            "tickvals": [0],
+            "ticktext": ["grid-search"],
+        },
+        {"label": "objective (final)", "values": [0.5, 1.0], "range": [0.4, 1.1]},
+    ]
+
+
+def _fire_params_pick(client, callback_map, picked, dims, options):
+    key = next(
+        key
+        for key in callback_map
+        if _outputs_of(key) == {"sweep-points-figure.figure"}
+    )
+    response = client.post(
+        "/dashboard/_dash-update-component",
+        json={
+            "output": key,
+            "outputs": {"id": "sweep-points-figure", "property": "figure"},
+            "inputs": [
+                {"id": "sweep-points-params", "property": "value", "value": picked}
+            ],
+            "state": [
+                {
+                    "id": "sweep-points-params",
+                    "property": "options",
+                    "value": options,
+                },
+                {
+                    "id": "sweep-points-data",
+                    "property": "data",
+                    "value": {"tks": [], "dims": dims},
+                },
+            ],
+            "changedPropIds": ["sweep-points-params.value"],
+        },
+    )
+    payload = response.json()["response"] if response.status_code == 200 else None
+    return response, payload
+
+
+class TestPointsParamsPicker:
+    def test_points_view_mounts_the_picker_with_every_param(self, service):
+        page, _polls = page_content(
+            f"{WORKSPACE}/sweep/{SWEEP}", service, search="?view=points"
+        )
+        picker = next(
+            node
+            for node in _walk(page)
+            if getattr(node, "id", None) == "sweep-points-params"
+        )
+        offered = [entry["value"] for entry in picker.options]
+        assert offered == ["lr"]
+        assert picker.value == offered
+
+    def test_parcoords_figures_carry_headroom_for_dimension_labels(self):
+        trials = [
+            {"params": {"lr": 0.1}, "objective": 0.5},
+            {"params": {"lr": 0.2}, "objective": 1.0},
+        ]
+        assert figures.parallel_coordinates(trials).layout.margin.t == 60
+        assert figures.points_parcoords(_pcp_dims()).layout.margin.t == 60
+
+    def test_other_figures_keep_the_compact_top_margin(self):
+        trials = [
+            {"params": {"lr": 0.1}, "objective": 0.5},
+            {"params": {"lr": 0.2}, "objective": 1.0},
+        ]
+        assert figures.slice_figure(trials).layout.margin.t == 30
+
+    def test_parcoords_keep_plots_the_dimension_subset(self):
+        dims = _pcp_dims()
+        figure = figures.points_parcoords(dims, keep={"width", "objective (final)"})
+        plotted = figure.data[0].dimensions
+        assert [dim.label for dim in plotted] == ["width", "objective (final)"]
+        assert len(figure.data[0].line.color) == 2
+
+    def test_parcoords_keep_default_and_empty_are_safe(self):
+        dims = _pcp_dims()
+        every = figures.points_parcoords(dims)
+        assert [dim.label for dim in every.data[0].dimensions] == [
+            dim["label"] for dim in dims
+        ]
+        assert figures.points_parcoords(dims, keep=set()).data[0].dimensions == ()
+
+    def test_picking_a_subset_drops_the_other_param_dims(self, authed, callback_map):
+        client, _store = authed
+        dims = _pcp_dims()
+        options = [{"label": "lr", "value": "lr"}, {"label": "width", "value": "width"}]
+        response, payload = _fire_params_pick(
+            client, callback_map, ["width"], dims, options
+        )
+        assert response.status_code == 200
+        plotted = payload["sweep-points-figure"]["figure"]["data"][0]["dimensions"]
+        assert [dim["label"] for dim in plotted] == [
+            "width",
+            "sweep",
+            "objective (final)",
+        ]
+
+    def test_empty_picking_restores_every_dimension(self, authed, callback_map):
+        client, _store = authed
+        dims = _pcp_dims()
+        options = [{"label": "lr", "value": "lr"}]
+        response, payload = _fire_params_pick(client, callback_map, [], dims, options)
+        assert response.status_code == 200
+        plotted = payload["sweep-points-figure"]["figure"]["data"][0]["dimensions"]
+        assert [dim["label"] for dim in plotted] == [dim["label"] for dim in dims]
 
 
 class TestSeriesPointCap:
