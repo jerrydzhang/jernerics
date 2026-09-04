@@ -13,6 +13,7 @@ from jernerics.backend.build_marker import needs_rebuild
 from jernerics.backend.job_meta import load_job_studies, save_job_meta
 from jernerics.backend.models import JobInfo, SubmitResult, SweepSubmission
 from jernerics.backend.project_sync import _quote_path
+from jernerics.backend.pueue.adapter import PueueAdapter, pueue_group_from_label
 from jernerics.backend.submission import (
     SweepInfrastructure,
     submit_sweep,
@@ -241,18 +242,29 @@ class Backend:
                 )
 
         if local_cache_dir is not None and result is not None:
-            effective_output = output_pattern or f"{cache_host}/logs/%A_%a.out"
-            effective_error = error_pattern or f"{cache_host}/logs/%A_%a.err"
-            for sub in result.submissions:
-                save_job_meta(
-                    job_id=sub.job_id,
-                    study_name=spec.study_name,
-                    output_pattern=str(sub.output_pattern or effective_output),
-                    error_pattern=str(sub.error_pattern or effective_error),
-                    remote_dir=self.paths.remote_dir,
-                    n_trials=sub.n_trials,
-                    local_cache_dir=local_cache_dir,
-                )
+            if isinstance(self.adapter, PueueAdapter):
+                for sub in result.submissions:
+                    save_job_meta(
+                        job_id=sub.job_id,
+                        study_name=spec.study_name,
+                        backend="pueue",
+                        remote_dir=self.paths.remote_dir,
+                        n_trials=sub.n_trials,
+                        local_cache_dir=local_cache_dir,
+                    )
+            else:
+                effective_output = output_pattern or f"{cache_host}/logs/%A_%a.out"
+                effective_error = error_pattern or f"{cache_host}/logs/%A_%a.err"
+                for sub in result.submissions:
+                    save_job_meta(
+                        job_id=sub.job_id,
+                        study_name=spec.study_name,
+                        output_pattern=str(sub.output_pattern or effective_output),
+                        error_pattern=str(sub.error_pattern or effective_error),
+                        remote_dir=self.paths.remote_dir,
+                        n_trials=sub.n_trials,
+                        local_cache_dir=local_cache_dir,
+                    )
 
         return result
 
@@ -347,14 +359,23 @@ class Backend:
         )
 
         if job_id and local_cache_dir is not None:
-            save_job_meta(
-                job_id=job_id,
-                output_pattern=f"{cache_host}/logs/build_%j.out",
-                error_pattern=f"{cache_host}/logs/build_%j.err",
-                remote_dir=self.paths.remote_dir,
-                n_trials=1,
-                local_cache_dir=local_cache_dir,
-            )
+            if isinstance(self.adapter, PueueAdapter):
+                save_job_meta(
+                    job_id=job_id,
+                    backend="pueue",
+                    remote_dir=self.paths.remote_dir,
+                    n_trials=1,
+                    local_cache_dir=local_cache_dir,
+                )
+            else:
+                save_job_meta(
+                    job_id=job_id,
+                    output_pattern=f"{cache_host}/logs/build_%j.out",
+                    error_pattern=f"{cache_host}/logs/build_%j.err",
+                    remote_dir=self.paths.remote_dir,
+                    n_trials=1,
+                    local_cache_dir=local_cache_dir,
+                )
 
         print(f"\nBuild job submitted: {job_id}")
         print("Monitor build with:")
@@ -594,6 +615,10 @@ class Backend:
                 study = studies.get(job.job_id)
                 if study is None and "_" in job.job_id:
                     study = studies.get(job.job_id.split("_")[0])
+                if study is None:
+                    group = pueue_group_from_label(job.name)
+                    if group is not None:
+                        study = studies.get(group)
                 job.study_name = study or ""
         return jobs
 
