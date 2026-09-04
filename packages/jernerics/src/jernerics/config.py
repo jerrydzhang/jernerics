@@ -70,9 +70,6 @@ class SharedConfig:
     # Container
     container_type: str = "apptainer"  # "apptainer" | "docker" | "none"
 
-    # Pueue (future)
-    parallel: int = 1
-
     # Retry
     heartbeat_interval_s: int = 60
     stale_after_s: int = 120
@@ -107,6 +104,9 @@ class SlurmConfig:
 
 @dataclass
 class PueueConfig:
+    """Queue options for ``type = "pueue"``, loaded from its own
+    ``[tool.jernerics.backends.<name>.pueue]`` table."""
+
     parallel: int = 1
 
 
@@ -234,7 +234,6 @@ def load_backend_config(
         host=os.environ.get("JERNERICS_HPC_HOST") or bc.get("host"),
         remote_dir=bc.get("remote_dir", "~/experiments/{project_name}"),
         cache_dir=bc.get("cache_dir"),
-        parallel=bc.get("parallel", 1),
         container_type=bc.get("container_type", "apptainer"),
         heartbeat_interval_s=bc.get("heartbeat_interval_s", 60),
         stale_after_s=bc.get("stale_after_s", 120),
@@ -260,8 +259,9 @@ def load_backend_config(
             post_hook_mem=slurm.get("post_hook_mem", "1G"),
         )
     elif backend_type == "pueue":
+        pueue = bc.get("pueue", {})
         backend_specific = PueueConfig(
-            parallel=bc.get("parallel", 1),
+            parallel=pueue.get("parallel", 1),
         )
     container_config: ApptainerConfig | DockerConfig | None = None
     if shared.container_type == "apptainer":

@@ -201,8 +201,10 @@ version = "0.1.0"
 
 [tool.jernerics.backends.local-pueue]
 type = "pueue"
-parallel = 4
 container_type = "docker"
+
+[tool.jernerics.backends.local-pueue.pueue]
+parallel = 4
 """)
         config = load_backend_config("local-pueue", project_dir)
 
@@ -211,7 +213,6 @@ container_type = "docker"
         assert isinstance(config.backend, PueueConfig)
         assert config.backend.parallel == 4
         assert config.shared.container_type == "docker"
-        assert config.shared.parallel == 4
 
     def test_load_backend_config_apptainer_build_dir(self, tmp_path):
         project_dir = tmp_path / "apptainer-cfg"
@@ -332,7 +333,6 @@ type = "pueue"
 
         assert config.shared.type == "pueue"
         assert config.shared.container_type == "apptainer"
-        assert config.shared.parallel == 1
         assert isinstance(config.backend, PueueConfig)
         assert config.backend.parallel == 1
 
@@ -412,7 +412,6 @@ class TestBackendConfig:
         assert config.backend.mem == "16G"
         assert config.backend.cpus == 4
         assert config.backend.max_concurrent_jobs == 10
-        assert config.shared.parallel == 1
         assert config.shared.cache_dir is None
 
 

@@ -135,14 +135,18 @@ build_dir = "/dev/shm/build/{project_name}"
 type = "pueue"
 host = "user@workstation.edu"
 remote_dir = "~/projects/{project_name}"
-parallel = 2
 container_type = "docker"
+
+[tool.jernerics.backends.pueue-remote.pueue]
+parallel = 2
 
 [tool.jernerics.backends.pueue-local]
 type = "pueue"
-parallel = 2
 container_type = "none"
 remote_dir = "."
+
+[tool.jernerics.backends.pueue-local.pueue]
+parallel = 2
 ```
 
 ### Config file — sweep variables
