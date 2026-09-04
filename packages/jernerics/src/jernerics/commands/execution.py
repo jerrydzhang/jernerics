@@ -9,6 +9,7 @@ import typer
 
 from jernerics.backend.local_backend import LocalBackend
 from jernerics.backend.models import SweepSubmission
+from jernerics.backend.pueue.adapter import PueueSubmitError
 from jernerics.backend.slurm.adapter import (
     SBATCH_OVERRIDE_KEYS,
     SlurmSubmitError,
@@ -238,7 +239,7 @@ def run_remote(
             cli_overrides=cli_overrides,
             local_cache_dir=cache_dir(),
         )
-    except SlurmSubmitError as e:
+    except (PueueSubmitError, SlurmSubmitError) as e:
         print(f"Error: {e}")
         raise SystemExit(ExitCode.SLURM_ERROR) from None
     except (RuntimeError, ValueError) as e:

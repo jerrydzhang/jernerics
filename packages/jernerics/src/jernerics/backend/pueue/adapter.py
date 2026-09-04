@@ -1,4 +1,5 @@
 import json
+import re
 import time
 
 from jernerics.backend.adapter import SweepSubmissionParams
@@ -51,6 +52,22 @@ def _task_succeeded(status: dict) -> bool:
 
 class PueueDaemonError(RuntimeError):
     """Raised when the pueue daemon is unreachable."""
+
+
+class PueueSubmitError(RuntimeError):
+    pass
+
+
+_TASK_ID_PATTERN = re.compile(r"New task added with ID (\d+)")
+
+
+def _parse_task_id(output: str, *, stderr: str) -> str:
+    match = _TASK_ID_PATTERN.search(output)
+    if match is None:
+        raise PueueSubmitError(
+            f"pueue add returned invalid task id {output.strip()!r}: {stderr}"
+        )
+    return match.group(1)
 
 
 def _query_pueue_status(host) -> dict:
@@ -138,6 +155,8 @@ class PueueAdapter:
             f"SETUP_ID=$(pueue add -g {group}"
             f" --label {group}_setup"
             f" -- bash {setup_path} 2>&1 | grep -oE '[0-9]+')",
+            '[ -n "$SETUP_ID" ] || '
+            '{ echo "setup task submission failed (empty id)" >&2; exit 1; }',
         ]
 
         for i in range(params.n_trials):
@@ -145,6 +164,11 @@ class PueueAdapter:
                 f"TRIAL_{i + 1}_ID=$(pueue add -g {group} --after $SETUP_ID"
                 f" --label {group}_trial_{i + 1}"
                 f" -- bash {trial_path} 2>&1 | grep -oE '[0-9]+')"
+            )
+            lines.append(
+                f'[ -n "$TRIAL_{i + 1}_ID" ] || '
+                f'{{ echo "trial {i + 1} submission failed (empty id)"'
+                " >&2; exit 1; }"
             )
 
         if params.post_hook_command is not None:
@@ -191,7 +215,15 @@ class PueueAdapter:
             text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to submit sweep: {result.stderr.strip()}")
+            raise PueueSubmitError(f"Failed to submit sweep: {result.stderr.strip()}")
+
+        if getattr(self.host, "emits_scripts", False):
+            # StdoutHost prints the script: stdout carries no task ids.
+            return SubmitResult(
+                submissions=[
+                    JobSubmission(job_id=params.study_name, n_trials=params.n_trials)
+                ]
+            )
 
         return SubmitResult(
             submissions=[
@@ -202,12 +234,19 @@ class PueueAdapter:
     def submit_job(
         self, script: str, *, name: str = "build", log_dir: str | None = None
     ) -> str:
-        submission_script = (
-            f"BUILD_ID=$(pueue add --label {name}"
-            f" -- bash -e -c '{script}'"
-            " 2>&1 | grep -oE '[0-9]+')\n"
-            "echo $BUILD_ID"
-        )
+        script_path = f"/tmp/jernerics_{name}.sh"
+        add_cmd = f"pueue add --label {name} -- bash {script_path}"
+        lines = [
+            f"cat > {script_path} <<'JERNERICS_EOF'",
+            script,
+            "JERNERICS_EOF",
+            f"ADD_OUTPUT=$({add_cmd}) "
+            '|| { echo "build job submission failed" >&2; exit 1; }',
+            '[ -n "$ADD_OUTPUT" ] || '
+            '{ echo "build job submission failed (empty task id)" >&2; exit 1; }',
+            'echo "$ADD_OUTPUT"',
+        ]
+        submission_script = "\n".join(lines)
 
         result = self.host.run(
             ["bash"],
@@ -217,8 +256,10 @@ class PueueAdapter:
             text=True,
         )
         if result.returncode != 0:
-            raise RuntimeError(f"Failed to submit build job: {result.stderr.strip()}")
-        return result.stdout.strip()
+            raise PueueSubmitError(
+                f"Failed to submit build job: {result.stderr.strip()}"
+            )
+        return _parse_task_id(result.stdout, stderr=result.stderr.strip())
 
     def list_jobs(self, include_completed: bool = False) -> list[JobInfo]:
         data = _query_pueue_status(self.host)
