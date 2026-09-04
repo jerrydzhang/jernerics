@@ -608,6 +608,7 @@ class TestViewerTitleAndCrumbs:
         )
         links = [(a.children, a.href) for a in _find(crumb, html.A)]
         assert links == [
+            ("Projects", "/dashboard/"),
             ("lab", "/dashboard/project/lab"),
             ("alpha", f"/dashboard/project/lab/sweep/{SWEEP}"),
         ]

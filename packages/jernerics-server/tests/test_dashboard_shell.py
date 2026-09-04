@@ -2,10 +2,15 @@ from pathlib import Path
 
 from dash import html
 from fastapi.testclient import TestClient
-from jernerics_server.dashboard import page
+from jernerics_server.dashboard import artifacts, exceptions, page, sweep, workspace
 from jernerics_server.dashboard.callbacks import page_content
-from jernerics_server.dashboard.routes import parse_route
-from jernerics_server.dashboard.service import DashboardService
+from jernerics_server.dashboard.routes import ROUTES_BASE, parse_route
+from jernerics_server.dashboard.service import (
+    ArtifactView,
+    DashboardService,
+    SweepSummary,
+)
+from jernerics_server.dashboard.sweep import SweepPageData
 from jernerics_server.http import create_app
 from jernerics_server.queries import QueryService
 from jernerics_server.store import Store
@@ -275,6 +280,130 @@ class TestPageComposition:
         edges = _of(page.pager(1, 2), html.Button)
         assert edges[0].disabled is True
         assert edges[-1].disabled is False
+
+
+class TestProjectsCrumb:
+    """Every project-scoped page trails a Projects hop to the catalog."""
+
+    @staticmethod
+    def _home_links(node) -> list[html.A]:
+        return [
+            link
+            for link in _of(node, html.A)
+            if link.children == "Projects" and link.href == f"{ROUTES_BASE}/"
+        ]
+
+    @staticmethod
+    def _sweep_data() -> SweepPageData:
+        summary = SweepSummary(
+            sweep_id="sw-1",
+            name="demo",
+            state="running",
+            backend="slurm",
+            submitted_jobs=1,
+            expected_trials=2,
+            started=1,
+            terminal=0,
+            active=1,
+            quiet=0,
+            stale=0,
+            unknown=0,
+            succeeded=0,
+            failed=0,
+            latest_submitted_ns=None,
+            waiting_trials=1,
+            running_trials=0,
+            trials=1,
+            trials_complete=0,
+            best_objective=None,
+            archived_ns=None,
+            invalid_ns=None,
+            invalid_reason=None,
+        )
+        return SweepPageData(
+            context={"name": "demo"},
+            overview=summary,
+            provenance=[],
+            jobs=[],
+            executions=[],
+            trials=[],
+            params=[],
+            artifacts=[],
+            catalogs={},
+            lineage=[],
+            via_record=None,
+            series_supported=False,
+        )
+
+    def test_overview_opens_with_the_projects_crumb(self, tmp_path):
+        shell = workspace.overview_page(_service(tmp_path), "lab")
+        assert self._home_links(shell)
+        container = _by_class(shell, "page")[0]
+        assert getattr(container.children[1], "className", None) == "crumb"
+        assert _text(container.children[1]) == "Projects›lab"
+
+    def test_investigations_index_opens_with_the_projects_crumb(self, tmp_path):
+        shell = workspace.investigations_index_page(_service(tmp_path), "lab", 0)
+        assert self._home_links(shell)
+        trail = _by_class(shell, "crumb")[0]
+        assert _text(trail) == "Projects›lab"
+
+    def test_editor_new_opens_with_the_projects_crumb(self, tmp_path):
+        shell = workspace.investigation_edit_page(_service(tmp_path), "lab", None, [])
+        assert self._home_links(shell)
+        trail = _by_class(shell, "crumb")[0]
+        assert _text(trail) == "Projects›lab›Investigations›New Investigation"
+
+    def test_investigation_workspace_trails_through_projects(self):
+        trail = workspace.investigation_crumb("lab", "roberts")
+        assert [link.href for link in _of(trail, html.A)] == [
+            f"{ROUTES_BASE}/",
+            f"{ROUTES_BASE}/project/lab",
+            f"{ROUTES_BASE}/project/lab/investigations",
+        ]
+        assert _text(trail) == "Projects›lab›Investigations›roberts"
+
+    def test_sweep_trails_through_projects(self):
+        trail = sweep._breadcrumbs(self._sweep_data(), "lab")
+        assert [link.href for link in _of(trail, html.A)] == [
+            f"{ROUTES_BASE}/",
+            f"{ROUTES_BASE}/project/lab",
+        ]
+        assert _text(trail) == "Projects›lab›sweep›demo"
+
+    def test_exceptions_opens_with_the_projects_crumb(self, tmp_path):
+        shell = exceptions.exceptions_page(_service(tmp_path), "lab")
+        assert self._home_links(shell)
+        trail = _by_class(shell, "crumb")[0]
+        assert _text(trail) == "Projects›lab"
+
+    def test_artifact_viewer_trails_through_projects(self):
+        view = ArtifactView(
+            artifact_id="abcd-1234",
+            key="model",
+            version=1,
+            versions=1,
+            execution_id=None,
+            filename="model.txt",
+            content_type="text/plain",
+            size_bytes=3,
+            sha256=None,
+            context=None,
+            source="trial",
+            declared_ns=1,
+            received_ns=1,
+            trial_id="t-1",
+            sweep_id="sw-1",
+            sweep_name="demo",
+            project="lab",
+        )
+        trail = artifacts._breadcrumbs(view)
+        assert [link.href for link in _of(trail, html.A)] == [
+            f"{ROUTES_BASE}/",
+            f"{ROUTES_BASE}/project/lab",
+            f"{ROUTES_BASE}/project/lab/sweep/sw-1",
+        ]
+        assert _text(trail) == "Projects›lab›demo›t1›model.txt"
 
 
 class TestStylesheetServing:

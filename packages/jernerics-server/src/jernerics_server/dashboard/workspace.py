@@ -383,7 +383,12 @@ def overview_page(
 
     def shell(*body: Any) -> html.Div:
         return page.page_shell(
-            "Overview", project, html.H1("Overview"), *body, scope=scope_line
+            "Overview",
+            project,
+            page.breadcrumbs([("Projects", f"{ROUTES_BASE}/"), project]),
+            html.H1("Overview"),
+            *body,
+            scope=scope_line,
         )
 
     if not summaries:
@@ -549,10 +554,11 @@ def investigation_crumb(
     view: str = "compare",
     member_label: str | None = None,
 ) -> html.Div:
-    """``project › Investigations › name › view › member``; the
+    """``Projects › project › Investigations › name › view › member``; the
     trailing view and member segments appear only when they narrow the
     page beyond Compare over all members."""
     crumbs: list[tuple[str, str] | str] = [
+        ("Projects", f"{ROUTES_BASE}/"),
         (project, f"{ROUTES_BASE}/project/{quote(project, safe='')}"),
         ("Investigations", investigations_index_href(project)),
         name,
@@ -889,6 +895,7 @@ def investigation_edit_page(
     an existing investigation, and nothing is written until Save."""
     now = time.time_ns() if now_ns is None else now_ns
     crumbs = [
+        ("Projects", f"{ROUTES_BASE}/"),
         (project, f"{ROUTES_BASE}/project/{quote(project, safe='')}"),
         ("Investigations", investigations_index_href(project)),
     ]
@@ -1421,6 +1428,7 @@ def investigations_index_page(
         for summary in unorganized
     ]
     body: list[Any] = [
+        page.breadcrumbs([("Projects", f"{ROUTES_BASE}/"), project]),
         html.H1("Investigations"),
         html.P(
             f"Cross-sweep questions over {project} · membership is server-persisted",

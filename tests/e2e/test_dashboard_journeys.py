@@ -404,6 +404,42 @@ class TestLinkGraphJourney:
                 else:
                     assert spec.kind in canonical, href
 
+    def test_every_page_links_home_to_the_projects_catalog(self, scenario):
+        """The landing catalog is the only project switcher, so every
+        project-scoped page the graph reaches carries a Projects crumb
+        back to it — including the sweep page reached with and without
+        its ``?via=`` return path."""
+        sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
+        scenario.service.create_investigation(
+            PROJECT, "homebound", "mode", "objective", members=[sweep_id]
+        )
+        pages = _walk_link_graph(scenario.service)
+        kinds = {parse_route(url).kind for url in pages}
+        assert {
+            "project",
+            "workspace",
+            "investigations",
+            "investigation",
+            "investigation-edit",
+            "sweep",
+            "exceptions",
+            "artifact",
+        } <= kinds
+        sweep_urls = [url for url in pages if parse_route(url).kind == "sweep"]
+        assert any("?via=" in url for url in sweep_urls)
+        assert any("?via=" not in url for url in sweep_urls)
+        for url, rendered in pages.items():
+            if url == LANDING:
+                continue
+            home = [
+                component
+                for component in _components(rendered)
+                if isinstance(component, html.A)
+                and component.children == "Projects"
+                and component.href == LANDING
+            ]
+            assert home, f"no Projects crumb on {url}"
+
     def test_sweep_page_reaches_every_object_kind(self, scenario):
         sweep_id = _rows(scenario.db_path, "SELECT sweep_id FROM sweeps")[0][0]
         trial_id = _rows(scenario.db_path, "SELECT trial_id FROM trials")[0][0]

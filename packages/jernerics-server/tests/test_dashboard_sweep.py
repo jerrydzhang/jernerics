@@ -407,7 +407,7 @@ class TestPageComposition:
         crumb = _text(
             next(node for node in body if getattr(node, "className", None) == "crumb")
         )
-        assert crumb.startswith(PROJECT)
+        assert crumb.startswith(f"Projects›{PROJECT}")
         assert "Investigations" not in crumb
 
     def test_artifact_chips_open_the_viewer(self, service):

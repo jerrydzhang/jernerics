@@ -252,7 +252,10 @@ def _last_activity_ns(executions: list[ExecutionRecord]) -> int | None:
 
 
 def _breadcrumbs(data: SweepPageData, project: str) -> html.Div:
-    trail: list[tuple[str, str] | str] = [(project, f"{ROUTES_BASE}/project/{project}")]
+    trail: list[tuple[str, str] | str] = [
+        ("Projects", f"{ROUTES_BASE}/"),
+        (project, f"{ROUTES_BASE}/project/{project}"),
+    ]
     if data.via_record is None:
         trail.append("sweep")
     else:
