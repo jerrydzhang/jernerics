@@ -584,11 +584,9 @@ class TestRetryRootPicking:
             (1, []),
         ]
 
-    def test_picking_writes_the_scope_and_mount_echo_is_a_no_op(
-        self, authed, callback_map
-    ):
+    def test_picking_writes_the_scope_and_mount_echo_is_a_no_op(self, authed, dash_app):
         client, _store = authed
-        key = _callback_key(callback_map)
+        key = _callback_key(dash_app.callback_map)
         url = f"{WORKSPACE}/sweep/{SWEEP}"
 
         def fire(values, current=None):
@@ -658,7 +656,7 @@ def authed(tmp_path):
 
 
 @pytest.fixture(scope="class")
-def callback_map(tmp_path_factory):
+def dash_app(tmp_path_factory):
     service = DashboardService(
         QueryService(_seeded_store(tmp_path_factory.mktemp("sweep-page-graph")))
     )
@@ -668,7 +666,7 @@ def callback_map(tmp_path_factory):
         service=service,
         signer=SessionSigner(b"\x00" * 32),
     )
-    return build_dash_app(ctx).callback_map
+    return build_dash_app(ctx)
 
 
 def _outputs_of(key: str) -> set[str]:
@@ -1015,3 +1013,176 @@ class TestSeriesCallbacks:
         assert "_dash_no_update" not in json.dumps(stores[0])
         assert stores[1] == _NO_UPDATE
         assert "sweep-series-pcp" in payload
+class TestCurationCallbackBinding:
+    """The curation callback rides pattern ids, so it binds on every
+    sweep page: only the applicable buttons mount per state and every
+    static target mounts in all four states (jernerics-ieik)."""
+
+    BUTTONS = {
+        "active": {"invalid", "archive"},
+        "archived": {"invalid", "restore"},
+        "archived+invalid": {"restore-validity"},
+    }
+    REASON_INPUT = {
+        "active": True,
+        "archived": True,
+        "archived+invalid": False,
+    }
+    STATIC_TARGETS = {"sweep-message", "sweep-page-body", "sweep-page-facts-store"}
+
+    @staticmethod
+    def _ids(components) -> set[str]:
+        return {
+            str(node_id)
+            for node_id in (getattr(node, "id", None) for node in _walk(components))
+            if node_id is not None
+        }
+
+    def _assert_state(self, service, label):
+        page, _polls = page_content(f"{WORKSPACE}/sweep/{DONE}", service)
+        ids = [
+            node_id
+            for node_id in (getattr(node, "id", None) for node in _walk(page))
+            if node_id is not None
+        ]
+        assert set(map(str, ids)) >= self.STATIC_TARGETS, label
+        actions = {
+            node_id["sweep-action"]
+            for node_id in ids
+            if isinstance(node_id, dict) and "sweep-action" in node_id
+        }
+        assert actions == self.BUTTONS[label], (label, actions)
+        reason = any(
+            isinstance(node_id, dict) and "sweep-action-reason" in node_id
+            for node_id in ids
+        )
+        assert reason == self.REASON_INPUT[label], (label, reason)
+
+    def test_every_curation_state_binds_the_callback(self, service):
+        sweep_id = str(DONE)
+        states = [
+            ("active", None),
+            (
+                "archived+invalid",
+                lambda: service.mark_sweep_invalid(sweep_id, "bad data"),
+            ),
+            ("archived", lambda: service.restore_sweep_validity(sweep_id)),
+            (
+                "archived+invalid",
+                lambda: service.mark_sweep_invalid(sweep_id, "worse data"),
+            ),
+            ("archived", lambda: service.restore_sweep_validity(sweep_id)),
+            ("active", lambda: service.restore_sweep(sweep_id)),
+        ]
+        for label, mutate in states:
+            if mutate is not None:
+                mutate()
+            self._assert_state(service, label)
+
+    def test_static_states_match_the_registration_and_mount(self, service, dash_app):
+        wanted = {
+            "sweep-message.children",
+            "sweep-page-body.children",
+            "sweep-page-facts-store.data",
+        }
+        cmap = dash_app.callback_map
+        key = next(k for k in cmap if _outputs_of(k) == wanted)
+        spec = cmap[key]
+        assert {item["id"] for item in spec["inputs"]} == {'{"sweep-action":["ALL"]}'}
+        static_states = {
+            item["id"] for item in spec["state"] if "ALL" not in item["id"]
+        }
+        assert static_states == {"url", "view-store"}
+        shell = self._ids(dash_app.layout)
+        assert static_states <= shell
+        page, _polls = page_content(f"{WORKSPACE}/sweep/{DONE}", service)
+        body = self._ids(page)
+        assert {target.rsplit(".", 1)[0] for target in wanted} <= body
+
+
+class TestCurationDispatch:
+    """Curation clicks reach the callback through Dash's dispatch
+    endpoint and write through to the store."""
+
+    @staticmethod
+    def _key(cmap):
+        wanted = {
+            "sweep-message.children",
+            "sweep-page-body.children",
+            "sweep-page-facts-store.data",
+        }
+        return next(
+            key
+            for key in cmap
+            if _outputs_of(key) == wanted
+            and {spec["id"] for spec in cmap[key]["inputs"]}
+            == {'{"sweep-action":["ALL"]}'}
+        )
+
+    def _fire(self, client, key, action, url, clicks=1, reason=""):
+        response = client.post(
+            "/dashboard/_dash-update-component",
+            json={
+                "output": key,
+                "outputs": [
+                    {"id": "sweep-message", "property": "children"},
+                    {"id": "sweep-page-body", "property": "children"},
+                    {"id": "sweep-page-facts-store", "property": "data"},
+                ],
+                "inputs": [
+                    [
+                        {
+                            "id": {"sweep-action": action},
+                            "property": "n_clicks",
+                            "value": clicks,
+                        }
+                    ]
+                ],
+                "state": [
+                    [
+                        {
+                            "id": {"sweep-action-reason": "reason"},
+                            "property": "value",
+                            "value": reason,
+                        }
+                    ],
+                    {"id": "url", "property": "pathname", "value": url},
+                    {"id": "url", "property": "search", "value": ""},
+                    {"id": "view-store", "property": "data", "value": None},
+                ],
+                "changedPropIds": [f'{{"sweep-action":"{action}"}}.n_clicks'],
+            },
+        )
+        body = response.json()["response"] if response.status_code == 200 else None
+        return response, body
+
+    def test_archive_click_writes_and_rerenders(self, authed, dash_app):
+        client, store = authed
+        service = DashboardService(QueryService(store), store)
+        key = self._key(dash_app.callback_map)
+        url = f"{WORKSPACE}/sweep/{SWEEP}"
+        response, body = self._fire(client, key, "archive", url)
+        assert response.status_code == 200
+        assert "Archived" in _text(body["sweep-message"]["children"])
+        heading = _text(
+            next(node for node in _render(service, SWEEP) if isinstance(node, html.H1))
+        )
+        assert "archived" in heading
+        # The remount echo (click counts of None) must not act.
+        echo, _ = self._fire(client, key, "archive", url, clicks=None)
+        assert echo.status_code == 204
+
+    def test_invalid_click_carries_the_reason(self, authed, dash_app):
+        client, store = authed
+        service = DashboardService(QueryService(store), store)
+        key = self._key(dash_app.callback_map)
+        url = f"{WORKSPACE}/sweep/{SWEEP}"
+        response, body = self._fire(
+            client, key, "invalid", url, reason="contaminated dataset"
+        )
+        assert response.status_code == 200
+        assert "invalid" in _text(body["sweep-message"]["children"])
+        heading = _text(
+            next(node for node in _render(service, SWEEP) if isinstance(node, html.H1))
+        )
+        assert "reason: contaminated dataset" in heading
