@@ -721,6 +721,7 @@ class TestInvestigationWorkspacePage:
             if isinstance(node, html.A) and node.href
         ]
         assert crumb_links == [
+            f"{ROUTES_BASE}/",
             f"{ROUTES_BASE}/project/{CMP}",
             f"{ROUTES_BASE}/project/{CMP}/investigations",
         ]

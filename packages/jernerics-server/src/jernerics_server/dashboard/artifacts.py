@@ -259,10 +259,11 @@ def _content_body(service: DashboardService, view: ArtifactView) -> Any:
 
 
 def _breadcrumbs(view: ArtifactView) -> html.Div:
-    """Project › Sweep › Trial › Execution trail back into the project;
+    """Projects › Project › Sweep › Trial › Execution trail back into the project;
     trial and execution have no pages of their own, and the artifact is
     the unlinked leaf."""
     hops: list[tuple[str, str] | str] = [
+        ("Projects", f"{ROUTES_BASE}/"),
         (view.project, f"{ROUTES_BASE}/project/{view.project}"),
         (
             view.sweep_name,

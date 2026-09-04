@@ -50,6 +50,7 @@ def exceptions_page(
     )
     curated = sum(1 for summary in summaries if summary.archived or summary.invalid)
     body = [
+        page.breadcrumbs([("Projects", f"{ROUTES_BASE}/"), project]),
         html.H1("Exceptions"),
         html.P(
             f"{len(fails)} failed executions · "
