@@ -55,7 +55,9 @@ from jernerics_server.dashboard.service import (
     DashboardService,
 )
 from jernerics_server.dashboard.workspace import (
+    best_objective_text,
     overview_filter_passes,
+    overview_row,
 )
 from jernerics_server.http import create_app
 from jernerics_server.ingest import IngestService
@@ -445,6 +447,183 @@ def _curation_seed_events() -> list:
     ]
 
 
+ST_OK = uuid.UUID("aa410000-0000-4000-8000-000000000001")
+ST_NOOBJ = uuid.UUID("aa420000-0000-4000-8000-000000000002")
+ST_FAIL = uuid.UUID("aa430000-0000-4000-8000-000000000003")
+ST_MIX = uuid.UUID("aa440000-0000-4000-8000-000000000004")
+ST_TERMINAL = uuid.UUID("aa450000-0000-4000-8000-000000000005")
+ST_T0 = uuid.UUID("cc410000-0000-4000-8000-000000000000")
+ST_T1 = uuid.UUID("cc410000-0000-4000-8000-000000000001")
+ST_T2 = uuid.UUID("cc420000-0000-4000-8000-000000000000")
+ST_T3 = uuid.UUID("cc430000-0000-4000-8000-000000000000")
+ST_T4 = uuid.UUID("cc440000-0000-4000-8000-000000000000")
+ST_T5 = uuid.UUID("cc440000-0000-4000-8000-000000000001")
+ST_T6 = uuid.UUID("cc450000-0000-4000-8000-000000000000")
+ST_E0 = uuid.UUID("dd410000-0000-4000-8000-000000000000")
+ST_E1 = uuid.UUID("dd410000-0000-4000-8000-000000000001")
+ST_E2 = uuid.UUID("dd420000-0000-4000-8000-000000000000")
+ST_E3 = uuid.UUID("dd430000-0000-4000-8000-000000000000")
+ST_E4 = uuid.UUID("dd440000-0000-4000-8000-000000000000")
+ST_E5 = uuid.UUID("dd440000-0000-4000-8000-000000000001")
+ST_E6 = uuid.UUID("dd450000-0000-4000-8000-000000000000")
+
+
+def _status_seed_events() -> list:
+    """One project whose sweeps all still announce "running" from their
+    snapshot events: an all-terminal sweep with objectives, a completed
+    trial without one, and trials whose failure only shows in their
+    execution outcomes (stuck "running" or terminal-failed)."""
+    now = datetime.now(UTC)
+
+    def at(seconds_ago: float) -> datetime:
+        return now - timedelta(seconds=seconds_ago)
+
+    def event(cls, seconds_ago: float, **kwargs):
+        return cls(event_id=uuid.uuid4(), recorded_at=at(seconds_ago), **kwargs)
+
+    def sweep(sweep_id, name, trial_specs):
+        events = [
+            event(
+                SweepSnapshotEvent,
+                900,
+                project="status",
+                sweep_id=sweep_id,
+                name=name,
+                state="running",
+            ),
+            event(
+                SubmissionSnapshotEvent,
+                895,
+                submission_id=uuid.uuid5(uuid.NAMESPACE_OID, name),
+                sweep_id=sweep_id,
+                backend="local",
+                state="completed",
+                submitted_at=at(895),
+            ),
+        ]
+        for index, (trial_id, execution_id, state, objective, outcome) in enumerate(
+            trial_specs
+        ):
+            events.append(
+                event(
+                    TrialSnapshotEvent,
+                    800 - index,
+                    trial_id=trial_id,
+                    sweep_id=sweep_id,
+                    number=index,
+                    state=state,
+                    retry_root_trial_id=trial_id,
+                    objective=objective,
+                )
+            )
+            events.append(
+                event(
+                    ExecutionStartEvent,
+                    700 - index,
+                    execution_id=execution_id,
+                    trial_id=trial_id,
+                    hostname="node00",
+                    started_at=at(700 - index),
+                )
+            )
+            if outcome is not None:
+                events.append(
+                    event(
+                        ExecutionEndEvent,
+                        600 - index,
+                        execution_id=execution_id,
+                        ended_at=at(600 - index),
+                        outcome=outcome,
+                        exit_code=0 if outcome == "success" else 1,
+                    )
+                )
+        return events
+
+    return [
+        *sweep(
+            ST_OK,
+            "all-done",
+            [
+                (ST_T0, ST_E0, TrialState.COMPLETED, 0.07, "success"),
+                (ST_T1, ST_E1, TrialState.COMPLETED, 0.05, "success"),
+            ],
+        ),
+        *sweep(
+            ST_NOOBJ,
+            "no-objective",
+            [(ST_T2, ST_E2, TrialState.COMPLETED, None, "success")],
+        ),
+        *sweep(
+            ST_FAIL,
+            "exec-failed",
+            [(ST_T3, ST_E3, TrialState.RUNNING, None, "failure")],
+        ),
+        *sweep(
+            ST_MIX,
+            "mixed",
+            [
+                (ST_T4, ST_E4, TrialState.COMPLETED, 0.2, "success"),
+                (ST_T5, ST_E5, TrialState.RUNNING, None, "failure"),
+            ],
+        ),
+        *sweep(
+            ST_TERMINAL,
+            "terminal-failed",
+            [(ST_T6, ST_E6, TrialState.FAILED, None, "failure")],
+        ),
+    ]
+
+
+@pytest.fixture
+def status_service(tmp_path) -> DashboardService:
+    store = Store(tmp_path / "status.sqlite")
+    result = IngestService(store).apply(
+        IngestRequest(protocol_version=PROTOCOL_VERSION, events=_status_seed_events())
+    )
+    assert not result.conflicts
+    return DashboardService(QueryService(store))
+
+
+class TestSweepStatusAndBestObjective:
+    def test_project_table_derives_completed_from_trials(self, status_service):
+        summaries = {row.name: row for row in status_service.sweep_overview("status")}
+        assert summaries["all-done"].state == "completed"
+        assert summaries["no-objective"].state == "completed"
+
+    def test_best_objective_is_the_real_minimum(self, status_service):
+        summaries = {row.name: row for row in status_service.sweep_overview("status")}
+        assert best_objective_text(summaries["all-done"]) == "0.05"
+
+    def test_best_objective_renders_em_dash_without_one(self, status_service):
+        summaries = {row.name: row for row in status_service.sweep_overview("status")}
+        assert best_objective_text(summaries["no-objective"]) == MISSING
+
+    def test_overview_row_cells_render_derived_facts(self, status_service):
+        summaries = {row.name: row for row in status_service.sweep_overview("status")}
+        cells = overview_row("status", summaries["all-done"], "", 0).children
+        assert cells[3].children == "2/2"
+        assert cells[4].children == "0.05"
+        dot = cells[2].children
+        assert getattr(dot, "className", None) == "st st-completed"
+
+    def test_overview_row_renders_em_dash_cell(self, status_service):
+        summaries = {row.name: row for row in status_service.sweep_overview("status")}
+        cells = overview_row("status", summaries["no-objective"], "", 0).children
+        assert cells[4].children == MISSING
+
+    def test_failed_execution_marks_sweep_failed(self, status_service):
+        summaries = {row.name: row for row in status_service.sweep_overview("status")}
+        assert summaries["exec-failed"].state == "failed"
+        assert summaries["mixed"].state == "failed"
+        assert summaries["terminal-failed"].state == "failed"
+
+    def test_failed_counts_are_trial_effective(self, status_service):
+        summaries = {row.name: row for row in status_service.sweep_overview("status")}
+        assert summaries["exec-failed"].trials_failed == 1
+        assert summaries["mixed"].trials_complete == 1
+        assert summaries["mixed"].trials_failed == 1
+
+
 @pytest.fixture
 def store_and_service(tmp_path) -> tuple[Store, DashboardService]:
     store = Store(tmp_path / "views.sqlite")
@@ -721,7 +900,7 @@ class TestOverviewPage:
         assert "completed sweeps" in text
         assert "sweeps with no trials yet" in text
         assert "tile crit" in text
-        assert "tile warn" not in text
+        assert "tile warn" in text
 
     def test_every_tile_is_a_filter_link(self, service):
         page, _polls, _text = self._page(service)
@@ -762,7 +941,7 @@ class TestOverviewPage:
         beta = summaries["beta"]
         assert overview_filter_passes(alpha, None) is True
         assert overview_filter_passes(alpha, "failed") is True
-        assert overview_filter_passes(alpha, "stale") is False
+        assert overview_filter_passes(alpha, "stale") is True
         assert overview_filter_passes(alpha, "completed") is False
         assert overview_filter_passes(beta, "completed") is True
         assert overview_filter_passes(beta, "failed") is False
@@ -778,7 +957,7 @@ class TestOverviewPage:
     def test_table_rows_carry_the_prototype_cells(self, service):
         page, _polls, text = self._page(service)
         assert f"{ROUTES_BASE}/project/ops/sweep/{SWEEP_A}" in text
-        assert "st st-running" in text
+        assert "st st-stale" in text
         assert "1/8" in text
         assert "0.25" in text
         checkboxes = [

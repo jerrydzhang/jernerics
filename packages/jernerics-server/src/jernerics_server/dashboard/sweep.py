@@ -45,7 +45,7 @@ from .service import (
 )
 
 _COMPLETED = "completed"
-_FAILED = "fail"
+_FAILED = "failed"
 
 
 def via_from_search(search: str | None) -> str | None:
@@ -218,34 +218,25 @@ def _lost_executions(data: SweepPageData) -> list[ExecutionRecord]:
     ]
 
 
-def _sweep_status(trials: list[TrialRecord], lost_numbers: set[int]) -> str:
-    """The sweep's derived status, per the prototype's decision table."""
-    complete = sum(1 for row in trials if row.state == _COMPLETED)
-    failed = sum(1 for row in trials if row.state == _FAILED)
-    if not trials:
-        return "no-data"
-    if complete + failed == len(trials):
-        return "completed"
-    lost = len(lost_numbers)
-    if (
-        lost
-        and complete + failed + lost >= len(trials)
-        and complete / len(trials) >= 0.5
-    ):
-        return "completed"
-    if lost:
-        return "stale"
-    return "running"
+def _failed_trial_ids(data: SweepPageData) -> set[str]:
+    """Trials whose latest execution ended in failure; executions
+    arrive oldest first, so the last outcome per trial wins."""
+    outcomes: dict[str, str | None] = {
+        str(row.trial_id): row.outcome for row in data.executions
+    }
+    return {trial_id for trial_id, outcome in outcomes.items() if outcome == "failure"}
 
 
 def _trial_state_dot(
-    trial: TrialRecord, lost_numbers: set[int], numbers: dict[str, int]
+    trial: TrialRecord, lost_numbers: set[int], failed_ids: set[str]
 ) -> Component:
     if trial.state == _COMPLETED:
         return status_dot("completed")
     if trial.state == _FAILED:
         return status_dot("failed")
-    if numbers.get(str(trial.trial_id)) in lost_numbers:
+    if str(trial.trial_id) in failed_ids:
+        return status_dot("failed", "failed execution")
+    if trial.number in lost_numbers:
         return status_dot("stale", "lost execution")
     return status_dot("running")
 
@@ -291,27 +282,17 @@ def _heading(data: SweepPageData) -> html.H1:
 
 
 def _sub_line(data: SweepPageData, now_ns: int) -> html.P:
-    numbers = _numbers(data)
     lost = _lost_executions(data)
-    lost_numbers = {numbers.get(str(row.trial_id), -1) for row in lost}
     complete = sum(1 for row in data.trials if row.state == _COMPLETED)
-    status = _sweep_status(data.trials, lost_numbers)
     parts: list[Component | str] = [
-        status_dot(status, f"{complete}/{len(data.trials)} trials"),
+        status_dot(data.overview.state, f"{complete}/{len(data.trials)} trials"),
         f" · {data.overview.succeeded} succeeded · {data.overview.failed} failed",
     ]
-    attention: list[Component] = []
-    if data.overview.failed:
-        attention.append(
-            html.Span(f"{data.overview.failed} failed", className="crit-text")
-        )
     if lost:
-        attention.append(
+        parts.append(" · ")
+        parts.append(
             html.Span(f"{len(lost)} lost — no terminal event", className="warn-text")
         )
-    for note in attention:
-        parts.append(" · ")
-        parts.append(note)
     activity = _last_activity_ns(data.executions)
     parts.append(
         " · last activity "
@@ -576,6 +557,7 @@ def _trials_section(data: SweepPageData, picked_families: set[str]) -> html.Sect
     numbers = _numbers(data)
     lost = _lost_executions(data)
     lost_numbers = {numbers.get(str(row.trial_id), -1) for row in lost}
+    failed_ids = _failed_trial_ids(data)
     has_retries = any(row.retry_index not in (None, 0) for row in data.trials)
     head: list[Component | str] = [
         html.Th(className="selbox"),
@@ -616,7 +598,7 @@ def _trials_section(data: SweepPageData, picked_families: set[str]) -> html.Sect
                 ),
                 className="num",
             ),
-            html.Td(_trial_state_dot(trial, lost_numbers, numbers)),
+            html.Td(_trial_state_dot(trial, lost_numbers, failed_ids)),
             html.Td(_sig(trial.objective), className="num"),
         ]
         if has_retries:
