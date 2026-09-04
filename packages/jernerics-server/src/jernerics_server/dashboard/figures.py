@@ -13,7 +13,7 @@ dimension; anything harder would degrade to color-only.
 """
 
 import math
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -825,7 +825,7 @@ def padded_range(values: list[float]) -> list[float]:
 
 
 def points_parcoords(
-    dims: list[dict[str, Any]], keep: Sequence[str] | None = None
+    dims: list[dict[str, Any]], keep: Collection[str] | None = None
 ) -> go.Figure:
     """Params → outcome parallel coordinates over the trials×final-scalars
     set. Every line stays plotted, each dimension carries its explicit
