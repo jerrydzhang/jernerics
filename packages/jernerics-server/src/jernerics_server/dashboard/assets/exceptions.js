@@ -5,14 +5,32 @@
 (function () {
   "use strict";
 
-  /* Each sweep checkbox carries its sweep id in name= (dcc.Input has
-     no custom data-* attributes), so selection reads off the DOM. */
+  /* dcc.Input renders the user className on a wrapper div, not on the
+     <input>, so checkboxes are classified via closest() and each sweep
+     id is read off the input's name= (dcc.Input has no custom data-*
+     attributes). */
+  function sweepBoxes(root) {
+    return Array.from((root || document).querySelectorAll(".sel-sweep input"));
+  }
+
+  function selKind(box) {
+    if (box.closest(".sel-group")) {
+      return "sel-group";
+    }
+    if (box.closest(".sel-sweep")) {
+      return "sel-sweep";
+    }
+    return null;
+  }
+
   function selectedSweeps() {
-    return Array.from(document.querySelectorAll(".sel-sweep:checked")).map(
-      function (box) {
+    return sweepBoxes()
+      .filter(function (box) {
+        return box.checked;
+      })
+      .map(function (box) {
         return box.name;
-      }
-    );
+      });
   }
 
   function updateCount() {
@@ -58,18 +76,19 @@
 
   document.addEventListener("change", function (event) {
     var box = event.target;
-    if (!box.classList) {
+    if (!box.closest) {
       return;
     }
-    if (box.classList.contains("sel-group")) {
+    var kind = selKind(box);
+    if (kind === "sel-group") {
       var group = box.closest(".failgroup");
       if (group) {
-        group.querySelectorAll(".sel-sweep").forEach(function (sweep) {
+        sweepBoxes(group).forEach(function (sweep) {
           sweep.checked = box.checked;
         });
       }
       updateCount();
-    } else if (box.classList.contains("sel-sweep")) {
+    } else if (kind === "sel-sweep") {
       updateCount();
     }
   });
