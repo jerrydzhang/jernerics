@@ -6,6 +6,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 import pytest
+from jernerics.tracking.blob_uploader import BlobUploadResult
 from jernerics.tracking.infra import TrackingServerSchemeError
 from jernerics.tracking.jsonl_io import TrackingReader
 from jernerics.tracking.trial_environment import TrialEnvironment
@@ -237,6 +238,7 @@ class TestEventValidity:
         env = TrialEnvironment(
             tracking_dir=str(tmp_path), trial_number=4, server_addr="http://srv"
         )
+        mock_upload.return_value = BlobUploadResult()
 
         with env:
             assert env.tracker is not None
