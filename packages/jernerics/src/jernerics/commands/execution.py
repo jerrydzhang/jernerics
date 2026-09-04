@@ -10,11 +10,7 @@ import typer
 from jernerics.backend.local_backend import LocalBackend
 from jernerics.backend.models import SweepSubmission
 from jernerics.backend.pueue.adapter import PueueSubmitError
-from jernerics.backend.slurm.adapter import (
-    SBATCH_OVERRIDE_KEYS,
-    SlurmSubmitError,
-    unknown_sbatch_override_message,
-)
+from jernerics.backend.slurm.adapter import SlurmSubmitError
 from jernerics.commands.common import _get_backend
 from jernerics.config import (
     ConfigValidationError,
@@ -139,7 +135,7 @@ def run_remote(
     ],
     set_opt: Annotated[
         list[str] | None,
-        typer.Option("--set", "-S", help="Set sbatch override (key=value)"),
+        typer.Option("--set", "-S", help="Set scheduler override (key=value)"),
     ] = None,
     set_param_opt: Annotated[
         list[str] | None,
@@ -180,10 +176,6 @@ def run_remote(
             print(f"Error: Empty key in --set option: {opt}")
             raise SystemExit(ExitCode.CONFIG_ERROR)
         cli_overrides[key] = value
-    unknown = set(cli_overrides) - SBATCH_OVERRIDE_KEYS
-    if unknown:
-        print(f"Error: {unknown_sbatch_override_message(unknown)}")
-        raise SystemExit(ExitCode.CONFIG_ERROR)
 
     param_overrides = {}
     for opt in set_param_opt or []:
@@ -199,6 +191,17 @@ def run_remote(
         param_overrides[key] = _coerce_param_value(raw)
 
     backend, project_name, project_dir = _get_backend(backend_name)
+
+    valid_keys = backend.adapter.valid_override_keys()
+    unknown = set(cli_overrides) - valid_keys
+    if unknown:
+        unknown_keys = ", ".join(sorted(unknown))
+        valid = ", ".join(sorted(valid_keys))
+        print(
+            f"Error: Unknown override key(s) for backend '{backend_name}': "
+            f"{unknown_keys}. Valid keys: {valid}"
+        )
+        raise SystemExit(ExitCode.CONFIG_ERROR)
 
     trial_relpath = _validate_relpath(
         str(trial_path.relative_to(project_dir)), "trial file"

@@ -114,4 +114,6 @@ class TestSchedulerAdapterProtocol:
 
             def cleanup(self): ...
 
+            def valid_override_keys(self): ...
+
         assert isinstance(FakeAdapter(), SchedulerAdapter)

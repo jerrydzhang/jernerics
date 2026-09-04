@@ -58,6 +58,9 @@ class PueueSubmitError(RuntimeError):
     pass
 
 
+PUEUE_OVERRIDE_KEYS = frozenset({"max_parallel"})
+
+
 _TASK_ID_PATTERN = re.compile(r"New task added with ID (\d+)")
 
 
@@ -131,6 +134,9 @@ class PueueAdapter:
             cache_dir=cache_dir,
             parallel=pueue.parallel,
         )
+
+    def valid_override_keys(self) -> frozenset[str]:
+        return PUEUE_OVERRIDE_KEYS
 
     def _render_script(self, params: SweepSubmissionParams) -> str:
         group = params.study_name

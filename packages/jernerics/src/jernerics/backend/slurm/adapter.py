@@ -356,6 +356,9 @@ class SlurmAdapter:
             post_hook_mem=slurm.post_hook_mem,
         )
 
+    def valid_override_keys(self) -> frozenset[str]:
+        return SBATCH_OVERRIDE_KEYS
+
     def _array_spec(self, params: SweepSubmissionParams) -> str:
         max_parallel = params.max_parallel or self.max_concurrent_jobs
         if max_parallel > 0:
