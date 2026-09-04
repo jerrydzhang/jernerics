@@ -1019,7 +1019,6 @@ def _editor_body(
                 "Save members" if editing else "Create investigation",
                 id={"inv-edit-save": "save"},
                 n_clicks=0,
-                disabled=not editing,
                 className="btn-primary",
             ),
             *(

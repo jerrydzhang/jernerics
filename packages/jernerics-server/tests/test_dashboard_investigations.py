@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from dash import dcc, html
+from dash import dcc, html, no_update
 from dash.development.base_component import Component
 from dash_ag_grid import AgGrid
 from fastapi.testclient import TestClient
@@ -813,7 +813,7 @@ class TestInvestigationEditorPages:
     """Create and edit are distinct flows; the preview carries real
     coverage counts before anything is written."""
 
-    def test_create_flow_seeds_members_preview_and_gating(self, cmp_service, sig):
+    def test_create_flow_seeds_members_preview_and_enabled_save(self, cmp_service, sig):
         seed = seed_sweeps_from_search(f"?sweeps={CS2},{CS1},deadbeef")
         assert seed == sorted({str(CS1), str(CS2), "deadbeef"})
         page = workspace.investigation_edit_page(cmp_service, CMP, None, seed)
@@ -827,7 +827,7 @@ class TestInvestigationEditorPages:
         assert picks[str(CS1)] == [str(CS1)] and picks[str(CS2)] == [str(CS2)]
         assert picks[str(CS3)] == []
         assert _first_pattern(page, "inv-edit-name") is not None
-        assert _first_pattern(page, "inv-edit-save").disabled is True
+        assert not getattr(_first_pattern(page, "inv-edit-save"), "disabled", False)
         assert not _pattern_nodes(page, "inv-edit-discard")
         text = _text(_first_pattern(page, "inv-edit-preview"))
         assert "unknown sweep: no sweep with id deadbeef" in text
@@ -866,7 +866,7 @@ class TestInvestigationEditorPages:
         }
         assert not _pattern_nodes(page, "inv-edit-name")
         assert not _pattern_nodes(page, "inv-edit-factor")
-        assert _first_pattern(page, "inv-edit-save").disabled is False
+        assert not getattr(_first_pattern(page, "inv-edit-save"), "disabled", False)
         assert _first_pattern(page, "inv-edit-discard") is not None
 
     def test_preview_panel_reports_pending_diff_and_coverage(self, cmp_service, sig):
@@ -1061,7 +1061,7 @@ class TestEditorCallbacks:
         )
         assert self._out(result, "inv-edit-state", "data")["picked"] == [str(CS1)]
 
-    def test_state_edit_flows_to_preview_and_save_gating(self, mounted):
+    def test_state_edit_flows_to_preview_and_member_labels(self, mounted):
         key = self._key(mounted.callback_map, "inv-edit-preview", "inv-edit-state")
         result = self._dispatch(
             mounted,
@@ -1119,7 +1119,6 @@ class TestEditorCallbacks:
                 {"id": "url", "property": "pathname", "value": self._CREATE_ROUTE},
             ],
         )
-        assert self._out(result, "inv-edit-save", "disabled") == [False]
         text = _text(self._out(result, "inv-edit-preview", "children"))
         assert "2 project members picked" in text
         assert "+2 -0 (unsaved)" in text
@@ -1171,6 +1170,77 @@ class TestEditorCallbacks:
         assert members == [str(CS1)]
         # the working set stays in the store; no grid echo comes back
         assert "inv-edit-grid" not in json.dumps(result["response"])
+
+    def test_save_on_edit_requires_a_member(self, mounted):
+        key = self._key(mounted.callback_map, "url.pathname", "inv-edit-save")
+        route = self._EDIT_ROUTE.replace("<id>", mounted.compare)
+        before = [
+            str(sweep)
+            for sweep in mounted.shared.detail(mounted.compare).investigation.members
+        ]
+        result = self._dispatch(
+            mounted,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"inv-edit-save": "save"},
+                        "property": "n_clicks",
+                        "value": 1,
+                    }
+                ]
+            ],
+            state=[
+                [
+                    {
+                        "id": {"inv-edit-state": "members"},
+                        "property": "data",
+                        "value": self._state([], before),
+                    }
+                ],
+                {"id": "url", "property": "pathname", "value": route},
+            ],
+        )
+        assert "member" in _text(self._out(result, "inv-edit-message", "children"))
+        assert "url" not in result["response"]
+        after = [
+            str(sweep)
+            for sweep in mounted.shared.detail(mounted.compare).investigation.members
+        ]
+        assert after == before
+
+    def test_save_validation_failure_ships_a_wildcard_no_update_slot(self, mounted):
+        # A wildcard (ALL) slot in a multi-output return must be a list;
+        # a bare NoUpdate crashes the renderer's multi-response
+        # validation in the browser.
+        key = self._key(mounted.callback_map, "url.pathname", "inv-edit-save")
+        result = self._dispatch(
+            mounted,
+            key,
+            inputs=[
+                [
+                    {
+                        "id": {"inv-edit-save": "save"},
+                        "property": "n_clicks",
+                        "value": 1,
+                    }
+                ]
+            ],
+            state=[
+                [
+                    {
+                        "id": {"inv-edit-state": "members"},
+                        "property": "data",
+                        "value": self._state([str(CS1)], []),
+                    }
+                ],
+                {"id": "url", "property": "pathname", "value": self._CREATE_ROUTE},
+            ],
+        )
+        slot = self._out(result, "inv-edit-state", "data")
+        assert isinstance(slot, list)
+        assert slot == [no_update.to_plotly_json()]
+        assert "required" in _text(self._out(result, "inv-edit-message", "children"))
 
     def test_save_on_create_requires_a_complete_body(self, mounted):
         key = self._key(mounted.callback_map, "url.pathname", "inv-edit-save")

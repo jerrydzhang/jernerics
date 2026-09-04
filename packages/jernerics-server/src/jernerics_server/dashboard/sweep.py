@@ -381,21 +381,25 @@ def _actions_row(data: SweepPageData, project: str, sweep_id: str) -> html.Div:
     actions: list[Component | str] = []
     if offered["invalid"]:
         actions.append(
-            html.Button("Mark invalid", id="sweep-invalid", className="btn-danger")
+            html.Button(
+                "Mark invalid", id={"sweep-action": "invalid"}, className="btn-danger"
+            )
         )
         actions.append(
             dcc.Input(
-                id="sweep-reason",
+                id={"sweep-action-reason": "reason"},
                 type="text",
                 placeholder="Reason (required for Mark invalid)",
             )
         )
     if offered["archive"]:
-        actions.append(html.Button("Archive", id="sweep-archive"))
+        actions.append(html.Button("Archive", id={"sweep-action": "archive"}))
     if offered["restore_validity"]:
-        actions.append(html.Button("Clear invalid", id="sweep-restore-validity"))
+        actions.append(
+            html.Button("Clear invalid", id={"sweep-action": "restore-validity"})
+        )
     if offered["restore"]:
-        actions.append(html.Button("Unarchive", id="sweep-restore"))
+        actions.append(html.Button("Unarchive", id={"sweep-action": "restore"}))
     if data.overview.failed:
         actions.append(
             html.A(

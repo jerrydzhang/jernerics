@@ -258,11 +258,6 @@ _CURATION_VERBS = {
 }
 
 
-def triggered_action(triggered: set[str], mapping: dict[str, str]) -> str | None:
-    """The action name for the one triggered control, if any."""
-    return next((action for prop, action in mapping.items() if prop in triggered), None)
-
-
 def run_curation(
     service: DashboardService, action: str, sweep_id: str, reason: str
 ) -> str:
@@ -1146,7 +1141,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
 
     @app.callback(
         Output({"inv-edit-preview": ALL}, "children"),
-        Output({"inv-edit-save": ALL}, "disabled"),
         Output({"inv-edit-pick": ALL}, "value"),
         Output({"inv-edit-mode": ALL}, "children"),
         Input({"inv-edit-state": ALL}, "data"),
@@ -1170,12 +1164,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         state = states[0] or {}
         picked = list(state.get("picked") or ())
         preview = service.investigation_preview(spec.object_id or "", picked)
-        ready = bool(
-            str(state.get("name") or "").strip()
-            and state.get("factor")
-            and state.get("outcome")
-            and picked
-        )
         picked_set = set(picked)
         # A freshly mounted table takes the working selection in its
         # checkboxes; a set the user just clicked echoes back and must
@@ -1199,7 +1187,6 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 members_label[index] = f"Members ({len(picked)})"
         return (
             [workspace.editor_preview_panel(preview, state)],
-            [not ready],
             values,
             members_label,
         )
@@ -1312,7 +1299,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 return (
                     no_update,
                     no_update,
-                    no_update,
+                    [no_update],
                     [
                         workspace.action_message(
                             False,
@@ -1329,7 +1316,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 return (
                     no_update,
                     no_update,
-                    no_update,
+                    [no_update],
                     [workspace.action_message(False, str(error))],
                 )
             saved = sorted({str(sweep) for sweep in record.members})
@@ -1339,13 +1326,20 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 [{**state, "picked": saved, "saved": saved}],
                 [""],
             )
+        if not picked:
+            return (
+                no_update,
+                no_update,
+                [no_update],
+                [workspace.action_message(False, "At least one member is required.")],
+            )
         try:
             record = service.set_investigation_members(spec.sub_id, picked)
         except CurationRejectedError as error:
             return (
                 no_update,
                 no_update,
-                no_update,
+                [no_update],
                 [workspace.action_message(False, str(error))],
             )
         saved = [str(sweep) for sweep in record.members]
@@ -1511,10 +1505,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         return classes, styles
 
     SWEEP_ACTIONS = {
-        "sweep-archive.n_clicks": "archive",
-        "sweep-invalid.n_clicks": "invalid",
-        "sweep-restore-validity.n_clicks": "restore_validity",
-        "sweep-restore.n_clicks": "restore",
+        "invalid": "invalid",
+        "archive": "archive",
+        "restore-validity": "restore_validity",
+        "restore": "restore",
     }
 
     # -- Sweep page: live refresh, curation, retry-family picks ------------
@@ -1564,33 +1558,31 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("sweep-message", "children"),
         Output("sweep-page-body", "children", allow_duplicate=True),
         Output("sweep-page-facts-store", "data", allow_duplicate=True),
-        Input("sweep-archive", "n_clicks"),
-        Input("sweep-invalid", "n_clicks"),
-        Input("sweep-restore-validity", "n_clicks"),
-        Input("sweep-restore", "n_clicks"),
-        State("sweep-reason", "value"),
+        Input({"sweep-action": ALL}, "n_clicks"),
+        State({"sweep-action-reason": ALL}, "value"),
         State("url", "pathname"),
         State("url", "search"),
         State("view-store", "data"),
         prevent_initial_call=True,
     )
     def _curate_from_sweep_page(
-        _archive: int,
-        _invalid: int,
-        _validity: int,
-        _restore: int,
-        reason: str | None,
+        _clicks: list,
+        reasons: list | None,
         pathname: str | None,
         search: str | None,
         view_doc: dict | None,
     ):
-        triggered = {str(prop) for prop in dash.callback_context.triggered_prop_ids}
-        action = triggered_action(triggered, SWEEP_ACTIONS)
+        context = dash.callback_context
+        if not pressed_props(context):
+            raise PreventUpdate
+        token, control = pattern_trigger(context)
+        action = SWEEP_ACTIONS.get(token) if control == "sweep-action" else None
         spec = parse_route(pathname)
         if action is None or spec.kind != "sweep":
             raise PreventUpdate
         sweep_id = spec.sub_id or ""
-        ok, report = apply_curation(service, action, [sweep_id], reason or "")
+        reason = str((reasons or [""])[0] or "")
+        ok, report = apply_curation(service, action, [sweep_id], reason)
         data = sweep.collect(service, sweep_id, sweep.via_from_search(search))
         if data is None:
             return workspace.action_message(ok, report), no_update, no_update
