@@ -315,6 +315,7 @@ class TestProjectsCrumb:
             running_trials=0,
             trials=1,
             trials_complete=0,
+            trials_failed=0,
             best_objective=None,
             archived_ns=None,
             invalid_ns=None,
