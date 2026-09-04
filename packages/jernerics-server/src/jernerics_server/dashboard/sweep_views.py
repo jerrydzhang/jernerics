@@ -111,13 +111,14 @@ def python_disclosure(project: str, sweep_id: str) -> html.Details:
 
 
 def default_series_state(keys: Sequence[str] = ()) -> dict[str, Any]:
-    """Series sub-view state: active metrics and each block's display
-    and axis-scale choice."""
+    """Series sub-view state: active metrics, each block's display and
+    axis-scale choice, and the digest pair the poll gate reads."""
     return {
         "keys": list(keys),
         "display": {},
         "scale": {},
         "cheap": "",
+        "digests": {},
     }
 
 
@@ -140,10 +141,95 @@ def _key_options(snapshot: dict[str, Any]) -> list[dict[str, str]]:
     return list(snapshot.get("key_options") or [])
 
 
-def series_chips(state: dict[str, Any], snapshot: dict[str, Any]) -> list[Any]:
-    """The active-metric chips plus the add-metric picker."""
-    offered = {entry["value"] for entry in _key_options(snapshot)}
-    chips = [
+def series_key_digests(
+    service: DashboardService, project: str, sweep_id: str
+) -> dict[str, str]:
+    """Cheap per-key digest: point/trial volume identity per scalar
+    series key — the poll gate that refreshes only the keys that
+    gained observations (jernerics-1r00)."""
+    return {
+        entry["key"]: hashlib.sha256(
+            json.dumps(
+                [entry["points"], entry["trials"], entry["extent"]], default=str
+            ).encode()
+        ).hexdigest()[:16]
+        for entry in service.analysis_value_keys(project, sweep_tray(sweep_id))
+        if entry["kind"] == "scalar" and entry["steps"]
+    }
+
+
+def _key_payload(
+    series: list[dict[str, Any]], numbers: dict[str, int]
+) -> dict[str, Any]:
+    """One key's store payload: exact stats from the full series, then
+    the series thinned to the figure point cap."""
+    return {
+        "series": [
+            {**entry, "points": figures.downsample_points(entry["points"])}
+            for entry in series
+        ],
+        "stats": [
+            [number, trial, last, low, high, points, step]
+            for number, trial, last, low, high, points, step in _trial_stats(
+                series, numbers
+            )
+        ],
+    }
+
+
+def series_split(
+    snapshot: dict[str, Any], keys: list[str]
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    """(per-key store payloads, global facts) from one full snapshot —
+    the split the view ships so poll refreshes move only changed keys."""
+    numbers = {row["trial_id"]: row["number"] for row in snapshot.get("trials") or []}
+    payloads = {
+        key: _key_payload(
+            list((snapshot.get("per_key") or {}).get(key, {}).get("series", [])),
+            numbers,
+        )
+        for key in keys
+    }
+    snap = {
+        name: snapshot.get(name)
+        for name in ("trials", "varying", "key_options", "reduction", "fingerprint")
+    }
+    return payloads, snap
+
+
+def series_keys_refetch(
+    service: DashboardService,
+    project: str,
+    sweep_id: str,
+    keys: list[str],
+    trials: list[dict[str, Any]],
+    now_ns: int,
+) -> dict[str, dict[str, Any]]:
+    """Fresh payloads for ONLY ``keys`` — the digest-gated incremental
+    refresh; every other key's stored payload stays untouched."""
+    numbers = {row["trial_id"]: row["number"] for row in trials}
+    merged = analysis.merge_series_keys(
+        service,
+        project,
+        sweep_tray(sweep_id),
+        {"reduction": "none", "trials": trials, "per_key": {}},
+        keys,
+        now_ns,
+    )
+    return {
+        key: _key_payload(
+            list((merged.get("per_key") or {}).get(key, {}).get("series", [])),
+            numbers,
+        )
+        for key in keys
+    }
+
+
+def series_chip_spans(state: dict[str, Any]) -> list[Any]:
+    """The active-metric chips: bare spans — the chips container and
+    add-picker ids live on the page-mounted chrome only, so callback
+    refreshes can never duplicate them (jernerics-hjip)."""
+    return [
         html.Span(
             [
                 key,
@@ -153,8 +239,13 @@ def series_chips(state: dict[str, Any], snapshot: dict[str, Any]) -> list[Any]:
         )
         for key in state["keys"]
     ]
+
+
+def series_chips(state: dict[str, Any], snapshot: dict[str, Any]) -> list[Any]:
+    """Server-rendered chips container plus the add-metric picker."""
+    offered = {entry["value"] for entry in _key_options(snapshot)}
     return [
-        html.Div(chips, id="sweep-series-chips", className="chips"),
+        html.Div(series_chip_spans(state), id="sweep-series-chips", className="chips"),
         dcc.Dropdown(
             id="sweep-series-add",
             placeholder="＋ add metric…",
@@ -170,7 +261,7 @@ def series_chips(state: dict[str, Any], snapshot: dict[str, Any]) -> list[Any]:
     ]
 
 
-def _series_block_figure(
+def series_key_figure(
     key: str, series: list[dict[str, Any]], state: dict[str, Any]
 ) -> go.Figure:
     axis = analysis.default_axis_state()
@@ -209,11 +300,11 @@ def _trial_stats(
     return sorted(stats)
 
 
-def _stats_rows(key: str, series: list[dict[str, Any]], numbers: dict[str, int]):
-    rows: list[Component | str] = []
-    for number, trial, last, low, high, points, step in _trial_stats(series, numbers):
+def _stats_rows(key: str, rows: list[list[Any]]):
+    formatted: list[Component | str] = []
+    for number, trial, last, low, high, points, step in rows:
         label = f"#{number}" if number >= 0 else components.short_id(trial)
-        rows.append(
+        formatted.append(
             html.Tr(
                 [
                     html.Td(label, className="num"),
@@ -228,49 +319,52 @@ def _stats_rows(key: str, series: list[dict[str, Any]], numbers: dict[str, int])
                 n_clicks=0,
             )
         )
-    return rows
+    return formatted
 
 
-def series_blocks(state: dict[str, Any], snapshot: dict[str, Any]) -> list[Any]:
+def series_key_head(key: str, series: list[dict[str, Any]]) -> list[Any]:
+    """The block header children: metric name and distinct-trial count."""
+    return [
+        html.H2(key),
+        html.Span(
+            f"· {len({entry['trial'] for entry in series})} trials",
+            className="annotate",
+        ),
+    ]
+
+
+def series_key_stats(key: str, stats: list[list[Any]]) -> Any:
+    """The per-trial stats table for one key from its stored rows."""
+    return scroll_table(
+        [
+            head_cell("Trial", numeric=True),
+            head_cell("Last", numeric=True),
+            head_cell("Min", numeric=True),
+            head_cell("Max", numeric=True),
+            head_cell("Points", numeric=True),
+            head_cell("Last step", numeric=True),
+        ],
+        _stats_rows(key, stats),
+    )
+
+
+def series_blocks(
+    state: dict[str, Any], payloads: dict[str, dict[str, Any]]
+) -> list[Any]:
     """One block per active metric: display and scale toggles, the
-    figure, and the per-trial stats table."""
-    numbers = {row["trial_id"]: row["number"] for row in snapshot.get("trials") or []}
+    figure, per-trial stats, and the key's payload store. Every key
+    mounts the same components — even with no observations — so the
+    pattern-matched outputs stay aligned with the tree."""
     blocks: list[Any] = []
     for key in state["keys"]:
-        series = list((snapshot.get("per_key") or {}).get(key, {}).get("series", []))
-        if not series:
-            body: list[Any] = [Empty(f"No observations logged for {key} yet.")]
-        else:
-            body = [
-                dcc.Graph(
-                    id={"sweep-series-plot": key},
-                    figure=_series_block_figure(key, series, state),
-                    clear_on_unhover=True,
-                ),
-                scroll_table(
-                    [
-                        head_cell("Trial", numeric=True),
-                        head_cell("Last", numeric=True),
-                        head_cell("Min", numeric=True),
-                        head_cell("Max", numeric=True),
-                        head_cell("Points", numeric=True),
-                        head_cell("Last step", numeric=True),
-                    ],
-                    _stats_rows(key, series, numbers),
-                ),
-            ]
+        payload = payloads.get(key) or {"series": [], "stats": []}
         blocks.append(
             html.Div(
                 [
                     html.Div(
-                        [
-                            html.H2(key),
-                            html.Span(
-                                f"· {len({entry['trial'] for entry in series})} trials",
-                                className="annotate",
-                            ),
-                        ],
+                        series_key_head(key, payload["series"]),
                         className="plot-head",
+                        id={"sweep-series-head": key},
                     ),
                     html.Div(
                         [
@@ -295,7 +389,16 @@ def series_blocks(state: dict[str, Any], snapshot: dict[str, Any]) -> list[Any]:
                         ],
                         className="plot-controls",
                     ),
-                    *body,
+                    dcc.Graph(
+                        id={"sweep-series-fig": key},
+                        figure=series_key_figure(key, payload["series"], state),
+                        clear_on_unhover=True,
+                    ),
+                    html.Div(
+                        series_key_stats(key, payload["stats"]),
+                        id={"sweep-series-stats": key},
+                    ),
+                    dcc.Store(id={"sweep-series-key": key}, data=payload),
                 ],
                 className="keyblock",
                 id={"sweep-series-block": key},
@@ -307,13 +410,13 @@ def series_blocks(state: dict[str, Any], snapshot: dict[str, Any]) -> list[Any]:
 
 
 def _finals_from_series(
-    snapshot: dict[str, Any], keys: list[str]
+    payloads: dict[str, dict[str, Any]], keys: list[str]
 ) -> dict[str, dict[str, Any]]:
     """Each trial's last logged value per active key — the pcp's final
-    dimensions."""
+    dimensions. Thinning keeps the last point, so finals stay exact."""
     finals: dict[str, dict[str, Any]] = {}
     for key in keys:
-        for entry in (snapshot.get("per_key") or {}).get(key, {}).get("series", []):
+        for entry in (payloads.get(key) or {}).get("series", []):
             per_trial = finals.setdefault(entry["trial"], {})
             for step, value in entry["points"]:
                 current = per_trial.get(key)
@@ -341,18 +444,19 @@ def _dim(label: str, values: list[Any]) -> dict[str, Any]:
 
 
 def series_pcp_outputs(
-    state: dict[str, Any], snapshot: dict[str, Any]
+    state: dict[str, Any],
+    payloads: dict[str, dict[str, Any]],
+    trials: list[dict[str, Any]],
 ) -> tuple[Any, dict[str, list[str]]]:
     """(figure, pcp-data) for the Params → final-values plot: one line
     per trial whose varying params and active finals are all numeric,
     in row order."""
-    trials = snapshot.get("trials") or []
     ordered = sorted(trials, key=lambda row: (row["sweep_id"], row["number"]))
     numeric = set(figures.numeric_param_keys(ordered))
     varying = [key for key in analysis.varying_param_keys(ordered) if key in numeric][
         : figures.MAX_PARAM_DIMS
     ]
-    finals = _finals_from_series(snapshot, state["keys"])
+    finals = _finals_from_series(payloads, state["keys"])
     columns: list[tuple[str, list[Any]]] = [
         (
             key,
@@ -412,8 +516,10 @@ def series_body(
         if entry["kind"] == "scalar" and entry["steps"]
     ]
     state = default_series_state(keys)
+    state["digests"] = series_key_digests(service, project, sweep_id)
     snapshot = series_snapshot_fetch(service, project, sweep_id, keys, now_ns)
-    figure, pcp_data = series_pcp_outputs(state, snapshot)
+    payloads, snap = series_split(snapshot, keys)
+    figure, pcp_data = series_pcp_outputs(state, payloads, snap["trials"] or [])
     return html.Div(
         [
             html.Div(
@@ -427,7 +533,7 @@ def series_body(
                 ],
                 className="series-controls",
             ),
-            html.Div(series_blocks(state, snapshot), id="sweep-series-blocks"),
+            html.Div(series_blocks(state, payloads), id="sweep-series-blocks"),
             html.H2("Params → final values"),
             html.Div(
                 [
@@ -447,7 +553,7 @@ def series_body(
                 clear_on_unhover=True,
             ),
             dcc.Store(id="sweep-series-state", data=state),
-            dcc.Store(id="sweep-series-snap", data=snapshot),
+            dcc.Store(id="sweep-series-snap", data=snap),
             dcc.Store(id="sweep-series-pcp-data", data=pcp_data),
             dcc.Store(id="sweep-series-sel", data={"tks": []}),
             dcc.Store(id="sweep-series-echo"),

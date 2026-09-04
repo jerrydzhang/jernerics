@@ -44,6 +44,11 @@ _STUDY_FIG_MAX_PARAMS = 8
 MAX_PARAM_DIMS = _STUDY_FIG_MAX_PARAMS
 """Public cap for params → outcome parallel-coordinate dimensions."""
 
+SERIES_POINT_CAP = 1500
+"""Plotted points per series above which the sweep-series view thins:
+stride sampling keeps the first and last observation, so shape and
+finals stay exact while poll payloads stay bounded (jernerics-1r00)."""
+
 _PANEL_HEIGHT = 360
 """Height of one series subplot row."""
 
@@ -78,6 +83,20 @@ def _series_height(rows: int, legend_entries: int) -> int:
     than the plot area grows the figure instead of clipping (jernerics-bt9)."""
     plot_area = _PANEL_HEIGHT * rows - 120
     return _PANEL_HEIGHT * rows + 90 + max(0, min(660, 30 * legend_entries - plot_area))
+
+
+def downsample_points(
+    points: list[tuple[int, float]], cap: int = SERIES_POINT_CAP
+) -> list[tuple[int, float]]:
+    """Stride-thinned (step, value) points under ``cap``; the first and
+    last observations always survive, so finals and end shape are exact."""
+    if len(points) <= cap:
+        return points
+    stride = max(1, math.ceil((len(points) - 1) / (cap - 1)))
+    thinned = points[::stride]
+    if thinned[-1] != points[-1]:
+        thinned.append(points[-1])
+    return thinned
 
 
 def _is_number(value: Any) -> bool:

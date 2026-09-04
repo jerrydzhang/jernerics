@@ -1661,12 +1661,56 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             return None
         return resolved if isinstance(resolved, dict) else None
 
-    def _pattern_value(values_list: Any, target: dict[str, Any]) -> Any:
-        """The current value of the ALL-pattern input whose id matches."""
-        for entry in values_list or []:
-            if isinstance(entry, dict) and entry.get("id") == target:
-                return entry.get("value")
-        return None
+    def _pattern_value(values: Any, target: dict[str, Any], keys: list[str]) -> Any:
+        """The current value of the ALL-pattern input for ``target``:
+        dash delivers one value per mounted component in tree order —
+        a bare value when exactly one matches, ``{"id", "value"}`` dicts
+        under some renderers."""
+        key = str(next(iter(target.values()), ""))
+        if not isinstance(values, list):
+            return values if keys == [key] else None
+        if values and all(
+            isinstance(entry, dict) and "id" in entry for entry in values
+        ):
+            for entry in values:
+                if entry.get("id") == target:
+                    return entry.get("value")
+            return None
+        try:
+            position = keys.index(key)
+        except ValueError:
+            return None
+        return values[position] if position < len(values) else None
+
+    def _key_store_payloads(key_stores: Any, keys: list[str]) -> dict[str, dict]:
+        """Stored per-key payloads off the ALL state, normalized to the
+        same positional-or-wrapped shapes dash delivers for inputs."""
+        if key_stores is None:
+            return {}
+        if not isinstance(key_stores, list):
+            return {keys[0]: key_stores} if keys else {}
+        entries = [
+            entry for entry in key_stores if isinstance(entry, dict) and "id" in entry
+        ]
+        if entries:
+            return {
+                str(entry["id"].get("sweep-series-key")): entry.get("value") or {}
+                for entry in entries
+                if isinstance(entry.get("id"), dict)
+                and entry["id"].get("sweep-series-key")
+            }
+        return {
+            key: payload or {} for key, payload in zip(keys, key_stores, strict=False)
+        }
+
+    def _series_options(snap: dict | None, keys: list[str]) -> list[dict[str, str]]:
+        """Add-picker options: every offered key the view not showing."""
+        offered = {
+            entry["value"]
+            for entry in (snap or {}).get("key_options") or []
+            if isinstance(entry, dict) and entry.get("value")
+        }
+        return [{"label": key, "value": key} for key in sorted(offered - set(keys))]
 
     @app.callback(
         Output("sweep-series-blocks", "children"),
@@ -1675,6 +1719,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Output("sweep-series-add", "value"),
         Output("sweep-series-state", "data"),
         Output("sweep-series-snap", "data"),
+        Output({"sweep-series-key": ALL}, "data"),
+        Output({"sweep-series-fig": ALL}, "figure"),
+        Output({"sweep-series-head": ALL}, "children"),
+        Output({"sweep-series-stats": ALL}, "children"),
         Output("sweep-series-updated", "children"),
         Output("sweep-series-pcp", "figure"),
         Output("sweep-series-pcp-data", "data"),
@@ -1685,6 +1733,7 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         Input({"sweep-series-scale": ALL}, "value"),
         State("sweep-series-state", "data"),
         State("sweep-series-snap", "data"),
+        State({"sweep-series-key": ALL}, "data"),
         State("url", "pathname"),
         State("url", "search"),
         prevent_initial_call=True,
@@ -1696,7 +1745,8 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         displays: list,
         scales: list,
         state: dict | None,
-        snapshot: dict | None,
+        snap: dict | None,
+        key_stores: list,
         pathname: str | None,
         search: str | None,
     ):
@@ -1710,9 +1760,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         triggered = {str(prop) for prop in context.triggered_prop_ids}
         pressed = pressed_props(context)
         state = state or sweep_views.default_series_state()
+        old_display = dict(state.get("display") or {})
+        old_scale = dict(state.get("scale") or {})
         keys = list(state.get("keys") or [])
-        display = dict(state.get("display") or {})
-        scale = dict(state.get("scale") or {})
+        display, scale = dict(old_display), dict(old_scale)
         keys_changed = False
         if "sweep-series-add.value" in triggered and added and added not in keys:
             keys = [*keys, str(added)]
@@ -1729,45 +1780,111 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             if not target:
                 continue
             if "sweep-series-display" in target:
-                value = _pattern_value(displays, target)
+                value = _pattern_value(displays, target, keys)
                 if value is not None:
                     display[str(target["sweep-series-display"])] = value
             if "sweep-series-scale" in target:
-                value = _pattern_value(scales, target)
+                value = _pattern_value(scales, target, keys)
                 if value is not None:
                     scale[str(target["sweep-series-scale"])] = value
-        controls_changed = display != dict(state.get("display") or {}) or scale != dict(
-            state.get("scale") or {}
-        )
-        cheap = sweep_views.facts_digest(service, sweep_id)
-        stale = cheap != state.get("cheap")
-        if not keys_changed and not controls_changed and not stale:
+        controls_keys = {
+            key
+            for key in keys
+            if display.get(key) != old_display.get(key)
+            or scale.get(key) != old_scale.get(key)
+        }
+        facts = sweep_views.facts_digest(service, sweep_id)
+        digests = sweep_views.series_key_digests(service, project, sweep_id)
+        old_digests = state.get("digests") or {}
+        stale = [key for key in keys if digests.get(key) != old_digests.get(key)]
+        facts_changed = facts != state.get("cheap")
+        if not keys_changed and not controls_keys and not stale and not facts_changed:
             raise PreventUpdate
-        if keys_changed or stale or snapshot is None:
-            now = time.time_ns()
+        now = time.time_ns()
+        stored = _key_store_payloads(key_stores, keys)
+        if keys_changed or facts_changed or snap is None:
             snapshot = sweep_views.series_snapshot_fetch(
                 service, project, sweep_id, keys, now
             )
+            payloads, snap = sweep_views.series_split(snapshot, keys)
+        else:
+            payloads = dict(stored)
+            if stale:
+                payloads.update(
+                    sweep_views.series_keys_refetch(
+                        service,
+                        project,
+                        sweep_id,
+                        stale,
+                        (snap or {}).get("trials") or [],
+                        now,
+                    )
+                )
+        data_keys = {key for key in keys if payloads.get(key) != stored.get(key)}
         state = {
             "keys": keys,
             "display": display,
             "scale": scale,
-            "cheap": cheap,
+            "cheap": facts,
+            "digests": digests,
         }
-        figure, pcp_data = sweep_views.series_pcp_outputs(state, snapshot)
-        offered = {
-            entry["value"]
-            for entry in snapshot.get("key_options") or []
-            if isinstance(entry, dict) and entry.get("value")
-        }
+        if keys_changed:
+            figure, pcp_data = sweep_views.series_pcp_outputs(
+                state, payloads, (snap or {}).get("trials") or []
+            )
+            return (
+                sweep_views.series_blocks(state, payloads),
+                sweep_views.series_chip_spans(state),
+                _series_options(snap, keys),
+                None,
+                state,
+                snap,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                analysis.updated_ago(now),
+                figure,
+                pcp_data,
+            )
+        refreshed = bool(data_keys or facts_changed)
+        if refreshed:
+            figure, pcp_data = sweep_views.series_pcp_outputs(
+                state, payloads, (snap or {}).get("trials") or []
+            )
+        else:
+            figure, pcp_data = no_update, no_update
+
+        def series_payload(key: str) -> dict:
+            return payloads.get(key) or {"series": [], "stats": []}
+
         return (
-            sweep_views.series_blocks(state, snapshot),
-            sweep_views.series_chips(state, snapshot),
-            [{"label": key, "value": key} for key in sorted(offered - set(keys))],
+            no_update,
+            no_update,
+            _series_options(snap, keys) if facts_changed else no_update,
             None,
             state,
-            snapshot,
-            analysis.updated_ago(int(snapshot.get("at_ns") or 0)),
+            snap if facts_changed else no_update,
+            [series_payload(key) if key in data_keys else no_update for key in keys],
+            [
+                sweep_views.series_key_figure(key, series_payload(key)["series"], state)
+                if key in data_keys | controls_keys
+                else no_update
+                for key in keys
+            ],
+            [
+                sweep_views.series_key_head(key, series_payload(key)["series"])
+                if key in data_keys
+                else no_update
+                for key in keys
+            ],
+            [
+                sweep_views.series_key_stats(key, series_payload(key)["stats"])
+                if key in data_keys
+                else no_update
+                for key in keys
+            ],
+            analysis.updated_ago(now) if refreshed else no_update,
             figure,
             pcp_data,
         )
