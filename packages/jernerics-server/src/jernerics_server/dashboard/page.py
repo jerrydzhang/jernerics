@@ -1,4 +1,5 @@
 from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
@@ -8,7 +9,8 @@ from dash.development.base_component import Component
 from .components import MISSING
 from .routes import ROUTES_BASE
 
-STYLESHEET_HREF = f"{ROUTES_BASE}/assets/page.css"
+_PAGE_CSS = Path(__file__).with_name("assets") / "page.css"
+STYLESHEET_HREF = f"{ROUTES_BASE}/assets/page.css?m={_PAGE_CSS.stat().st_mtime_ns}"
 
 TABS = ("Overview", "Investigations", "Exceptions")
 
@@ -29,7 +31,9 @@ def topbar(project: str | None, scope: str = "Active sweeps") -> html.Div:
     """Brand · project scope · log out, one line across the top. A
     catalog page has no project, so it passes ``None`` to drop the
     scopebar; the logout posts to the auth route."""
-    children: list[Component | str] = [html.Span("jernerics", className="brand")]
+    children: list[Component | str] = [
+        html.A("jernerics", href=f"{ROUTES_BASE}/", className="brand")
+    ]
     if project is not None:
         children.append(
             html.Span(

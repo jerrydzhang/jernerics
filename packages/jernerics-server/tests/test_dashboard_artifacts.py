@@ -625,7 +625,7 @@ class TestViewerShell:
         page, _ = page_content(f"/dashboard/artifact-view/{CUSTOM.hex}", env.service)
         assert getattr(page, "className", None) == "np"
         link = _find(page, html.Link)[0]
-        assert link.href == "/dashboard/assets/page.css"
+        assert link.href.startswith("/dashboard/assets/page.css?m=")
         assert not any(
             getattr(node, "className", None) == "topbar" for node in _walk(page)
         )
