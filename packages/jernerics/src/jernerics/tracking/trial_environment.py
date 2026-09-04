@@ -171,6 +171,12 @@ class TrialEnvironment:
                 "the post-hook will retry",
                 file=sys.stderr,
             )
+        if result.pending:
+            print(
+                f"jernerics: {result.pending} blob(s) without confirmed server "
+                "receipt; kept for the post-hook sweep",
+                file=sys.stderr,
+            )
 
     def close(self) -> None:
         if self._closed:
