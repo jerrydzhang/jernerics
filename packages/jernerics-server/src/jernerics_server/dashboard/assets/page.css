@@ -296,10 +296,18 @@
   content: "▾";
 }
 
-/* dcc wraps its checkboxes in a 100%-wide container the flex summary stretches full-row (jernerics-7j3j). */
+/* dcc wraps its checkboxes in a container that collapses to its 1px
+   borders under `width: auto; flex: none` (its input's width:100% makes
+   the intrinsic size resolve to 0) and clips them with overflow:hidden
+   (jernerics-7j3j). Size the wrapper to the box itself instead. */
 .np details.failgroup summary .dash-input-container {
-  width: auto;
+  width: 14px;
+  height: 14px;
   flex: none;
+  border: none;
+  background: none;
+  box-shadow: none;
+  overflow: visible;
 }
 
 .np details.failgroup summary .dash-input-container input[type="checkbox"] {
@@ -378,15 +386,23 @@
   position: sticky;
   top: 0;
   z-index: 5;
-  display: flex;
-  gap: 8px;
   align-items: center;
-  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   padding: 8px 12px;
   margin: 0 0 12px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+
+/* dcc's width:100% container would take a whole flex line; let it share. */
+.np .bulkbar .dash-input-container {
+  flex: 1 1 260px;
+  width: auto;
+  min-width: 200px;
 }
 
 .np .tabs {
@@ -463,6 +479,7 @@
   color: var(--text-2);
   border-right: 1px solid var(--border);
   background: var(--surface);
+  white-space: nowrap;
 }
 
 .np .seg :last-child {

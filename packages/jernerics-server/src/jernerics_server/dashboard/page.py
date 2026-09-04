@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Literal
@@ -10,7 +11,8 @@ from .components import MISSING
 from .routes import ROUTES_BASE
 
 _PAGE_CSS = Path(__file__).with_name("assets") / "page.css"
-STYLESHEET_HREF = f"{ROUTES_BASE}/assets/page.css?m={_PAGE_CSS.stat().st_mtime_ns}"
+_PAGE_CSS_HASH = hashlib.sha256(_PAGE_CSS.read_bytes()).hexdigest()[:12]
+STYLESHEET_HREF = f"{ROUTES_BASE}/assets/page.css?m={_PAGE_CSS_HASH}"
 
 TABS = ("Overview", "Investigations", "Exceptions")
 
