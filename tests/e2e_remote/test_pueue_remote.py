@@ -4,6 +4,10 @@ Three configs run sequentially against one co-located server (module-scoped
 ``scimlab_server``). See ``_helpers.py`` for the wire protocol details.
 """
 
+import json
+import re
+import subprocess
+
 from ._helpers import (
     SCIMLAB,
     SCIMLAB_CACHE,
@@ -12,11 +16,37 @@ from ._helpers import (
     metric_max,
     retry_ledger,
     run_sweep,
+    ssh,
     value_count,
     wait_for,
     wait_for_settled,
     wait_for_trial_end,
 )
+
+
+def _remote_task_started(study):
+    res = ssh(SCIMLAB, "pueue status --json", capture_output=True, text=True)
+    if res.returncode != 0:
+        return None
+    try:
+        tasks = json.loads(res.stdout).get("tasks", {})
+    except json.JSONDecodeError:
+        return None
+    for task in tasks.values():
+        status = task.get("status", {})
+        if task.get("group") in (study, f"{study}_checker") and "Queued" not in status:
+            return True
+    return None
+
+
+def _run_cli(*args, timeout):
+    return subprocess.run(
+        ["jernerics", *args],
+        cwd="example",
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
 
 
 def test_basic(scimlab_server):
@@ -53,3 +83,33 @@ def test_gpu(scimlab_server):
     )
     cuda = wait_for(lambda: metric_max(server, study, "cuda_available"), timeout=60)
     assert cuda, f"cuda_available not 1.0 for {study} (got {cuda})"
+
+
+def test_job_logs_follow(scimlab_server):
+    """Group-id follow ends with a per-task state line on pueue."""
+    server = scimlab_server
+    study = run_sweep(server, "pueue-remote", "config_gpu.py")
+    assert wait_for(lambda: _remote_task_started(study), timeout=300), (
+        f"no task started for {study}"
+    )
+    proc = _run_cli(
+        "job", "logs", study, "--backend", "pueue-remote", "--follow", timeout=900
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--- job " in proc.stdout
+    assert "follow ended ---" in proc.stdout
+
+
+def test_job_resources(scimlab_server):
+    """Resources dispatch through the pueue backend: wall-time, no cpu/mem."""
+    server = scimlab_server
+    study = run_sweep(server, "pueue-remote", "config_gpu.py")
+    assert wait_for_trial_end(server, study, 1, timeout=900), (
+        f"expected 1 terminal trial for {study}"
+    )
+    proc = _run_cli("job", "resources", study, "--backend", "pueue-remote", timeout=120)
+    assert proc.returncode == 0, proc.stderr
+    assert "job_id" in proc.stdout
+    assert re.search(r"wall_time_s\s+\d", proc.stdout)
+    assert "COMPLETED" in proc.stdout
+    assert "cpu_time_s  —" in proc.stdout

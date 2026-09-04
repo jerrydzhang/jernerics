@@ -453,6 +453,23 @@ class TestFromConfig:
         assert adapter.parallel == 4
         assert "~" not in adapter.remote_dir
 
+    def test_no_cache_dir_defaults_to_home(self):
+        from jernerics.backend.host import LocalHost
+
+        config = BackendConfig(
+            shared=SharedConfig(
+                name="local-pueue",
+                type="pueue",
+                host=None,
+                remote_dir="~/projects/proj",
+                container_type="docker",
+            ),
+            backend=PueueConfig(parallel=2),
+        )
+        adapter = PueueAdapter.from_config(config, host=LocalHost())
+
+        assert adapter.cache_dir == f"{LocalHost().home}/.cache/jernerics"
+
 
 class TestCleanup:
     def test_cleanup_cleans_only_tracked_groups(self):
