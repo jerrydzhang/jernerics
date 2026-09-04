@@ -71,8 +71,8 @@ def facts_digest(service: DashboardService, sweep_id: str) -> str:
 
 
 def python_disclosure(project: str, sweep_id: str) -> html.Details:
-    """The sweep's effective Selection as an opaque token plus the
-    runnable handoff snippet, disclosed in place."""
+    """The sweep's effective Selection as the runnable handoff snippet
+    — token embedded, disclosed in place."""
     selection = Selection(project=project, sweeps=(uuid.UUID(sweep_id),))
     token = encode_selection(selection)
     snippet = analysis.python_snippet(token, project, _PYTHON_BASE_URL)
@@ -87,10 +87,6 @@ def python_disclosure(project: str, sweep_id: str) -> html.Details:
                     dcc.Clipboard(content=snippet, title="Copy runnable snippet"),
                 ],
                 className="actions",
-            ),
-            html.Section(
-                html.Pre(token, className="config-json", style=style),
-                className="section",
             ),
             html.Section(
                 html.Pre(snippet, className="config-json", style=style),

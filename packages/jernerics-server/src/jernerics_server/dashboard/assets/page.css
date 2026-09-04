@@ -210,7 +210,16 @@
   border-radius: 8px;
   overflow: hidden;
   margin: 0 0 8px;
+  padding: 12px 16px;
+}
+
+/* Tables sit flush (cells carry the inset); every other child keeps the box inset. */
+.np .section:has(> table:only-child) {
   padding: 0;
+}
+
+.np .section > pre {
+  margin: 0;
 }
 
 .np th {
