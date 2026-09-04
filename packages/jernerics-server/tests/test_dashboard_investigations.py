@@ -240,7 +240,7 @@ class TestUnorganized:
     def test_rows_shaped_like_sweep_summaries(self, service, compare):
         lone = service.unorganized(LAB)[0]
         assert str(lone.sweep_id) == str(LONE_SWEEP)
-        assert lone.state == "completed"
+        assert lone.state == "no-data"
         assert lone.incomplete is False
 
     def test_archived_investigation_still_organizes(self, service, store, shared):

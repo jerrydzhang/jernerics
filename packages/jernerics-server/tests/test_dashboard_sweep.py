@@ -246,6 +246,71 @@ def service(tmp_path):
     return DashboardService(QueryService(store), store)
 
 
+FAIL_SWEEP = uuid.UUID("aa730000-0000-4000-8000-000000000000")
+FAIL_SUB = uuid.UUID("bb730000-0000-4000-8000-000000000000")
+FAIL_TRIAL = uuid.UUID("cc730000-0000-4000-8000-000000000000")
+FAIL_EXEC = uuid.UUID("dd730000-0000-4000-8000-000000000000")
+
+
+def _failed_seed_events() -> list:
+    """One sweep whose only trial never left "running" while its single
+    execution ended in failure — the stuck atlas shape."""
+    return [
+        _event(
+            SweepSnapshotEvent,
+            900,
+            project=PROJECT,
+            sweep_id=FAIL_SWEEP,
+            name="doomed",
+            state="running",
+        ),
+        _event(
+            SubmissionSnapshotEvent,
+            895,
+            submission_id=FAIL_SUB,
+            sweep_id=FAIL_SWEEP,
+            backend="local",
+            state="running",
+            submitted_at=_BASE - timedelta(seconds=895),
+        ),
+        _event(
+            TrialSnapshotEvent,
+            890,
+            trial_id=FAIL_TRIAL,
+            sweep_id=FAIL_SWEEP,
+            number=0,
+            state=TrialState.RUNNING,
+            retry_root_trial_id=FAIL_TRIAL,
+        ),
+        _event(
+            ExecutionStartEvent,
+            880,
+            execution_id=FAIL_EXEC,
+            trial_id=FAIL_TRIAL,
+            hostname="node01",
+            started_at=_BASE - timedelta(seconds=880),
+        ),
+        _event(
+            ExecutionEndEvent,
+            870,
+            execution_id=FAIL_EXEC,
+            ended_at=_BASE - timedelta(seconds=870),
+            outcome="failure",
+            exit_code=1,
+        ),
+    ]
+
+
+@pytest.fixture
+def failed_service(tmp_path):
+    store = Store(tmp_path / "failed-sweep.sqlite")
+    result = IngestService(store).apply(
+        IngestRequest(protocol_version=PROTOCOL_VERSION, events=_failed_seed_events())
+    )
+    assert not result.conflicts
+    return DashboardService(QueryService(store), store)
+
+
 @pytest.fixture
 def investigation_id(service):
     record = service.create_investigation(
@@ -650,3 +715,21 @@ def _fire_picks(client, key, url, values, current=None):
     )
     payload = response.json()["response"] if response.status_code == 200 else None
     return response, payload
+
+
+class TestFailedExecutionStatus:
+    def test_sweep_state_derives_failed_from_execution(self, failed_service):
+        detail = failed_service.sweep_detail(str(FAIL_SWEEP))
+        assert detail.overview.state == "failed"
+
+    def test_header_counts_failure_once(self, failed_service):
+        rendered = _flat(_render(failed_service, FAIL_SWEEP))
+        assert "st-failed" in rendered
+        assert "st-running" not in rendered
+        assert "0/1 trials" in rendered
+        assert "0 succeeded · 1 failed" in rendered
+        assert rendered.count("succeeded · 1 failed") == 1
+
+    def test_trial_dot_marks_failed_execution(self, failed_service):
+        rendered = _flat(_render(failed_service, FAIL_SWEEP))
+        assert "failed execution" in rendered

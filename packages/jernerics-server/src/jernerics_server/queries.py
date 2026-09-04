@@ -140,6 +140,22 @@ def _monitoring(
     return "stale"
 
 
+def sweep_status(trials: int, complete: int, failed: int, lost: int) -> str:
+    """The one sweep-status derivation: all-terminal trials with a
+    failure are "failed", all-terminal are "completed", lost-execution
+    majorities lean "completed" or "stale", else "running"/"no-data"."""
+    if trials <= 0:
+        return "no-data"
+    terminal = complete + failed
+    if terminal >= trials:
+        return "failed" if failed else "completed"
+    if lost and terminal + lost >= trials and complete / trials >= 0.5:
+        return "completed"
+    if lost:
+        return "stale"
+    return "running"
+
+
 _ZERO_COUNTS: dict[str, int] = {
     "active": 0,
     "quiet": 0,
@@ -991,10 +1007,11 @@ class QueryService:
         case_sql, case_params = self._monitoring_case()
         _, rows = self._store.query(
             "WITH sel AS ("
-            "SELECT s.sweep_id AS sweep_id, s.name AS name, s.state AS state, "
+            "SELECT s.sweep_id AS sweep_id, s.name AS name, "
             "s.updated_ns AS updated_ns, c.archived_ns AS archived_ns, "
             "c.invalid_ns AS invalid_ns, c.invalid_reason AS invalid_reason "
-            "FROM sweeps s LEFT JOIN sweep_curation c ON c.sweep_id = s.sweep_id "
+            "FROM sweeps s LEFT JOIN sweep_curation c "
+            "ON c.sweep_id = s.sweep_id "
             f"WHERE {scope}), "
             "latest_sub AS ("
             "SELECT sweep_id, submitted_ns, backend, expected_trials FROM ("
@@ -1023,17 +1040,35 @@ class QueryService:
             f"{case_sql} AS label "
             "FROM executions e JOIN trials t ON e.trial_id = t.trial_id "
             "JOIN sel ON t.sweep_id = sel.sweep_id) x GROUP BY x.sweep_id), "
+            "ranked_execs AS ("
+            "SELECT e.trial_id AS trial_id, e.outcome AS outcome, "
+            "ROW_NUMBER() OVER (PARTITION BY e.trial_id ORDER BY "
+            "e.started_ns DESC, e.execution_id DESC) AS rn "
+            "FROM executions e "
+            "JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sel ON t.sweep_id = sel.sweep_id), "
+            "latest_execs AS ("
+            "SELECT trial_id, outcome FROM ranked_execs WHERE rn = 1), "
             "trial_states AS ("
             "SELECT t.sweep_id AS sweep_id, "
             "COUNT(*) AS trials, "
             "SUM(t.state = 'completed') AS trials_complete, "
-            "MIN(CASE WHEN t.state = 'completed' THEN t.objective END) "
-            "AS best_objective, "
+            "SUM(t.state = 'failed' OR (t.state IN ('waiting', 'running') "
+            "AND le.outcome = 'failure')) AS trials_failed, "
             "SUM(t.state = 'waiting') AS waiting, "
-            "SUM(t.state = 'running') AS running "
+            "SUM(t.state = 'running') AS running, "
+            "MIN(CASE WHEN t.state = 'completed' THEN t.objective END) "
+            "AS best_objective "
             "FROM trials t JOIN sel ON t.sweep_id = sel.sweep_id "
+            "LEFT JOIN latest_execs le ON le.trial_id = t.trial_id "
+            "GROUP BY t.sweep_id), "
+            "lost_trials AS ("
+            "SELECT t.sweep_id AS sweep_id, COUNT(DISTINCT t.trial_id) AS lost "
+            "FROM executions e JOIN trials t ON e.trial_id = t.trial_id "
+            "JOIN sel ON t.sweep_id = sel.sweep_id "
+            f"WHERE e.outcome IS NULL AND {case_sql} = 'stale' "
             "GROUP BY t.sweep_id) "
-            "SELECT sel.sweep_id, sel.name, sel.state, ls.submitted_ns, "
+            "SELECT sel.sweep_id, sel.name, ls.submitted_ns, "
             "ls.backend, ls.expected_trials, COALESCE(j.n_jobs, 0), "
             "COALESCE(m.started, 0), COALESCE(m.terminal, 0), "
             "COALESCE(m.n_active, 0), COALESCE(m.n_quiet, 0), "
@@ -1041,22 +1076,23 @@ class QueryService:
             "COALESCE(m.n_succeeded, 0), COALESCE(m.n_failed, 0), "
             "COALESCE(ts.waiting, 0), COALESCE(ts.running, 0), "
             "COALESCE(ts.trials, 0), COALESCE(ts.trials_complete, 0), "
+            "COALESCE(ts.trials_failed, 0), COALESCE(lt.lost, 0), "
             "ts.best_objective, "
             "sel.archived_ns, sel.invalid_ns, sel.invalid_reason "
             "FROM sel LEFT JOIN latest_sub ls ON ls.sweep_id = sel.sweep_id "
             "LEFT JOIN jobs j ON j.sweep_id = sel.sweep_id "
             "LEFT JOIN mon m ON m.sweep_id = sel.sweep_id "
             "LEFT JOIN trial_states ts ON ts.sweep_id = sel.sweep_id "
+            "LEFT JOIN lost_trials lt ON lt.sweep_id = sel.sweep_id "
             "ORDER BY sel.updated_ns DESC, sel.sweep_id",
-            [*params, *case_params],
+            [*params, *case_params, *case_params],
         )
-        return [
+        mapped = [
             dict(
                 zip(
                     (
                         "sweep_id",
                         "name",
-                        "state",
                         "latest_submitted_ns",
                         "backend",
                         "expected_trials",
@@ -1073,6 +1109,8 @@ class QueryService:
                         "running_trials",
                         "trials",
                         "trials_complete",
+                        "trials_failed",
+                        "trials_lost",
                         "best_objective",
                         "archived_ns",
                         "invalid_ns",
@@ -1084,6 +1122,14 @@ class QueryService:
             )
             for row in rows
         ]
+        for item in mapped:
+            item["state"] = sweep_status(
+                item["trials"],
+                item["trials_complete"],
+                item["trials_failed"],
+                item["trials_lost"],
+            )
+        return mapped
 
     def failed_executions(
         self,
