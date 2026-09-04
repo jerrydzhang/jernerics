@@ -600,7 +600,7 @@ class TestSweepStatusAndBestObjective:
 
     def test_overview_row_cells_render_derived_facts(self, status_service):
         summaries = {row.name: row for row in status_service.sweep_overview("status")}
-        cells = overview_row("status", summaries["all-done"], "", 0).children
+        cells = overview_row("status", summaries["all-done"], "", 0).children or []
         assert cells[3].children == "2/2"
         assert cells[4].children == "0.05"
         dot = cells[2].children
@@ -608,7 +608,7 @@ class TestSweepStatusAndBestObjective:
 
     def test_overview_row_renders_em_dash_cell(self, status_service):
         summaries = {row.name: row for row in status_service.sweep_overview("status")}
-        cells = overview_row("status", summaries["no-objective"], "", 0).children
+        cells = overview_row("status", summaries["no-objective"], "", 0).children or []
         assert cells[4].children == MISSING
 
     def test_failed_execution_marks_sweep_failed(self, status_service):

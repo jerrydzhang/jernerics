@@ -805,7 +805,7 @@ class TestInvestigationCompare:
         assert member.state == "incomplete"
         cells = {
             stat.children[0].children: stat.children[1].children
-            for stat in workspace.coverage_strip(doc).children
+            for stat in workspace.coverage_strip(doc).children or []
         }
         assert cells["Incomplete"] == 1
 

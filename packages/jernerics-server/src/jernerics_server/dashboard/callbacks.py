@@ -1601,7 +1601,9 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
         if not pressed_props(context):
             raise PreventUpdate
         token, control = pattern_trigger(context)
-        action = SWEEP_ACTIONS.get(token) if control == "sweep-action" else None
+        action = (
+            SWEEP_ACTIONS.get(token) if control == "sweep-action" and token else None
+        )
         spec = parse_route(pathname)
         if action is None or spec.kind != "sweep":
             raise PreventUpdate
@@ -1716,9 +1718,10 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
                 if isinstance(entry.get("id"), dict)
                 and entry["id"].get("sweep-series-key")
             }
-        return {
-            key: payload or {} for key, payload in zip(keys, key_stores, strict=False)
-        }
+        normalized: dict[str, dict] = {}
+        for key, payload in zip(keys, key_stores, strict=False):
+            normalized[str(key)] = payload if isinstance(payload, dict) else {}
+        return normalized
 
     def _series_options(snap: dict | None, keys: list[str]) -> list[dict[str, str]]:
         """Add-picker options: every offered key the view not showing."""

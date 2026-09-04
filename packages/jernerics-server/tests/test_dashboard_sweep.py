@@ -669,6 +669,20 @@ def dash_app(tmp_path_factory):
     return build_dash_app(ctx)
 
 
+@pytest.fixture(scope="class")
+def callback_map(tmp_path_factory):
+    service = DashboardService(
+        QueryService(_seeded_store(tmp_path_factory.mktemp("sweep-page-graph")))
+    )
+    ctx = DashboardContext(
+        api_key=API_KEY,
+        queries=service.queries,
+        service=service,
+        signer=SessionSigner(b"\x00" * 32),
+    )
+    return build_dash_app(ctx).callback_map
+
+
 def _outputs_of(key: str) -> set[str]:
     stripped = key.removeprefix("..").removesuffix("..")
     return {part.split("@")[0] for part in stripped.split("...") if part}
@@ -732,6 +746,7 @@ class TestFailedExecutionStatus:
     def test_trial_dot_marks_failed_execution(self, failed_service):
         rendered = _flat(_render(failed_service, FAIL_SWEEP))
         assert "failed execution" in rendered
+
 
 # -- Series sub-view callbacks (jernerics-hjip, jernerics-idrh, jernerics-1r00)
 
@@ -1013,6 +1028,8 @@ class TestSeriesCallbacks:
         assert "_dash_no_update" not in json.dumps(stores[0])
         assert stores[1] == _NO_UPDATE
         assert "sweep-series-pcp" in payload
+
+
 class TestCurationCallbackBinding:
     """The curation callback rides pattern ids, so it binds on every
     sweep page: only the applicable buttons mount per state and every
