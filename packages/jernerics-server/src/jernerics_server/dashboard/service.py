@@ -335,6 +335,18 @@ def _parse_id(value: str) -> uuid.UUID | None:
         return None
 
 
+def _member_state(trial_states: Sequence[str], expected_trials: int | None) -> str:
+    """Data completeness, not sweep status: completed only when every
+    expected trial reached a terminal state; the coverage strip's
+    Incomplete counts the rest."""
+    terminal = sum(1 for state in trial_states if state in ("completed", "failed"))
+    if expected_trials is not None:
+        return "completed" if terminal >= expected_trials else "incomplete"
+    if not trial_states:
+        return "no-data"
+    return "completed" if terminal == len(trial_states) else "incomplete"
+
+
 def _summary_facts(summary: SweepSummary) -> tuple:
     """Overview row as a digest-stable tuple of stored facts."""
     return (
@@ -679,12 +691,16 @@ class DashboardService:
         signatures_of_trial = {
             trial: tuple(sorted(items)) for trial, items in signatures_of_trial.items()
         }
+        trial_states: dict[str, list[str]] = {}
+        for row in trials:
+            trial_states.setdefault(str(row["sweep_id"]), []).append(str(row["state"]))
         members = self._compare_members(
             record,
             member_ids,
             sweep_of_trial,
             outcome_of_trial,
             factor_values,
+            trial_states,
         )
         analysis_set = [
             member
@@ -737,6 +753,7 @@ class DashboardService:
         sweep_of_trial: dict[str, str],
         outcome_of_trial: dict[str, float],
         factor_values: dict[str, str | None],
+        trial_states: dict[str, list[str]],
     ) -> list[CompareMember]:
         summaries = {
             summary.sweep_id: summary
@@ -756,8 +773,10 @@ class DashboardService:
                 CompareMember(
                     sweep_id=sweep_id,
                     name=summary.name,
+                    state=_member_state(
+                        trial_states.get(sweep_id, ()), summary.expected_trials
+                    ),
                     factor_value=factor_values.get(sweep_id),
-                    state=summary.state,
                     invalid=summary.invalid,
                     archived=summary.archived,
                     completed=summary.succeeded,

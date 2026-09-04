@@ -692,7 +692,7 @@ class TestDashboardJourney:
         assert "adadelta / config_lr.py" in text
         # usable fractions and curation badges ride their row cells
         assert "roberts-lr completed 2/2 2/2" in text
-        assert "roberts-lr-partial running 1/2 1/2" in text
+        assert "roberts-lr-partial incomplete 1/2 1/2" in text
         assert "roberts-lr-flagged invalid archived completed 2/2 2/2" in text
 
         # every member name links to the sweep page carrying the
