@@ -2273,6 +2273,27 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             raise PreventUpdate
         return {"tks": []}, []
 
+    @app.callback(
+        Output("sweep-points-figure", "figure"),
+        Input("sweep-points-params", "value"),
+        State("sweep-points-params", "options"),
+        State("sweep-points-data", "data"),
+        prevent_initial_call=True,
+    )
+    def _pick_sweep_points_params(
+        picked: list[str] | None,
+        options: list[dict[str, str]] | None,
+        data: dict | None,
+    ):
+        dims = (data or {}).get("dims") or []
+        offered = {entry["value"] for entry in options or []}
+        keep = None
+        if picked:
+            keep = {str(key) for key in picked} | {
+                dim["label"] for dim in dims if dim["label"] not in offered
+            }
+        return figures.points_parcoords(dims, keep=keep)
+
     # -- Search: the trial filter ------------------------------------------
 
     @app.callback(

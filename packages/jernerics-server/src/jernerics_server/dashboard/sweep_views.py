@@ -622,14 +622,23 @@ def points_columns(view: dict[str, Any]) -> list[SortColumn]:
     ]
 
 
+def _param_pick_labels(view: dict[str, Any], outcome: str | None) -> list[str]:
+    """The parcoords dimensions that are sampled params — the picker's
+    choices; the sweep and outcome columns are never params."""
+    fixed = {"sweep", f"{outcome} (final)"}
+    return [dim["label"] for dim in view["dims"] if dim["label"] not in fixed]
+
+
 def points_body(service: DashboardService, project: str, sweep_id: str) -> html.Div:
     """The Points sub-view: trials × final scalars grid with the
-    params → outcome parallel coordinates and the selection split."""
+    params → outcome parallel coordinates, a picker over the plotted
+    params, and the selection split."""
     built = points_view(service, project, sweep_id)
     view = built["view"]
     if not view["rows"]:
         return html.Div(Empty("No trials under this sweep — nothing to compare yet."))
     plotted = built["outcome"] and len(view["dims"]) > 1 and view["with_outcome"]
+    params = _param_pick_labels(view, built["outcome"])
     return html.Div(
         [
             html.Section(
@@ -681,10 +690,21 @@ def points_body(service: DashboardService, project: str, sweep_id: str) -> html.
                     ),
                     *(
                         [
+                            dcc.Dropdown(
+                                id="sweep-points-params",
+                                options=[
+                                    {"label": label, "value": label} for label in params
+                                ],
+                                value=params,
+                                multi=True,
+                                clearable=False,
+                                placeholder="params…",
+                                className="addkey",
+                            ),
                             dcc.Graph(
                                 id="sweep-points-figure",
                                 figure=figures.points_parcoords(view["dims"]),
-                            )
+                            ),
                         ]
                         if plotted
                         else [
@@ -697,7 +717,10 @@ def points_body(service: DashboardService, project: str, sweep_id: str) -> html.
                 ],
                 className="section",
             ),
-            dcc.Store(id="sweep-points-data", data={"tks": view["tks"]}),
+            dcc.Store(
+                id="sweep-points-data",
+                data={"tks": view["tks"], "dims": view["dims"]},
+            ),
             dcc.Store(id="sweep-points-sel", data={"tks": []}),
             dcc.Store(id="sweep-points-echo"),
         ],

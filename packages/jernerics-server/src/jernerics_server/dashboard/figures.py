@@ -76,6 +76,9 @@ _STUDY_FIG_HEIGHT = 240
 
 _STUDY_FIG_MARGIN = {"l": 48, "r": 16, "t": 30, "b": 36}
 """Compact margins; plotly's 80px defaults would eat a 240px figure."""
+_PARCOORDS_MARGIN = {**_STUDY_FIG_MARGIN, "t": 60}
+"""Parcoords draws rotated dimension labels above the plot box; the
+compact top margin clips them (jernerics-3yam)."""
 
 
 def _series_height(rows: int, legend_entries: int) -> int:
@@ -799,7 +802,7 @@ def parallel_coordinates(trials: list[dict[str, Any]]) -> go.Figure:
         )
     figure.update_layout(
         height=_STUDY_FIG_HEIGHT,
-        margin={**_STUDY_FIG_MARGIN, "l": 44, "r": 44},
+        margin={**_PARCOORDS_MARGIN, "l": 44, "r": 44},
     )
     return figure
 
@@ -821,12 +824,16 @@ def padded_range(values: list[float]) -> list[float]:
     return [low - pad, high + pad]
 
 
-def points_parcoords(dims: list[dict[str, Any]]) -> go.Figure:
+def points_parcoords(
+    dims: list[dict[str, Any]], keep: Sequence[str] | None = None
+) -> go.Figure:
     """Params → outcome parallel coordinates over the trials×final-scalars
     set. Every line stays plotted, each dimension carries its explicit
     full-data range (brushing fades natively, axes never rescale), and
     the line colors are the line order so the client restyles a
-    selection's colors without re-reading the data."""
+    selection's colors without re-reading the data. ``keep`` limits the
+    plotted dimensions to those labels; ``None`` keeps every dimension."""
+    plotted = [dim for dim in dims if keep is None or dim["label"] in keep]
     dimensions = [
         go.parcoords.Dimension(
             values=dim["values"],
@@ -838,13 +845,13 @@ def points_parcoords(dims: list[dict[str, Any]]) -> go.Figure:
                 else {}
             ),
         )
-        for dim in dims
+        for dim in plotted
     ]
     figure = go.Figure(
         go.Parcoords(
             dimensions=dimensions,
             line={
-                "color": list(range(len(dims[0]["values"]) if dims else 0)),
+                "color": list(range(len(plotted[0]["values"]) if plotted else 0)),
                 "colorscale": "Viridis",
                 "showscale": False,
             },
@@ -852,7 +859,7 @@ def points_parcoords(dims: list[dict[str, Any]]) -> go.Figure:
     )
     figure.update_layout(
         height=_POINTS_FIG_HEIGHT,
-        margin={**_STUDY_FIG_MARGIN, "l": 60, "r": 60},
+        margin={**_PARCOORDS_MARGIN, "l": 60, "r": 60},
     )
     return figure
 
