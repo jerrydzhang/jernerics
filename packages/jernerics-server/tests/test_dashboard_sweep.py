@@ -552,10 +552,24 @@ class TestSubViews:
             for node in _walk(page)
             if isinstance(node, html.Pre) and "config-json" in str(node.className)
         ]
-        token = str(pres[0].children)
+        assert len(pres) == 1
+        snippet = str(pres[0].children)
+        assert snippet.startswith("from jernerics.tracking import TrackingClient")
+        token = snippet.split('decode_selection("')[1].split('")')[0]
         selection = decode_selection(token)
         assert selection.project == PROJECT
         assert selection.sweeps == (SWEEP,)
+
+    def test_python_disclosure_never_shows_a_bare_token(self, service):
+        page, _polls = page_content(f"{WORKSPACE}/sweep/{SWEEP}", service)
+        pres = [
+            str(node.children)
+            for node in _walk(page)
+            if isinstance(node, html.Pre) and "config-json" in str(node.className)
+        ]
+        assert pres
+        for text in pres:
+            assert "decode_selection(" in text
 
     def test_unsupported_view_falls_back_to_the_overview(self, service):
         page, polls = page_content(
