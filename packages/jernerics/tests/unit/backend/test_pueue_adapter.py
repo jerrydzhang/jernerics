@@ -5,7 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 from jernerics.backend.adapter import SchedulerAdapter
-from jernerics.backend.pueue.adapter import PueueAdapter
+from jernerics.backend.host import StdoutHost
+from jernerics.backend.pueue.adapter import PueueAdapter, PueueSubmitError
 from jernerics.config import BackendConfig, PueueConfig, SharedConfig
 
 
@@ -136,10 +137,20 @@ class TestRenderSweep:
         assert "/tmp/jernerics_mystudy_checker.sh" in script
         assert "/tmp/jernerics_mystudy_wait_and_check.sh" in script
 
+    def test_validates_setup_and_trial_ids(self):
+        adapter = _make_adapter()
+        params = _make_params(n_trials=3)
+        script = adapter.render_sweep(params)
+
+        assert '[ -n "$SETUP_ID" ]' in script
+        assert '[ -n "$TRIAL_1_ID" ]' in script
+        assert '[ -n "$TRIAL_3_ID" ]' in script
+
 
 class TestSubmitSweep:
     def test_submits_and_returns_group_id(self):
         host = MagicMock()
+        host.emits_scripts = False
         host.run.return_value = MagicMock(returncode=0, stdout="")
         adapter = _make_adapter(host=host)
         params = _make_params(n_trials=5)
@@ -155,19 +166,68 @@ class TestSubmitSweep:
         host.run.return_value = MagicMock(returncode=1, stderr="pueue error")
         adapter = _make_adapter(host=host)
 
-        with pytest.raises(RuntimeError, match="Failed to submit sweep"):
+        with pytest.raises(PueueSubmitError, match="Failed to submit sweep"):
             adapter.submit_sweep(_make_params())
+
+    def test_skips_id_parsing_for_emits_scripts_host(self):
+        adapter = _make_adapter(host=StdoutHost())
+
+        result = adapter.submit_sweep(_make_params(n_trials=2))
+
+        assert len(result.submissions) == 1
+        assert result.submissions[0].job_id == "mystudy"
 
 
 class TestSubmitJob:
     def test_submits_single_job(self):
         host = MagicMock()
-        host.run.return_value = MagicMock(returncode=0, stdout="42\n")
+        host.run.return_value = MagicMock(
+            returncode=0, stdout="New task added with ID 42\n"
+        )
         adapter = _make_adapter(host=host)
 
         job_id = adapter.submit_job("echo hello", name="build")
 
         assert job_id == "42"
+
+    def test_preserves_script_with_single_quotes(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(
+            returncode=0, stdout="New task added with ID 7\n"
+        )
+        adapter = _make_adapter(host=host)
+
+        adapter.submit_job("echo '{def_hash}'", name="build")
+
+        submitted = host.run.call_args.kwargs["input"]
+        assert "cat > /tmp/jernerics_build.sh <<'JERNERICS_EOF'" in submitted
+        assert "echo '{def_hash}'" in submitted
+        assert "pueue add --label build -- bash /tmp/jernerics_build.sh" in submitted
+        assert "bash -e -c" not in submitted
+
+    def test_raises_on_unparseable_output(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="queued\n")
+        adapter = _make_adapter(host=host)
+
+        with pytest.raises(PueueSubmitError, match="invalid task id"):
+            adapter.submit_job("echo hello")
+
+    def test_raises_on_empty_output(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=0, stdout="")
+        adapter = _make_adapter(host=host)
+
+        with pytest.raises(PueueSubmitError, match="invalid task id"):
+            adapter.submit_job("echo hello")
+
+    def test_raises_on_failure(self):
+        host = MagicMock()
+        host.run.return_value = MagicMock(returncode=1, stderr="pueue down")
+        adapter = _make_adapter(host=host)
+
+        with pytest.raises(PueueSubmitError, match="Failed to submit build job"):
+            adapter.submit_job("echo hello")
 
 
 class TestJobLifecycle:

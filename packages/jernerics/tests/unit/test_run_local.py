@@ -583,6 +583,45 @@ class TestRunRemoteCommand:
         assert exc_info.value.code == ExitCode.SLURM_ERROR
         assert "array job 10001 already queued" in capsys.readouterr().out
 
+    @patch("jernerics.commands.execution._get_backend")
+    @patch("jernerics.commands.execution.load_config")
+    @patch("jernerics.commands.execution.find_pyproject_dir")
+    def test_pueue_submit_error_exits_four(
+        self, mock_find, mock_load, mock_get_backend, tmp_path, capsys
+    ):
+        from jernerics.backend.pueue.adapter import PueueSubmitError
+        from jernerics.commands.execution import run_remote
+        from jernerics.config import ExitCode
+
+        (tmp_path / "trial.py").write_text("pass")
+        (tmp_path / "config.py").write_text("pass")
+
+        mock_find.return_value = tmp_path
+        mock_load.return_value = SweepConfig(
+            base={},
+            search_space=None,
+            n_trials=1,
+            sampler=None,
+            direction="minimize",
+            backend_overrides={},
+            objective=None,
+        )
+        backend = MagicMock()
+        backend.prepare_and_submit.side_effect = PueueSubmitError(
+            "pueue add returned invalid task id '': daemon unreachable"
+        )
+        mock_get_backend.return_value = (backend, "proj", tmp_path)
+
+        with pytest.raises(SystemExit) as exc_info:
+            run_remote(
+                str(tmp_path / "trial.py"),
+                str(tmp_path / "config.py"),
+                backend_name="pueue",
+            )
+
+        assert exc_info.value.code == ExitCode.SLURM_ERROR
+        assert "invalid task id" in capsys.readouterr().out
+
     @patch("jernerics.commands.execution.load_config")
     @patch("jernerics.commands.execution.find_pyproject_dir")
     def test_set_unknown_key_exits_config_error(
