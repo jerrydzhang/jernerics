@@ -550,7 +550,10 @@ class TestRunRemoteCommand:
     def test_slurm_submit_error_exits_four(
         self, mock_find, mock_load, mock_get_backend, tmp_path, capsys
     ):
-        from jernerics.backend.slurm.adapter import SlurmSubmitError
+        from jernerics.backend.slurm.adapter import (
+            SBATCH_OVERRIDE_KEYS,
+            SlurmSubmitError,
+        )
         from jernerics.commands.execution import run_remote
         from jernerics.config import ExitCode
 
@@ -568,6 +571,7 @@ class TestRunRemoteCommand:
             objective=None,
         )
         backend = MagicMock()
+        backend.adapter.valid_override_keys.return_value = SBATCH_OVERRIDE_KEYS
         backend.prepare_and_submit.side_effect = SlurmSubmitError(
             "checker submission failed; array job 10001 already queued"
         )
@@ -589,7 +593,10 @@ class TestRunRemoteCommand:
     def test_pueue_submit_error_exits_four(
         self, mock_find, mock_load, mock_get_backend, tmp_path, capsys
     ):
-        from jernerics.backend.pueue.adapter import PueueSubmitError
+        from jernerics.backend.pueue.adapter import (
+            PUEUE_OVERRIDE_KEYS,
+            PueueSubmitError,
+        )
         from jernerics.commands.execution import run_remote
         from jernerics.config import ExitCode
 
@@ -607,6 +614,7 @@ class TestRunRemoteCommand:
             objective=None,
         )
         backend = MagicMock()
+        backend.adapter.valid_override_keys.return_value = PUEUE_OVERRIDE_KEYS
         backend.prepare_and_submit.side_effect = PueueSubmitError(
             "pueue add returned invalid task id '': daemon unreachable"
         )
@@ -622,11 +630,13 @@ class TestRunRemoteCommand:
         assert exc_info.value.code == ExitCode.SLURM_ERROR
         assert "invalid task id" in capsys.readouterr().out
 
+    @patch("jernerics.commands.execution._get_backend")
     @patch("jernerics.commands.execution.load_config")
     @patch("jernerics.commands.execution.find_pyproject_dir")
     def test_set_unknown_key_exits_config_error(
-        self, mock_find, mock_load, tmp_path, capsys
+        self, mock_find, mock_load, mock_get_backend, tmp_path, capsys
     ):
+        from jernerics.backend.slurm.adapter import SBATCH_OVERRIDE_KEYS
         from jernerics.commands.execution import run_remote
         from jernerics.config import ExitCode
 
@@ -642,6 +652,9 @@ class TestRunRemoteCommand:
             backend_overrides={},
             objective=None,
         )
+        backend = MagicMock()
+        backend.adapter.valid_override_keys.return_value = SBATCH_OVERRIDE_KEYS
+        mock_get_backend.return_value = (backend, "proj", tmp_path)
 
         with pytest.raises(SystemExit) as exc_info:
             run_remote(
@@ -726,6 +739,7 @@ class TestRunRemoteCommand:
     def test_set_param_coerces_values_into_spec(
         self, mock_find, mock_load, mock_get_backend, tmp_path
     ):
+        from jernerics.backend.slurm.adapter import SBATCH_OVERRIDE_KEYS
         from jernerics.commands.execution import run_remote
 
         (tmp_path / "trial.py").write_text("pass")
@@ -741,6 +755,7 @@ class TestRunRemoteCommand:
             objective=None,
         )
         backend = MagicMock()
+        backend.adapter.valid_override_keys.return_value = SBATCH_OVERRIDE_KEYS
         backend.prepare_and_submit.return_value = None
         mock_get_backend.return_value = (backend, "proj", tmp_path)
 
@@ -761,6 +776,7 @@ class TestRunRemoteCommand:
     def test_set_valid_sbatch_key_passes_cli_overrides(
         self, mock_find, mock_load, mock_get_backend, tmp_path
     ):
+        from jernerics.backend.slurm.adapter import SBATCH_OVERRIDE_KEYS
         from jernerics.commands.execution import run_remote
 
         (tmp_path / "trial.py").write_text("pass")
@@ -776,6 +792,7 @@ class TestRunRemoteCommand:
             objective=None,
         )
         backend = MagicMock()
+        backend.adapter.valid_override_keys.return_value = SBATCH_OVERRIDE_KEYS
         backend.prepare_and_submit.return_value = None
         mock_get_backend.return_value = (backend, "proj", tmp_path)
 
