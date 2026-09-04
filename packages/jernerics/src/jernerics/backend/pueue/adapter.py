@@ -1,11 +1,16 @@
+import contextlib
 import json
 import re
 import time
+from datetime import datetime, timezone
 
 from jernerics.backend.adapter import SweepSubmissionParams
 from jernerics.backend.models import JobInfo, JobSubmission, SubmitResult
 from jernerics.backend.path_resolver import substitute_project_name
-from jernerics.config import BackendConfig, PueueConfig
+from jernerics.config import BackendConfig, ExitCode, PueueConfig
+
+_LOG_RETRY_ATTEMPTS = 5
+_LOG_RETRY_DELAY_S = 1.0
 
 
 def _parse_pueue_status(status_json: dict) -> list[JobInfo]:
@@ -48,6 +53,36 @@ def _task_succeeded(status: dict) -> bool:
     if "Done" not in status:
         return False
     return status["Done"].get("result") == "Success"
+
+
+def _done_end(task: dict) -> datetime:
+    end = task.get("status", {}).get("Done", {}).get("end")
+    if end:
+        try:
+            return datetime.fromisoformat(end)
+        except ValueError:
+            pass
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _pick_follow_task(tasks: list[tuple[str, dict]]) -> str:
+    for task_id, task in tasks:
+        if _pueue_status_to_str(task["status"]) == "RUNNING":
+            return task_id
+    done = [(task_id, task) for task_id, task in tasks if _task_is_done(task["status"])]
+    if not done:
+        return tasks[0][0]
+    return max(done, key=lambda item: (_done_end(item[1]), int(item[0])))[0]
+
+
+def pueue_group_from_label(label: str) -> str | None:
+    for suffix in ("_checker", "_setup"):
+        if label.endswith(suffix):
+            return label[: -len(suffix)] or None
+    match = re.fullmatch(r"(.+)_trial_\d+", label)
+    if match:
+        return match.group(1) or None
+    return None
 
 
 class PueueDaemonError(RuntimeError):
@@ -342,34 +377,88 @@ class PueueAdapter:
         array_index: int | None = None,
         meta: dict | None = None,
     ) -> None:
-        if not job_id.isdigit():
-            print("Error: For pueue backends, specify a task ID (integer).")
-            raise SystemExit(1)
+        if job_id.isdigit():
+            if follow:
+                self._follow_task(job_id, stderr=stderr)
+            else:
+                print(self._get_log(job_id, stderr=stderr))
+            return
 
         if follow:
-            self.host.run(
-                ["pueue", "follow", job_id],
-                check=False,
-            )
-        else:
-            output = self._get_log(job_id)
-            print(output)
+            tasks = self._group_tasks(job_id)
+            if not tasks:
+                print(f"Error: no tasks found in group {job_id}")
+                raise SystemExit(ExitCode.GENERAL_ERROR)
+            self._follow_task(_pick_follow_task(tasks), stderr=stderr)
+            return
 
-    def _get_log(self, task_id: str) -> str:
-        result = self.host.run(
-            ["pueue", "log", task_id, "--json"],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        self._log_group(job_id, stderr=stderr)
+
+    def _group_tasks(self, group: str) -> list[tuple[str, dict]]:
+        data = _query_pueue_status(self.host)
+        tasks = [
+            (task_id, task)
+            for task_id, task in data.get("tasks", {}).items()
+            if task.get("group") == group
+        ]
+        return sorted(tasks, key=lambda item: int(item[0]) if item[0].isdigit() else 0)
+
+    def _follow_task(self, task_id: str, *, stderr: bool) -> None:
+        command = ["pueue", "follow", task_id]
+        if stderr:
+            command.append("--stderr")
+        with contextlib.suppress(KeyboardInterrupt):
+            self.host.run(command, check=False)
+        state = self.get_status(task_id) or "UNKNOWN"
+        print(f"--- job {task_id} {state}: follow ended ---")
+
+    def _log_group(self, group: str, *, stderr: bool) -> None:
+        tasks: list[tuple[str, dict]] = []
+        outputs: dict[str, str] = {}
+        for attempt in range(_LOG_RETRY_ATTEMPTS):
+            tasks = self._group_tasks(group)
+            outputs = {
+                task_id: self._fetch_log(task_id, stderr=stderr) for task_id, _ in tasks
+            }
+            if tasks and any(outputs.values()):
+                break
+            if attempt == 0:
+                print("Waiting for logs...")
+            time.sleep(_LOG_RETRY_DELAY_S)
+        else:
+            print(f"Error: no log output found for group {group}")
+            raise SystemExit(ExitCode.GENERAL_ERROR)
+        for task_id, task in tasks:
+            label = task.get("label")
+            header = f"--- task {task_id} ---"
+            if label:
+                header = f"--- task {task_id} ({label}) ---"
+            print(header)
+            print(outputs[task_id])
+
+    def _get_log(self, task_id: str, *, stderr: bool = False) -> str:
+        for attempt in range(_LOG_RETRY_ATTEMPTS):
+            output = self._fetch_log(task_id, stderr=stderr)
+            if output:
+                return output
+            if attempt == 0:
+                print("Waiting for logs...")
+            time.sleep(_LOG_RETRY_DELAY_S)
+        print(f"Error: no log output found for task {task_id}")
+        raise SystemExit(ExitCode.GENERAL_ERROR)
+
+    def _fetch_log(self, task_id: str, *, stderr: bool) -> str:
+        command = ["pueue", "log", task_id, "--json"]
+        if stderr:
+            command.append("--stderr")
+        result = self.host.run(command, check=False, capture_output=True, text=True)
         if result.returncode != 0:
-            return result.stderr
+            return ""
         try:
             data = json.loads(result.stdout)
-            task_data = data.get(task_id, {})
-            return task_data.get("output", "")
         except json.JSONDecodeError:
             return result.stdout
+        return data.get(task_id, {}).get("output", "")
 
     def cleanup(self) -> None:
         self.host.run(["pueue", "clean"], check=False, capture_output=True)
