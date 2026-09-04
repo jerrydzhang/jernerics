@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -391,8 +392,8 @@ class TestJobMeta:
 
     def _spec(self):
         return SweepSubmission(
-            trial_path=None,
-            config_path=None,
+            trial_path=Path("/tmp/trial.py"),
+            config_path=Path("/tmp/config.py"),
             study_name="mystudy",
             storage_url="http://tracking",
             n_trials=3,
