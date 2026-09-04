@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from jernerics_schema import (
     PROTOCOL_VERSION,
     ExecutionEndEvent,
+    ExecutionHeartbeatEvent,
     ExecutionStartEvent,
     FlatContext,
     IngestRequest,
@@ -696,6 +697,117 @@ class TestInvestigationCompare:
                 sig.compare
             ).investigation.members
         }
+
+    def test_lost_trial_keeps_member_incomplete_in_the_strip(
+        self, service, shared, store
+    ):
+        """1 complete + 1 lost trial: the sweep-level status forgives the
+        loss, the coverage strip's Incomplete must not."""
+        sweep_id = uuid.UUID("aa360000-0000-4000-8000-000000000006")
+        done_trial = uuid.UUID("cc360000-0000-4000-8000-000000000001")
+        done_exec = uuid.UUID("dd360000-0000-4000-8000-000000000001")
+        lost_trial = uuid.UUID("cc360000-0000-4000-8000-000000000002")
+        lost_exec = uuid.UUID("dd360000-0000-4000-8000-000000000002")
+        now = datetime.now(UTC)
+
+        def event(cls, seconds_ago, **kwargs):
+            return cls(
+                event_id=uuid.uuid4(),
+                recorded_at=now - timedelta(seconds=seconds_ago),
+                **kwargs,
+            )
+
+        result = IngestService(store).apply(
+            IngestRequest(
+                protocol_version=PROTOCOL_VERSION,
+                events=[
+                    event(
+                        SweepSnapshotEvent,
+                        2000,
+                        project=LAB,
+                        sweep_id=sweep_id,
+                        name="strip-sweep",
+                        state="running",
+                    ),
+                    event(
+                        TrialSnapshotEvent,
+                        1900,
+                        trial_id=done_trial,
+                        sweep_id=sweep_id,
+                        number=0,
+                        state=TrialState.COMPLETED,
+                        retry_root_trial_id=done_trial,
+                    ),
+                    event(
+                        ExecutionStartEvent,
+                        1800,
+                        execution_id=done_exec,
+                        trial_id=done_trial,
+                        hostname="node00",
+                        started_at=now - timedelta(seconds=1800),
+                    ),
+                    event(
+                        ExecutionEndEvent,
+                        1700,
+                        execution_id=done_exec,
+                        ended_at=now - timedelta(seconds=1700),
+                        outcome="success",
+                        exit_code=0,
+                    ),
+                    event(
+                        ValueEvent,
+                        1600,
+                        trial_id=done_trial,
+                        key=OUTCOME,
+                        step=0,
+                        value=0.5,
+                    ),
+                    event(
+                        TrialSnapshotEvent,
+                        1500,
+                        trial_id=lost_trial,
+                        sweep_id=sweep_id,
+                        number=1,
+                        state=TrialState.RUNNING,
+                        retry_root_trial_id=lost_trial,
+                    ),
+                    event(
+                        ExecutionStartEvent,
+                        1400,
+                        execution_id=lost_exec,
+                        trial_id=lost_trial,
+                        hostname="node00",
+                        started_at=now - timedelta(seconds=1400),
+                    ),
+                    event(
+                        ExecutionHeartbeatEvent,
+                        1300,
+                        execution_id=lost_exec,
+                        at=now - timedelta(seconds=1300),
+                    ),
+                ],
+            )
+        )
+        assert not result.conflicts
+        record = shared.create(
+            LAB,
+            "strip-compare",
+            "lr",
+            OUTCOME,
+            members=[str(VAL_SWEEP), str(sweep_id)],
+        )
+        doc = service.investigation_compare(str(record.id))
+        overview = {
+            row.sweep_id: row for row in service.sweep_overview(LAB, [str(sweep_id)])
+        }
+        assert overview[str(sweep_id)].state == "completed"
+        member = next(m for m in doc.members if m.sweep_id == str(sweep_id))
+        assert member.state == "incomplete"
+        cells = {
+            stat.children[0].children: stat.children[1].children
+            for stat in workspace.coverage_strip(doc).children
+        }
+        assert cells["Incomplete"] == 1
 
 
 class TestInvestigationWorkspacePage:
