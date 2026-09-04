@@ -455,15 +455,20 @@ class TestFromConfig:
 
 
 class TestCleanup:
-    def test_cleanup_runs_pueue_clean(self):
+    def test_cleanup_cleans_only_tracked_groups(self):
         host = MagicMock()
-        host.run.return_value = MagicMock(returncode=0)
+        host.run.return_value = MagicMock(returncode=0, stdout="mystudy\n")
         adapter = _make_adapter(host=host)
 
         adapter.cleanup()
 
-        host.run.assert_called_with(
-            ["pueue", "clean"], check=False, capture_output=True
+        host.run.assert_any_call(
+            ["pueue", "clean", "--group", "mystudy"],
+            check=False,
+            capture_output=True,
+        )
+        assert not any(
+            call.args == [["pueue", "clean"]] for call in host.run.call_args_list
         )
 
 

@@ -10,7 +10,10 @@ from jernerics.backend.adapter import (
     SweepSubmissionParams,
 )
 from jernerics.backend.models import JobInfo, JobSubmission, SubmitResult
-from jernerics.backend.path_resolver import substitute_project_name
+from jernerics.backend.path_resolver import (
+    has_project_template,
+    substitute_project_name,
+)
 from jernerics.config import BackendConfig, ExitCode, PueueConfig
 
 _LOG_RETRY_ATTEMPTS = 5
@@ -193,7 +196,10 @@ class PueueAdapter:
             if shared.cache_dir
             else f"{host.home}/.cache/jernerics"
         )
-
+        if has_project_template(cache_dir):
+            cache_dir = substitute_project_name(cache_dir, project_name)
+        elif project_name:
+            cache_dir = f"{cache_dir}/{project_name}"
         return cls(
             host=host,
             remote_dir=remote_dir,
@@ -509,4 +515,20 @@ class PueueAdapter:
         return data.get(task_id, {}).get("output", "")
 
     def cleanup(self) -> None:
-        self.host.run(["pueue", "clean"], check=False, capture_output=True)
+        for group in self._tracked_groups():
+            self.host.run(
+                ["pueue", "clean", "--group", group],
+                check=False,
+                capture_output=True,
+            )
+
+    def _tracked_groups(self) -> list[str]:
+        result = self.host.run(
+            ["ls", "-1", f"{self.cache_dir}/tracking"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return []
+        return sorted({line for line in result.stdout.splitlines() if line.strip()})

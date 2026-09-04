@@ -10,6 +10,7 @@ image the trials use. Both container runtimes share the host network namespace
 the server at its loopback/hostname without extra bind mounts.
 """
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -69,7 +70,20 @@ def scimlab_server():
         pytest.fail(f"scimlab co-located server did not become healthy:\n{logs}")
     yield server
     ssh(SCIMLAB, f"docker stop {SERVER_CONTAINER}", capture_output=True)
-    ssh(SCIMLAB, "pueue clean", capture_output=True)
+    status = ssh(SCIMLAB, "pueue status --json", capture_output=True, text=True)
+    if status.returncode != 0:
+        return
+    try:
+        tasks = json.loads(status.stdout).get("tasks", {})
+    except json.JSONDecodeError:
+        return
+    groups = {
+        task["group"]
+        for task in tasks.values()
+        if task.get("group", "").startswith(f"{PROJECT}_")
+    }
+    for group in sorted(groups):
+        ssh(SCIMLAB, f"pueue clean --group {group}", capture_output=True)
 
 
 @pytest.fixture(scope="module")
