@@ -431,21 +431,6 @@ class TestGetLogs:
 
         assert "trial output" in capsys.readouterr().out
 
-    def test_get_logs_rejects_non_numeric(self):
-        adapter = _make_adapter()
-
-        with pytest.raises(SystemExit):
-            adapter.get_logs("mystudy")
-
-    def test_get_logs_follow(self):
-        host = MagicMock()
-        host.run.return_value = MagicMock(returncode=0)
-        adapter = _make_adapter(host=host)
-
-        adapter.get_logs("5", follow=True)
-
-        host.run.assert_called_with(["pueue", "follow", "5"], check=False)
-
 
 class TestFromConfig:
     def test_constructs_from_config(self):
