@@ -5,6 +5,7 @@ browser-drives the mounted dashboard after merge, so these tests assert
 on the pure page builders the Dash callbacks wrap plus TestClient facts.
 """
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -27,8 +28,8 @@ from jernerics_schema import (
     ValueEvent,
     decode_selection,
 )
+from jernerics_server.dashboard import figures, sweep_views
 from jernerics_server.dashboard import sweep as sweep_page
-from jernerics_server.dashboard import sweep_views
 from jernerics_server.dashboard.analysis import (
     default_view_state,
     edited_view,
@@ -650,3 +651,285 @@ def _fire_picks(client, key, url, values, current=None):
     )
     payload = response.json()["response"] if response.status_code == 200 else None
     return response, payload
+
+
+# -- Series sub-view callbacks (jernerics-hjip, jernerics-idrh, jernerics-1r00)
+
+
+_SERIES_OUTPUTS = [
+    {"id": "sweep-series-blocks", "property": "children"},
+    {"id": "sweep-series-chips", "property": "children"},
+    {"id": "sweep-series-add", "property": "options"},
+    {"id": "sweep-series-add", "property": "value"},
+    {"id": "sweep-series-state", "property": "data"},
+    {"id": "sweep-series-snap", "property": "data"},
+    {"id": {"sweep-series-key": "ALL"}, "property": "data"},
+    {"id": {"sweep-series-fig": "ALL"}, "property": "figure"},
+    {"id": {"sweep-series-head": "ALL"}, "property": "children"},
+    {"id": {"sweep-series-stats": "ALL"}, "property": "children"},
+    {"id": "sweep-series-updated", "property": "children"},
+    {"id": "sweep-series-pcp", "property": "figure"},
+    {"id": "sweep-series-pcp-data", "property": "data"},
+]
+
+_NO_UPDATE = {"_dash_no_update": "_dash_no_update"}
+
+
+def _series_callback_key(callback_map):
+    return next(
+        key for key in callback_map if '{"sweep-series-key":["ALL"]}.data' in key
+    )
+
+
+def _series_docs(service, keys, display=None):
+    """(state, snap, payloads) exactly as the server-rendered page stores
+    them before any callback fires."""
+    snapshot = sweep_views.series_snapshot_fetch(service, PROJECT, str(SWEEP), keys, 0)
+    payloads, snap = sweep_views.series_split(snapshot, keys)
+    state = sweep_views.default_series_state(keys)
+    if display:
+        state["display"] = dict(display)
+    state["cheap"] = sweep_views.facts_digest(service, str(SWEEP))
+    state["digests"] = sweep_views.series_key_digests(service, PROJECT, str(SWEEP))
+    return state, snap, payloads
+
+
+def _series_inputs(keys, *, added=None, display=None, scale=None):
+    display = display or {}
+    scale = scale or {}
+    return [
+        {"id": "poll", "property": "n_intervals", "value": 1},
+        {"id": "sweep-series-add", "property": "value", "value": added},
+        [
+            {"id": {"sweep-series-drop": key}, "property": "n_clicks", "value": 0}
+            for key in keys
+        ],
+        [
+            {
+                "id": {"sweep-series-display": key},
+                "property": "value",
+                "value": display.get(key, "median_iqr"),
+            }
+            for key in keys
+        ],
+        [
+            {
+                "id": {"sweep-series-scale": key},
+                "property": "value",
+                "value": scale.get(key, "linear"),
+            }
+            for key in keys
+        ],
+    ]
+
+
+def _series_state_docs(state, snap, payloads, keys):
+    return [
+        {"id": "sweep-series-state", "property": "data", "value": state},
+        {"id": "sweep-series-snap", "property": "data", "value": snap},
+        [
+            {
+                "id": {"sweep-series-key": key},
+                "property": "data",
+                "value": payloads.get(key),
+            }
+            for key in keys
+        ],
+        {"id": "url", "property": "pathname", "value": f"{WORKSPACE}/sweep/{SWEEP}"},
+        {"id": "url", "property": "search", "value": "?view=series"},
+    ]
+
+
+def _fire_series(client, callback_map, keys, docs, *, changed, added=None, **values):
+    state, snap, payloads = docs
+    response = client.post(
+        "/dashboard/_dash-update-component",
+        json={
+            "output": _series_callback_key(callback_map),
+            "outputs": _SERIES_OUTPUTS,
+            "inputs": _series_inputs(keys, added=added, **values),
+            "state": _series_state_docs(state, snap, payloads, keys),
+            "changedPropIds": changed,
+        },
+    )
+    payload = response.json()["response"] if response.status_code == 200 else None
+    return response, payload
+
+
+def _id_count(node, wanted):
+    """Components whose id equals ``wanted`` (plain or pattern key)."""
+    total = 0
+    for item in _walk(node):
+        cid = getattr(item, "id", None)
+        if cid == wanted or (isinstance(cid, dict) and wanted in cid):
+            total += 1
+    return total
+
+
+def _json_id_count(node, wanted):
+    total = 0
+    if isinstance(node, dict):
+        if node.get("id") == wanted or (
+            isinstance(node.get("id"), dict) and wanted in node["id"]
+        ):
+            total += 1
+        for value in node.values():
+            total += _json_id_count(value, wanted)
+    elif isinstance(node, list):
+        for value in node:
+            total += _json_id_count(value, wanted)
+    return total
+
+
+class TestSeriesPointCap:
+    def test_cap_respected_and_endpoints_kept(self):
+        points = [(step, float(step)) for step in range(10 * figures.SERIES_POINT_CAP)]
+        thinned = figures.downsample_points(points)
+        assert len(thinned) <= figures.SERIES_POINT_CAP
+        assert thinned[0] == points[0]
+        assert thinned[-1] == points[-1]
+        assert thinned == sorted(thinned)
+
+    def test_short_series_pass_through_untouched(self):
+        points = [(0, 1.0), (1, 2.0), (2, 3.0)]
+        assert figures.downsample_points(points) is points
+
+
+class TestSeriesCallbacks:
+    def _service(self, store):
+        return DashboardService(QueryService(store))
+
+    def test_page_and_callback_never_duplicate_container_ids(
+        self, authed, callback_map
+    ):
+        """jernerics-hjip: the chips refresh ships spans only — the chips
+        container and add picker stay singular in the rendered tree."""
+        client, store = authed
+        service = self._service(store)
+        page, _polls = page_content(
+            f"{WORKSPACE}/sweep/{SWEEP}", service, search="?view=series"
+        )
+        assert _id_count(page, "sweep-series-chips") == 1
+        assert _id_count(page, "sweep-series-add") == 1
+        docs = _series_docs(service, ["loss"])
+        response, payload = _fire_series(
+            client,
+            callback_map,
+            ["loss"],
+            docs,
+            changed=["sweep-series-add.value"],
+            added="lr",
+        )
+        assert response.status_code == 200
+        spans = payload["sweep-series-chips"]["children"]
+        for wanted in ("sweep-series-chips", "sweep-series-add"):
+            assert _json_id_count(spans, wanted) == 0
+            assert _id_count(page, wanted) == 1
+
+    def test_display_toggle_restyles_the_chart(self, authed, callback_map):
+        """jernerics-idrh: flipping Median+IQR / All raw must swap the
+        figure's trace structure, not just fire requests."""
+        client, store = authed
+        service = self._service(store)
+        display = {"loss": "median_iqr"}
+        docs = _series_docs(service, ["loss"], display=display)
+        median_figure = sweep_views.series_key_figure(
+            "loss", docs[2]["loss"]["series"], docs[0]
+        )
+        response, payload = _fire_series(
+            client,
+            callback_map,
+            ["loss"],
+            docs,
+            changed=['{"sweep-series-display": "loss"}.value'],
+            display={"loss": "all"},
+        )
+        assert response.status_code == 200
+        figures_out = payload['{"sweep-series-fig":"ALL"}']["figure"]
+        assert len(figures_out) == 1
+        raw_figure = figures_out[0]
+        assert not isinstance(raw_figure, dict) or "_dash_no_update" not in raw_figure
+        raw_names = [trace["name"] for trace in raw_figure["data"]]
+        median_names = [trace.name for trace in median_figure.data]
+        assert raw_names != median_names
+        assert len(raw_figure["data"]) != len(median_figure.data)
+        assert payload["sweep-series-state"]["data"]["display"] == {"loss": "all"}
+        assert payload['{"sweep-series-key":"ALL"}']["data"] == [_NO_UPDATE]
+        assert payload['{"sweep-series-stats":"ALL"}']["children"] == [_NO_UPDATE]
+        assert "sweep-series-pcp" not in payload
+
+    def test_scale_toggle_switches_the_y_axis(self, authed, callback_map):
+        client, store = authed
+        service = self._service(store)
+        docs = _series_docs(service, ["loss"])
+        response, payload = _fire_series(
+            client,
+            callback_map,
+            ["loss"],
+            docs,
+            changed=['{"sweep-series-scale": "loss"}.value'],
+            scale={"loss": "log"},
+        )
+        assert response.status_code == 200
+        figure = payload['{"sweep-series-fig":"ALL"}']["figure"][0]
+        assert figure["layout"]["yaxis"]["type"] == "log"
+
+    def test_unchanged_tick_ships_nothing(self, authed, callback_map):
+        client, store = authed
+        service = self._service(store)
+        docs = _series_docs(service, ["loss"])
+        response, _payload = _fire_series(
+            client, callback_map, ["loss"], docs, changed=["poll.n_intervals"]
+        )
+        assert response.status_code == 204
+
+    def test_stale_digest_refetches_only_that_key(
+        self, authed, callback_map, monkeypatch
+    ):
+        """jernerics-1r00: a tick where only one key gained points fetches
+        and re-renders just that key — the other block is untouched."""
+        client, store = authed
+        service = self._service(store)
+        result = IngestService(store).apply(
+            IngestRequest(
+                protocol_version=PROTOCOL_VERSION,
+                events=[
+                    _event(ValueEvent, 970, trial_id=T0, key="acc", step=0, value=1.0),
+                    _event(ValueEvent, 969, trial_id=T0, key="acc", step=1, value=0.9),
+                ],
+            )
+        )
+        assert not result.conflicts
+        docs = _series_docs(service, ["loss", "acc"])
+        calls = []
+        real = DashboardService.analysis_series
+
+        def spy(self, project, tray, keys, reduction="none"):
+            calls.append(list(keys))
+            return real(self, project, tray, keys, reduction)
+
+        monkeypatch.setattr(DashboardService, "analysis_series", spy)
+        result = IngestService(store).apply(
+            IngestRequest(
+                protocol_version=PROTOCOL_VERSION,
+                events=[
+                    _event(ValueEvent, 5, trial_id=T0, key="loss", step=2, value=0.7)
+                ],
+            )
+        )
+        assert not result.conflicts
+        response, payload = _fire_series(
+            client, callback_map, ["loss", "acc"], docs, changed=["poll.n_intervals"]
+        )
+        assert response.status_code == 200
+        assert calls == [["loss"]]
+        figures_out = payload['{"sweep-series-fig":"ALL"}']["figure"]
+        assert "_dash_no_update" not in json.dumps(figures_out[0])
+        assert figures_out[1] == _NO_UPDATE
+        stats = payload['{"sweep-series-stats":"ALL"}']["children"]
+        assert "_dash_no_update" not in json.dumps(stats[0])
+        assert stats[1] == _NO_UPDATE
+        stores = payload['{"sweep-series-key":"ALL"}']["data"]
+        assert "_dash_no_update" not in json.dumps(stores[0])
+        assert stores[1] == _NO_UPDATE
+        assert "sweep-series-pcp" in payload
