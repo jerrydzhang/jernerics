@@ -4,9 +4,9 @@ from datetime import UTC, datetime
 from unittest.mock import patch
 
 import pytest
+from jernerics.backend.adapter import build_job_resource_event
 from jernerics.backend.slurm.sacct import (
     SACCT_FORMAT,
-    build_job_resource_event,
     fetch_job_resources,
     parse_duration_s,
     parse_mem_mb,

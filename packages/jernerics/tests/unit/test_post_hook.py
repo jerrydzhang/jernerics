@@ -1,11 +1,11 @@
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from uuid import uuid4, uuid5
 
 import pytest
-from jernerics.backend.slurm.sacct import SacctResult
+from jernerics.backend.adapter import JobResourceSnapshot, JobResourcesResult
 from jernerics.post_hook import (
     PipelineResult,
     ReconciliationConflictError,
@@ -667,7 +667,6 @@ class TestCaptureJobResources:
         )
 
     def _snapshot(self, job_id):
-        from jernerics.backend.slurm.sacct import JobResourceSnapshot
 
         return JobResourceSnapshot(
             job_id=job_id,
@@ -692,13 +691,17 @@ class TestCaptureJobResources:
         submission_id = uuid4()
         self._write_submission_events(tracking_dir, submission_id, "990001")
         with (
-            patch("jernerics.post_hook.fetch_job_resources") as fetch,
+            patch("jernerics.post_hook._resource_adapter") as factory,
             patch("jernerics.post_hook.ship_events_file") as ship,
         ):
-            fetch.return_value = SacctResult(self._snapshot("990001"), None)
+            adapter = MagicMock()
+            adapter.fetch_job_resources.return_value = JobResourcesResult(
+                [self._snapshot("990001")], None
+            )
+            factory.return_value = adapter
             capture_job_resources(str(tracking_dir), "mystudy", "http://srv", "key")
 
-        fetch.assert_called_once_with("990001")
+        adapter.fetch_job_resources.assert_called_once_with("990001")
         ship.assert_called_once()
         path, base_url = ship.call_args.args[:2]
         assert base_url == "http://srv"
@@ -728,13 +731,17 @@ class TestCaptureJobResources:
             json.dumps({"job_id": "880003", "study_name": "otherstudy"})
         )
         with (
-            patch("jernerics.post_hook.fetch_job_resources") as fetch,
+            patch("jernerics.post_hook._resource_adapter") as factory,
             patch("jernerics.post_hook.ship_events_file") as ship,
         ):
-            fetch.return_value = SacctResult(self._snapshot("990002"), None)
+            adapter = MagicMock()
+            adapter.fetch_job_resources.return_value = JobResourcesResult(
+                [self._snapshot("990002")], None
+            )
+            factory.return_value = adapter
             capture_job_resources(str(tracking_dir), "mystudy", "http://srv", None)
 
-        fetch.assert_called_once_with("990002")
+        adapter.fetch_job_resources.assert_called_once_with("990002")
         ship.assert_called_once()
         events, _ = scan_events(ship.call_args.args[0], 0)
         event = events[0][0]
@@ -759,15 +766,14 @@ class TestCaptureJobResources:
             ).model_dump_json()
             + "\n"
         )
-        snapshots = {"990004": self._snapshot("990004"), "990005": None}
-
-        def fake_fetch(job_id):
-            if snapshots[job_id] is None:
-                return SacctResult(None, f"sacct for job {job_id} timed out")
-            return SacctResult(snapshots[job_id], None)
-
+        results = {
+            "990004": JobResourcesResult([self._snapshot("990004")], None),
+            "990005": JobResourcesResult([], "sacct for job 990005 timed out"),
+        }
+        adapter = MagicMock()
+        adapter.fetch_job_resources.side_effect = lambda job_id: results[job_id]
         with (
-            patch("jernerics.post_hook.fetch_job_resources", side_effect=fake_fetch),
+            patch("jernerics.post_hook._resource_adapter", return_value=adapter),
             patch("jernerics.post_hook.ship_events_file") as ship,
         ):
             capture_job_resources(str(tracking_dir), "mystudy", "http://srv", None)
@@ -799,12 +805,12 @@ class TestCaptureJobResources:
         tracking_dir = tmp_path / "tracking" / "mystudy"
         self._write_submission_events(tracking_dir, uuid4(), "990006")
         with (
-            patch(
-                "jernerics.post_hook.fetch_job_resources",
-                side_effect=RuntimeError("boom"),
-            ),
+            patch("jernerics.post_hook._resource_adapter") as factory,
             patch("jernerics.post_hook.ship_events_file") as ship,
         ):
+            adapter = MagicMock()
+            adapter.fetch_job_resources.side_effect = RuntimeError("boom")
+            factory.return_value = adapter
             capture_job_resources(str(tracking_dir), "mystudy", "http://srv", None)
 
         assert "resource capture failed" in capsys.readouterr().err

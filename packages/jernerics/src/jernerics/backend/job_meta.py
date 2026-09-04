@@ -48,3 +48,21 @@ def load_job_studies(local_cache_dir: Path) -> dict[str, str]:
         if job_id and study_name:
             studies[job_id] = study_name
     return studies
+
+
+def load_job_backends(local_cache_dir: Path) -> dict[str, str]:
+    """Scheduler type per job id from metadata; jobs without one are absent."""
+    meta_dir = local_cache_dir / "jobs"
+    if not meta_dir.is_dir():
+        return {}
+    backends: dict[str, str] = {}
+    for meta_file in meta_dir.glob("*.json"):
+        try:
+            meta = json.loads(meta_file.read_text())
+        except (OSError, ValueError):
+            continue
+        job_id = meta.get("job_id")
+        backend = meta.get("backend")
+        if job_id and backend:
+            backends[str(job_id)] = str(backend)
+    return backends

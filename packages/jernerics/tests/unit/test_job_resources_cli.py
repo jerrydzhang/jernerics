@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from jernerics.backend.slurm.sacct import JobResourceSnapshot, SacctResult
+from jernerics.backend.adapter import JobResourceSnapshot, JobResourcesResult
 from jernerics.cli import app
 from jernerics.tracking.jsonl_io import scan_events
 from jernerics_schema import JobResourceEvent
@@ -28,7 +28,7 @@ SNAPSHOT = JobResourceSnapshot(
 def test_prints_aligned_parsed_fields():
     with patch(
         "jernerics.commands.jobs.fetch_job_resources",
-        return_value=SacctResult(SNAPSHOT, None),
+        return_value=JobResourcesResult([SNAPSHOT], None),
     ):
         result = CliRunner().invoke(app, ["job", "resources", "990001"])
 
@@ -43,7 +43,7 @@ def test_prints_aligned_parsed_fields():
 def test_missing_accounting_data_is_not_an_error():
     with patch(
         "jernerics.commands.jobs.fetch_job_resources",
-        return_value=SacctResult(None, "sacct returned no accounting row"),
+        return_value=JobResourcesResult([], "sacct returned no accounting row"),
     ):
         result = CliRunner().invoke(app, ["job", "resources", "990001"])
 
@@ -61,7 +61,7 @@ def test_ship_without_configured_server_notes_and_succeeds(monkeypatch):
     monkeypatch.delenv("JERNERICS_TRACKING_SERVER", raising=False)
     with patch(
         "jernerics.commands.jobs.fetch_job_resources",
-        return_value=SacctResult(SNAPSHOT, None),
+        return_value=JobResourcesResult([SNAPSHOT], None),
     ):
         result = CliRunner().invoke(app, ["job", "resources", "990001", "--ship"])
 
@@ -80,7 +80,7 @@ def test_ship_appends_record_with_study_from_job_meta(monkeypatch, tmp_path: Pat
     with (
         patch(
             "jernerics.commands.jobs.fetch_job_resources",
-            return_value=SacctResult(SNAPSHOT, None),
+            return_value=JobResourcesResult([SNAPSHOT], None),
         ),
         patch("jernerics.commands.jobs.ship_events_file") as ship,
     ):
@@ -106,7 +106,7 @@ def test_ship_without_study_uses_scratch_file(monkeypatch, tmp_path: Path):
     with (
         patch(
             "jernerics.commands.jobs.fetch_job_resources",
-            return_value=SacctResult(SNAPSHOT, None),
+            return_value=JobResourcesResult([SNAPSHOT], None),
         ),
         patch("jernerics.commands.jobs.ship_events_file", return_value=False) as ship,
     ):
@@ -123,7 +123,7 @@ def test_ship_with_scheme_less_server_addr_notes_and_succeeds(monkeypatch):
     monkeypatch.setenv("JERNERICS_TRACKING_SERVER", "homelab:8000")
     with patch(
         "jernerics.commands.jobs.fetch_job_resources",
-        return_value=SacctResult(SNAPSHOT, None),
+        return_value=JobResourcesResult([SNAPSHOT], None),
     ):
         result = CliRunner().invoke(app, ["job", "resources", "990001", "--ship"])
 
@@ -142,7 +142,7 @@ def test_ship_failure_leaves_exit_code_zero(monkeypatch, tmp_path: Path):
     with (
         patch(
             "jernerics.commands.jobs.fetch_job_resources",
-            return_value=SacctResult(SNAPSHOT, None),
+            return_value=JobResourcesResult([SNAPSHOT], None),
         ),
         patch("jernerics.commands.jobs.ship_events_file", return_value=False) as ship,
     ):

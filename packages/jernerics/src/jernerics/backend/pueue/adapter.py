@@ -4,7 +4,11 @@ import re
 import time
 from datetime import datetime, timezone
 
-from jernerics.backend.adapter import SweepSubmissionParams
+from jernerics.backend.adapter import (
+    JobResourceSnapshot,
+    JobResourcesResult,
+    SweepSubmissionParams,
+)
 from jernerics.backend.models import JobInfo, JobSubmission, SubmitResult
 from jernerics.backend.path_resolver import substitute_project_name
 from jernerics.config import BackendConfig, ExitCode, PueueConfig
@@ -43,6 +47,33 @@ def _pueue_status_to_str(status: dict) -> str:
     if "Locked" in status:
         return "LOCKED"
     return "UNKNOWN"
+
+
+def _task_resource_snapshot(task_id: str, task: dict) -> JobResourceSnapshot | None:
+    """Done-task snapshot from start/end; None when the task never ended."""
+    done = task.get("status", {}).get("Done", {})
+    if not done.get("end"):
+        return None
+    try:
+        started = datetime.fromisoformat(done["start"]) if done.get("start") else None
+        ended = datetime.fromisoformat(done["end"])
+        wall_time_s = (ended - started).total_seconds() if started else None
+    except (TypeError, ValueError):
+        return None
+    return JobResourceSnapshot(
+        job_id=task_id,
+        state=_pueue_status_to_str(task.get("status", {})),
+        exit_code=None,
+        wall_time_s=wall_time_s,
+        cpu_time_s=None,
+        cpu_pct=None,
+        max_rss_mb=None,
+        ave_rss_mb=None,
+        alloc_cpus=None,
+        req_mem=None,
+        alloc_tres=None,
+        node_list=None,
+    )
 
 
 def _task_is_done(status: dict) -> bool:
@@ -340,6 +371,21 @@ class PueueAdapter:
             return None
         return _pueue_status_to_str(task["status"])
 
+    def fetch_job_resources(self, job_id: str) -> JobResourcesResult:
+        data = _query_pueue_status(self.host)
+        tasks = data.get("tasks", {})
+        if job_id.isdigit():
+            task = tasks.get(job_id)
+            if task is None:
+                return JobResourcesResult(error=f"pueue has no task {job_id}")
+            snapshots = [_task_resource_snapshot(job_id, task)]
+        else:
+            snapshots = [
+                _task_resource_snapshot(task_id, task)
+                for task_id, task in self._group_tasks(job_id, data)
+            ]
+        return JobResourcesResult([s for s in snapshots if s is not None])
+
     def wait_for_completion(
         self, job_id: str, poll_interval: float = 30, timeout: float | None = None
     ) -> bool:
@@ -394,8 +440,10 @@ class PueueAdapter:
 
         self._log_group(job_id, stderr=stderr)
 
-    def _group_tasks(self, group: str) -> list[tuple[str, dict]]:
-        data = _query_pueue_status(self.host)
+    def _group_tasks(
+        self, group: str, data: dict | None = None
+    ) -> list[tuple[str, dict]]:
+        data = data if data is not None else _query_pueue_status(self.host)
         tasks = [
             (task_id, task)
             for task_id, task in data.get("tasks", {}).items()

@@ -7,12 +7,13 @@ import threading
 import time
 from pathlib import Path
 
-from jernerics.backend.adapter import SweepSubmissionParams
+from jernerics.backend.adapter import JobResourcesResult, SweepSubmissionParams
 from jernerics.backend.models import JobInfo, JobSubmission, SubmitResult
 from jernerics.backend.path_resolver import (
     strip_project_template,
     substitute_project_name,
 )
+from jernerics.backend.slurm import sacct
 from jernerics.config import BackendConfig, ExitCode, SlurmConfig
 
 _SLURM_VALUE_PATTERN = re.compile(r"^[a-zA-Z0-9_.:/\-]+$")
@@ -632,6 +633,12 @@ class SlurmAdapter:
                 main_state = states[0].split("+")[0].split(":")[0]
                 return main_state
         return None
+
+    def fetch_job_resources(self, job_id: str) -> JobResourcesResult:
+        result = sacct.fetch_job_resources(job_id)
+        if result.snapshot is None:
+            return JobResourcesResult(error=result.error)
+        return JobResourcesResult([result.snapshot])
 
     def wait_for_completion(
         self, job_id: str, poll_interval: float = 30, timeout: float | None = None

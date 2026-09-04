@@ -1,11 +1,9 @@
 import re
 import subprocess
-import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from functools import partial
 
-from jernerics_schema import JERNERICS_NAMESPACE, JobResourceEvent
+from jernerics.backend.adapter import JobResourceSnapshot
 
 SACCT_TIMEOUT_S = 10.0
 """Wall-clock ceiling for one sacct invocation."""
@@ -21,24 +19,6 @@ _STEP_ROW = re.compile(r"\.(batch|extern|[0-9]+)$")
 _MEM_SCALE = {"K": 1024.0, "M": 1024.0**2, "G": 1024.0**3, "T": 1024.0**4}
 _MEM_BYTES = re.compile(r"^(\d+(?:\.\d+)?)\s*([KMGT])$", re.IGNORECASE)
 _REQ_MEM = re.compile(r"^(\d+(?:\.\d+)?)\s*([KMGT])\s*[cn]?$", re.IGNORECASE)
-
-
-@dataclass(frozen=True)
-class JobResourceSnapshot:
-    """Parsed sacct facts for one job; None means missing or unparseable."""
-
-    job_id: str
-    state: str | None
-    exit_code: str | None
-    wall_time_s: float | None
-    cpu_time_s: float | None
-    cpu_pct: float | None
-    max_rss_mb: float | None
-    ave_rss_mb: float | None
-    alloc_cpus: int | None
-    req_mem: str | None
-    alloc_tres: str | None
-    node_list: str | None
 
 
 @dataclass(frozen=True)
@@ -189,35 +169,3 @@ def fetch_job_resources(
             "(job may be too fresh for the accounting database)",
         )
     return SacctResult(snapshot, None)
-
-
-def build_job_resource_event(
-    snapshot: JobResourceSnapshot,
-    *,
-    study_name: str | None = None,
-    submission_id: str | None = None,
-    recorded_at: datetime | None = None,
-) -> JobResourceEvent:
-    """Snapshot as a tracking event with a per-job deterministic event id.
-
-    The uuid5 id keyed on the scheduler job id makes re-captures (post-hook
-    rerun, backfill CLI) ingest as duplicates instead of duplicate rows.
-    """
-    return JobResourceEvent(
-        event_id=uuid.uuid5(JERNERICS_NAMESPACE, f"job-resource:{snapshot.job_id}"),
-        recorded_at=recorded_at or datetime.now(UTC),
-        job_id=snapshot.job_id,
-        study_name=study_name,
-        submission_id=submission_id,
-        wall_time_s=snapshot.wall_time_s,
-        cpu_time_s=snapshot.cpu_time_s,
-        cpu_pct=snapshot.cpu_pct,
-        max_rss_mb=snapshot.max_rss_mb,
-        ave_rss_mb=snapshot.ave_rss_mb,
-        alloc_cpus=snapshot.alloc_cpus,
-        req_mem=snapshot.req_mem,
-        alloc_tres=snapshot.alloc_tres,
-        node_list=snapshot.node_list,
-        state=snapshot.state,
-        exit_code=snapshot.exit_code,
-    )

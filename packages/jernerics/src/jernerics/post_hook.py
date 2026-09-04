@@ -22,6 +22,7 @@ from jernerics_schema import (
     ExecutionStartEvent,
     FailureKind,
     JobSnapshotEvent,
+    SubmissionSnapshotEvent,
     SweepSnapshotEvent,
     TrialId,
     sweep_id_for,
@@ -29,10 +30,12 @@ from jernerics_schema import (
 from optuna.storages.journal import JournalFileBackend, JournalStorage
 from optuna.trial import FrozenTrial, TrialState
 
-from jernerics.backend.job_meta import load_job_studies
-from jernerics.backend.slurm.sacct import (
-    build_job_resource_event,
-    fetch_job_resources,
+from jernerics.backend.adapter import SchedulerAdapter, build_job_resource_event
+from jernerics.backend.job_meta import load_job_backends, load_job_studies
+from jernerics.config import (
+    ConfigNotFound,
+    ConfigValidationError,
+    load_backend_config,
 )
 from jernerics.optuna_mirror import (
     _journal_timestamp,
@@ -272,15 +275,61 @@ def _sweep_job_ids(tracking_dir: Path, study_name: str) -> dict[str, str | None]
     return {job_id: None for job_id, study in studies.items() if study == study_name}
 
 
+def _sweep_backend_name(tracking_dir: Path) -> str | None:
+    """Backend name recorded on the study's sweep submission, if any."""
+    submission_dir = tracking_dir / "submission"
+    if not submission_dir.is_dir():
+        return None
+    for path in sorted(submission_dir.glob("*.jsonl")):
+        try:
+            events, _ = scan_events(path, 0)
+        except (OSError, ValueError):
+            continue
+        for event, _ in events:
+            if isinstance(event, SubmissionSnapshotEvent):
+                return event.backend
+    return None
+
+
+def _job_meta_backend_type(tracking_dir: Path, study_name: str) -> str | None:
+    """Scheduler type recorded for the study's jobs, if job metadata has one."""
+    jobs_dir = tracking_dir.parent.parent
+    studies = load_job_studies(jobs_dir)
+    backends = load_job_backends(jobs_dir)
+    for job_id in _sweep_job_ids(tracking_dir, study_name):
+        if studies.get(job_id) == study_name and job_id in backends:
+            return backends[job_id]
+    return None
+
+
+def _resource_backend_type(tracking_dir: Path, study_name: str) -> str:
+    """Scheduler type for capture: submission events, job meta, then slurm."""
+    name = _sweep_backend_name(tracking_dir)
+    if name:
+        try:
+            return load_backend_config(name).shared.type
+        except (ConfigNotFound, ConfigValidationError):
+            if name in ("slurm", "pueue"):
+                return name
+    return _job_meta_backend_type(tracking_dir, study_name) or "slurm"
+
+
+def _resource_adapter(tracking_dir: Path, study_name: str) -> SchedulerAdapter:
+    from jernerics.backend.submission import make_resource_adapter
+
+    return make_resource_adapter(_resource_backend_type(tracking_dir, study_name))
+
+
 def capture_job_resources(
     tracking_dir: str, study_name: str, base_url: str, api_key: str | None
 ) -> None:
-    """Best-effort sacct capture for the study's jobs; never raises.
+    """Best-effort scheduler resource capture for the study's jobs; never raises.
 
-    Assumes sacct is reachable from where the post-hook runs; a cluster
-    that blocks compute-node slurmdbd access makes every fetch fail with
-    one stderr line each — the ``jernerics job resources`` backfill CLI
-    is the recovery path there (verify on first real deployment).
+    Assumes the scheduler's accounting CLI is reachable from where the
+    post-hook runs; a cluster that blocks compute-node slurmdbd access
+    makes every fetch fail with one stderr line each — the ``jernerics
+    job resources`` backfill CLI is the recovery path there (verify on
+    first real deployment).
     """
     try:
         job_ids = _sweep_job_ids(Path(tracking_dir), study_name)
@@ -291,18 +340,20 @@ def capture_job_resources(
                 file=sys.stderr,
             )
             return
+        adapter = _resource_adapter(Path(tracking_dir), study_name)
         events = []
         for job_id, submission_id in sorted(job_ids.items()):
-            result = fetch_job_resources(job_id)
-            if result.error is not None or result.snapshot is None:
+            result = adapter.fetch_job_resources(job_id)
+            if result.error is not None:
                 print(f"jernerics: {result.error}", file=sys.stderr)
                 continue
-            events.append(
+            events.extend(
                 build_job_resource_event(
-                    result.snapshot,
+                    snapshot,
                     study_name=study_name,
                     submission_id=submission_id,
                 )
+                for snapshot in result.snapshots
             )
         if not events:
             return

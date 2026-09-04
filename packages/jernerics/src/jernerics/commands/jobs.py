@@ -8,12 +8,13 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from jernerics.backend.job_meta import load_job_studies
-from jernerics.backend.slurm.sacct import (
+from jernerics.backend.adapter import (
     JobResourceSnapshot,
+    JobResourcesResult,
     build_job_resource_event,
-    fetch_job_resources,
 )
+from jernerics.backend.job_meta import load_job_backends, load_job_studies
+from jernerics.backend.submission import make_resource_adapter
 from jernerics.commands.common import _get_backend
 from jernerics.config import ExitCode, load_tracking_server
 from jernerics.paths import cache_dir
@@ -193,6 +194,17 @@ def wait(
 # ── resources ────────────────────────────────────────────────────────────────
 
 
+def fetch_job_resources(
+    job_id: str, backend_name: str | None = None
+) -> JobResourcesResult:
+    """Fetch via the named backend, the job's recorded backend, or sacct."""
+    if backend_name:
+        backend, _, _ = _get_backend(backend_name)
+        return backend.adapter.fetch_job_resources(job_id)
+    backend_type = load_job_backends(cache_dir()).get(job_id, "slurm")
+    return make_resource_adapter(backend_type).fetch_job_resources(job_id)
+
+
 def _print_resources(snapshot: JobResourceSnapshot) -> None:
     fields = [
         ("job_id", snapshot.job_id),
@@ -251,15 +263,21 @@ def resources(
         bool,
         typer.Option("--ship", help="Also append the record to the tracking server"),
     ] = False,
+    backend_name: Annotated[
+        str | None, typer.Option("--backend", "-b", help="Backend name from config")
+    ] = None,
 ) -> None:
-    """Show sacct resource usage for a past job within retention."""
-    result = fetch_job_resources(job_id)
-    if result.snapshot is None:
-        print(f"No accounting data for job {job_id}: {result.error}")
+    """Show resource usage for a past job within scheduler retention."""
+    result = fetch_job_resources(job_id, backend_name)
+    if not result.snapshots:
+        detail = result.error or "job not found"
+        print(f"No accounting data for job {job_id}: {detail}")
         return
-    _print_resources(result.snapshot)
+    for snapshot in result.snapshots:
+        _print_resources(snapshot)
     if ship:
-        _ship_resources(result.snapshot)
+        for snapshot in result.snapshots:
+            _ship_resources(snapshot)
 
 
 def register(app: typer.Typer) -> None:

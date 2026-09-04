@@ -14,9 +14,10 @@ from jernerics_schema import (
     sweep_id_for,
 )
 
-from jernerics.backend.adapter import SweepSubmissionParams
+from jernerics.backend.adapter import SchedulerAdapter, SweepSubmissionParams
 from jernerics.backend.command_builders import build_sweep_commands
 from jernerics.backend.container import Docker, NoContainer
+from jernerics.backend.host import LocalHost
 from jernerics.backend.models import SubmitResult
 from jernerics.backend.path_resolver import PathResolver, substitute_project_name
 from jernerics.config import (
@@ -130,6 +131,17 @@ def make_adapter(config: BackendConfig, *, host, project_name: str = ""):
 
         return PueueAdapter.from_config(config, host=host, project_name=project_name)
     raise ValueError(f"Unknown backend type: {backend_type}")
+
+
+def make_resource_adapter(backend_type: str) -> SchedulerAdapter:
+    """Fetch-only adapter; unknown types fall back to the slurm sacct path."""
+    if backend_type == "pueue":
+        from jernerics.backend.pueue.adapter import PueueAdapter
+
+        return PueueAdapter(LocalHost(), remote_dir="", cache_dir="")
+    from jernerics.backend.slurm.adapter import SlurmAdapter
+
+    return SlurmAdapter(LocalHost(), remote_dir="")
 
 
 @dataclass

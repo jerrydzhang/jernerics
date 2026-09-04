@@ -259,6 +259,7 @@ class Backend:
                     save_job_meta(
                         job_id=sub.job_id,
                         study_name=spec.study_name,
+                        backend="slurm",
                         output_pattern=str(sub.output_pattern or effective_output),
                         error_pattern=str(sub.error_pattern or effective_error),
                         remote_dir=self.paths.remote_dir,
