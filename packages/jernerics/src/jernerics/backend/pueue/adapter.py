@@ -163,6 +163,11 @@ def _query_pueue_status(host) -> dict:
 
 
 class PueueAdapter:
+    """Pueue scheduler adapter: trials share one group of N slots; the
+    post-hook checker runs in its own ``<study>_checker`` group (parallel=1)
+    so it never costs a trial slot mid-sweep.
+    """
+
     def __init__(
         self,
         host,
@@ -250,19 +255,21 @@ class PueueAdapter:
             )
 
         if params.post_hook_command is not None:
+            checker_group = f"{group}_checker"
             checker_inner_path = f"/tmp/jernerics_{group}_checker.sh"
             checker_wrapper_path = f"/tmp/jernerics_{group}_wait_and_check.sh"
 
             trial_ids = " ".join(f"$TRIAL_{i + 1}_ID" for i in range(params.n_trials))
 
             lines.append("")
+            lines.append(f"pueue group add {checker_group} 2>/dev/null || true")
+            lines.append(f"pueue parallel 1 --group {checker_group}")
             lines.append(f"cat > {checker_inner_path} << 'JERNERICS_EOF'")
             lines.append(params.post_hook_command)
             lines.append("JERNERICS_EOF")
             lines.append("")
-            # pueue wait, not --after $TRIAL_N_ID: --after only fires on upstream
-            # success, but the post-hook must run after failed trials too (it
-            # detects and retries them). Costs a worker slot while waiting.
+            # Checker gets its own parallel=1 group: trials keep all N sweep slots.
+            # wait, not --after: --after skips failed upstreams the post-hook retries.
             lines.append(
                 f"cat > {checker_wrapper_path} <<JERNERICS_EOF\n"
                 f"pueue wait {trial_ids} -q\n"
@@ -272,7 +279,7 @@ class PueueAdapter:
             lines.append("")
 
             lines.append(
-                f"pueue add -g {group}"
+                f"pueue add -g {checker_group}"
                 f" --label {group}_checker"
                 f" -- bash {checker_wrapper_path}"
             )
@@ -354,6 +361,12 @@ class PueueAdapter:
                 capture_output=True,
             )
             return result.returncode == 0
+        # Checker group may not exist (no post-hook); best effort.
+        self.host.run(
+            ["pueue", "kill", "--group", f"{job_id}_checker"],
+            check=False,
+            capture_output=True,
+        )
         result = self.host.run(
             ["pueue", "kill", "--group", job_id],
             check=False,
@@ -412,7 +425,11 @@ class PueueAdapter:
                 if _task_is_done(task["status"]):
                     return _task_succeeded(task["status"])
             else:
-                group_tasks = [t for t in tasks.values() if t.get("group") == job_id]
+                group_tasks = [
+                    t
+                    for t in tasks.values()
+                    if t.get("group") in (job_id, f"{job_id}_checker")
+                ]
                 if not group_tasks:
                     return True
                 if all(_task_is_done(t["status"]) for t in group_tasks):
@@ -453,7 +470,7 @@ class PueueAdapter:
         tasks = [
             (task_id, task)
             for task_id, task in data.get("tasks", {}).items()
-            if task.get("group") == group
+            if task.get("group") in (group, f"{group}_checker")
         ]
         return sorted(tasks, key=lambda item: int(item[0]) if item[0].isdigit() else 0)
 
@@ -518,6 +535,11 @@ class PueueAdapter:
         for group in self._tracked_groups():
             self.host.run(
                 ["pueue", "clean", "--group", group],
+                check=False,
+                capture_output=True,
+            )
+            self.host.run(
+                ["pueue", "clean", "--group", f"{group}_checker"],
                 check=False,
                 capture_output=True,
             )

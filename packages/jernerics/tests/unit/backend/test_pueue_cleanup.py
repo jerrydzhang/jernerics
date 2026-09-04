@@ -73,7 +73,9 @@ class TestCleanupScoping:
 
         assert _clean_commands(host) == [
             ["pueue", "clean", "--group", STUDY_A],
+            ["pueue", "clean", "--group", f"{STUDY_A}_checker"],
             ["pueue", "clean", "--group", STUDY_B],
+            ["pueue", "clean", "--group", f"{STUDY_B}_checker"],
         ]
 
     def test_unrelated_group_tasks_survive(self):

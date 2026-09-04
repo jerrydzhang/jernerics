@@ -127,7 +127,7 @@ class TestRenderSweep:
 
         assert "pueue wait $TRIAL_1_ID $TRIAL_2_ID $TRIAL_3_ID -q" in script
         assert "wrapped_checker" in script
-        assert "pueue add -g mystudy --label mystudy_checker" in script
+        assert "pueue add -g mystudy_checker --label mystudy_checker" in script
 
     def test_post_hook_writes_checker_to_temp_files(self):
         adapter = _make_adapter()
