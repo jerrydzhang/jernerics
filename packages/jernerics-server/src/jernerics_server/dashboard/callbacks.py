@@ -1448,6 +1448,31 @@ def register_callbacks(app: dash.Dash, service: DashboardService) -> None:
             cleared,
         )
 
+    # The clientside store writer: the checked boxes live only in the page DOM.
+    app.clientside_callback(
+        """
+        function(clicks, reason) {
+            if (!clicks) {
+                return window.dash_clientside.no_update;
+            }
+            const sweeps = Array.from(
+                document.querySelectorAll(".sel-sweep input:checked"),
+                (box) => box.name
+            );
+            const active = document.querySelector("#exc-mode-seg .gmode.on");
+            return {
+                sweeps: sweeps,
+                reason: reason || "",
+                mode: (active && active.dataset.mode) || "cause",
+            };
+        }
+        """,
+        Output("exc-selection-store", "data"),
+        Input("exc-mark-invalid", "n_clicks"),
+        State("exc-reason", "value"),
+        prevent_initial_call=True,
+    )
+
     # -- Investigation Compare: the include-invalid toggle ------------------
     @app.callback(
         Output("navigate", "href"),

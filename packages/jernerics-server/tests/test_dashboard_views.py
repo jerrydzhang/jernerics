@@ -1390,6 +1390,36 @@ class TestExceptionsPage:
         assert rendered.count("hidden=True") == 2  # sweep and host sets
         assert "hidden=False" in rendered  # cause set starts visible
 
+    def test_selection_checkboxes_render_in_summaries_with_marker_classes(
+        self, service
+    ):
+        page, _ = page_content(f"{ROUTES_BASE}/project/ops/exceptions", service)
+        markers = [
+            node
+            for node in _walk(page)
+            if isinstance(node, dcc.Input)
+            and str(getattr(node, "className", "")).startswith("sel-")
+        ]
+        summaries = [
+            node
+            for node in _walk(page)
+            if isinstance(node, html.Summary)
+            and any(
+                isinstance(child, dcc.Input)
+                and str(getattr(child, "className", "")).startswith("sel-")
+                for child in node.children
+            )
+        ]
+        assert len(markers) == len(summaries) == 6  # one group + sweep per groupset
+        assert {box.name for box in markers if box.className == "sel-sweep"} == {
+            str(SWEEP_A)
+        }
+
+    def test_stylesheet_sizes_the_selection_checkbox_wrappers(self, authed):
+        css = authed.get(f"{ROUTES_BASE}/assets/page.css").text
+        assert ".np details.failgroup summary .dash-input-container {" in css
+        assert ".np details.failgroup summary .dash-input-container input" in css
+
     def test_all_three_groupsets_render_heads(self, service):
         page, _ = page_content(f"{ROUTES_BASE}/project/ops/exceptions", service)
         rendered = str(page)
@@ -1494,3 +1524,15 @@ class TestExceptionsPage:
         assert "Select sweeps first" in str(response["exc-note"]["children"])
         assert "exc-groupsets" not in str(response)
         assert store._curation_row(str(SWEEP_A))[1] is None
+
+    def test_mark_invalid_press_is_wired_to_the_selection_store(self, mutable_client):
+        _store, client = mutable_client
+        callback_map = self._callback_map(client)
+        key = self._callback_key(callback_map, {"exc-selection-store.data"})
+        spec = callback_map[key]
+        assert [(dep["id"], dep["property"]) for dep in spec["inputs"]] == [
+            ("exc-mark-invalid", "n_clicks")
+        ]
+        assert [(dep["id"], dep["property"]) for dep in spec["state"]] == [
+            ("exc-reason", "value")
+        ]

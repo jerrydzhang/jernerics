@@ -285,6 +285,20 @@
   content: "▾";
 }
 
+/* dcc wraps its checkboxes in a 100%-wide container the flex summary stretches full-row (jernerics-7j3j). */
+.np details.failgroup summary .dash-input-container {
+  width: auto;
+  flex: none;
+}
+
+.np details.failgroup summary .dash-input-container input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  flex: none;
+  cursor: pointer;
+}
+
 .np .count-badge {
   background: var(--crit-bg);
   color: var(--crit-fg);
