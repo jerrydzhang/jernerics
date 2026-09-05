@@ -61,13 +61,17 @@ max_fast_failures = 3         # fast-fail circuit-breaker threshold
 
 | Failure type | Detection | Behavior |
 |-------------|-----------|----------|
-| App exception | Trial exits non-zero | Trial marked FAILED, no retry |
-| Node death (`os._exit`) | Heartbeat stale | Trial retried up to max_retries |
+| App exception (sampled sweep) | Trial exits non-zero | Marked FAILED; the checker refills its slot with a fresh sample — no same-params retry |
+| App exception (grid sweep) | Trial exits non-zero | Same params retried under the per-combo ledger, up to `max_retries` |
+| Node death (`os._exit`) | Heartbeat stale | Trial retried with the same params up to `max_retries` |
 | Persistent failure | Same params always die | Exhausts retries, marked failed |
 
-App-level exceptions (Python exceptions, `RuntimeError`) are normal
-Optuna failures — the trial is marked as FAIL and the sweep continues.
-They do NOT trigger retry.
+App-level exceptions (Python exceptions, `RuntimeError`) are normal Optuna
+failures — the trial is marked FAIL and the sweep continues. In a sampled
+(Optuna) sweep they do NOT trigger a same-params retry; the failed slot is
+refilled with a fresh sample. In a deterministic grid sweep every
+combination must eventually run, so FAILs are retried with identical
+params under the per-combination retry ledger.
 
 Only hard crashes (where the process disappears without cleanup)
 trigger the heartbeat-based retry path.
@@ -76,12 +80,20 @@ trigger the heartbeat-based retry path.
 
 After a sweep completes, the post-hook runs:
 
-1. **Retry check** — detect stale heartbeats, submit retry job if needed
+1. **Retry check** — detect stale heartbeats (and, in grid sweeps, failed
+   combinations); submit a retry job if any replacement is needed
 2. **Reconciliation** — snapshot every optimizer-journal trial as a
-   terminal trial snapshot; conflicts with already-terminal server
-   state abort without overwriting anything
-3. **Tracking replay** — replay local JSONL events to the HTTP tracking server
-4. **Artifact sync** — upload pending artifact blobs to the server's disk
+   terminal trial snapshot, and reconcile dead executions (started but
+   never ended whose trial is already terminal) into durable ends;
+   conflicts with already-terminal server state abort without overwriting
+3. **Job-resource capture** — best-effort scheduler accounting (sacct /
+   pueue) for the sweep's jobs, shipped to the server
+4. **Tracking replay** — replay local JSONL events to the HTTP tracking
+   server (live trial logs first, then the reconcile snapshots)
+5. **Artifact sync** — upload pending artifact blobs and manifests to the
+   server's disk
 
-If a retry job is submitted, the post-hook returns early. The retry
-job will run its own post-hook when it completes.
+If a retry job is submitted, the post-hook ships the reconciliation
+snapshots best-effort and returns early. The retry job will run its own
+post-hook when it completes.
+

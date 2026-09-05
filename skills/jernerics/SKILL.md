@@ -6,10 +6,12 @@ description: |
   and artifact storage. Covers trial authoring (trial_config/trial_tracker),
   config files, CLI commands, backend configuration, container starters,
   interactive GPU sessions, Optuna/grid sweeps, HTTP tracking server,
-  artifact upload, and retry system. Trigger on "sweep", "backend", "trial",
+  artifact upload, retry system, and investigations (named sweep groups
+  for factor/outcome comparison). Trigger on "sweep", "backend", "trial",
   "container", "tracking", "optuna", "apptainer", "docker", "slurm", "pueue",
   "interactive", "artifact", "retry", "observability", "runs", "summary",
-  or when working with trial.py / config.py files in a jernerics project.
+  "investigation", "resources", or when working with trial.py / config.py
+  files in a jernerics project.
 ---
 
 # Jernerics
@@ -43,6 +45,9 @@ from training data.
 - **Retry** — Heartbeat-based staleness detection with automatic
   resubmission for node deaths; retries carry lineage so families read
   as generations.
+- **Investigation** — A named group of member sweeps with a factor/outcome
+  pair, stored on the tracking server: "compare these sweeps along this
+  factor, judged by this metric".
 
 ## CLI surface
 
@@ -59,15 +64,19 @@ from training data.
 | `jernerics backend clean -b <name>` | Delete remote artifacts |
 | `jernerics job list -b <name>` | List jobs |
 | `jernerics job cancel -b <name> [id]` | Cancel jobs |
-| `jernerics job logs -b <name> <id>` | View logs |
+| `jernerics job logs -b <name> <id>` | View logs (`--array-index`, `--stderr`, `--follow`) |
 | `jernerics job wait -b <name> <id>` | Block until job completes |
+| `jernerics job resources <id>` | Scheduler resource usage for a past job (`--ship` to append to the server) |
 | `jernerics tracking runs` | List this project's trials with derived monitoring |
 | `jernerics tracking summary <ref>` | One trial: lineage, params, values, artifacts, executions |
 | `jernerics tracking diff <a> <b>` | Compare two trials (params + latest values) |
 | `jernerics tracking trace <ref> <key>` | One value key's step series |
 | `jernerics tracking query "<sql>"` | Raw read-only SQL escape hatch |
+| `jernerics investigation create <name> --factor <f> --outcome <key> [sweeps...]` | Group sweeps into a named factor/outcome comparison |
+| `jernerics investigation list / show <ref> / preview` | Browse investigations with coverage facts; preview before creating |
+| `jernerics investigation members set\|add\|remove <ref> <sweeps...>` | Manage members; also `archive`/`restore` |
 
-Common flags: `--dry-run` (run/backend build/interactive start/tracking replay/resolve), `--force` (init/backend build/backend clean), `--follow` (job logs), `--set KEY=VALUE` (run), `--study` (tracking replay), `--json` (tracking commands, interactive sync status). A trial ref is `<sweep-name>:<trial-number>` or a 32-hex trial id.
+Common flags: `--dry-run` (run/backend build/interactive start/tracking replay/resolve), `--force` (init/backend build/backend clean), `--follow` (job logs), `--set KEY=VALUE` (run; validated against the backend's override keys), `--set-param KEY=VALUE` (run; trial-config params), `--study` (tracking replay), `--json` (tracking/investigation commands, interactive sync status). A trial ref is `<sweep-name>:<trial-number>` or a 32-hex trial id.
 
 ## Reference docs
 
@@ -87,5 +96,8 @@ Load these before relevant activities:
   storage, environment variables, `tracking replay`.
 - **`references/observability.md`** — `tracking runs`/`summary`/`diff`/
   `trace`/`query` commands and when to use them vs raw SQL.
+- **`references/investigations.md`** — `investigation` commands: grouping
+  sweeps into named comparisons, coverage/preview, selection tokens,
+  `ProjectHandle` investigation operations.
 - **`references/retry.md`** — Heartbeat, retry detection, retry
   config, failure modes, post-hook pipeline.

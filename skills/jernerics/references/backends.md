@@ -48,8 +48,13 @@ remote_dir = "."
 parallel = 2
 ```
 
-Pueue manages a local task queue. Each trial is a pueue task.
-Omit `host` for local-only pueue.
+Pueue manages a local task queue. Each trial is a pueue task. Omit `host`
+for local-only pueue.
+
+Sweeps run in a pueue group named after the study, limited to `parallel`
+concurrent slots. The post-hook checker runs in its own
+`<study>_checker` group pinned to `parallel = 1`, so it never competes with
+trial slots. `job cancel` covers both groups.
 
 ## Container types
 
@@ -70,21 +75,31 @@ jernerics backend build -b <name> --dry-run  # Preview
 # Submit sweep
 jernerics run -b <name> trial.py config.py
 jernerics run -b <name> trial.py config.py --dry-run
-jernerics run -b <name> trial.py config.py --set time=4:00:00
+jernerics run -b <name> trial.py config.py --set time=4:00:00     # scheduler override
+jernerics run -b <name> trial.py config.py --set-param lr=0.01    # trial-config param
 
 # Monitor
 jernerics job list -b <name>
 jernerics job list -b <name> --all
 jernerics job logs -b <name> <id> --follow
+jernerics job logs -b <name> <id> --array-index 3   # one trial of an array job
+jernerics job logs -b <name> <id> --stderr
+jernerics job resources <id>          # scheduler accounting (sacct / pueue)
+jernerics job resources <id> --ship   # also append the record to the tracking server
 
 # Cancel
 jernerics job cancel -b <name> <id>
 jernerics job cancel -b <name> --all
 ```
 
-> **Warning:** `job cancel` cancels the main array job but leaves the checker
-dependency job pending. Clean up with `jernerics job cancel -b <name> --all`
-or manually `scancel` all pending jobs for your user.
+`--set` keys are validated against the target backend's override key set —
+an unknown key errors immediately instead of being silently ignored. Use
+`--set-param` for trial-config params, not scheduler options.
+
+> **Warning (Slurm):** `job cancel` cancels the main array job but leaves the
+> checker dependency job pending. Clean up with `jernerics job cancel -b <name> --all`
+> or manually `scancel` all pending jobs for your user. (Pueue cancel covers
+> the checker group too.)
 
 ```bash
 # Clean remote artifacts

@@ -3,18 +3,20 @@
 ## Tracking server
 
 A single HTTP process (`python -m jernerics_server`) receives tracked
-events and serves them. One SQLite store (schema v6) plus an artifacts
+events and serves them. One SQLite store (schema v9) plus an artifacts
 directory on its own disk. Endpoints:
 
 - `POST /ingest` — one batch of tagged v3 events (JSONL lines: sweep,
   submission, job, trial snapshots; execution lifecycle; params, values,
-  progress; artifact declarations). Idempotent per event id: replays
-  and live-stream overlaps land as duplicates, never double-apply.
+  progress; artifact declarations; job resource records). Idempotent per
+  event id: replays and live-stream overlaps land as duplicates, never
+  double-apply.
 - `PUT /artifact/{artifact_id}` — upload one declared artifact blob
   (raw body); `GET /artifact/{artifact_id}` — download it.
 - Domain reads (POST, JSON body with a `Selection`): `/projects`,
   `/sweeps`, `/trials`, `/lineage`, `/executions`, `/trial-params`,
-  `/value-catalog`, `/values`, `/artifacts`, `/provenance`.
+  `/value-catalog`, `/values`, `/artifacts`, `/provenance`,
+  `/job-resources`, `/investigations`.
 - `POST /query` — raw read-only SQL escape hatch (`SELECT`/`WITH`/...,
   capped rows and runtime budget).
 - `GET /api/health` — liveness.
@@ -116,6 +118,9 @@ safe.
 - **CLI** — `jernerics tracking runs | summary | diff | trace | query`.
 - **Raw SQL** — `POST /query` (also `TrackingClient.raw_query`) for
   anything the domain reads do not cover.
+- **Investigations** — `jernerics investigation ...` CLI and the matching
+  `ProjectHandle` operations group sweeps into named factor/outcome
+  comparisons — see `references/investigations.md`.
 
 ## Environment variables
 

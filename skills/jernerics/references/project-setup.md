@@ -120,9 +120,10 @@ backend_overrides = {
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `base` | Yes | Base config dict merged into every trial |
+| `base` | No | Base config dict merged into every trial (defaults `{}`) |
 | `search_space(trial)` | No | Optuna sampling function |
-| `n_trials` | Yes | Number of trials |
+| `grid` | No | Dict of lists — deterministic cartesian-product sweep; mutually exclusive with `search_space` |
+| `n_trials` | No | Number of trials (defaults `1`; in grid mode defaults to the grid size and must match it exactly if set) |
 | `objective` | No | Lambda extracting metric from task results |
 | `direction` | No | `"minimize"` or `"maximize"` |
 | `sampler` | No | Optuna sampler instance |

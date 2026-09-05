@@ -66,3 +66,17 @@ use `--json` to reason over the full series.
 The same data is available programmatically via
 `jernerics.tracking.TrackingClient` (typed records, no SQL) — see
 `references/tracking.md`.
+
+## Related: investigations
+
+When the question spans whole sweeps rather than single trials — "compare
+these sweeps along this factor, judged by this outcome" — group them into a
+named investigation instead of eyeballing `runs` output:
+
+```bash
+jernerics investigation preview [sweep_id ...]   # coverage before committing
+jernerics investigation create <name> --factor lr --outcome loss [sweep_id ...]
+```
+
+See `references/investigations.md`.
+

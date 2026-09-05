@@ -65,8 +65,10 @@ grid = {
 }
 ```
 
-Jernerics computes the cartesian product and adjusts `n_trials` automatically.
-Each combination is tried exactly once. No Optuna randomness.
+Jernerics computes the cartesian product; each combination is tried exactly
+once, with no Optuna randomness. `grid` and `search_space` are mutually
+exclusive (a config with both is rejected). `n_trials` must equal the grid
+size exactly, or be omitted — it then defaults to the grid size.
 
 **`search_space`** — a callable receiving an Optuna trial, for sampled sweeps:
 
@@ -102,9 +104,11 @@ tracker = trial_tracker()
 tracker.log_param("lr", config["lr"])
 tracker.log_value("loss", 0.05, step=100)
 tracker.log_value("summary", {"epoch": 5, "fold": 2})  # non-scalar -> stored as JSON
+tracker.set_progress(3, 10, "epoch")                   # explicit execution progress
 tracker.log_artifact("model", "model.pt")
+with tracker.open_artifact("preds", "wt") as f:        # write an artifact in memory
+    json.dump(predictions, f)
 tracker.finish({"loss": 0.05, "accuracy": 0.95})
-```
 
 Tracker methods:
 
@@ -112,7 +116,15 @@ Tracker methods:
 - `log_value(key, value, *, step=None)` — log an observation. Numbers are
   stored as scalar metrics (a time-series when you pass increasing `step`);
   any other JSON-serializable value is stored as JSON. `step` is keyword-only.
-- `log_artifact(key, path)` — register a file artifact for upload
+- `log_metric(key, value, *, step=None)` — alias of `log_value`
+- `set_progress(current, total, unit)` — explicit progress for this
+  execution (complements the automatic heartbeat)
+- `log_artifact(key, path)` — register a file on disk for upload
+- `open_artifact(key, mode="wt", *, filename=None)` — context manager
+  returning a writable file-like object; what you write becomes the
+  artifact blob, no temp file needed. `mode` is `"wt"` (text) or `"wb"`
+  (binary); `filename` defaults to `key`. Both artifact methods accept
+  `content_type=` to override the guessed MIME type.
 - `finish(results)` — log a results dict and close the tracker. The runner
   hands `results` to the config's `objective` lambda.
 
